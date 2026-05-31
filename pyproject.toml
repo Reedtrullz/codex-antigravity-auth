@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-antigravity-auth"
+version = "1.0.0"
+description = "Google Antigravity OAuth model access for OpenAI Codex"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+  "httpx>=0.28",
+  "fastapi>=0.110",
+  "uvicorn>=0.28",
+  "pyyaml>=6.0",
+]
+
+[project.scripts]
+codex-antigravity = "codex_antigravity_auth.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["codex_antigravity_auth*"]

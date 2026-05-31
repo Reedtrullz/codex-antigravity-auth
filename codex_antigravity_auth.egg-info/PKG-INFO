@@ -1,3 +1,15 @@
+Metadata-Version: 2.4
+Name: codex-antigravity-auth
+Version: 1.0.0
+Summary: Google Antigravity OAuth model access for OpenAI Codex
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: httpx>=0.28
+Requires-Dist: fastapi>=0.110
+Requires-Dist: uvicorn>=0.28
+Requires-Dist: pyyaml>=6.0
+
 # Google Antigravity Auth for OpenAI Codex
 
 Create a clean, reliable local gateway server that allows you to use Google Antigravity models (Gemini 3.x, Claude Opus/Sonnet 4.6, etc.) directly in OpenAI Codex (CLI or Desktop), utilizing proper Google OAuth (PKCE) authentication and automatic multi-account switching / rotation.
@@ -16,7 +28,9 @@ Before running `codex-antigravity login`, set up your desktop Google OAuth crede
 
 ```bash
 export ANTIGRAVITY_CLIENT_ID="your-client-id.apps.googleusercontent.com"
-export ANTIGRAVITY_CLIENT_SECRET="your...
+export ANTIGRAVITY_CLIENT_SECRET="your-client-secret"
+```
+
 Or write them to `~/.codex/antigravity-credentials.json`:
 
 ```json

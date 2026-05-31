@@ -1,0 +1,2 @@
+[console_scripts]
+codex-antigravity = codex_antigravity_auth.cli:main
