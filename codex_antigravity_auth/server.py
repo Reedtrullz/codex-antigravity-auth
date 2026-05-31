@@ -147,6 +147,7 @@ async def create_response(request: Request):
                             
                             # Parse Google stream lines. Format:
                             # data: {"candidates": [{"content": {"parts": [{"text": "..."}]}}]}
+                            # Also supports raw wrapped response chunks
                             if line.startswith("data:"):
                                 data_payload = line[5:].strip()
                                 if data_payload == "[DONE]":
@@ -156,13 +157,15 @@ async def create_response(request: Request):
                                     # If list-wrapped chunk format
                                     if isinstance(parsed, list) and parsed:
                                         parsed = parsed[0]
+                                    if "response" in parsed and isinstance(parsed["response"], dict):
+                                        parsed = parsed["response"]
                                     candidates = parsed.get("candidates", [])
                                     for cand in candidates:
                                         content = cand.get("content", {})
                                         parts = content.get("parts", [])
                                         for part in parts:
                                             # Yield reasoning/thinking blocks in separate reasoning events
-                                            if part.get("thought") is True or part.get("type") == "thinking":
+                                            if part.get("thought") is True or part.get("type") == "thinking" or "thoughtSignature" in part:
                                                 thought_text = part.get("text", "") or part.get("thinking", "")
                                                 # Send reasoning delta event
                                                 yield f"data: {json.dumps({'type': 'response.reasoning.delta', 'response_id': response_id, 'delta': thought_text})}\n\n"

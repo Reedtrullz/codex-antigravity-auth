@@ -153,9 +153,17 @@ def transform_request(codex_req: dict) -> dict:
 
 def transform_gemini_candidate(candidate: dict) -> dict:
     """Extract standard Codex message / content parts from a Gemini candidate."""
+    # Support both "response" outer wrap or candidate directly
+    if "response" in candidate and isinstance(candidate["response"], dict):
+        candidate = candidate["response"]
+    if "candidates" in candidate and isinstance(candidate["candidates"], list) and candidate["candidates"]:
+        candidate = candidate["candidates"][0]
+
     content = candidate.get("content", {})
     parts = content.get("parts", [])
     role = content.get("role", "assistant")
+    if role == "model":
+        role = "assistant"
     
     output_parts = []
     reasoning_text = ""
@@ -165,7 +173,7 @@ def transform_gemini_candidate(candidate: dict) -> dict:
             continue
             
         # 1. Handle thoughts / thinking blocks
-        if part.get("thought") is True or part.get("type") == "thinking":
+        if part.get("thought") is True or part.get("type") == "thinking" or "thoughtSignature" in part:
             reasoning_text += part.get("text", "") or part.get("thinking", "")
             continue
             
@@ -216,6 +224,10 @@ def transform_response(gemini_resp: dict, model: str) -> dict:
     # Official Responses API response schema:
     # { "id": "resp_...", "object": "response", "created_at": 1234, "model": "...", "output": [ ... ], "usage": { ... }, "status": "completed" }
     
+    # Handle response wrapping
+    if "response" in gemini_resp and isinstance(gemini_resp["response"], dict):
+        gemini_resp = gemini_resp["response"]
+
     candidates = gemini_resp.get("candidates", [])
     output_items = []
     
