@@ -141,6 +141,27 @@ def run_doctor():
         print("       Set ANTIGRAVITY_CLIENT_ID and ANTIGRAVITY_CLIENT_SECRET,")
         print("       or create ~/.codex/antigravity-credentials.json")
         
+    # Check Token secure storage status
+    try:
+        from .storage import _get_encryption_key, KEYRING_SERVICE_NAME
+        import keyring
+        stored_key = keyring.get_password(KEYRING_SERVICE_NAME, "storage-encryption-key")
+        if stored_key:
+            print("[PASS] Token Storage Encryption: SECURE (OS Keyring Integrated)")
+        else:
+            print("[WARN] Token Storage Encryption: PARTIAL (Using fallback key; keyring password lookup returned empty)")
+    except Exception as e:
+        print(f"[WARN] Token Storage Encryption: PARTIAL (Fallback active. Error: {e})")
+        
+    # Check network connectivity to Google Antigravity backend
+    try:
+        import urllib.request
+        req = urllib.request.Request("https://cloudcode-pa.googleapis.com", method="HEAD")
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            print("[PASS] Google Antigravity Connectivity: ONLINE")
+    except Exception as e:
+        print(f"[FAIL] Google Antigravity Connectivity: OFFLINE / TIMEOUT ({e})")
+        
     # Check accounts
     data = load_accounts()
     accounts = data.get("accounts", [])
