@@ -43,9 +43,23 @@ class TestTransformationEdgeCases(unittest.TestCase):
         self.assertNotIn("minLength", user_props["name"])
         
         # Verify placeholder injection on empty nested object schemas
-        # settings has theme so it has properties and doesn't get a placeholder,
-        # but cleaned outer schemas have properties and required is injected
         self.assertIn("_placeholder", cleaned["required"])
+
+    def test_account_rotation_consecutive_failure_backoff(self):
+        manager = AccountManager()
+        email = "fail-acc@gmail.com"
+        
+        # Mark failure once
+        manager.mark_failure(email, "Simulated network failure")
+        cd1 = manager._cooldowns[email]
+        duration1 = cd1 - time.time()
+        self.assertTrue(110 <= duration1 <= 130, f"Expected ~120s cooldown, got {duration1}")
+        
+        # Mark failure twice
+        manager.mark_failure(email, "Simulated network failure")
+        cd2 = manager._cooldowns[email]
+        duration2 = cd2 - time.time()
+        self.assertTrue(230 <= duration2 <= 250, f"Expected ~240s cooldown, got {duration2}")
 
 if __name__ == "__main__":
     unittest.main()
