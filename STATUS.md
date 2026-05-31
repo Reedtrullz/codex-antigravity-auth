@@ -1,16 +1,38 @@
-# Current Integration Status - 31 May 2026
+# Current Integration Status — 31 May 2026
 
-## 1. Accomplishments
-* **OS-Native Token Encryption**: Patched `storage.py` and `cli.py` to seamlessly integrate Fernet symmetric encryption key lookups backed by the secure local OS Keyring (`keyring` package) transparently. Placed clean decrypt fallbacks to ensure plaintext backward compatibility.
-* **Stream Transformation Fidelity**: Discovered and resolved streaming envelope discrepancy errors. Translated nested `response` candidate properties, mapped role variables from `model` to `assistant`, and safely mapped thought sequences like `thoughtSignature` into separate reasoning elements.
-* **TUI Connectivity Inspections**: Configured diagnostics connect probes inside `doctor` that test real connection to Google Antigravity servers, showing active secure keychain status.
-* **Testing suite**: Set up custom unit assertions (`test_fidelity_transforms.py`) ensuring zero regressions. All **14 tests are fully passing (100% success rate)**.
+## Build & Test Health
+- **pytest**: 18/18 passing ✅
+- **install**: `uv pip install -e .` ✅
+- **doctor**: credentials + keyring + accounts ✅
+- **connectivity**: POST-based health check ✅
 
-## 2. Success Criteria Met
-- Gateway server executes completely for both non-streaming and streaming Codex calls.
-- High-fidelity streaming deltas emit correct Response API formats cleanly.
-- Cooldown rotation schedules and OS credential lookups function perfectly.
+## Core Features
+| Feature | Status |
+|---|---|
+| OAuth PKCE login | ✅ |
+| OS keyring token encryption | ✅ |
+| Multi-account rotation | ✅ |
+| Exponential cooldown backoff | ✅ |
+| Auto token refresh | ✅ |
+| Responses API translation | ✅ |
+| SSE streaming | ✅ |
+| Tool/function calling | ✅ |
+| Reasoning/thinking isolation | ✅ |
+| `/v1/models` endpoint | ✅ |
+| Codex Desktop model picker | ✅ |
+| Schema sanitization | ✅ |
+| Device fingerprinting | ✅ |
 
-## 3. Next Recommendations
-- Perform heavy daily desk usage in Codex to inspect multi-account load distribution.
-- Monitor Google Antigravity endpoints to trace API modifications.
+## Known Limitations
+- All 3 Claude accounts are currently rate-limited (quota resets ~2h)
+- AccountManager cooldowns are in-memory (lost on restart)
+- Streaming function call output_index is non-incremental
+- `codex-shim` ASAR patch fails on current Codex Desktop version
+
+## Latest Release
+[v0.1.0-alpha](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v0.1.0-alpha)
+
+## Next Priorities
+1. Persist cooldown state across restarts
+2. Incremental streaming output indices for tool calls
+3. Add `/v1/responses/compact` support

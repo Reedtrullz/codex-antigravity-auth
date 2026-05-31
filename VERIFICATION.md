@@ -1,49 +1,32 @@
-## Google Antigravity Auth for OpenAI Codex Setup & Verification Plan
+# Verification Guide
 
-### Prerequisites
-Before running, you must configure a Google Desktop OAuth Client ID and Client Secret in the Google Cloud Console. Set up the redirect URI as `http://localhost:51121/oauth-callback`.
+## Quick Start (5 minutes)
 
-Then configure these credentials:
-- Option A: Export them in your environment:
-  ```bash
-  export ANTIGRAVITY_CLIENT_ID="your-client-id.apps.googleusercontent.com"
-  export ANTIGRAVITY_CLIENT_SECRET="your-client-secret"
-  ```
-- Option B: Write them to `~/.codex/antigravity-credentials.json`:
-  ```json
-  {
-    "client_id": "your-client-id.apps.googleusercontent.com",
-    "client_secret": "your-client-secret"
-  }
-  ```
-
----
-
-### Step-by-Step Verification
-
-#### 1. Setup the virtual environment
-Ensure you have cloned this repository, set up a virtual environment, and installed it in editable mode:
+### 1. Install
 ```bash
+git clone https://github.com/Reedtrullz/codex-antigravity-auth
+cd codex-antigravity-auth
 uv pip install -e .
 ```
 
-#### 2. Run Diagnostics (`doctor`)
-Verify your client credentials configuration and existing setup:
-```bash
-codex-antigravity doctor
+### 2. Configure Credentials
+Write `~/.codex/antigravity-credentials.json`:
+```json
+{
+  "client_id": "YOUR_CLIENT_ID.apps.googleusercontent.com",
+  "client_secret": "YOUR_CLIENT_SECRET"
+}
 ```
-Ensure that the Google OAuth credentials check shows `[PASS]`.
+Or export: `ANTIGRAVITY_CLIENT_ID` + `ANTIGRAVITY_CLIENT_SECRET`.
 
-#### 3. Log In (`login`)
-Run the interactive PKCE OAuth login process:
+### 3. Login
 ```bash
 codex-antigravity login
 ```
-This will open your browser to choose a Google account. Follow the prompts and return to the terminal. You should see:
-`[+] Successfully authenticated new Google Account: <email>`
+Opens browser → pick Google account → tokens stored encrypted.
 
-#### 4. Configure Codex
-Add the custom `model_provider` to your `~/.codex/config.toml`:
+### 4. Configure Codex
+Add to `~/.codex/config.toml`:
 ```toml
 model = "gemini-3.5-flash-high"
 model_provider = "antigravity"
@@ -55,11 +38,32 @@ base_url = "http://localhost:51122/v1"
 wire_api = "responses"
 ```
 
-#### 5. Start the Server
-Start the local Responses API gateway:
+### 5. Start Gateway
 ```bash
 codex-antigravity start
 ```
 
-#### 6. Verify with Codex
-Now trigger an action inside Codex to verify everything functions end-to-end. Codex will automatically route its Responses API requests to your local gateway server, translating them to Google Antigravity and streaming the response back!
+### 6. Verify
+```bash
+codex-antigravity doctor        # diagnostics
+pytest                           # 18 tests, all must pass
+curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
+```
+
+## Manual Smoke Test
+```bash
+curl -s -X POST http://localhost:51122/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini-3.5-flash-high","input":"Say hello!"}'
+# Expect: 200 with output containing text
+```
+
+## Switching Between ChatGPT and Antigravity
+- **Use ChatGPT**: Remove `model_provider` line from config.toml
+- **Use Antigravity**: Add `model_provider = "antigravity"`, ensure gateway is running
+
+## Available Models
+- `gemini-3.5-flash-high` → Gemini 3.5 Flash (Agent High)
+- `gemini-3.1-pro-high` → Gemini 3.1 Pro (Reasoning)
+- `claude-3.5-sonnet` → Claude Sonnet 4.6 (Google)
+- `claude-opus-4-6` → Claude Opus 4.6 (Google)
