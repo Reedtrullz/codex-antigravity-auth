@@ -4,7 +4,8 @@ from typing import AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from .accounts import AccountManager
-from .transform import transform_request, transform_response
+from .byok import all_provider_configs, resolve_api_key, split_provider_model
+from .transform import transform_chat_response, transform_request, transform_request_to_chat, transform_response
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
 
 app = FastAPI(title="Codex Antigravity Gateway")
@@ -22,6 +23,27 @@ AVAILABLE_MODELS = [
 async def list_models():
     """Return model catalog so Codex Desktop can populate its picker dropdown."""
     import time
+    byok_models = []
+    for provider_id, provider in all_provider_configs().items():
+        for model_entry in provider.get("models", []):
+            if isinstance(model_entry, dict):
+                provider_model = model_entry.get("id")
+                display_name = model_entry.get("display_name") or model_entry.get("displayName") or provider_model
+                context_window = model_entry.get("context_window") or model_entry.get("contextWindow") or 128000
+            else:
+                provider_model = str(model_entry)
+                display_name = provider_model
+                context_window = 128000
+            if not provider_model:
+                continue
+            byok_models.append({
+                "id": f"{provider_id}:{provider_model}",
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": provider_id,
+                "display_name": f"{provider.get('displayName', provider_id)}: {display_name}",
+                "context_window": context_window,
+            })
     return {
         "object": "list",
         "data": [
@@ -34,7 +56,7 @@ async def list_models():
                 "context_window": m["context_window"],
             }
             for m in AVAILABLE_MODELS
-        ],
+        ] + byok_models,
     }
 
 def build_headers(account: dict) -> dict:
@@ -62,6 +84,30 @@ def build_headers(account: dict) -> dict:
             
     return headers
 
+
+def build_openai_compatible_headers(provider: dict) -> dict:
+    api_key = resolve_api_key(provider)
+    if not api_key:
+        raise HTTPException(
+            status_code=401,
+            detail=f"No API key configured for provider '{provider['id']}'. Set {provider.get('apiKeyEnv', 'provider API key')} or run provider set.",
+        )
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    headers.update(provider.get("headers", {}) or {})
+    return headers
+
+
+def chat_completions_url(provider: dict) -> str:
+    base_url = provider.get("baseUrl", "").rstrip("/")
+    if not base_url:
+        raise HTTPException(status_code=500, detail=f"Provider '{provider['id']}' has no baseUrl configured")
+    if base_url.endswith("/chat/completions"):
+        return base_url
+    return f"{base_url}/chat/completions"
+
 @app.post("/v1/responses")
 async def create_response(request: Request):
     try:
@@ -71,6 +117,20 @@ async def create_response(request: Request):
         
     model = codex_req.get("model", "gemini-3.5-flash-high")
     stream = codex_req.get("stream", False)
+    provider_id, provider_model = split_provider_model(model)
+    if provider_id:
+        providers = all_provider_configs()
+        provider = providers.get(provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail=f"BYOK provider '{provider_id}' is not configured")
+        if provider.get("kind") != "openai_chat":
+            raise HTTPException(status_code=500, detail=f"Unsupported BYOK provider kind: {provider.get('kind')}")
+        if stream:
+            return StreamingResponse(
+                openai_compatible_sse_generator(codex_req, provider, provider_model, model),
+                media_type="text/event-stream",
+            )
+        return await create_openai_compatible_response(codex_req, provider, provider_model, model)
     
     # 1. Select account automatically from pool
     account = account_manager.select_active_account(model)
@@ -289,3 +349,135 @@ async def create_response(request: Request):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
+
+
+async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str) -> dict:
+    payload = transform_request_to_chat(codex_req, provider_model)
+    payload["stream"] = False
+    url = chat_completions_url(provider)
+    headers = build_openai_compatible_headers(provider)
+    async with httpx.AsyncClient(timeout=provider.get("timeout", 120.0)) as client:
+        try:
+            res = await client.post(url, json=payload, headers=headers)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"{provider['id']} connection error: {e}") from e
+    if res.status_code != 200:
+        raise HTTPException(status_code=res.status_code, detail=f"{provider['id']} API error: {res.text}")
+    try:
+        return transform_chat_response(res.json(), display_model)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{provider['id']} response translation failed: {e}") from e
+
+
+async def openai_compatible_sse_generator(
+    codex_req: dict,
+    provider: dict,
+    provider_model: str,
+    display_model: str,
+) -> AsyncGenerator[str, None]:
+    import uuid
+
+    response_id = f"resp_{uuid.uuid4().hex[:12]}"
+    msg_id = f"msg_{uuid.uuid4().hex[:8]}"
+    output_text = ""
+    usage = None
+    tool_calls: dict[int, dict] = {}
+    tool_output_indices: dict[int, int] = {}
+    next_output_index = 1
+
+    yield f"data: {json.dumps({'type': 'response.created', 'response': {'id': response_id, 'object': 'response', 'status': 'in_progress', 'model': display_model}})}\n\n"
+    yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': 0, 'item': {'type': 'message', 'id': msg_id, 'role': 'assistant', 'status': 'in_progress', 'content': []}})}\n\n"
+    yield f"data: {json.dumps({'type': 'response.content_part.added', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': ''}})}\n\n"
+
+    payload = transform_request_to_chat({**codex_req, "stream": True}, provider_model)
+    url = chat_completions_url(provider)
+    headers = build_openai_compatible_headers(provider)
+
+    async def fail_stream(code: str, message: str) -> AsyncGenerator[str, None]:
+        yield f"data: {json.dumps({'type': 'error', 'error': {'code': code, 'message': message}})}\n\n"
+        yield f"data: {json.dumps({'type': 'response.failed', 'response': {'id': response_id, 'object': 'response', 'status': 'failed', 'model': display_model, 'error': {'code': code, 'message': message}}})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def parse_chat_stream_line(line: str) -> AsyncGenerator[str, None]:
+        nonlocal output_text, usage, next_output_index
+        line = line.strip()
+        if not line or not line.startswith("data:"):
+            return
+        data_payload = line[5:].strip()
+        if data_payload == "[DONE]":
+            return
+        try:
+            parsed = json.loads(data_payload)
+        except json.JSONDecodeError as e:
+            print(f"[*] Skipping invalid {provider['id']} SSE JSON chunk: {e}")
+            return
+        if parsed.get("usage"):
+            provider_usage = parsed["usage"]
+            usage = {
+                "input_tokens": provider_usage.get("prompt_tokens", provider_usage.get("input_tokens", 0)),
+                "output_tokens": provider_usage.get("completion_tokens", provider_usage.get("output_tokens", 0)),
+                "total_tokens": provider_usage.get("total_tokens", 0),
+            }
+        for choice in parsed.get("choices", []) or []:
+            delta = choice.get("delta", {}) or {}
+            if delta.get("content"):
+                output_text += delta["content"]
+                yield f"data: {json.dumps({'type': 'response.content_part.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': delta['content']})}\n\n"
+            for tool_delta in delta.get("tool_calls", []) or []:
+                idx = int(tool_delta.get("index", 0))
+                generated_call_id = tool_delta.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                state = tool_calls.setdefault(idx, {
+                    "id": generated_call_id,
+                    "type": "function_call",
+                    "call_id": generated_call_id,
+                    "name": "",
+                    "arguments": "",
+                })
+                if tool_delta.get("id"):
+                    state["id"] = tool_delta["id"]
+                    state["call_id"] = tool_delta["id"]
+                fn = tool_delta.get("function", {}) or {}
+                if fn.get("name"):
+                    state["name"] += fn["name"]
+                if fn.get("arguments"):
+                    state["arguments"] += fn["arguments"]
+                if idx not in tool_output_indices:
+                    tool_output_indices[idx] = next_output_index
+                    next_output_index += 1
+
+    try:
+        async with httpx.AsyncClient(timeout=provider.get("timeout", 120.0)) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as res:
+                if res.status_code != 200:
+                    body = (await res.aread()).decode("utf-8", errors="ignore")
+                    async for event in fail_stream("backend_error", f"{provider['id']} returned HTTP {res.status_code}: {body}"):
+                        yield event
+                    return
+                buffer = ""
+                async for chunk in res.aiter_text():
+                    buffer += chunk
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        async for event in parse_chat_stream_line(line):
+                            yield event
+                if buffer.strip():
+                    async for event in parse_chat_stream_line(buffer):
+                        yield event
+    except Exception as e:
+        async for event in fail_stream("connection_error", str(e)):
+            yield event
+        return
+
+    for idx in sorted(tool_calls):
+        item = tool_calls[idx]
+        output_index = tool_output_indices[idx]
+        yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': output_index, 'item': item})}\n\n"
+        yield f"data: {json.dumps({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': output_index, 'item': item})}\n\n"
+
+    yield f"data: {json.dumps({'type': 'response.content_part.done', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': output_text}})}\n\n"
+    yield f"data: {json.dumps({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': 0, 'item': {'type': 'message', 'id': msg_id, 'role': 'assistant', 'status': 'completed', 'content': [{'type': 'output_text', 'text': output_text, 'annotations': []}]}})}\n\n"
+    done_response = {"id": response_id, "object": "response", "status": "completed", "model": display_model}
+    if usage:
+        done_response["usage"] = usage
+    yield f"data: {json.dumps({'type': 'response.done', 'response': done_response})}\n\n"
+    yield "data: [DONE]\n\n"

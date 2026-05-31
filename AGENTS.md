@@ -4,7 +4,7 @@ Guidance for AI coding agents (Codex, Claude Code, OpenCode, etc.) working on th
 
 ## Overview
 
-Local gateway server that allows OpenAI Codex (CLI and Desktop) to use Google Antigravity models (Gemini 3.x, Claude Opus/Sonnet 4.6) via Google OAuth PKCE and multi-account rotation.
+Local gateway server that allows OpenAI Codex (CLI and Desktop) to use Google Antigravity models (Gemini 3.x, Claude Opus/Sonnet 4.6) via Google OAuth PKCE and multi-account rotation, plus BYOK OpenAI-compatible providers such as OpenRouter, DeepSeek, xAI, Kimi/Moonshot, Ollama, and OpenCode-compatible endpoints.
 
 ## Architecture
 
@@ -17,6 +17,7 @@ codex_antigravity_auth/
 ├── storage.py       # Encrypted JSON persistence (Fernet + OS keyring)
 ├── cli.py           # CLI: login, doctor, accounts, start
 ├── constants.py     # Endpoints, credential resolution, platform detection
+├── byok.py          # Encrypted BYOK provider config, presets, model routing
 ├── models.py        # User-facing model name → backend ID mapping
 ├── schema.py        # JSON Schema sanitization for Antigravity compatibility
 ├── fingerprint.py   # Device fingerprint generation (Electron UA, IDE metadata)
@@ -51,10 +52,11 @@ Codex Desktop/CLI  ←  Responses API formatted response
 - **Python 3.10+** — use `python3` or activate venv
 - **Virtual env**: `source .venv/bin/activate`
 - **Install**: `uv pip install -e .`
-- **Test**: `python3 -m pytest` (27 tests, all must pass)
+- **Test**: `python3 -m pytest` (34 tests, all must pass)
 - **Run server**: `codex-antigravity start --port 51122`
 - **Credentials**: `~/.codex/antigravity-credentials.json` or env vars
 - **Accounts**: `~/.codex/antigravity-accounts.json` (Fernet-encrypted)
+- **BYOK providers**: `~/.codex/antigravity-providers.json` (Fernet-encrypted) or provider API key env vars
 
 ## Model Name Mapping
 
@@ -64,6 +66,13 @@ User-facing aliases → Google backend models (`models.py`):
 - `gemini-3.1-pro-high` → `gemini-3.1-pro-high`
 - `claude-3.5-sonnet` → `claude-sonnet-4-6`
 - `claude-opus-4-6` → `claude-opus-4-6-thinking`
+
+BYOK provider models use a provider prefix:
+- `deepseek:deepseek-chat`
+- `openrouter:deepseek/deepseek-chat`
+- `xai:grok-code-fast-1`
+- `kimi:kimi-k2-0711-preview`
+- `ollama:gpt-oss:20b`
 
 ## Critical Pitfalls
 

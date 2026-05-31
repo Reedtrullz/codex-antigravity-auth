@@ -19,11 +19,20 @@ Write `~/.codex/antigravity-credentials.json`:
 ```
 Or export: `ANTIGRAVITY_CLIENT_ID` + `ANTIGRAVITY_CLIENT_SECRET`.
 
-### 3. Login
+### 3. Login Or Configure BYOK
 ```bash
 codex-antigravity login
 ```
 Opens browser → pick Google account → tokens stored encrypted.
+
+For BYOK providers:
+```bash
+codex-antigravity provider set deepseek --api-key "$DEEPSEEK_API_KEY" --model deepseek-chat
+codex-antigravity provider set openrouter --api-key "$OPENROUTER_API_KEY" --model deepseek/deepseek-chat
+codex-antigravity provider set xai --api-key "$XAI_API_KEY" --model grok-code-fast-1
+codex-antigravity provider set kimi --api-key "$KIMI_API_KEY" --model kimi-k2-0711-preview
+codex-antigravity provider set ollama --base-url http://localhost:11434/v1 --model gpt-oss:20b
+```
 
 ### 4. Configure Codex
 Add to `~/.codex/config.toml`:
@@ -46,7 +55,7 @@ codex-antigravity start
 ### 6. Verify
 ```bash
 codex-antigravity doctor        # diagnostics
-python3 -m pytest                # 27 tests, all must pass
+python3 -m pytest                # 34 tests, all must pass
 curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
 ```
 
@@ -67,3 +76,8 @@ curl -s -X POST http://localhost:51122/v1/responses \
 - `gemini-3.1-pro-high` → Gemini 3.1 Pro (Reasoning)
 - `claude-3.5-sonnet` → Claude Sonnet 4.6 (Google)
 - `claude-opus-4-6` → Claude Opus 4.6 (Google)
+- `deepseek:deepseek-chat` → DeepSeek BYOK
+- `openrouter:deepseek/deepseek-chat` → OpenRouter BYOK
+- `xai:grok-code-fast-1` → xAI BYOK
+- `kimi:kimi-k2-0711-preview` → Kimi/Moonshot BYOK
+- `ollama:gpt-oss:20b` → Ollama BYOK/local

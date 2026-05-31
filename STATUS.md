@@ -1,7 +1,7 @@
 # Current Integration Status — 31 May 2026
 
 ## Build & Test Health
-- **pytest**: 27/27 passing ✅
+- **pytest**: 34/34 passing ✅
 - **install**: `uv pip install -e .` ✅
 - **doctor**: credentials + keyring + accounts ✅
 - **connectivity**: POST-based health check ✅
@@ -22,6 +22,9 @@
 | Codex Desktop model picker | ✅ |
 | Schema sanitization | ✅ |
 | Device fingerprinting | ✅ |
+| BYOK provider presets | ✅ |
+| OpenAI-compatible provider routing | ✅ |
+| Encrypted API-key provider config | ✅ |
 
 ## Known Limitations
 - All 3 Claude accounts are currently rate-limited (quota resets ~2h)
@@ -32,5 +35,5 @@
 
 ## Next Priorities
 1. Add `/v1/responses/compact` support
-2. Expand live backend smoke coverage
+2. Expand live backend smoke coverage for BYOK providers
 3. Track upstream Codex Desktop shim compatibility
