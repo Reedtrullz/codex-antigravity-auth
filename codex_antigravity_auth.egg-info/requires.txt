@@ -2,3 +2,5 @@ httpx>=0.28
 fastapi>=0.110
 uvicorn>=0.28
 pyyaml>=6.0
+keyring>=25.0.0
+cryptography>=42.0.0

@@ -10,6 +10,33 @@ from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
 app = FastAPI(title="Codex Antigravity Gateway")
 account_manager = AccountManager()
 
+# ── Model catalog for native Codex Desktop picker ──
+AVAILABLE_MODELS = [
+    {"id": "gemini-3.5-flash-high", "display_name": "Gemini 3.5 Flash (Agent High)", "context_window": 1000000},
+    {"id": "gemini-3.1-pro-high",    "display_name": "Gemini 3.1 Pro (Reasoning)", "context_window": 1000000},
+    {"id": "claude-3.5-sonnet",      "display_name": "Claude Sonnet 4.6 (Google)",  "context_window": 200000},
+    {"id": "claude-opus-4-6",        "display_name": "Claude Opus 4.6 (Google)",   "context_window": 200000},
+]
+
+@app.get("/v1/models")
+async def list_models():
+    """Return model catalog so Codex Desktop can populate its picker dropdown."""
+    import time
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": m["id"],
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "google-antigravity",
+                "display_name": m["display_name"],
+                "context_window": m["context_window"],
+            }
+            for m in AVAILABLE_MODELS
+        ],
+    }
+
 def build_headers(account: dict) -> dict:
     platform = get_platform()
     headers = {
@@ -165,7 +192,7 @@ async def create_response(request: Request):
                                         parts = content.get("parts", [])
                                         for part in parts:
                                             # Yield reasoning/thinking blocks in separate reasoning events
-                                            if part.get("thought") is True or part.get("type") == "thinking" or "thoughtSignature" in part:
+                                            if part.get("thought") is True or part.get("type") == "thinking":
                                                 thought_text = part.get("text", "") or part.get("thinking", "")
                                                 # Send reasoning delta event
                                                 yield f"data: {json.dumps({'type': 'response.reasoning.delta', 'response_id': response_id, 'delta': thought_text})}\n\n"

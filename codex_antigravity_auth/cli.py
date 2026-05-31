@@ -156,9 +156,15 @@ def run_doctor():
     # Check network connectivity to Google Antigravity backend
     try:
         import urllib.request
-        req = urllib.request.Request("https://cloudcode-pa.googleapis.com", method="HEAD")
-        with urllib.request.urlopen(req, timeout=3.0) as resp:
-            print("[PASS] Google Antigravity Connectivity: ONLINE")
+        # cloudcode-pa.googleapis.com returns 404 on HEAD; POST to keepalive-health endpoint
+        req = urllib.request.Request("https://cloudcode-pa.googleapis.com/v1internal:generateContent", method="POST",
+                                     data=b'{"model":"gemini-3.5-flash-low","request":{"contents":[]}}',
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            if resp.status in (200, 401, 403):
+                print("[PASS] Google Antigravity Connectivity: ONLINE")
+            else:
+                print(f"[FAIL] Google Antigravity Connectivity: REACHABLE but status {resp.status}")
     except Exception as e:
         print(f"[FAIL] Google Antigravity Connectivity: OFFLINE / TIMEOUT ({e})")
         

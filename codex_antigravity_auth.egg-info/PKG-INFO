@@ -9,10 +9,17 @@ Requires-Dist: httpx>=0.28
 Requires-Dist: fastapi>=0.110
 Requires-Dist: uvicorn>=0.28
 Requires-Dist: pyyaml>=6.0
+Requires-Dist: keyring>=25.0.0
+Requires-Dist: cryptography>=42.0.0
 
 # Google Antigravity Auth for OpenAI Codex
 
 Create a clean, reliable local gateway server that allows you to use Google Antigravity models (Gemini 3.x, Claude Opus/Sonnet 4.6, etc.) directly in OpenAI Codex (CLI or Desktop), utilizing proper Google OAuth (PKCE) authentication and automatic multi-account switching / rotation.
+
+## Features
+- **OS-Native Keyring Encryption**: Automatically encrypts OAuth credentials and tokens at rest securely inside macOS Keychain, Windows Credential Manager, or Linux Secret Service via the `keyring` package.
+- **Transaction-Safe Cooldown Rotations**: Automatically rotates accounts on backend failures (such as `401`, `403`, or `429` rate limiters) with clean exponential backoff.
+- **High-Fidelity SSE Translation**: Fully translates complex stream candidate envelopes, role alignments, thoughts token tracking, and VALIDATED tool parameter modes.
 
 ## Installation
 
@@ -56,4 +63,16 @@ wire_api = "responses"
 name = "Google Antigravity"
 base_url = "http://localhost:51122/v1"
 wire_api = "responses"
+```
+
+## Verification
+
+To run connection check diagnostics and verify token security:
+```bash
+codex-antigravity doctor
+```
+
+And execute full unit test coverage:
+```bash
+pytest
 ```

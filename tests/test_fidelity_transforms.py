@@ -25,7 +25,7 @@ class TestFidelityTransforms(unittest.TestCase):
         self.assertEqual(res["output"][0]["role"], "assistant")
         self.assertEqual(res["output"][0]["content"][0]["text"], "Hello world!")
 
-    def test_thought_signature_extracted_to_reasoning(self):
+    def test_thought_signature_text_appears_in_output(self):
         candidate = {
             "content": {
                 "role": "model",
@@ -41,9 +41,11 @@ class TestFidelityTransforms(unittest.TestCase):
             }
         }
         transformed = transform_gemini_candidate(candidate)
-        self.assertIn("reasoning", transformed)
-        self.assertEqual(transformed["reasoning"]["step_by_step_summary"], "Self-reflection thought process.")
-        self.assertEqual(transformed["message"]["content"][0]["text"], "Actual answer.")
+        # thoughtSignature parts now stay in output as regular text
+        content_texts = [c["text"] for c in transformed["message"]["content"]]
+        self.assertIn("Self-reflection thought process.", content_texts)
+        self.assertIn("Actual answer.", content_texts)
+        self.assertNotIn("reasoning", transformed)  # not misclassified as reasoning
 
 if __name__ == "__main__":
     unittest.main()

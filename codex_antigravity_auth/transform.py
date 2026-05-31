@@ -3,6 +3,7 @@
 
 import uuid
 import json
+import time
 from typing import Any
 from .models import resolve_backend_model
 from .schema import clean_json_schema
@@ -104,7 +105,7 @@ def transform_request(codex_req: dict) -> dict:
 
     # Validate tool calling configuration for Claude models
     tool_config = None
-    if "claude" in backend_model.lower():
+    if gemini_tools and "claude" in backend_model.lower():
         tool_config = {
             "functionCallingConfig": {
                 "mode": "VALIDATED"
@@ -173,10 +174,10 @@ def transform_gemini_candidate(candidate: dict) -> dict:
             continue
             
         # 1. Handle thoughts / thinking blocks
-        if part.get("thought") is True or part.get("type") == "thinking" or "thoughtSignature" in part:
+        if part.get("thought") is True or part.get("type") == "thinking":
             reasoning_text += part.get("text", "") or part.get("thinking", "")
             continue
-            
+
         # 2. Handle standard text
         if "text" in part:
             output_parts.append({
@@ -184,7 +185,7 @@ def transform_gemini_candidate(candidate: dict) -> dict:
                 "text": part["text"],
                 "annotations": []
             })
-            
+
         # 3. Handle tool calls
         elif "functionCall" in part:
             fc = part["functionCall"]
@@ -247,7 +248,7 @@ def transform_response(gemini_resp: dict, model: str) -> dict:
     return {
         "id": f"resp_{uuid.uuid4().hex[:12]}",
         "object": "response",
-        "created_at": int(time.time()) if "time" in globals() else int(uuid.uuid4().time / 10000000), # safe fallback
+        "created_at": int(time.time()),
         "model": model,
         "output": output_items,
         "usage": translated_usage,

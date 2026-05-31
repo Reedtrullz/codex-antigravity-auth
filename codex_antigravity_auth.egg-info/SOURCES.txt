@@ -17,4 +17,11 @@ codex_antigravity_auth.egg-info/dependency_links.txt
 codex_antigravity_auth.egg-info/entry_points.txt
 codex_antigravity_auth.egg-info/requires.txt
 codex_antigravity_auth.egg-info/top_level.txt
+tests/test_accounts.py
+tests/test_cli.py
+tests/test_fidelity_edge_cases.py
+tests/test_fidelity_transforms.py
+tests/test_schema_sanitization.py
+tests/test_server_streaming.py
+tests/test_storage.py
 tests/test_transform.py

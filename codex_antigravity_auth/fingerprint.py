@@ -1,6 +1,7 @@
 import uuid
 import secrets
 import random
+import time
 
 PLATFORM_CHOICES = ["darwin", "win32"]
 ARCHITECTURES = ["x64", "arm64"]
@@ -52,5 +53,5 @@ def generate_fingerprint() -> dict:
             "platform": platform_display,
             "pluginType": "GEMINI",
         },
-        "createdAt": int(uuid.uuid4().time / 10000), # dummy ms timestamp
+        "createdAt": int(time.time() * 1000),
     }

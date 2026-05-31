@@ -32,4 +32,9 @@ def resolve_backend_model(model: str) -> str:
         if parts[-1] in MODEL_MAP:
             return MODEL_MAP[parts[-1]]
         return parts[-1]
+    # Normalize hyphens to dots (codex-shim slug normalization)
+    if "-" in lower and lower not in MODEL_MAP:
+        dotted = lower.replace("-", ".")
+        if dotted in MODEL_MAP:
+            return MODEL_MAP[dotted]
     return lower

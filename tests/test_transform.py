@@ -32,7 +32,8 @@ class TestTransform(unittest.TestCase):
         res = transform_request(req)
         self.assertEqual(res["model"], "claude-sonnet-4-6")
         self.assertEqual(res["request"]["contents"][0]["parts"][0]["text"], "Hello, how are you?")
-        self.assertEqual(res["request"]["toolConfig"]["functionCallingConfig"]["mode"], "VALIDATED")
+        # No tools in request → no toolConfig key
+        self.assertNotIn("toolConfig", res["request"])
 
     def test_response_transformation(self):
         gemini_resp = {
