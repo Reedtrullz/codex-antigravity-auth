@@ -60,5 +60,5 @@ codex-antigravity doctor
 
 And execute full unit test coverage:
 ```bash
-pytest
+python3 -m pytest
 ```

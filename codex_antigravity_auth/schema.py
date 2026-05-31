@@ -8,30 +8,47 @@ UNSUPPORTED_KEYWORDS = [
     "format", "default", "examples"
 ]
 
-def clean_json_schema(schema: dict) -> dict:
+def _resolve_local_ref(ref: str, root: dict) -> dict | None:
+    if not ref.startswith("#/"):
+        return None
+    current = root
+    for raw_part in ref[2:].split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current if isinstance(current, dict) else None
+
+def clean_json_schema(schema: dict, _root: dict | None = None, _is_root: bool = True) -> dict:
     """Recursively sanitize JSON Schema for Antigravity compatibility.
     Removes unsupported keys, strips const, and handles unions (anyOf/oneOf).
     """
     if not isinstance(schema, dict):
         return schema
+
+    root = _root or schema
+    if "$ref" in schema:
+        resolved = _resolve_local_ref(schema["$ref"], root)
+        if resolved is not None:
+            merged = {**resolved, **{k: v for k, v in schema.items() if k != "$ref"}}
+            return clean_json_schema(merged, root, _is_root)
     
     cleaned = {}
     for k, v in schema.items():
         if k in UNSUPPORTED_KEYWORDS:
             continue
         if k == "properties" and isinstance(v, dict):
-            cleaned[k] = {pk: clean_json_schema(pv) for pk, pv in v.items()}
+            cleaned[k] = {pk: clean_json_schema(pv, root, False) for pk, pv in v.items()}
         elif k == "items" and isinstance(v, dict):
-            cleaned[k] = clean_json_schema(v)
+            cleaned[k] = clean_json_schema(v, root, False)
         elif k in ("anyOf", "oneOf", "allOf") and isinstance(v, list):
             # Try to flatten or pick the best option
-            cleaned[k] = [clean_json_schema(opt) for opt in v if isinstance(opt, dict)]
+            cleaned[k] = [clean_json_schema(opt, root, False) for opt in v if isinstance(opt, dict)]
         else:
             cleaned[k] = v
             
-    # VALIDATED mode requirement: every tool parameter object schema must have at
-    # least one property listed in the "required" array.
-    if cleaned.get("type") == "object":
+    # VALIDATED mode requires a non-empty root required list for object params.
+    if _is_root and cleaned.get("type") == "object":
         props = cleaned.setdefault("properties", {})
         reqs = cleaned.setdefault("required", [])
         if not reqs:

@@ -38,7 +38,16 @@ def decode_state(state: str) -> dict:
     return parsed
 
 def get_pkce_verifier(state_id: str) -> dict[str, str] | None:
-    return _pkce_verifier_store.pop(state_id, None)
+    verifier_info = _pkce_verifier_store.pop(state_id, None)
+    if not verifier_info:
+        return None
+    try:
+        created_at = float(verifier_info.get("createdAt", "0"))
+    except ValueError:
+        return None
+    if time.time() - created_at > _PKCE_VERIFIER_TTL_SECONDS:
+        return None
+    return verifier_info
 
 def authorize_antigravity() -> dict:
     cid, csec = require_credentials()

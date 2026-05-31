@@ -23,18 +23,20 @@ MODEL_MAP = {
 
 def resolve_backend_model(model: str) -> str:
     """Resolve Codex-provided model name to official Antigravity backend model."""
-    lower = model.lower()
+    lower = str(model).lower()
     if lower in MODEL_MAP:
         return MODEL_MAP[lower]
     # Remove any provider prefixes like "openai-responses/" or "openai/"
     if "/" in lower:
         parts = lower.split("/")
-        if parts[-1] in MODEL_MAP:
-            return MODEL_MAP[parts[-1]]
-        return parts[-1]
+        return resolve_backend_model(parts[-1])
     # Normalize hyphens to dots (codex-shim slug normalization)
-    if "-" in lower and lower not in MODEL_MAP:
-        dotted = lower.replace("-", ".")
-        if dotted in MODEL_MAP:
-            return MODEL_MAP[dotted]
+    slug_variants = {
+        lower.replace("-3-5-", "-3.5-"),
+        lower.replace("-3-1-", "-3.1-"),
+        lower.replace("-4-6", "-4.6"),
+    }
+    for variant in slug_variants:
+        if variant in MODEL_MAP:
+            return MODEL_MAP[variant]
     return lower

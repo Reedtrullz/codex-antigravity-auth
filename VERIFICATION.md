@@ -46,7 +46,7 @@ codex-antigravity start
 ### 6. Verify
 ```bash
 codex-antigravity doctor        # diagnostics
-pytest                           # 18 tests, all must pass
+python3 -m pytest                # 27 tests, all must pass
 curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
 ```
 

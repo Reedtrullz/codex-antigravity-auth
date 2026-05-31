@@ -8,7 +8,7 @@ import time
 import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-from .oauth import authorize_antigravity, exchange_antigravity
+from .oauth import authorize_antigravity, decode_state, exchange_antigravity
 from .storage import load_accounts, save_accounts
 from .constants import resolve_oauth_credentials
 
@@ -29,6 +29,7 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
             code = query["code"][0]
             # Store globally on server to be grabbed by parent thread
             self.server.auth_code = code
+            self.server.auth_state = query.get("state", [None])[0]
             self.wfile.write(b"""
             <html>
             <head><style>body { font-family: sans-serif; text-align: center; margin-top: 50px; background-color: #f4f7f6; }</style></head>
@@ -52,6 +53,16 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
 class OAuthServer(socketserver.TCPServer):
     allow_reuse_address = True
     auth_code = None
+    auth_state = None
+
+def normalize_epoch_seconds(value):
+    try:
+        ts = float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    if ts > 10_000_000_000:
+        ts = ts / 1000
+    return ts
 
 def run_local_oauth_flow():
     # Verify environment credentials or credentials file exists
@@ -67,24 +78,40 @@ def run_local_oauth_flow():
     url = auth_info["url"]
     
     server = OAuthServer(("localhost", 51121), OAuthCallbackHandler)
-    
-    print(f"[*] Opening browser authorization URL...")
-    print(f"[*] If the browser doesn't open automatically, navigate to:\n{url}\n")
-    webbrowser.open(url)
-    
-    # Wait for callback
-    while server.auth_code is None:
-        server.handle_request()
+    server.timeout = 600
+    try:
+        print(f"[*] Opening browser authorization URL...")
+        print(f"[*] If the browser doesn't open automatically, navigate to:\n{url}\n")
+        webbrowser.open(url)
         
-    print("[*] Callback received. Exchanging code for tokens...")
-    # Retrieve verifier from oauth module verifier store
-    from .oauth import get_pkce_verifier
-    verifier_info = get_pkce_verifier(auth_info["state_id"])
-    if not verifier_info:
-        print("[!] PKCE verifier state not found or expired!")
-        sys.exit(1)
-        
-    tokens = exchange_antigravity(server.auth_code, verifier_info["verifier"])
+        # Wait for callback
+        deadline = time.time() + 600
+        while server.auth_code is None:
+            if time.time() > deadline:
+                print("[!] Timed out waiting for OAuth callback.")
+                sys.exit(1)
+            server.handle_request()
+
+        print("[*] Callback received. Exchanging code for tokens...")
+        try:
+            returned_state = decode_state(server.auth_state or "")
+        except Exception:
+            print("[!] OAuth callback state was missing or invalid.")
+            sys.exit(1)
+        if returned_state.get("id") != auth_info["state_id"]:
+            print("[!] OAuth callback state did not match the active login attempt.")
+            sys.exit(1)
+
+        # Retrieve verifier from oauth module verifier store
+        from .oauth import get_pkce_verifier
+        verifier_info = get_pkce_verifier(auth_info["state_id"])
+        if not verifier_info:
+            print("[!] PKCE verifier state not found or expired!")
+            sys.exit(1)
+
+        tokens = exchange_antigravity(server.auth_code, verifier_info["verifier"])
+    finally:
+        server.server_close()
     
     # Extract user profile email
     email = None
@@ -97,8 +124,12 @@ def run_local_oauth_flow():
         with urllib.request.urlopen(req) as resp:
             user_info = json.loads(resp.read().decode("utf-8"))
             email = user_info.get("email")
-    except Exception:
-        email = "unknown-google-account"
+    except Exception as e:
+        print(f"[!] Could not retrieve Google account email: {e}")
+        sys.exit(1)
+    if not email:
+        print("[!] Google account email was missing from userinfo response.")
+        sys.exit(1)
 
     # Save to storage
     data = load_accounts()
@@ -111,9 +142,16 @@ def run_local_oauth_flow():
             existing_idx = idx
             break
             
+    refresh_token = tokens.get("refresh_token")
+    if not refresh_token and existing_idx is not None:
+        refresh_token = accounts[existing_idx].get("refreshToken")
+    if not refresh_token:
+        print("[!] Google did not return a refresh token. Revoke this client grant and run login again.")
+        sys.exit(1)
+
     account_entry = {
         "email": email,
-        "refreshToken": tokens["refresh_token"],
+        "refreshToken": refresh_token,
         "accessToken": tokens["access_token"],
         "expiresAt": int(time.time()) + tokens.get("expires_in", 3600),
     }
@@ -156,15 +194,25 @@ def run_doctor():
     # Check network connectivity to Google Antigravity backend
     try:
         import urllib.request
+        import urllib.error
         # cloudcode-pa.googleapis.com returns 404 on HEAD; POST to keepalive-health endpoint
         req = urllib.request.Request("https://cloudcode-pa.googleapis.com/v1internal:generateContent", method="POST",
                                      data=b'{"model":"gemini-3.5-flash-low","request":{"contents":[]}}',
                                      headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            if resp.status in (200, 401, 403):
-                print("[PASS] Google Antigravity Connectivity: ONLINE")
+        try:
+            resp_ctx = urllib.request.urlopen(req, timeout=5.0)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                print("[PASS] Google Antigravity Connectivity: ONLINE (authentication required)")
+                resp_ctx = None
             else:
-                print(f"[FAIL] Google Antigravity Connectivity: REACHABLE but status {resp.status}")
+                raise
+        if resp_ctx:
+            with resp_ctx as resp:
+                if resp.status in (200, 401, 403):
+                    print("[PASS] Google Antigravity Connectivity: ONLINE")
+                else:
+                    print(f"[FAIL] Google Antigravity Connectivity: REACHABLE but status {resp.status}")
     except Exception as e:
         print(f"[FAIL] Google Antigravity Connectivity: OFFLINE / TIMEOUT ({e})")
         
@@ -175,7 +223,7 @@ def run_doctor():
         print(f"[PASS] Authenticated Accounts: {len(accounts)} configured")
         for acc in accounts:
             email = acc.get("email")
-            expires_at = acc.get("expiresAt", 0)
+            expires_at = normalize_epoch_seconds(acc.get("expiresAt", 0))
             status = "ACTIVE" if expires_at > time.time() else "EXPIRED (will auto-refresh)"
             print(f"       - {email} ({status})")
     else:
@@ -233,7 +281,7 @@ def main():
             return
         print("[*] Configured Google Accounts:")
         for idx, acc in enumerate(accounts):
-            print(f"[{idx}] {acc.get('email')} (Expires: {time.ctime(acc.get('expiresAt', 0))})")
+            print(f"[{idx}] {acc.get('email')} (Expires: {time.ctime(normalize_epoch_seconds(acc.get('expiresAt', 0)))})")
     elif args.command == "start":
         import uvicorn
         print(f"[*] Starting local Responses API compatible gateway server on {args.host}:{args.port}...")

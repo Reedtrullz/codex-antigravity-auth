@@ -1,17 +1,46 @@
 import time
+import threading
 from typing import Any
-from .storage import load_accounts, save_accounts
+from .storage import load_accounts, save_accounts, get_accounts_json_path
 from .oauth import refresh_access_token
 from .fingerprint import generate_fingerprint
 
 class AccountManager:
     def __init__(self):
-        self._lock = threading.RLock() if "threading" in globals() else None
-        # Lazy imports are okay, but thread safety matters
-        import threading
         self._lock = threading.RLock()
         self._failures = {} # email -> failure count
         self._cooldowns = {} # email -> cooldown end timestamp
+
+    def _sync_state_from_storage(self, data: dict[str, Any]) -> None:
+        state = data.get("accountState", {})
+        if isinstance(state, dict):
+            failures = state.get("failures", {})
+            cooldowns = state.get("cooldowns", {})
+            if isinstance(failures, dict):
+                self._failures.update({str(k): int(v) for k, v in failures.items() if isinstance(v, (int, float))})
+            if isinstance(cooldowns, dict):
+                self._cooldowns.update({str(k): float(v) for k, v in cooldowns.items() if isinstance(v, (int, float))})
+
+    def _save_state_to_storage(self) -> None:
+        data = load_accounts()
+        if not data.get("accounts") and not get_accounts_json_path().exists():
+            return
+        data["accountState"] = {
+            "failures": self._failures,
+            "cooldowns": self._cooldowns,
+        }
+        save_accounts(data)
+
+    @staticmethod
+    def _normalize_expires_at(value: Any) -> float:
+        try:
+            expires_at = float(value or 0)
+        except (TypeError, ValueError):
+            return 0
+        # Epoch milliseconds are currently around 1.7e12; epoch seconds around 1.7e9.
+        if expires_at > 10_000_000_000:
+            expires_at = expires_at / 1000
+        return expires_at
 
     def get_accounts(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -21,9 +50,11 @@ class AccountManager:
     def select_active_account(self, model: str) -> dict[str, Any] | None:
         with self._lock:
             data = load_accounts()
+            self._sync_state_from_storage(data)
             accounts = data.get("accounts", [])
             if not accounts:
                 return None
+            dirty = False
 
             family = "claude" if "claude" in model.lower() else "gemini"
             family_map = data.setdefault("activeIndexByFamily", {"claude": 0, "gemini": 0})
@@ -40,19 +71,28 @@ class AccountManager:
                 idx = (start_index + i) % len(accounts)
                 acc = accounts[idx]
                 email = acc.get("email")
+                if not email:
+                    continue
                 
                 # Check cooldown
                 cooldown_end = self._cooldowns.get(email, 0)
                 if cooldown_end > current_time:
                     continue # Account is cooling down, skip
+                if cooldown_end:
+                    self._cooldowns.pop(email, None)
+                    self._failures.pop(email, None)
+                    dirty = True
                 
                 # Ensure it has a fingerprint, generate one if not
                 if not acc.get("fingerprint"):
                     acc["fingerprint"] = generate_fingerprint()
-                    save_accounts(data)
+                    dirty = True
 
                 # Check if access token is missing or expired, auto-refresh if so
-                expires_at = acc.get("expiresAt", 0) # epoch seconds
+                expires_at = self._normalize_expires_at(acc.get("expiresAt", 0))
+                if expires_at != acc.get("expiresAt", 0):
+                    acc["expiresAt"] = expires_at
+                    dirty = True
                 if not acc.get("accessToken") or expires_at < current_time + 300: # 5 min buffer
                     refresh_tok = acc.get("refreshToken")
                     if refresh_tok:
@@ -63,30 +103,46 @@ class AccountManager:
                             # update refresh token if Google rotates it
                             if refreshed.get("refresh_token"):
                                 acc["refreshToken"] = refreshed["refresh_token"]
-                            save_accounts(data)
+                            dirty = True
                         except Exception as e:
                             # If token refresh fails (e.g. invalid grant), mark failure/cooldown
                             self.mark_failure(email, f"Token refresh failed: {e}")
                             continue
+                    else:
+                        self.mark_failure(email, "Token expired and no refresh token is available")
+                        continue
 
                 # Found a viable account, make it sticky/active
+                if family_map.get(family) != idx:
+                    dirty = True
                 family_map[family] = idx
+                if data.get("activeIndex") != idx:
+                    dirty = True
                 data["activeIndex"] = idx
-                save_accounts(data)
+                state_payload = {
+                    "failures": self._failures,
+                    "cooldowns": self._cooldowns,
+                }
+                if self._failures or self._cooldowns or data.get("accountState"):
+                    if data.get("accountState") != state_payload:
+                        dirty = True
+                    data["accountState"] = state_payload
+                if dirty:
+                    save_accounts(data)
                 return acc
 
-            # If all accounts are cooling down or failed, fallback to the preferred one even if cooling down
-            if start_index < len(accounts):
-                return accounts[start_index]
             return None
 
     def mark_failure(self, email: str, reason: str) -> None:
         with self._lock:
+            if not email:
+                return
             self._failures[email] = self._failures.get(email, 0) + 1
             # Cooldown for 2 minutes on first failure, exponentially backing off
             backoff_factor = min(self._failures[email], 5)
             cooldown_duration = 120 * (2 ** (backoff_factor - 1))
             self._cooldowns[email] = time.time() + cooldown_duration
+            self._save_state_to_storage()
             
             # Print warning
             print(f"[*] Account {email} flagged as cooling down for {cooldown_duration}s. Reason: {reason}")
@@ -95,3 +151,4 @@ class AccountManager:
         with self._lock:
             self._failures.pop(email, None)
             self._cooldowns.pop(email, None)
+            self._save_state_to_storage()

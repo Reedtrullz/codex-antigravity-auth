@@ -51,7 +51,7 @@ Codex Desktop/CLI  ←  Responses API formatted response
 - **Python 3.10+** — use `python3` or activate venv
 - **Virtual env**: `source .venv/bin/activate`
 - **Install**: `uv pip install -e .`
-- **Test**: `pytest` (18 tests, all must pass)
+- **Test**: `python3 -m pytest` (27 tests, all must pass)
 - **Run server**: `codex-antigravity start --port 51122`
 - **Credentials**: `~/.codex/antigravity-credentials.json` or env vars
 - **Accounts**: `~/.codex/antigravity-accounts.json` (Fernet-encrypted)
@@ -73,11 +73,11 @@ User-facing aliases → Google backend models (`models.py`):
 
 3. **Non-streaming response wrapping** — Backend responses come wrapped in `{"response": {"candidates": [...]}}`. Always unwrap via `gemini_resp.get("response", gemini_resp)` before parsing.
 
-4. **Rate-limit cooldowns are in-memory** — `AccountManager._cooldowns` and `._failures` are not persisted across server restarts. The `rateLimitResetTimes` in the accounts JSON is persisted but the exponential backoff counter resets.
+4. **Rate-limit cooldowns are persisted** — `AccountManager._cooldowns` and `._failures` are mirrored into the encrypted accounts JSON under `accountState` so restarts do not immediately retry cooled-down accounts.
 
 5. **`/v1/models` endpoint is REQUIRED** for Codex Desktop's model picker to show custom models. Without it, the picker only shows OpenAI's native models.
 
-6. **Streaming function call output_index** — currently hardcoded to `1` for all function calls. If multiple tool calls appear in one stream, indices collide. Track a counter per stream.
+6. **Streaming function call output_index** — function calls must keep unique, incrementing output indices and stable item IDs between `added` and `done` events.
 
 ## Configuring Codex Desktop
 
