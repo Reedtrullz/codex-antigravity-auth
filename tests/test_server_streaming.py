@@ -81,12 +81,12 @@ class TestServerStreaming(unittest.TestCase):
                 lines = response.text.split("\n")
                 
                 created_lines = [l for l in lines if "response.created" in l]
-                delta_lines = [l for l in lines if "response.content_part.delta" in l]
-                done_lines = [l for l in lines if "response.done" in l]
+                delta_lines = [l for l in lines if "response.output_text.delta" in l]
+                done_lines = [l for l in lines if "response.completed" in l]
                 
                 self.assertTrue(len(created_lines) > 0, "Missing response.created event")
-                self.assertTrue(len(delta_lines) > 0, "Missing response.content_part.delta event")
-                self.assertTrue(len(done_lines) > 0, "Missing response.done event")
+                self.assertTrue(len(delta_lines) > 0, "Missing response.output_text.delta event")
+                self.assertTrue(len(done_lines) > 0, "Missing response.completed event")
 
     def test_sse_generator_handling_wrapped_responses(self):
         with TestClient(app) as test_client:
@@ -156,8 +156,8 @@ class TestServerStreaming(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 
                 lines = response.text.split("\n")
-                delta_lines = [l for l in lines if "response.content_part.delta" in l]
-                self.assertTrue(len(delta_lines) > 0, "Missing response.content_part.delta event for nested wrapped response")
+                delta_lines = [l for l in lines if "response.output_text.delta" in l]
+                self.assertTrue(len(delta_lines) > 0, "Missing response.output_text.delta event for nested wrapped response")
                 self.assertIn("Hello stream", delta_lines[0])
 
 if __name__ == "__main__":

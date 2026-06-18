@@ -1,4 +1,5 @@
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "kind": "openai_chat",
         "baseUrl": "https://openrouter.ai/api/v1",
         "apiKeyEnv": "OPENROUTER_API_KEY",
-        "models": ["openrouter:auto"],
+        "models": ["openrouter/auto"],
         "headers": {
             "HTTP-Referer": "https://github.com/Reedtrullz/codex-antigravity-auth",
             "X-Title": "Codex Antigravity Auth",
@@ -99,13 +100,16 @@ def load_provider_config() -> dict[str, Any]:
 def save_provider_config(data: dict[str, Any]) -> None:
     path = get_providers_json_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(".tmp")
+    temp_path = None
     try:
-        temp_path.write_bytes(encrypt_payload(json.dumps(data, indent=2)))
+        encrypted_data = encrypt_payload(json.dumps(data, indent=2))
+        with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent, prefix=f".{path.name}.", suffix=".tmp") as f:
+            temp_path = Path(f.name)
+            f.write(encrypted_data)
         os.chmod(temp_path, 0o600)
         os.replace(temp_path, path)
     except Exception as e:
-        if temp_path.exists():
+        if temp_path and temp_path.exists():
             try:
                 temp_path.unlink()
             except Exception:

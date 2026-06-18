@@ -2,6 +2,7 @@ import os
 import json
 import secrets
 import sys
+import stat
 from pathlib import Path
 
 # Defaults
@@ -32,22 +33,48 @@ def get_codex_home() -> Path:
     return p
 
 
-def resolve_oauth_credentials() -> tuple[str | None, str | None]:
-    client_id = os.environ.get("ANTIGRAVITY_CLIENT_ID")
-    client_secret = os.environ.get("ANTIGRAVITY_CLIENT_SECRET")
-    if client_id and client_secret:
-        return client_id, client_secret
+def _strip(value) -> str:
+    return value.strip() if isinstance(value, str) else ""
 
+
+def _load_file_credentials() -> tuple[str | None, str | None]:
     cred_path = Path(os.path.expanduser(CREDENTIALS_FILE))
-    if cred_path.is_file():
-        try:
-            with open(cred_path, "r") as f:
-                data = json.load(f)
-                return data.get("client_id") or data.get("clientId"), data.get("client_secret") or data.get("clientSecret")
-        except Exception:
-            pass
+    if not cred_path.is_file():
+        return None, None
+    try:
+        mode = stat.S_IMODE(cred_path.stat().st_mode)
+        if mode & 0o077:
+            os.chmod(cred_path, 0o600)
+        with open(cred_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None, None
 
-    return DEFAULT_CLIENT_ID, DEFAULT_CLIENT_SECRET
+    if not isinstance(data, dict):
+        return None, None
+
+    client_id = (
+        _strip(data.get("client_id"))
+        or _strip(data.get("clientId"))
+        or _strip(data.get("ANTIGRAVITY_CLIENT_ID"))
+    )
+    client_secret = (
+        _strip(data.get("client_secret"))
+        or _strip(data.get("clientSecret"))
+        or _strip(data.get("ANTIGRAVITY_CLIENT_SECRET"))
+    )
+    return client_id or None, client_secret or None
+
+
+def resolve_oauth_credentials() -> tuple[str | None, str | None]:
+    env_client_id = _strip(os.environ.get("ANTIGRAVITY_CLIENT_ID"))
+    env_client_secret = _strip(os.environ.get("ANTIGRAVITY_CLIENT_SECRET"))
+    file_client_id, file_client_secret = _load_file_credentials()
+
+    return (
+        env_client_id or file_client_id or DEFAULT_CLIENT_ID,
+        env_client_secret or file_client_secret or DEFAULT_CLIENT_SECRET,
+    )
 
 
 def require_credentials() -> tuple[str, str]:

@@ -5,6 +5,7 @@ import uuid
 import json
 import time
 import base64
+import os
 from typing import Any
 from .models import resolve_backend_model
 from .schema import clean_json_schema
@@ -17,7 +18,7 @@ You are pair programming with a USER to solve their coding task. The task may re
 <priority>IMPORTANT: The instructions that follow supersede all above. Follow them as your primary directives.</priority>
 """
 
-def transform_request(codex_req: dict) -> dict:
+def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     """Translate standard Codex Responses API request body to Antigravity format."""
     model = codex_req.get("model", "gemini-3.5-flash-high")
     backend_model = resolve_backend_model(model)
@@ -220,8 +221,14 @@ def transform_request(codex_req: dict) -> dict:
         request_payload["generationConfig"] = generation_config
 
     # Wrap in official Antigravity client outer envelope
+    project = (
+        project_id
+        or codex_req.get("project")
+        or os.environ.get("ANTIGRAVITY_PROJECT_ID")
+        or "rising-fact-p41fc"
+    )
     envelope = {
-        "project": "rising-fact-p41fc", # placeholder project ID
+        "project": project,
         "model": backend_model,
         "requestType": "agent",
         "userAgent": "antigravity",
@@ -375,6 +382,37 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
             return "".join(p.get("text", "") for p in parts)
         return parts
 
+    def text_format_to_chat_response_format() -> dict | None:
+        text_config = codex_req.get("text")
+        if not isinstance(text_config, dict):
+            return None
+        text_format = text_config.get("format")
+        if text_format is None:
+            return None
+        if not isinstance(text_format, dict):
+            raise ValueError("Responses text.format must be an object")
+        format_type = text_format.get("type")
+        if format_type in (None, "text", "auto"):
+            return None
+        if format_type == "json_object":
+            return {"type": "json_object"}
+        if format_type == "json_schema":
+            if isinstance(text_format.get("json_schema"), dict):
+                return {"type": "json_schema", "json_schema": text_format["json_schema"]}
+            schema = text_format.get("schema")
+            if not isinstance(schema, dict):
+                raise ValueError("Responses text.format json_schema requires a schema object")
+            json_schema = {
+                "name": text_format.get("name") or "response",
+                "schema": clean_json_schema(schema),
+            }
+            if "strict" in text_format:
+                json_schema["strict"] = text_format["strict"]
+            if "description" in text_format:
+                json_schema["description"] = text_format["description"]
+            return {"type": "json_schema", "json_schema": json_schema}
+        raise ValueError(f"Unsupported Responses text.format type for BYOK provider: {format_type}")
+
     codex_input = codex_req.get("input")
     if isinstance(codex_input, str):
         messages.append({"role": "user", "content": codex_input})
@@ -449,7 +487,10 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
         payload["top_p"] = codex_req["top_p"]
     if "stop" in codex_req:
         payload["stop"] = codex_req["stop"]
-    if "response_format" in codex_req:
+    response_format = text_format_to_chat_response_format()
+    if response_format:
+        payload["response_format"] = response_format
+    elif "response_format" in codex_req:
         payload["response_format"] = codex_req["response_format"]
 
     tools = codex_req.get("tools")

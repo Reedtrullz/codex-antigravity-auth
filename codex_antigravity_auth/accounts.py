@@ -4,6 +4,7 @@ from typing import Any
 from .storage import load_accounts, save_accounts, get_accounts_json_path
 from .oauth import refresh_access_token
 from .fingerprint import generate_fingerprint
+from .redaction import redact_secret_text
 
 class AccountManager:
     def __init__(self):
@@ -133,7 +134,7 @@ class AccountManager:
 
             return None
 
-    def mark_failure(self, email: str, reason: str) -> None:
+    def mark_failure(self, email: str, reason: str, retry_after_seconds: float | None = None) -> None:
         with self._lock:
             if not email:
                 return
@@ -141,11 +142,13 @@ class AccountManager:
             # Cooldown for 2 minutes on first failure, exponentially backing off
             backoff_factor = min(self._failures[email], 5)
             cooldown_duration = 120 * (2 ** (backoff_factor - 1))
+            if retry_after_seconds and retry_after_seconds > 0:
+                cooldown_duration = max(cooldown_duration, min(float(retry_after_seconds), 86_400.0))
             self._cooldowns[email] = time.time() + cooldown_duration
             self._save_state_to_storage()
             
             # Print warning
-            print(f"[*] Account {email} flagged as cooling down for {cooldown_duration}s. Reason: {reason}")
+            print(f"[*] Account {email} flagged as cooling down for {cooldown_duration}s. Reason: {redact_secret_text(reason)}")
 
     def clear_failures(self, email: str) -> None:
         with self._lock:

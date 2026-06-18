@@ -10,6 +10,7 @@ from .constants import (
     require_credentials,
     SCOPES,
 )
+from .redaction import redact_secret_text
 
 # In-memory PKCE verifier store
 _pkce_verifier_store: dict[str, dict[str, str]] = {}
@@ -100,9 +101,9 @@ def exchange_antigravity(code: str, verifier: str) -> dict:
             return data
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"OAuth exchange failed ({e.code}): {error_body}")
+        raise RuntimeError(f"OAuth exchange failed ({e.code}): {redact_secret_text(error_body)}")
     except Exception as e:
-        raise RuntimeError(f"OAuth exchange failed: {e}")
+        raise RuntimeError(f"OAuth exchange failed: {redact_secret_text(str(e))}")
 
 def refresh_access_token(refresh_token: str) -> dict:
     cid, csec = require_credentials()
@@ -123,6 +124,6 @@ def refresh_access_token(refresh_token: str) -> dict:
             return data
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"Token refresh failed ({e.code}): {error_body}")
+        raise RuntimeError(f"Token refresh failed ({e.code}): {redact_secret_text(error_body)}")
     except Exception as e:
-        raise RuntimeError(f"Token refresh failed: {e}")
+        raise RuntimeError(f"Token refresh failed: {redact_secret_text(str(e))}")

@@ -19,6 +19,8 @@ class TestBYOKProviders(unittest.TestCase):
     def test_provider_model_prefix_parsing_preserves_slashy_models(self):
         self.assertEqual(split_provider_model("deepseek:deepseek-chat"), ("deepseek", "deepseek-chat"))
         self.assertEqual(split_provider_model("openrouter:deepseek/deepseek-chat"), ("openrouter", "deepseek/deepseek-chat"))
+        self.assertEqual(split_provider_model("openrouter:openrouter/auto"), ("openrouter", "openrouter/auto"))
+        self.assertIn("openrouter/auto", PROVIDER_PRESETS["openrouter"]["models"])
 
     def test_transform_responses_to_chat_completions(self):
         payload = transform_request_to_chat(
@@ -51,6 +53,55 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(payload["messages"][3]["role"], "tool")
         self.assertEqual(payload["tools"][0]["function"]["name"], "lookup")
         self.assertEqual(payload["max_tokens"], 100)
+
+    def test_transform_text_format_json_object_to_chat_response_format(self):
+        payload = transform_request_to_chat(
+            {
+                "model": "deepseek:deepseek-chat",
+                "input": "Return JSON.",
+                "text": {"format": {"type": "json_object"}},
+            },
+            "deepseek-chat",
+        )
+
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+
+    def test_transform_text_format_json_schema_to_chat_response_format(self):
+        payload = transform_request_to_chat(
+            {
+                "model": "deepseek:deepseek-chat",
+                "input": "Return JSON.",
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "answer",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "properties": {"answer": {"type": "string"}},
+                            "required": ["answer"],
+                        },
+                    }
+                },
+            },
+            "deepseek-chat",
+        )
+
+        self.assertEqual(payload["response_format"]["type"], "json_schema")
+        self.assertEqual(payload["response_format"]["json_schema"]["name"], "answer")
+        self.assertTrue(payload["response_format"]["json_schema"]["strict"])
+        self.assertEqual(payload["response_format"]["json_schema"]["schema"]["required"], ["answer"])
+
+    def test_transform_text_format_unsupported_type_fails(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported Responses text.format type"):
+            transform_request_to_chat(
+                {
+                    "model": "deepseek:deepseek-chat",
+                    "input": "Return XML.",
+                    "text": {"format": {"type": "xml"}},
+                },
+                "deepseek-chat",
+            )
 
     def test_transform_chat_response_to_responses(self):
         response = transform_chat_response(
@@ -96,6 +147,18 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         model_ids = [m["id"] for m in response.json()["data"]]
         self.assertIn("deepseek:deepseek-chat", model_ids)
+
+    def test_models_endpoint_includes_documented_builtin_aliases(self):
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
+            response = TestClient(app).get("/v1/models")
+
+        self.assertEqual(response.status_code, 200)
+        model_ids = [m["id"] for m in response.json()["data"]]
+        self.assertIn("gemini-3.5-flash-high", model_ids)
+        self.assertIn("gemini-3.5-flash-medium", model_ids)
+        self.assertIn("gemini-3.1-pro-high", model_ids)
+        self.assertIn("claude-3.5-sonnet", model_ids)
+        self.assertIn("claude-opus-4-6", model_ids)
 
     def test_non_streaming_byok_route_posts_chat_completion(self):
         provider = {
@@ -210,11 +273,15 @@ class TestBYOKProviders(unittest.TestCase):
             if line.startswith("data: ") and line != "data: [DONE]":
                 events.append(json.loads(line[6:]))
 
-        deltas = [e["delta"] for e in events if e.get("type") == "response.content_part.delta"]
+        deltas = [e["delta"] for e in events if e.get("type") == "response.output_text.delta"]
+        arg_deltas = [e["delta"] for e in events if e.get("type") == "response.function_call_arguments.delta"]
+        arg_done = [e for e in events if e.get("type") == "response.function_call_arguments.done"]
         tool_done = [e for e in events if e.get("type") == "response.output_item.done" and e["item"]["type"] == "function_call"]
-        done = [e for e in events if e.get("type") == "response.done"]
+        done = [e for e in events if e.get("type") == "response.completed"]
 
         self.assertEqual("".join(deltas), "Hello")
+        self.assertEqual(arg_deltas, ['{"q":"x"}'])
+        self.assertEqual(arg_done[0]["arguments"], '{"q":"x"}')
         self.assertEqual(tool_done[0]["item"]["call_id"], "call_1")
         self.assertEqual(tool_done[0]["item"]["name"], "lookup")
         self.assertEqual(tool_done[0]["item"]["arguments"], '{"q":"x"}')

@@ -1,5 +1,8 @@
 import json
 import httpx
+import email.utils
+import re
+from datetime import datetime, timezone
 from typing import AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
@@ -7,6 +10,7 @@ from .accounts import AccountManager
 from .byok import all_provider_configs, resolve_api_key, split_provider_model
 from .transform import transform_chat_response, transform_request, transform_request_to_chat, transform_response
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
+from .redaction import redact_secret_text
 
 app = FastAPI(title="Codex Antigravity Gateway")
 account_manager = AccountManager()
@@ -14,10 +18,60 @@ account_manager = AccountManager()
 # ── Model catalog for native Codex Desktop picker ──
 AVAILABLE_MODELS = [
     {"id": "gemini-3.5-flash-high", "display_name": "Gemini 3.5 Flash (Agent High)", "context_window": 1000000},
+    {"id": "gemini-3.5-flash-medium", "display_name": "Gemini 3.5 Flash (General)", "context_window": 1000000},
     {"id": "gemini-3.1-pro-high",    "display_name": "Gemini 3.1 Pro (Reasoning)", "context_window": 1000000},
     {"id": "claude-3.5-sonnet",      "display_name": "Claude Sonnet 4.6 (Google)",  "context_window": 200000},
     {"id": "claude-opus-4-6",        "display_name": "Claude Opus 4.6 (Google)",   "context_window": 200000},
 ]
+
+
+def safe_error_detail(value: object) -> str:
+    return redact_secret_text(str(value))
+
+
+def retry_after_seconds_from_response(res: httpx.Response) -> float | None:
+    retry_after = res.headers.get("retry-after")
+    if retry_after:
+        try:
+            return max(0.0, float(retry_after))
+        except ValueError:
+            try:
+                retry_at = email.utils.parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+            except Exception:
+                pass
+
+    try:
+        payload = res.json()
+    except Exception:
+        return None
+
+    details = []
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("details"), list):
+            details.extend(error["details"])
+        if isinstance(payload.get("details"), list):
+            details.extend(payload["details"])
+
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        retry_delay = detail.get("retryDelay")
+        if isinstance(retry_delay, str):
+            match = re.fullmatch(r"(\d+(?:\.\d+)?)s", retry_delay)
+            if match:
+                return float(match.group(1))
+        if isinstance(retry_delay, dict):
+            seconds = retry_delay.get("seconds", 0)
+            nanos = retry_delay.get("nanos", 0)
+            try:
+                return float(seconds) + (float(nanos) / 1_000_000_000)
+            except (TypeError, ValueError):
+                continue
+    return None
 
 @app.get("/v1/models")
 async def list_models():
@@ -141,7 +195,8 @@ async def create_response(request: Request):
         )
         
     # 2. Translate standard Responses API request to Antigravity request envelope
-    antigravity_req = transform_request(codex_req)
+    project_id = account.get("projectId") or account.get("managedProjectId")
+    antigravity_req = transform_request(codex_req, project_id=project_id)
     backend_model = antigravity_req.get("model")
     
     # Route target action based on streaming mode
@@ -164,7 +219,7 @@ async def create_response(request: Request):
                     res = await client.post(backend_url, json=antigravity_req, headers=headers)
                     return res
             except Exception as e:
-                account_manager.mark_failure(account["email"], f"Connection error: {e}")
+                account_manager.mark_failure(account["email"], f"Connection error: {safe_error_detail(e)}")
                 return None
 
     # Handle standard non-streaming response path
@@ -182,8 +237,8 @@ async def create_response(request: Request):
             raise HTTPException(status_code=502, detail="Failed to communicate with Antigravity backend after rotation")
 
         if res.status_code in (401, 403, 429):
-            reason = "Rate limited / Quota exceeded" if res.status_code == 429 else f"Auth failure {res.status_code}: {res.text}"
-            account_manager.mark_failure(account["email"], reason)
+            reason = "Rate limited / Quota exceeded" if res.status_code == 429 else f"Auth failure {res.status_code}: {safe_error_detail(res.text)}"
+            account_manager.mark_failure(account["email"], reason, retry_after_seconds_from_response(res))
             new_account = account_manager.select_active_account(model)
             if new_account:
                 account = new_account
@@ -194,15 +249,15 @@ async def create_response(request: Request):
             
         if res.status_code in (401, 403):
             # Token might be invalidated or verification required
-            account_manager.mark_failure(account["email"], f"Auth failure {res.status_code}: {res.text}")
-            raise HTTPException(status_code=res.status_code, detail=f"Google Authentication failure: {res.text}")
+            account_manager.mark_failure(account["email"], f"Auth failure {res.status_code}: {safe_error_detail(res.text)}")
+            raise HTTPException(status_code=res.status_code, detail=f"Google Authentication failure: {safe_error_detail(res.text)}")
             
         if res.status_code == 429:
-            account_manager.mark_failure(account["email"], "Rate limited / Quota exceeded")
+            account_manager.mark_failure(account["email"], "Rate limited / Quota exceeded", retry_after_seconds_from_response(res))
             raise HTTPException(status_code=429, detail="Antigravity account rate limit reached. Auto-switching to next account.")
             
         if res.status_code != 200:
-            raise HTTPException(status_code=res.status_code, detail=f"Google Antigravity API error: {res.text}")
+            raise HTTPException(status_code=res.status_code, detail=f"Google Antigravity API error: {safe_error_detail(res.text)}")
             
         try:
             gemini_resp = res.json()
@@ -233,6 +288,7 @@ async def create_response(request: Request):
         yield f"data: {json.dumps({'type': 'response.content_part.added', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': ''}})}\n\n"
 
         async def fail_stream(code: str, message: str) -> AsyncGenerator[str, None]:
+            message = safe_error_detail(message)
             yield f"data: {json.dumps({'type': 'error', 'error': {'code': code, 'message': message}})}\n\n"
             yield f"data: {json.dumps({'type': 'response.failed', 'response': {'id': response_id, 'object': 'response', 'status': 'failed', 'error': {'code': code, 'message': message}}})}\n\n"
             yield "data: [DONE]\n\n"
@@ -275,21 +331,26 @@ async def create_response(request: Request):
                         yield f"data: {json.dumps({'type': 'response.reasoning.delta', 'response_id': response_id, 'delta': thought_text})}\n\n"
                     elif "text" in part:
                         output_text += part["text"]
-                        yield f"data: {json.dumps({'type': 'response.content_part.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': part['text']})}\n\n"
+                        yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': part['text']})}\n\n"
                     elif "functionCall" in part:
                         fc = part["functionCall"]
                         call_id = fc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
                         item_id = f"fc_{uuid.uuid4().hex[:8]}"
                         output_index = next_output_index
                         next_output_index += 1
+                        arguments = json.dumps(fc.get("args", {}))
                         item = {
                             "type": "function_call",
                             "id": item_id,
                             "call_id": call_id,
                             "name": fc.get("name"),
-                            "arguments": json.dumps(fc.get("args", {})),
+                            "arguments": "",
                         }
                         yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': output_index, 'item': item})}\n\n"
+                        if arguments:
+                            yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': item_id, 'output_index': output_index, 'delta': arguments})}\n\n"
+                        item["arguments"] = arguments
+                        yield f"data: {json.dumps({'type': 'response.function_call_arguments.done', 'response_id': response_id, 'item_id': item_id, 'output_index': output_index, 'arguments': arguments})}\n\n"
                         yield f"data: {json.dumps({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': output_index, 'item': item})}\n\n"
 
         completed = False
@@ -306,7 +367,11 @@ async def create_response(request: Request):
                             if res.status_code in (401, 403, 429):
                                 body_bytes = await res.aread()
                                 body_text = body_bytes.decode("utf-8", errors="ignore")
-                                account_manager.mark_failure(stream_account["email"], f"Streaming HTTP {res.status_code}: {body_text}")
+                                account_manager.mark_failure(
+                                    stream_account["email"],
+                                    f"Streaming HTTP {res.status_code}: {safe_error_detail(body_text)}",
+                                    retry_after_seconds_from_response(res),
+                                )
                             last_error = f"Google Antigravity returned HTTP {res.status_code}"
                         else:
                             buffer = ""
@@ -321,8 +386,8 @@ async def create_response(request: Request):
                                     yield event
                             completed = True
             except Exception as e:
-                account_manager.mark_failure(stream_account["email"], f"Streaming connection error: {e}")
-                last_error = str(e)
+                account_manager.mark_failure(stream_account["email"], f"Streaming connection error: {safe_error_detail(e)}")
+                last_error = safe_error_detail(e)
 
             if completed:
                 break
@@ -345,14 +410,17 @@ async def create_response(request: Request):
         done_response = {'id': response_id, 'object': 'response', 'status': 'completed'}
         if usage:
             done_response["usage"] = usage
-        yield f"data: {json.dumps({'type': 'response.done', 'response': done_response})}\n\n"
+        yield f"data: {json.dumps({'type': 'response.completed', 'response': done_response})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
 
 async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str) -> dict:
-    payload = transform_request_to_chat(codex_req, provider_model)
+    try:
+        payload = transform_request_to_chat(codex_req, provider_model)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     payload["stream"] = False
     url = chat_completions_url(provider)
     headers = build_openai_compatible_headers(provider)
@@ -360,9 +428,9 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
         try:
             res = await client.post(url, json=payload, headers=headers)
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"{provider['id']} connection error: {e}") from e
+            raise HTTPException(status_code=502, detail=f"{provider['id']} connection error: {safe_error_detail(e)}") from e
     if res.status_code != 200:
-        raise HTTPException(status_code=res.status_code, detail=f"{provider['id']} API error: {res.text}")
+        raise HTTPException(status_code=res.status_code, detail=f"{provider['id']} API error: {safe_error_detail(res.text)}")
     try:
         return transform_chat_response(res.json(), display_model)
     except Exception as e:
@@ -389,14 +457,20 @@ async def openai_compatible_sse_generator(
     yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': 0, 'item': {'type': 'message', 'id': msg_id, 'role': 'assistant', 'status': 'in_progress', 'content': []}})}\n\n"
     yield f"data: {json.dumps({'type': 'response.content_part.added', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': ''}})}\n\n"
 
-    payload = transform_request_to_chat({**codex_req, "stream": True}, provider_model)
-    url = chat_completions_url(provider)
-    headers = build_openai_compatible_headers(provider)
-
     async def fail_stream(code: str, message: str) -> AsyncGenerator[str, None]:
+        message = safe_error_detail(message)
         yield f"data: {json.dumps({'type': 'error', 'error': {'code': code, 'message': message}})}\n\n"
         yield f"data: {json.dumps({'type': 'response.failed', 'response': {'id': response_id, 'object': 'response', 'status': 'failed', 'model': display_model, 'error': {'code': code, 'message': message}}})}\n\n"
         yield "data: [DONE]\n\n"
+
+    try:
+        payload = transform_request_to_chat({**codex_req, "stream": True}, provider_model)
+    except ValueError as e:
+        async for event in fail_stream("invalid_request", str(e)):
+            yield event
+        return
+    url = chat_completions_url(provider)
+    headers = build_openai_compatible_headers(provider)
 
     async def parse_chat_stream_line(line: str) -> AsyncGenerator[str, None]:
         nonlocal output_text, usage, next_output_index
@@ -422,7 +496,7 @@ async def openai_compatible_sse_generator(
             delta = choice.get("delta", {}) or {}
             if delta.get("content"):
                 output_text += delta["content"]
-                yield f"data: {json.dumps({'type': 'response.content_part.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': delta['content']})}\n\n"
+                yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': delta['content']})}\n\n"
             for tool_delta in delta.get("tool_calls", []) or []:
                 idx = int(tool_delta.get("index", 0))
                 generated_call_id = tool_delta.get("id") or f"call_{uuid.uuid4().hex[:8]}"
@@ -464,14 +538,20 @@ async def openai_compatible_sse_generator(
                     async for event in parse_chat_stream_line(buffer):
                         yield event
     except Exception as e:
-        async for event in fail_stream("connection_error", str(e)):
+        async for event in fail_stream("connection_error", safe_error_detail(e)):
             yield event
         return
 
     for idx in sorted(tool_calls):
         item = tool_calls[idx]
         output_index = tool_output_indices[idx]
-        yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': output_index, 'item': item})}\n\n"
+        arguments = item.get("arguments", "")
+        added_item = dict(item)
+        added_item["arguments"] = ""
+        yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': output_index, 'item': added_item})}\n\n"
+        if arguments:
+            yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': item['id'], 'output_index': output_index, 'delta': arguments})}\n\n"
+        yield f"data: {json.dumps({'type': 'response.function_call_arguments.done', 'response_id': response_id, 'item_id': item['id'], 'output_index': output_index, 'arguments': arguments})}\n\n"
         yield f"data: {json.dumps({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': output_index, 'item': item})}\n\n"
 
     yield f"data: {json.dumps({'type': 'response.content_part.done', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': output_text}})}\n\n"
@@ -479,5 +559,5 @@ async def openai_compatible_sse_generator(
     done_response = {"id": response_id, "object": "response", "status": "completed", "model": display_model}
     if usage:
         done_response["usage"] = usage
-    yield f"data: {json.dumps({'type': 'response.done', 'response': done_response})}\n\n"
+    yield f"data: {json.dumps({'type': 'response.completed', 'response': done_response})}\n\n"
     yield "data: [DONE]\n\n"

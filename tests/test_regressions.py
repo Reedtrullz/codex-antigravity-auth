@@ -12,7 +12,7 @@ from codex_antigravity_auth.cli import run_doctor
 from codex_antigravity_auth.models import resolve_backend_model
 from codex_antigravity_auth.oauth import _pkce_verifier_store, get_pkce_verifier
 from codex_antigravity_auth.schema import clean_json_schema
-from codex_antigravity_auth.server import app
+from codex_antigravity_auth.server import app, retry_after_seconds_from_response
 from codex_antigravity_auth.transform import transform_request, transform_response
 
 
@@ -47,6 +47,46 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(contents[1]["role"], "user")
         self.assertEqual(contents[1]["parts"][0]["functionResponse"]["name"], "lookup")
         self.assertEqual(contents[1]["parts"][0]["functionResponse"]["response"]["content"], "42")
+
+    def test_transform_request_honors_selected_account_project(self):
+        req = {
+            "model": "gemini-3.5-flash-high",
+            "input": "hello",
+        }
+
+        transformed = transform_request(req, project_id="account-project-123")
+
+        self.assertEqual(transformed["project"], "account-project-123")
+
+    def test_transform_request_can_use_project_environment_override(self):
+        req = {
+            "model": "gemini-3.5-flash-high",
+            "input": "hello",
+        }
+
+        with patch.dict("os.environ", {"ANTIGRAVITY_PROJECT_ID": "env-project-123"}):
+            transformed = transform_request(req)
+
+        self.assertEqual(transformed["project"], "env-project-123")
+
+    def test_retry_after_seconds_supports_headers_and_google_retry_info(self):
+        header_response = httpx.Response(429, headers={"Retry-After": "17"})
+        self.assertEqual(retry_after_seconds_from_response(header_response), 17)
+
+        retry_info_response = httpx.Response(
+            429,
+            json={
+                "error": {
+                    "details": [
+                        {
+                            "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                            "retryDelay": "3.5s",
+                        }
+                    ]
+                }
+            },
+        )
+        self.assertEqual(retry_after_seconds_from_response(retry_info_response), 3.5)
 
     def test_backend_function_call_is_top_level_response_output(self):
         gemini_resp = {
@@ -145,6 +185,17 @@ class TestRegressionFixes(unittest.TestCase):
 
         self.assertEqual(selected["email"], "healthy@gmail.com")
 
+    @patch("codex_antigravity_auth.accounts.save_accounts")
+    @patch("codex_antigravity_auth.accounts.load_accounts")
+    @patch("codex_antigravity_auth.accounts.time.time", return_value=1000)
+    def test_retry_after_hint_extends_cooldown(self, mock_time, mock_load, mock_save):
+        mock_load.return_value = {"accounts": [], "activeIndex": 0, "activeIndexByFamily": {"claude": 0, "gemini": 0}}
+        manager = AccountManager()
+
+        manager.mark_failure("limited@gmail.com", "429", retry_after_seconds=600)
+
+        self.assertEqual(manager._cooldowns["limited@gmail.com"], 1600)
+
     def test_pkce_verifier_expires(self):
         _pkce_verifier_store["expired_state"] = {
             "verifier": "secret",
@@ -241,9 +292,11 @@ class TestRegressionFixes(unittest.TestCase):
                 events.append(json.loads(line[6:]))
 
         added = [e for e in events if e.get("type") == "response.output_item.added" and e["item"]["type"] == "function_call"]
+        arg_done = [e for e in events if e.get("type") == "response.function_call_arguments.done"]
         done = [e for e in events if e.get("type") == "response.output_item.done" and e["item"]["type"] == "function_call"]
 
         self.assertEqual([e["output_index"] for e in added], [1, 2])
+        self.assertEqual([e["arguments"] for e in arg_done], ['{"x": 1}', '{"y": 2}'])
         self.assertEqual([e["output_index"] for e in done], [1, 2])
         self.assertEqual([e["item"]["id"] for e in added], [e["item"]["id"] for e in done])
 
