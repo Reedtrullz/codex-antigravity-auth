@@ -1,10 +1,8 @@
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
-from .storage import decrypt_payload, encrypt_payload
-import json
+from .storage import load_secure_json_file, save_secure_json_file, update_secure_json_file
 
 
 PROVIDERS_FILE = "~/.codex/antigravity-providers.json"
@@ -78,43 +76,30 @@ def get_providers_json_path() -> Path:
     return p
 
 
+def default_provider_config() -> dict[str, Any]:
+    return {"providers": {}}
+
+
+def normalize_provider_config(data: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("providers", {})
+    return data
+
+
 def load_provider_config() -> dict[str, Any]:
     path = get_providers_json_path()
-    if not path.is_file():
-        return {"providers": {}}
-    try:
-        encrypted_data = path.read_bytes()
-        try:
-            raw = decrypt_payload(encrypted_data)
-            data = json.loads(raw)
-        except Exception:
-            data = json.loads(encrypted_data.decode("utf-8"))
-        if not isinstance(data, dict):
-            data = {}
-        data.setdefault("providers", {})
-        return data
-    except Exception as e:
-        raise RuntimeError(f"Failed to load BYOK providers file {path}: {e}") from e
+    return load_secure_json_file(
+        path,
+        default_provider_config,
+        normalize=normalize_provider_config,
+        error_label="BYOK providers",
+    )
 
 
 def save_provider_config(data: dict[str, Any]) -> None:
     path = get_providers_json_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = None
-    try:
-        encrypted_data = encrypt_payload(json.dumps(data, indent=2))
-        with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent, prefix=f".{path.name}.", suffix=".tmp") as f:
-            temp_path = Path(f.name)
-            f.write(encrypted_data)
-        os.chmod(temp_path, 0o600)
-        os.replace(temp_path, path)
-    except Exception as e:
-        if temp_path and temp_path.exists():
-            try:
-                temp_path.unlink()
-            except Exception:
-                pass
-        raise RuntimeError(f"Failed to save BYOK providers file securely: {e}") from e
+    save_secure_json_file(path, normalize_provider_config(data), error_label="BYOK providers")
 
 
 def provider_preset(provider_id: str) -> dict[str, Any]:
@@ -186,37 +171,54 @@ def set_provider_config(
     display_name: str | None = None,
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    data = load_provider_config()
-    providers = data.setdefault("providers", {})
-    current = dict(providers.get(provider_id, {}))
-    preset = PROVIDER_PRESETS.get(provider_id, {})
-    current.setdefault("kind", preset.get("kind", "openai_chat"))
-    current.setdefault("displayName", preset.get("displayName", provider_id))
-    current.setdefault("baseUrl", preset.get("baseUrl", ""))
-    if api_key is not None:
-        current["apiKey"] = api_key
-    if api_key_env is not None:
-        current["apiKeyEnv"] = api_key_env
-    if base_url is not None:
-        current["baseUrl"] = base_url.rstrip("/")
-    if models is not None:
-        current["models"] = models
-    if display_name is not None:
-        current["displayName"] = display_name
-    if headers is not None:
-        current["headers"] = headers
-    providers[provider_id] = current
-    save_provider_config(data)
-    return merged_provider_config(provider_id, current)
+    updated: dict[str, Any] = {}
+
+    def mutate(data: dict[str, Any]) -> None:
+        providers = data.setdefault("providers", {})
+        current = dict(providers.get(provider_id, {}))
+        preset = PROVIDER_PRESETS.get(provider_id, {})
+        current.setdefault("kind", preset.get("kind", "openai_chat"))
+        current.setdefault("displayName", preset.get("displayName", provider_id))
+        current.setdefault("baseUrl", preset.get("baseUrl", ""))
+        if api_key is not None:
+            current["apiKey"] = api_key
+        if api_key_env is not None:
+            current["apiKeyEnv"] = api_key_env
+        if base_url is not None:
+            current["baseUrl"] = base_url.rstrip("/")
+        if models is not None:
+            current["models"] = models
+        if display_name is not None:
+            current["displayName"] = display_name
+        if headers is not None:
+            current["headers"] = headers
+        providers[provider_id] = current
+        updated.update(current)
+
+    update_secure_json_file(
+        get_providers_json_path(),
+        default_provider_config,
+        mutate,
+        normalize=normalize_provider_config,
+        error_label="BYOK providers",
+    )
+    return merged_provider_config(provider_id, updated)
 
 
 def remove_provider_config(provider_id: str) -> bool:
-    data = load_provider_config()
-    providers = data.setdefault("providers", {})
-    existed = provider_id in providers
-    providers.pop(provider_id, None)
-    save_provider_config(data)
-    return existed
+    def mutate(data: dict[str, Any]) -> bool:
+        providers = data.setdefault("providers", {})
+        existed = provider_id in providers
+        providers.pop(provider_id, None)
+        return existed
+
+    return bool(update_secure_json_file(
+        get_providers_json_path(),
+        default_provider_config,
+        mutate,
+        normalize=normalize_provider_config,
+        error_label="BYOK providers",
+    ))
 
 
 def split_provider_model(model: str) -> tuple[str | None, str]:

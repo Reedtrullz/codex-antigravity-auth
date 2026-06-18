@@ -18,7 +18,7 @@ from .byok import (
 )
 from .oauth import authorize_antigravity, decode_state, exchange_antigravity
 from .storage import load_accounts, save_accounts
-from .constants import resolve_oauth_credentials
+from .constants import is_loopback_host, resolve_oauth_credentials
 
 class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -71,6 +71,19 @@ def normalize_epoch_seconds(value):
     if ts > 10_000_000_000:
         ts = ts / 1000
     return ts
+
+
+def require_safe_gateway_host(host: str, allow_remote: bool) -> None:
+    if is_loopback_host(host):
+        return
+    if not allow_remote:
+        raise SystemExit(
+            "Refusing to bind the unauthenticated gateway to a non-loopback host. "
+            "Use --allow-remote with ANTIGRAVITY_GATEWAY_TOKEN set to opt in."
+        )
+    if not os.environ.get("ANTIGRAVITY_GATEWAY_TOKEN"):
+        raise SystemExit("ANTIGRAVITY_GATEWAY_TOKEN must be set when --allow-remote is used.")
+    os.environ["ANTIGRAVITY_ALLOW_REMOTE"] = "1"
 
 def run_local_oauth_flow():
     # Verify environment credentials or credentials file exists
@@ -306,6 +319,7 @@ def main():
     start_parser = subparsers.add_parser("start", help="Start the local Responses API gateway server")
     start_parser.add_argument("--port", type=int, default=51122, help="Gateway server port (default: 51122)")
     start_parser.add_argument("--host", default="127.0.0.1", help="Gateway server host (default: 127.0.0.1)")
+    start_parser.add_argument("--allow-remote", action="store_true", help="Allow non-loopback clients when ANTIGRAVITY_GATEWAY_TOKEN is set")
     
     args = parser.parse_args()
     
@@ -378,6 +392,7 @@ def main():
                 print(f"[*] No stored BYOK provider named {args.provider}")
     elif args.command == "start":
         import uvicorn
+        require_safe_gateway_host(args.host, args.allow_remote)
         print(f"[*] Starting local Responses API compatible gateway server on {args.host}:{args.port}...")
         uvicorn.run("codex_antigravity_auth.server:app", host=args.host, port=args.port, log_level="info")
 

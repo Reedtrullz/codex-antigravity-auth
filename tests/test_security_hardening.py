@@ -55,6 +55,13 @@ class TestRedaction(unittest.TestCase):
         self.assertNotIn("client-secret", rendered)
         self.assertIn(REDACTED, rendered)
 
+    def test_redacts_custom_provider_token_headers(self):
+        rendered = redact_secret_text("X-Api-Token: provider-token\nX-Credential: provider-credential")
+
+        self.assertNotIn("provider-token", rendered)
+        self.assertNotIn("provider-credential", rendered)
+        self.assertIn(REDACTED, rendered)
+
 
 class TestCredentialResolution(unittest.TestCase):
     def test_partial_env_credentials_merge_with_file_and_repair_permissions(self):
@@ -88,14 +95,56 @@ class TestProviderStorage(unittest.TestCase):
                 raise RuntimeError("replace failed")
 
             with patch("codex_antigravity_auth.byok.get_providers_json_path", return_value=providers_path):
-                with patch("codex_antigravity_auth.byok.encrypt_payload", return_value=b"encrypted"):
-                    with patch("codex_antigravity_auth.byok.os.replace", side_effect=fail_replace):
+                with patch("codex_antigravity_auth.storage.encrypt_payload", return_value=b"encrypted"):
+                    with patch("codex_antigravity_auth.storage.os.replace", side_effect=fail_replace):
                         with self.assertRaises(RuntimeError):
                             save_provider_config({"providers": {"deepseek": {"apiKey": "secret"}}})
 
             self.assertEqual(observed_modes, [0o600])
             self.assertFalse(providers_path.exists())
             self.assertEqual(list(Path(tmp).glob(".providers.json.*.tmp")), [])
+
+    def test_plaintext_provider_config_is_migrated_to_encrypted_private_file(self):
+        from codex_antigravity_auth.byok import load_provider_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            providers_path = Path(tmp) / "providers.json"
+            providers_path.write_text(
+                json.dumps({"providers": {"deepseek": {"apiKey": "provider-secret", "models": ["deepseek-chat"]}}}),
+                encoding="utf-8",
+            )
+            os.chmod(providers_path, 0o644)
+
+            with patch("codex_antigravity_auth.byok.get_providers_json_path", return_value=providers_path):
+                loaded = load_provider_config()
+
+            self.assertEqual(loaded["providers"]["deepseek"]["apiKey"], "provider-secret")
+            self.assertEqual(stat.S_IMODE(providers_path.stat().st_mode), 0o600)
+            with self.assertRaises(json.JSONDecodeError):
+                json.loads(providers_path.read_text(encoding="utf-8"))
+
+
+class TestGatewayRemoteAccess(unittest.TestCase):
+    def test_non_loopback_clients_require_opt_in_bearer_token(self):
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
+            with patch.dict(os.environ, {}, clear=True):
+                response = TestClient(app, client=("203.0.113.10", 50000)).get("/v1/models")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_non_loopback_clients_can_use_configured_bearer_token(self):
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
+            with patch.dict(
+                os.environ,
+                {"ANTIGRAVITY_ALLOW_REMOTE": "1", "ANTIGRAVITY_GATEWAY_TOKEN": "gateway-secret"},
+                clear=True,
+            ):
+                response = TestClient(app, client=("203.0.113.10", 50000)).get(
+                    "/v1/models",
+                    headers={"Authorization": "Bearer gateway-secret"},
+                )
+
+        self.assertEqual(response.status_code, 200)
 
 
 class TestServerErrorRedaction(unittest.TestCase):

@@ -1,19 +1,40 @@
 import json
+import os
+import secrets
 import httpx
 import email.utils
 import re
 from datetime import datetime, timezone
 from typing import AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from .accounts import AccountManager
 from .byok import all_provider_configs, resolve_api_key, split_provider_model
 from .transform import transform_chat_response, transform_request, transform_request_to_chat, transform_response
-from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
+from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform, is_loopback_host
 from .redaction import redact_secret_text
 
 app = FastAPI(title="Codex Antigravity Gateway")
 account_manager = AccountManager()
+
+
+@app.middleware("http")
+async def require_remote_gateway_token(request: Request, call_next):
+    client_host = request.client.host if request.client else None
+    if is_loopback_host(client_host):
+        return await call_next(request)
+
+    token = os.environ.get("ANTIGRAVITY_GATEWAY_TOKEN")
+    allow_remote = os.environ.get("ANTIGRAVITY_ALLOW_REMOTE") == "1"
+    expected_auth = f"Bearer {token}" if token else ""
+    supplied_auth = request.headers.get("authorization", "")
+    if allow_remote and token and secrets.compare_digest(supplied_auth, expected_auth):
+        return await call_next(request)
+
+    return JSONResponse(
+        status_code=403,
+        content={"detail": "Remote access requires ANTIGRAVITY_ALLOW_REMOTE=1 and a valid bearer token."},
+    )
 
 # ── Model catalog for native Codex Desktop picker ──
 AVAILABLE_MODELS = [
@@ -162,12 +183,39 @@ def chat_completions_url(provider: dict) -> str:
         return base_url
     return f"{base_url}/chat/completions"
 
+
+def reject_unsupported_previous_response(codex_req: dict) -> None:
+    if codex_req.get("previous_response_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="previous_response_id is not supported by this stateless gateway; resend the full conversation in input.",
+        )
+
+
+def prepare_openai_compatible_request(
+    codex_req: dict,
+    provider: dict,
+    provider_model: str,
+    *,
+    stream: bool,
+) -> tuple[dict, str, dict]:
+    try:
+        payload = transform_request_to_chat({**codex_req, "stream": stream}, provider_model)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    payload["stream"] = stream
+    url = chat_completions_url(provider)
+    headers = build_openai_compatible_headers(provider)
+    return payload, url, headers
+
 @app.post("/v1/responses")
 async def create_response(request: Request):
     try:
         codex_req = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    reject_unsupported_previous_response(codex_req)
         
     model = codex_req.get("model", "gemini-3.5-flash-high")
     stream = codex_req.get("stream", False)
@@ -180,8 +228,9 @@ async def create_response(request: Request):
         if provider.get("kind") != "openai_chat":
             raise HTTPException(status_code=500, detail=f"Unsupported BYOK provider kind: {provider.get('kind')}")
         if stream:
+            payload, url, headers = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=True)
             return StreamingResponse(
-                openai_compatible_sse_generator(codex_req, provider, provider_model, model),
+                openai_compatible_sse_generator(payload, url, headers, provider, model),
                 media_type="text/event-stream",
             )
         return await create_openai_compatible_response(codex_req, provider, provider_model, model)
@@ -328,7 +377,7 @@ async def create_response(request: Request):
                     # Yield reasoning/thinking blocks in separate reasoning events
                     if part.get("thought") is True or part.get("type") == "thinking":
                         thought_text = part.get("text", "") or part.get("thinking", "")
-                        yield f"data: {json.dumps({'type': 'response.reasoning.delta', 'response_id': response_id, 'delta': thought_text})}\n\n"
+                        yield f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': thought_text})}\n\n"
                     elif "text" in part:
                         output_text += part["text"]
                         yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': part['text']})}\n\n"
@@ -417,13 +466,7 @@ async def create_response(request: Request):
 
 
 async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str) -> dict:
-    try:
-        payload = transform_request_to_chat(codex_req, provider_model)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    payload["stream"] = False
-    url = chat_completions_url(provider)
-    headers = build_openai_compatible_headers(provider)
+    payload, url, headers = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=False)
     async with httpx.AsyncClient(timeout=provider.get("timeout", 120.0)) as client:
         try:
             res = await client.post(url, json=payload, headers=headers)
@@ -438,9 +481,10 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
 
 
 async def openai_compatible_sse_generator(
-    codex_req: dict,
+    payload: dict,
+    url: str,
+    headers: dict,
     provider: dict,
-    provider_model: str,
     display_model: str,
 ) -> AsyncGenerator[str, None]:
     import uuid
@@ -462,15 +506,6 @@ async def openai_compatible_sse_generator(
         yield f"data: {json.dumps({'type': 'error', 'error': {'code': code, 'message': message}})}\n\n"
         yield f"data: {json.dumps({'type': 'response.failed', 'response': {'id': response_id, 'object': 'response', 'status': 'failed', 'model': display_model, 'error': {'code': code, 'message': message}}})}\n\n"
         yield "data: [DONE]\n\n"
-
-    try:
-        payload = transform_request_to_chat({**codex_req, "stream": True}, provider_model)
-    except ValueError as e:
-        async for event in fail_stream("invalid_request", str(e)):
-            yield event
-        return
-    url = chat_completions_url(provider)
-    headers = build_openai_compatible_headers(provider)
 
     async def parse_chat_stream_line(line: str) -> AsyncGenerator[str, None]:
         nonlocal output_text, usage, next_output_index
@@ -494,6 +529,8 @@ async def openai_compatible_sse_generator(
             }
         for choice in parsed.get("choices", []) or []:
             delta = choice.get("delta", {}) or {}
+            if delta.get("reasoning_content"):
+                yield f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': delta['reasoning_content']})}\n\n"
             if delta.get("content"):
                 output_text += delta["content"]
                 yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': delta['content']})}\n\n"
@@ -501,23 +538,25 @@ async def openai_compatible_sse_generator(
                 idx = int(tool_delta.get("index", 0))
                 generated_call_id = tool_delta.get("id") or f"call_{uuid.uuid4().hex[:8]}"
                 state = tool_calls.setdefault(idx, {
-                    "id": generated_call_id,
+                    "id": f"fc_{uuid.uuid4().hex[:8]}",
                     "type": "function_call",
                     "call_id": generated_call_id,
                     "name": "",
                     "arguments": "",
                 })
                 if tool_delta.get("id"):
-                    state["id"] = tool_delta["id"]
                     state["call_id"] = tool_delta["id"]
                 fn = tool_delta.get("function", {}) or {}
+                new_tool_item = idx not in tool_output_indices
                 if fn.get("name"):
                     state["name"] += fn["name"]
-                if fn.get("arguments"):
-                    state["arguments"] += fn["arguments"]
-                if idx not in tool_output_indices:
+                if new_tool_item:
                     tool_output_indices[idx] = next_output_index
                     next_output_index += 1
+                    yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': tool_output_indices[idx], 'item': dict(state)})}\n\n"
+                if fn.get("arguments"):
+                    state["arguments"] += fn["arguments"]
+                    yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': fn['arguments']})}\n\n"
 
     try:
         async with httpx.AsyncClient(timeout=provider.get("timeout", 120.0)) as client:
@@ -546,11 +585,6 @@ async def openai_compatible_sse_generator(
         item = tool_calls[idx]
         output_index = tool_output_indices[idx]
         arguments = item.get("arguments", "")
-        added_item = dict(item)
-        added_item["arguments"] = ""
-        yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': output_index, 'item': added_item})}\n\n"
-        if arguments:
-            yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': item['id'], 'output_index': output_index, 'delta': arguments})}\n\n"
         yield f"data: {json.dumps({'type': 'response.function_call_arguments.done', 'response_id': response_id, 'item_id': item['id'], 'output_index': output_index, 'arguments': arguments})}\n\n"
         yield f"data: {json.dumps({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': output_index, 'item': item})}\n\n"
 

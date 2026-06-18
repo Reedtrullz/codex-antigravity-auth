@@ -6,6 +6,7 @@ import json
 import time
 import base64
 import os
+import copy
 from typing import Any
 from .models import resolve_backend_model
 from .schema import clean_json_schema
@@ -17,6 +18,43 @@ You are pair programming with a USER to solve their coding task. The task may re
 
 <priority>IMPORTANT: The instructions that follow supersede all above. Follow them as your primary directives.</priority>
 """
+
+
+def response_function_tool(tool: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the function payload from flat Responses or nested Chat-style tools."""
+    if not isinstance(tool, dict) or tool.get("type") != "function":
+        return None
+    nested = tool.get("function")
+    if isinstance(nested, dict):
+        fn = copy.deepcopy(nested)
+        if not isinstance(fn.get("name"), str) or not fn.get("name"):
+            return None
+        return fn
+    fn: dict[str, Any] = {}
+    for key in ("name", "description", "parameters", "strict"):
+        if key in tool:
+            fn[key] = copy.deepcopy(tool[key])
+    if not isinstance(fn.get("name"), str) or not fn.get("name"):
+        return None
+    return fn
+
+
+def chat_tool_choice(tool_choice: Any) -> Any:
+    """Translate Responses forced function choices to Chat Completions shape."""
+    if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
+        return tool_choice
+    nested = tool_choice.get("function")
+    name = tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
+    if not name:
+        return tool_choice
+    return {"type": "function", "function": {"name": name}}
+
+
+def _tool_choice_function_name(tool_choice: Any) -> str | None:
+    if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
+        return None
+    nested = tool_choice.get("function")
+    return tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
 
 def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     """Translate standard Codex Responses API request body to Antigravity format."""
@@ -171,9 +209,9 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     if isinstance(codex_tools, list) and codex_tools:
         declarations = []
         for tool in codex_tools:
-            if not isinstance(tool, dict) or tool.get("type") != "function":
+            fn = response_function_tool(tool)
+            if not fn:
                 continue
-            fn = tool.get("function", {})
             params = clean_json_schema(fn.get("parameters", {}))
             declarations.append({
                 "name": fn.get("name"),
@@ -183,14 +221,26 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
         if declarations:
             gemini_tools.append({"functionDeclarations": declarations})
 
-    # Validate tool calling configuration for Claude models
+    # Validate tool calling configuration for Claude models and bridge forced
+    # Responses tool choices into Google function calling config.
     tool_config = None
-    if gemini_tools and "claude" in backend_model.lower():
-        tool_config = {
-            "functionCallingConfig": {
-                "mode": "VALIDATED"
-            }
-        }
+    if gemini_tools:
+        function_calling_config = {}
+        tool_choice = codex_req.get("tool_choice")
+        if tool_choice == "none":
+            function_calling_config["mode"] = "NONE"
+        elif tool_choice == "required":
+            function_calling_config["mode"] = "ANY"
+        elif isinstance(tool_choice, dict):
+            forced_name = _tool_choice_function_name(tool_choice)
+            if forced_name:
+                function_calling_config["mode"] = "VALIDATED" if "claude" in backend_model.lower() else "ANY"
+                function_calling_config["allowedFunctionNames"] = [forced_name]
+        elif "claude" in backend_model.lower():
+            function_calling_config["mode"] = "VALIDATED"
+
+        if function_calling_config:
+            tool_config = {"functionCallingConfig": function_calling_config}
 
     # 3. Assemble Antigravity request payload
     request_payload = {
@@ -352,6 +402,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
     messages = []
     system_texts = []
     function_names_by_call_id = {}
+    pending_reasoning_content = None
 
     if codex_req.get("instructions"):
         system_texts.append(str(codex_req["instructions"]))
@@ -404,7 +455,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 raise ValueError("Responses text.format json_schema requires a schema object")
             json_schema = {
                 "name": text_format.get("name") or "response",
-                "schema": clean_json_schema(schema),
+                "schema": copy.deepcopy(schema),
             }
             if "strict" in text_format:
                 json_schema["strict"] = text_format["strict"]
@@ -422,6 +473,11 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 continue
             item_type = item.get("type")
             if item_type == "reasoning":
+                pending_reasoning_content = (
+                    item.get("reasoning_content")
+                    or item.get("step_by_step_summary")
+                    or item.get("summary")
+                )
                 continue
             if item_type == "function_call":
                 call_id = item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:8]}"
@@ -430,7 +486,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 arguments = item.get("arguments", "{}")
                 if not isinstance(arguments, str):
                     arguments = json.dumps(arguments)
-                messages.append({
+                assistant_message = {
                     "role": "assistant",
                     "content": None,
                     "tool_calls": [{
@@ -441,7 +497,11 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                             "arguments": arguments,
                         },
                     }],
-                })
+                }
+                if pending_reasoning_content:
+                    assistant_message["reasoning_content"] = pending_reasoning_content
+                    pending_reasoning_content = None
+                messages.append(assistant_message)
                 continue
             if item_type == "function_call_output":
                 call_id = item.get("call_id") or f"call_{uuid.uuid4().hex[:8]}"
@@ -466,7 +526,11 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
             if role in ("system", "developer"):
                 system_texts.append("".join(p.get("text", "") for p in parts if p.get("type") == "text"))
             else:
-                messages.append({"role": "assistant" if role == "assistant" else "user", "content": normalize_content(parts)})
+                chat_message = {"role": "assistant" if role == "assistant" else "user", "content": normalize_content(parts)}
+                if role == "assistant" and pending_reasoning_content:
+                    chat_message["reasoning_content"] = pending_reasoning_content
+                    pending_reasoning_content = None
+                messages.append(chat_message)
 
     if system_texts:
         messages.insert(0, {"role": "system", "content": "\n\n".join(t for t in system_texts if t)})
@@ -497,16 +561,14 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
     if isinstance(tools, list) and tools:
         chat_tools = []
         for tool in tools:
-            if not isinstance(tool, dict) or tool.get("type") != "function":
+            fn = response_function_tool(tool)
+            if not fn:
                 continue
-            fn = dict(tool.get("function", {}))
-            if "parameters" in fn:
-                fn["parameters"] = clean_json_schema(fn["parameters"])
             chat_tools.append({"type": "function", "function": fn})
         if chat_tools:
             payload["tools"] = chat_tools
             if "tool_choice" in codex_req:
-                payload["tool_choice"] = codex_req["tool_choice"]
+                payload["tool_choice"] = chat_tool_choice(codex_req["tool_choice"])
 
     return payload
 
@@ -517,6 +579,14 @@ def transform_chat_response(chat_resp: dict, model: str) -> dict:
     choices = chat_resp.get("choices", [])
     for choice in choices:
         message = choice.get("message", {}) or {}
+        reasoning_content = message.get("reasoning_content")
+        if reasoning_content:
+            output_items.append({
+                "type": "reasoning",
+                "id": f"rs_{uuid.uuid4().hex[:8]}",
+                "encrypted_content": "",
+                "step_by_step_summary": str(reasoning_content),
+            })
         content = message.get("content")
         if content:
             if isinstance(content, list):

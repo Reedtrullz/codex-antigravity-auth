@@ -30,6 +30,7 @@
 
 ## Known Limitations
 - Live Google Antigravity and BYOK provider smoke tests require configured credentials/API keys.
+- `previous_response_id` is rejected by design in this stateless gateway; replay the full conversation, including tool calls and outputs, in `input`.
 - `/v1/responses/compact` is not implemented.
 - CI proves local unit/compile health only; it does not prove live backend availability.
 

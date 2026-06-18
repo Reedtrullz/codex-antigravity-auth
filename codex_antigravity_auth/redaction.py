@@ -25,6 +25,8 @@ _SECRET_KEY_FRAGMENTS = (
     "sessiontoken",
     "api_key",
     "apikey",
+    "api_token",
+    "apitoken",
 )
 
 _EXACT_SECRET_KEYS = {
@@ -49,7 +51,7 @@ _FORM_SECRET_RE = re.compile(
     r"(?i)\b(access_token|accessToken|refresh_token|refreshToken|id_token|idToken|client_secret|clientSecret|code_verifier|codeVerifier|session_token|sessionToken|code|api_key|apiKey|apikey|x-api-key|x-goog-api-key|key)=([^&\s]+)"
 )
 _HEADER_SECRET_RE = re.compile(
-    r"(?im)(^|[ \t])((?:authorization|x-api-key|x-goog-api-key|api-key)\s*:\s*)[^\r\n]+"
+    r"(?im)(^|[ \t])((?:authorization|proxy-authorization|[\w-]*(?:api[-_]?key|api[-_]?token|token|secret|credential|password)[\w-]*)\s*:\s*)[^\r\n]+"
 )
 
 

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from codex_antigravity_auth.accounts import AccountManager
 from codex_antigravity_auth.cli import run_doctor
 from codex_antigravity_auth.models import resolve_backend_model
-from codex_antigravity_auth.oauth import _pkce_verifier_store, get_pkce_verifier
+from codex_antigravity_auth.oauth import OAUTH_HTTP_TIMEOUT_SECONDS, _pkce_verifier_store, exchange_antigravity, get_pkce_verifier, refresh_access_token
 from codex_antigravity_auth.schema import clean_json_schema
 from codex_antigravity_auth.server import app, retry_after_seconds_from_response
 from codex_antigravity_auth.transform import transform_request, transform_response
@@ -68,6 +68,20 @@ class TestRegressionFixes(unittest.TestCase):
             transformed = transform_request(req)
 
         self.assertEqual(transformed["project"], "env-project-123")
+
+    def test_forced_tool_choice_maps_to_google_tool_config(self):
+        transformed = transform_request(
+            {
+                "model": "gemini-3.5-flash-high",
+                "input": "Use the tool.",
+                "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object", "properties": {}}}],
+                "tool_choice": {"type": "function", "name": "lookup"},
+            }
+        )
+
+        config = transformed["request"]["toolConfig"]["functionCallingConfig"]
+        self.assertEqual(config["mode"], "ANY")
+        self.assertEqual(config["allowedFunctionNames"], ["lookup"])
 
     def test_retry_after_seconds_supports_headers_and_google_retry_info(self):
         header_response = httpx.Response(429, headers={"Retry-After": "17"})
@@ -135,10 +149,9 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertNotIn("minLength", payload["properties"]["name"])
         self.assertNotIn("_placeholder", payload["properties"])
 
-    @patch("codex_antigravity_auth.accounts.save_accounts")
-    @patch("codex_antigravity_auth.accounts.load_accounts")
+    @patch("codex_antigravity_auth.accounts.update_accounts")
     @patch("codex_antigravity_auth.accounts.refresh_access_token")
-    def test_millisecond_expiry_is_normalized_and_refreshed(self, mock_refresh, mock_load, mock_save):
+    def test_millisecond_expiry_is_normalized_and_refreshed(self, mock_refresh, mock_update):
         data = {
             "accounts": [
                 {
@@ -151,7 +164,7 @@ class TestRegressionFixes(unittest.TestCase):
             "activeIndex": 0,
             "activeIndexByFamily": {"claude": 0, "gemini": 0},
         }
-        mock_load.return_value = data
+        mock_update.side_effect = lambda mutator: mutator(data)
         mock_refresh.return_value = {"access_token": "new", "expires_in": 3600}
 
         selected = AccountManager().select_active_account("gemini-3.5-flash-high")
@@ -160,9 +173,8 @@ class TestRegressionFixes(unittest.TestCase):
         mock_refresh.assert_called_once_with("refresh_1")
         self.assertLess(selected["expiresAt"], 10_000_000_000)
 
-    @patch("codex_antigravity_auth.accounts.save_accounts")
-    @patch("codex_antigravity_auth.accounts.load_accounts")
-    def test_expired_account_without_refresh_token_is_skipped(self, mock_load, mock_save):
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_expired_account_without_refresh_token_is_skipped(self, mock_update):
         data = {
             "accounts": [
                 {
@@ -179,17 +191,15 @@ class TestRegressionFixes(unittest.TestCase):
             "activeIndex": 0,
             "activeIndexByFamily": {"claude": 0, "gemini": 0},
         }
-        mock_load.return_value = data
+        mock_update.side_effect = lambda mutator: mutator(data)
 
         selected = AccountManager().select_active_account("gemini-3.5-flash-high")
 
         self.assertEqual(selected["email"], "healthy@gmail.com")
 
-    @patch("codex_antigravity_auth.accounts.save_accounts")
-    @patch("codex_antigravity_auth.accounts.load_accounts")
+    @patch("codex_antigravity_auth.accounts.update_accounts")
     @patch("codex_antigravity_auth.accounts.time.time", return_value=1000)
-    def test_retry_after_hint_extends_cooldown(self, mock_time, mock_load, mock_save):
-        mock_load.return_value = {"accounts": [], "activeIndex": 0, "activeIndexByFamily": {"claude": 0, "gemini": 0}}
+    def test_retry_after_hint_extends_cooldown(self, mock_time, mock_update):
         manager = AccountManager()
 
         manager.mark_failure("limited@gmail.com", "429", retry_after_seconds=600)
@@ -203,6 +213,28 @@ class TestRegressionFixes(unittest.TestCase):
         }
 
         self.assertIsNone(get_pkce_verifier("expired_state"))
+
+    @patch("codex_antigravity_auth.oauth.require_credentials", return_value=("client-id", "client-secret"))
+    @patch("urllib.request.urlopen")
+    def test_oauth_exchange_and_refresh_use_timeout(self, mock_urlopen, mock_creds):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"access_token":"access","expires_in":3600}'
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        exchange_antigravity("oauth-code", "verifier")
+        refresh_access_token("refresh-token")
+
+        self.assertEqual(mock_urlopen.call_args_list[0].kwargs["timeout"], OAUTH_HTTP_TIMEOUT_SECONDS)
+        self.assertEqual(mock_urlopen.call_args_list[1].kwargs["timeout"], OAUTH_HTTP_TIMEOUT_SECONDS)
+
+    def test_previous_response_id_is_rejected_before_backend_routing(self):
+        response = TestClient(app).post(
+            "/v1/responses",
+            json={"model": "gemini-3.5-flash-high", "input": "hello", "previous_response_id": "resp_old"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("previous_response_id is not supported", response.json()["detail"])
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")

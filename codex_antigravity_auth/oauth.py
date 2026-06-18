@@ -15,6 +15,7 @@ from .redaction import redact_secret_text
 # In-memory PKCE verifier store
 _pkce_verifier_store: dict[str, dict[str, str]] = {}
 _PKCE_VERIFIER_TTL_SECONDS = 600
+OAUTH_HTTP_TIMEOUT_SECONDS = 15.0
 
 def generate_pkce() -> dict:
     verifier = secrets.token_urlsafe(64)
@@ -96,7 +97,7 @@ def exchange_antigravity(code: str, verifier: str) -> dict:
     )
     
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=OAUTH_HTTP_TIMEOUT_SECONDS) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data
     except urllib.error.HTTPError as e:
@@ -119,7 +120,7 @@ def refresh_access_token(refresh_token: str) -> dict:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=OAUTH_HTTP_TIMEOUT_SECONDS) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data
     except urllib.error.HTTPError as e:

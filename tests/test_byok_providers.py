@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from codex_antigravity_auth.byok import PROVIDER_PRESETS, split_provider_model
 from codex_antigravity_auth.server import app
-from codex_antigravity_auth.transform import transform_chat_response, transform_request_to_chat
+from codex_antigravity_auth.transform import transform_chat_response, transform_request, transform_request_to_chat
 
 
 class TestBYOKProviders(unittest.TestCase):
@@ -54,6 +54,29 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(payload["tools"][0]["function"]["name"], "lookup")
         self.assertEqual(payload["max_tokens"], 100)
 
+    def test_flat_responses_function_tools_transform_for_google_and_byok(self):
+        flat_tool = {
+            "type": "function",
+            "name": "lookup",
+            "description": "Lookup a value",
+            "parameters": {
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"],
+            },
+            "strict": True,
+        }
+
+        google = transform_request({"model": "gemini-3.5-flash-high", "input": "hi", "tools": [flat_tool]})
+        declaration = google["request"]["tools"][0]["functionDeclarations"][0]
+        self.assertEqual(declaration["name"], "lookup")
+        self.assertEqual(declaration["parameters"]["required"], ["q"])
+
+        byok = transform_request_to_chat({"model": "deepseek:deepseek-chat", "input": "hi", "tools": [flat_tool]}, "deepseek-chat")
+        chat_fn = byok["tools"][0]["function"]
+        self.assertEqual(chat_fn["name"], "lookup")
+        self.assertTrue(chat_fn["strict"])
+
     def test_transform_text_format_json_object_to_chat_response_format(self):
         payload = transform_request_to_chat(
             {
@@ -91,6 +114,45 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(payload["response_format"]["json_schema"]["name"], "answer")
         self.assertTrue(payload["response_format"]["json_schema"]["strict"])
         self.assertEqual(payload["response_format"]["json_schema"]["schema"]["required"], ["answer"])
+
+    def test_byok_json_schema_preserves_strict_schema_keywords(self):
+        payload = transform_request_to_chat(
+            {
+                "model": "deepseek:deepseek-chat",
+                "input": "Return JSON.",
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "answer",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {"answer": {"type": "string", "minLength": 1}},
+                            "required": ["answer"],
+                        },
+                    }
+                },
+            },
+            "deepseek-chat",
+        )
+
+        schema = payload["response_format"]["json_schema"]["schema"]
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(schema["properties"]["answer"]["minLength"], 1)
+
+    def test_forced_responses_tool_choice_maps_to_chat_shape(self):
+        payload = transform_request_to_chat(
+            {
+                "model": "deepseek:deepseek-chat",
+                "input": "Use the tool.",
+                "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object", "properties": {}}}],
+                "tool_choice": {"type": "function", "name": "lookup"},
+            },
+            "deepseek-chat",
+        )
+
+        self.assertEqual(payload["tool_choice"], {"type": "function", "function": {"name": "lookup"}})
 
     def test_transform_text_format_unsupported_type_fails(self):
         with self.assertRaisesRegex(ValueError, "Unsupported Responses text.format type"):
@@ -130,6 +192,35 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(response["output"][1]["type"], "function_call")
         self.assertEqual(response["output"][1]["call_id"], "call_1")
         self.assertEqual(response["usage"]["total_tokens"], 3)
+
+    def test_transform_chat_response_preserves_reasoning_content(self):
+        response = transform_chat_response(
+            {
+                "created": 123,
+                "choices": [{"message": {"reasoning_content": "thinking", "content": "answer"}}],
+            },
+            "deepseek:deepseek-reasoner",
+        )
+
+        self.assertEqual(response["output"][0]["type"], "reasoning")
+        self.assertEqual(response["output"][0]["step_by_step_summary"], "thinking")
+        self.assertEqual(response["output"][1]["content"][0]["text"], "answer")
+
+    def test_replayed_reasoning_content_attaches_to_chat_tool_call_turn(self):
+        payload = transform_request_to_chat(
+            {
+                "model": "deepseek:deepseek-reasoner",
+                "input": [
+                    {"type": "reasoning", "step_by_step_summary": "need a lookup"},
+                    {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": {"q": "x"}},
+                ],
+            },
+            "deepseek-reasoner",
+        )
+
+        self.assertEqual(payload["messages"][0]["role"], "assistant")
+        self.assertEqual(payload["messages"][0]["reasoning_content"], "need a lookup")
+        self.assertEqual(payload["messages"][0]["tool_calls"][0]["function"]["name"], "lookup")
 
     def test_models_endpoint_includes_configured_byok_models(self):
         provider = {
@@ -217,6 +308,7 @@ class TestBYOKProviders(unittest.TestCase):
         }
 
         chunks = [
+            'data: {"choices":[{"delta":{"reasoning_content":"Think "}}]}\n',
             'data: {"choices":[{"delta":{"content":"Hel"}}]}\n',
             'data: {"choices":[{"delta":{"content":"lo"}}]}\n',
             'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"lookup","arguments":"{\\"q\\":"}}]}}]}\n',
@@ -274,18 +366,41 @@ class TestBYOKProviders(unittest.TestCase):
                 events.append(json.loads(line[6:]))
 
         deltas = [e["delta"] for e in events if e.get("type") == "response.output_text.delta"]
+        reasoning_deltas = [e["delta"] for e in events if e.get("type") == "response.reasoning_text.delta"]
         arg_deltas = [e["delta"] for e in events if e.get("type") == "response.function_call_arguments.delta"]
+        tool_added = [e for e in events if e.get("type") == "response.output_item.added" and e["item"]["type"] == "function_call"]
         arg_done = [e for e in events if e.get("type") == "response.function_call_arguments.done"]
         tool_done = [e for e in events if e.get("type") == "response.output_item.done" and e["item"]["type"] == "function_call"]
         done = [e for e in events if e.get("type") == "response.completed"]
 
         self.assertEqual("".join(deltas), "Hello")
-        self.assertEqual(arg_deltas, ['{"q":"x"}'])
+        self.assertEqual("".join(reasoning_deltas), "Think ")
+        self.assertEqual("".join(arg_deltas), '{"q":"x"}')
+        self.assertLess(events.index(tool_added[0]), events.index(arg_done[0]))
+        self.assertEqual(tool_added[0]["item"]["name"], "lookup")
         self.assertEqual(arg_done[0]["arguments"], '{"q":"x"}')
         self.assertEqual(tool_done[0]["item"]["call_id"], "call_1")
         self.assertEqual(tool_done[0]["item"]["name"], "lookup")
         self.assertEqual(tool_done[0]["item"]["arguments"], '{"q":"x"}')
         self.assertEqual(done[0]["response"]["usage"]["total_tokens"], 3)
+
+    def test_streaming_byok_missing_api_key_fails_before_sse_starts(self):
+        provider = {
+            "id": "deepseek",
+            "displayName": "DeepSeek",
+            "kind": "openai_chat",
+            "baseUrl": "https://api.deepseek.com",
+            "models": ["deepseek-chat"],
+        }
+
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"deepseek": provider}):
+            response = TestClient(app).post(
+                "/v1/responses",
+                json={"model": "deepseek:deepseek-chat", "input": "hello", "stream": True},
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertNotIn("response.created", response.text)
 
 
 if __name__ == "__main__":

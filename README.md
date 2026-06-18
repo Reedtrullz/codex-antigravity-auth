@@ -75,6 +75,8 @@ To run connection check diagnostics and verify token security:
 codex-antigravity doctor
 ```
 
+The gateway binds to `127.0.0.1` by default. Binding to a non-loopback host requires both `--allow-remote` and `ANTIGRAVITY_GATEWAY_TOKEN`; remote callers must send `Authorization: Bearer <token>`.
+
 And execute full unit test coverage:
 ```bash
 python3 -m pytest
