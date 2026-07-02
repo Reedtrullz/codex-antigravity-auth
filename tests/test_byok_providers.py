@@ -1052,6 +1052,82 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(tool_done[0]["name"], "lookup")
         self.assertEqual(tool_done[0]["arguments"], '{"q":"x"}')
 
+    def test_streaming_byok_waits_for_fragmented_tool_name_before_added_event(self):
+        provider = {
+            "id": "xai",
+            "displayName": "xAI",
+            "kind": "openai_chat",
+            "baseUrl": "https://api.x.ai/v1",
+            "apiKey": "secret",
+            "models": ["grok-code-fast-1"],
+        }
+
+        chunks = [
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_frag","function":{"name":"look"}}]}}]}\n',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"up"}}]}}]}\n',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}\n',
+            "data: [DONE]\n",
+        ]
+
+        class AsyncAiterText:
+            def __init__(self, text_chunks):
+                self.chunks = list(text_chunks)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self.chunks:
+                    raise StopAsyncIteration
+                return self.chunks.pop(0)
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+
+        class StreamContext:
+            async def __aenter__(self):
+                return mock_response
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        class MockClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            def stream(self, *args, **kwargs):
+                return StreamContext()
+
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"xai": provider}):
+            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                response = TestClient(app).post(
+                    "/v1/responses",
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                )
+
+        events = []
+        for line in response.text.splitlines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                events.append(json.loads(line[6:]))
+
+        tool_added = [e for e in events if e.get("type") == "response.output_item.added" and e["item"]["type"] == "function_call"]
+        arg_done = [e for e in events if e.get("type") == "response.function_call_arguments.done"]
+        tool_done = [e["item"] for e in events if e.get("type") == "response.output_item.done" and e["item"]["type"] == "function_call"]
+
+        self.assertEqual(len(tool_added), 1)
+        self.assertEqual(tool_added[0]["item"]["name"], "lookup")
+        self.assertEqual(tool_added[0]["item"]["arguments"], "")
+        self.assertEqual(arg_done[0]["arguments"], "{}")
+        self.assertEqual(tool_done[0]["name"], "lookup")
+        self.assertEqual(tool_done[0]["arguments"], "{}")
+
     def test_streaming_byok_missing_api_key_fails_before_sse_starts(self):
         provider = {
             "id": "deepseek",

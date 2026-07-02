@@ -749,9 +749,11 @@ async def openai_compatible_sse_generator(
                 if tool_call_id:
                     state["call_id"] = tool_call_id
                 buffered_arguments = state.get("arguments", "")
-                if isinstance(fn.get("name"), str) and fn.get("name"):
-                    state["name"] += fn["name"]
-                new_tool_item = idx not in tool_output_indices and bool(state["name"])
+                name_delta = stream_string(fn.get("name"))
+                arguments_delta = stream_string(fn.get("arguments"))
+                if name_delta:
+                    state["name"] += name_delta
+                new_tool_item = idx not in tool_output_indices and bool(state["name"]) and arguments_delta is not None
                 if new_tool_item:
                     tool_output_indices[idx] = next_output_index
                     next_output_index += 1
@@ -760,10 +762,10 @@ async def openai_compatible_sse_generator(
                     yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': tool_output_indices[idx], 'item': item})}\n\n"
                     if buffered_arguments:
                         yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': buffered_arguments})}\n\n"
-                if isinstance(fn.get("arguments"), str) and fn.get("arguments"):
-                    state["arguments"] += fn["arguments"]
+                if arguments_delta:
+                    state["arguments"] += arguments_delta
                     if idx in tool_output_indices:
-                        yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': fn['arguments']})}\n\n"
+                        yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': arguments_delta})}\n\n"
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -790,8 +792,16 @@ async def openai_compatible_sse_generator(
 
     for idx in sorted(tool_calls):
         item = tool_calls[idx]
-        if idx not in tool_output_indices or not item.get("name"):
+        if not item.get("name"):
             continue
+        if idx not in tool_output_indices:
+            tool_output_indices[idx] = next_output_index
+            next_output_index += 1
+            added_item = dict(item)
+            added_item["arguments"] = ""
+            yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': tool_output_indices[idx], 'item': added_item})}\n\n"
+            if item.get("arguments"):
+                yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': item['id'], 'output_index': tool_output_indices[idx], 'delta': item['arguments']})}\n\n"
         output_index = tool_output_indices[idx]
         arguments = item.get("arguments", "")
         yield f"data: {json.dumps({'type': 'response.function_call_arguments.done', 'response_id': response_id, 'item_id': item['id'], 'output_index': output_index, 'arguments': arguments})}\n\n"
