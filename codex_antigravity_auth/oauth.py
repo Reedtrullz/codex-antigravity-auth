@@ -2,6 +2,7 @@ import secrets
 import hashlib
 import base64
 import json
+import math
 import time
 import urllib.request
 import urllib.error
@@ -23,7 +24,7 @@ def token_expires_in_seconds(tokens: dict, default: int = 3600) -> int:
         expires_in = float(tokens.get("expires_in", default))
     except (AttributeError, TypeError, ValueError):
         return default
-    if expires_in <= 0:
+    if not math.isfinite(expires_in) or expires_in <= 0:
         return default
     return int(expires_in)
 

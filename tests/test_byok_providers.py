@@ -728,6 +728,87 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(tool_done[0]["item"]["arguments"], '{"q":"x"}')
         self.assertEqual(done[0]["response"]["usage"]["total_tokens"], 3)
 
+    def test_streaming_byok_ignores_malformed_tool_call_deltas(self):
+        provider = {
+            "id": "xai",
+            "displayName": "xAI",
+            "kind": "openai_chat",
+            "baseUrl": "https://api.x.ai/v1",
+            "apiKey": "secret",
+            "models": ["grok-code-fast-1"],
+        }
+
+        chunks = [
+            'data: {"choices":"bad"}\n',
+            'data: {"choices":[{"delta":"bad"}]}\n',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":"bad","id":"bad","function":{"name":"ignored","arguments":"{}"}}]}}]}\n',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":-1,"id":"bad","function":{"name":"ignored","arguments":"{}"}}]}}]}\n',
+            'data: {"choices":[{"delta":{"tool_calls":["bad",{"index":0,"id":"call_1","function":"bad"}]}}]}\n',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"bad_2","function":"bad"}]}}]}\n',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":"0","function":{"name":"lookup","arguments":"{}"}}]}}]}\n',
+            'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
+            "data: [DONE]\n",
+        ]
+
+        class AsyncAiterText:
+            def __init__(self, text_chunks):
+                self.chunks = list(text_chunks)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self.chunks:
+                    raise StopAsyncIteration
+                return self.chunks.pop(0)
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+
+        class StreamContext:
+            async def __aenter__(self):
+                return mock_response
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        class MockClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            def stream(self, *args, **kwargs):
+                return StreamContext()
+
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"xai": provider}):
+            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                response = TestClient(app).post(
+                    "/v1/responses",
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                )
+
+        events = []
+        for line in response.text.splitlines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                events.append(json.loads(line[6:]))
+
+        self.assertFalse([e for e in events if e.get("type") == "error"])
+        deltas = [e["delta"] for e in events if e.get("type") == "response.output_text.delta"]
+        arg_done = [e for e in events if e.get("type") == "response.function_call_arguments.done"]
+        tool_done = [e["item"] for e in events if e.get("type") == "response.output_item.done" and e["item"]["type"] == "function_call"]
+        completed = [e for e in events if e.get("type") == "response.completed"]
+
+        self.assertEqual("".join(deltas), "ok")
+        self.assertEqual([e["arguments"] for e in arg_done], ["{}"])
+        self.assertEqual(tool_done[0]["name"], "lookup")
+        self.assertTrue(completed)
+
     def test_streaming_byok_missing_api_key_fails_before_sse_starts(self):
         provider = {
             "id": "deepseek",

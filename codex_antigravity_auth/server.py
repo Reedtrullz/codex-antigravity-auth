@@ -264,6 +264,18 @@ def validate_provider_model_id(provider_id: str | None, provider_model: str) -> 
         raise HTTPException(status_code=400, detail=f"Provider '{provider_id}' model id must be non-empty")
 
 
+def chat_tool_call_delta_index(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return None
+    if index < 0:
+        return None
+    return index
+
+
 def prepare_openai_compatible_request(
     codex_req: dict,
     provider: dict,
@@ -435,7 +447,7 @@ async def create_response(request: Request):
                 return
             if "response" in parsed and isinstance(parsed["response"], dict):
                 parsed = parsed["response"]
-            if parsed.get("usageMetadata"):
+            if isinstance(parsed.get("usageMetadata"), dict):
                 usage_meta = parsed["usageMetadata"]
                 usage = {
                     "input_tokens": usage_meta.get("promptTokenCount", 0),
@@ -443,10 +455,20 @@ async def create_response(request: Request):
                     "total_tokens": usage_meta.get("totalTokenCount", 0),
                 }
             candidates = parsed.get("candidates", [])
+            if not isinstance(candidates, list):
+                return
             for cand in candidates:
+                if not isinstance(cand, dict):
+                    continue
                 content = cand.get("content", {})
+                if not isinstance(content, dict):
+                    continue
                 parts = content.get("parts", [])
+                if not isinstance(parts, list):
+                    continue
                 for part in parts:
+                    if not isinstance(part, dict):
+                        continue
                     # Yield reasoning/thinking blocks in separate reasoning events
                     if part.get("thought") is True or part.get("type") == "thinking":
                         thought_text = part.get("text", "") or part.get("thinking", "")
@@ -456,11 +478,14 @@ async def create_response(request: Request):
                         yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': part['text']})}\n\n"
                     elif "functionCall" in part:
                         fc = part["functionCall"]
+                        if not isinstance(fc, dict):
+                            continue
                         call_id = fc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
                         item_id = f"fc_{uuid.uuid4().hex[:8]}"
                         output_index = next_output_index
                         next_output_index += 1
-                        arguments = json.dumps(fc.get("args", {}))
+                        args = fc.get("args", {})
+                        arguments = json.dumps(args if isinstance(args, dict) else {})
                         item = {
                             "type": "function_call",
                             "id": item_id,
@@ -594,22 +619,41 @@ async def openai_compatible_sse_generator(
         except json.JSONDecodeError as e:
             print(f"[*] Skipping invalid {provider['id']} SSE JSON chunk: {e}")
             return
-        if parsed.get("usage"):
+        if not isinstance(parsed, dict):
+            return
+        if isinstance(parsed.get("usage"), dict):
             provider_usage = parsed["usage"]
             usage = {
                 "input_tokens": provider_usage.get("prompt_tokens", provider_usage.get("input_tokens", 0)),
                 "output_tokens": provider_usage.get("completion_tokens", provider_usage.get("output_tokens", 0)),
                 "total_tokens": provider_usage.get("total_tokens", 0),
             }
-        for choice in parsed.get("choices", []) or []:
+        choices = parsed.get("choices", []) or []
+        if not isinstance(choices, list):
+            return
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
             delta = choice.get("delta", {}) or {}
+            if not isinstance(delta, dict):
+                continue
             if delta.get("reasoning_content"):
                 yield f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': delta['reasoning_content']})}\n\n"
             if delta.get("content"):
                 output_text += delta["content"]
                 yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': delta['content']})}\n\n"
-            for tool_delta in delta.get("tool_calls", []) or []:
-                idx = int(tool_delta.get("index", 0))
+            tool_deltas = delta.get("tool_calls", []) or []
+            if not isinstance(tool_deltas, list):
+                continue
+            for tool_delta in tool_deltas:
+                if not isinstance(tool_delta, dict):
+                    continue
+                idx = chat_tool_call_delta_index(tool_delta.get("index", 0))
+                if idx is None:
+                    continue
+                fn = tool_delta.get("function", {}) or {}
+                if not isinstance(fn, dict):
+                    continue
                 generated_call_id = tool_delta.get("id") or f"call_{uuid.uuid4().hex[:8]}"
                 state = tool_calls.setdefault(idx, {
                     "id": f"fc_{uuid.uuid4().hex[:8]}",
@@ -620,15 +664,14 @@ async def openai_compatible_sse_generator(
                 })
                 if tool_delta.get("id"):
                     state["call_id"] = tool_delta["id"]
-                fn = tool_delta.get("function", {}) or {}
                 new_tool_item = idx not in tool_output_indices
-                if fn.get("name"):
+                if isinstance(fn.get("name"), str) and fn.get("name"):
                     state["name"] += fn["name"]
                 if new_tool_item:
                     tool_output_indices[idx] = next_output_index
                     next_output_index += 1
                     yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': tool_output_indices[idx], 'item': dict(state)})}\n\n"
-                if fn.get("arguments"):
+                if isinstance(fn.get("arguments"), str) and fn.get("arguments"):
                     state["arguments"] += fn["arguments"]
                     yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': fn['arguments']})}\n\n"
 

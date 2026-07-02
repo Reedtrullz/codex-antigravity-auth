@@ -277,6 +277,8 @@ class TestRegressionFixes(unittest.TestCase):
             {},
             {"expires_in": None},
             {"expires_in": "not-a-number"},
+            {"expires_in": "NaN"},
+            {"expires_in": "Infinity"},
             {"expires_in": -1},
             {"expires_in": 0},
         ):
@@ -521,6 +523,83 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual([e["arguments"] for e in arg_done], ['{"x": 1}', '{"y": 2}'])
         self.assertEqual([e["output_index"] for e in done], [1, 2])
         self.assertEqual([e["item"]["id"] for e in added], [e["item"]["id"] for e in done])
+
+    def test_google_streaming_skips_malformed_chunks_and_clamps_function_args(self):
+        fake_account = {
+            "email": "test@gmail.com",
+            "accessToken": "dummy_access",
+            "fingerprint": {"userAgent": "Antigravity/2.0.0", "apiClient": "google-cloud-sdk"},
+        }
+
+        chunks = [
+            'data: {"usageMetadata": "bad", "candidates": "bad"}\n',
+            'data: {"candidates": ["bad", {"content": {"parts": ["bad", {"functionCall": {"id": "call_a", "name": "a", "args": ["not", "object"]}}, {"text": "ok"}]}}]}\n',
+            "data: [DONE]\n",
+        ]
+
+        class AsyncAiterText:
+            def __init__(self, text_chunks):
+                self.chunks = list(text_chunks)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self.chunks:
+                    raise StopAsyncIteration
+                return self.chunks.pop(0)
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+
+        class StreamContext:
+            async def __aenter__(self):
+                return mock_response
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        class MockClientInstance:
+            def stream(self, *args, **kwargs):
+                return StreamContext()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        class CleanAsyncClientMock:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return MockClientInstance()
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        with patch("codex_antigravity_auth.server.account_manager.select_active_account", return_value=fake_account):
+            with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                response = TestClient(app).post(
+                    "/v1/responses",
+                    json={"model": "gemini-3.5-flash-high", "input": "call tools", "stream": True},
+                )
+
+        events = []
+        for line in response.text.splitlines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                events.append(json.loads(line[6:]))
+
+        self.assertNotIn("connection_error", response.text)
+        arg_done = [e for e in events if e.get("type") == "response.function_call_arguments.done"]
+        deltas = [e["delta"] for e in events if e.get("type") == "response.output_text.delta"]
+        completed = [e for e in events if e.get("type") == "response.completed"]
+
+        self.assertEqual([e["arguments"] for e in arg_done], ["{}"])
+        self.assertEqual("".join(deltas), "ok")
+        self.assertTrue(completed)
 
 
 if __name__ == "__main__":
