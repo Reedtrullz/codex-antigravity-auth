@@ -276,6 +276,10 @@ def chat_tool_call_delta_index(value: object) -> int | None:
     return index
 
 
+def stream_string(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 def prepare_openai_compatible_request(
     codex_req: dict,
     provider: dict,
@@ -471,16 +475,23 @@ async def create_response(request: Request):
                         continue
                     # Yield reasoning/thinking blocks in separate reasoning events
                     if part.get("thought") is True or part.get("type") == "thinking":
-                        thought_text = part.get("text", "") or part.get("thinking", "")
-                        yield f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': thought_text})}\n\n"
+                        thought_text = stream_string(part.get("text")) or stream_string(part.get("thinking"))
+                        if thought_text:
+                            yield f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': thought_text})}\n\n"
                     elif "text" in part:
-                        output_text += part["text"]
-                        yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': part['text']})}\n\n"
+                        text = stream_string(part.get("text"))
+                        if text is None:
+                            continue
+                        output_text += text
+                        yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': text})}\n\n"
                     elif "functionCall" in part:
                         fc = part["functionCall"]
                         if not isinstance(fc, dict):
                             continue
-                        call_id = fc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                        name = stream_string(fc.get("name"))
+                        if not name:
+                            continue
+                        call_id = stream_string(fc.get("id")) or f"call_{uuid.uuid4().hex[:8]}"
                         item_id = f"fc_{uuid.uuid4().hex[:8]}"
                         output_index = next_output_index
                         next_output_index += 1
@@ -490,7 +501,7 @@ async def create_response(request: Request):
                             "type": "function_call",
                             "id": item_id,
                             "call_id": call_id,
-                            "name": fc.get("name"),
+                            "name": name,
                             "arguments": "",
                         }
                         yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': output_index, 'item': item})}\n\n"
@@ -637,11 +648,13 @@ async def openai_compatible_sse_generator(
             delta = choice.get("delta", {}) or {}
             if not isinstance(delta, dict):
                 continue
-            if delta.get("reasoning_content"):
-                yield f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': delta['reasoning_content']})}\n\n"
-            if delta.get("content"):
-                output_text += delta["content"]
-                yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': delta['content']})}\n\n"
+            reasoning_content = stream_string(delta.get("reasoning_content"))
+            if reasoning_content:
+                yield f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': reasoning_content})}\n\n"
+            content_delta = stream_string(delta.get("content"))
+            if content_delta:
+                output_text += content_delta
+                yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': content_delta})}\n\n"
             tool_deltas = delta.get("tool_calls", []) or []
             if not isinstance(tool_deltas, list):
                 continue
@@ -654,7 +667,7 @@ async def openai_compatible_sse_generator(
                 fn = tool_delta.get("function", {}) or {}
                 if not isinstance(fn, dict):
                     continue
-                generated_call_id = tool_delta.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                generated_call_id = stream_string(tool_delta.get("id")) or f"call_{uuid.uuid4().hex[:8]}"
                 state = tool_calls.setdefault(idx, {
                     "id": f"fc_{uuid.uuid4().hex[:8]}",
                     "type": "function_call",
@@ -662,8 +675,9 @@ async def openai_compatible_sse_generator(
                     "name": "",
                     "arguments": "",
                 })
-                if tool_delta.get("id"):
-                    state["call_id"] = tool_delta["id"]
+                tool_call_id = stream_string(tool_delta.get("id"))
+                if tool_call_id:
+                    state["call_id"] = tool_call_id
                 new_tool_item = idx not in tool_output_indices
                 if isinstance(fn.get("name"), str) and fn.get("name"):
                     state["name"] += fn["name"]

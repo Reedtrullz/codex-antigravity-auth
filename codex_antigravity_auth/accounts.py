@@ -1,3 +1,4 @@
+import math
 import time
 import threading
 from typing import Any
@@ -18,9 +19,26 @@ class AccountManager:
             failures = state.get("failures", {})
             cooldowns = state.get("cooldowns", {})
             if isinstance(failures, dict):
-                self._failures.update({str(k): int(v) for k, v in failures.items() if isinstance(v, (int, float))})
+                cleaned_failures = {}
+                for k, v in failures.items():
+                    if not isinstance(v, (int, float)) or isinstance(v, bool):
+                        continue
+                    failure_number = float(v)
+                    if not math.isfinite(failure_number):
+                        continue
+                    failure_count = int(failure_number)
+                    if failure_count > 0:
+                        cleaned_failures[str(k)] = failure_count
+                self._failures.update(cleaned_failures)
             if isinstance(cooldowns, dict):
-                self._cooldowns.update({str(k): float(v) for k, v in cooldowns.items() if isinstance(v, (int, float))})
+                cleaned_cooldowns = {}
+                for k, v in cooldowns.items():
+                    if not isinstance(v, (int, float)) or isinstance(v, bool):
+                        continue
+                    cooldown_end = float(v)
+                    if math.isfinite(cooldown_end) and cooldown_end > 0:
+                        cleaned_cooldowns[str(k)] = cooldown_end
+                self._cooldowns.update(cleaned_cooldowns)
 
     def _save_state_to_storage(self) -> None:
         if not get_accounts_json_path().exists():
@@ -39,6 +57,8 @@ class AccountManager:
         try:
             expires_at = float(value or 0)
         except (TypeError, ValueError):
+            return 0
+        if not math.isfinite(expires_at):
             return 0
         # Epoch milliseconds are currently around 1.7e12; epoch seconds around 1.7e9.
         if expires_at > 10_000_000_000:
@@ -138,11 +158,22 @@ class AccountManager:
             return selected
 
     def _record_failure(self, email: str, retry_after_seconds: float | None = None) -> float:
-        self._failures[email] = self._failures.get(email, 0) + 1
+        previous_failures = self._failures.get(email, 0)
+        if not isinstance(previous_failures, int) or isinstance(previous_failures, bool) or previous_failures < 0:
+            previous_failures = 0
+        self._failures[email] = previous_failures + 1
         backoff_factor = min(self._failures[email], 5)
         cooldown_duration = 120 * (2 ** (backoff_factor - 1))
-        if retry_after_seconds and retry_after_seconds > 0:
-            cooldown_duration = max(cooldown_duration, min(float(retry_after_seconds), 86_400.0))
+        try:
+            retry_after = (
+                float(retry_after_seconds)
+                if retry_after_seconds is not None and not isinstance(retry_after_seconds, bool)
+                else 0.0
+            )
+        except (TypeError, ValueError):
+            retry_after = 0.0
+        if math.isfinite(retry_after) and retry_after > 0:
+            cooldown_duration = max(cooldown_duration, min(retry_after, 86_400.0))
         self._cooldowns[email] = time.time() + cooldown_duration
         return cooldown_duration
 

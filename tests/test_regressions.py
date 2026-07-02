@@ -272,6 +272,49 @@ class TestRegressionFixes(unittest.TestCase):
         mock_refresh.assert_called_once_with("refresh_1")
         self.assertLess(selected["expiresAt"], 10_000_000_000)
 
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.refresh_access_token")
+    @patch("codex_antigravity_auth.accounts.time.time", return_value=1000)
+    def test_non_finite_account_state_and_expiry_are_normalized(self, mock_time, mock_refresh, mock_update):
+        data = {
+            "accounts": [
+                {
+                    "email": "primary@gmail.com",
+                    "refreshToken": "refresh_1",
+                    "accessToken": "old",
+                    "expiresAt": float("nan"),
+                }
+            ],
+            "activeIndex": 0,
+            "activeIndexByFamily": {"claude": 0, "gemini": 0},
+            "accountState": {
+                "failures": {
+                    "primary@gmail.com": float("nan"),
+                    "other@gmail.com": 2,
+                    "bool@gmail.com": True,
+                    "zero@gmail.com": 0,
+                    "negative@gmail.com": -3,
+                },
+                "cooldowns": {
+                    "primary@gmail.com": float("inf"),
+                    "other@gmail.com": 2000,
+                    "bool@gmail.com": False,
+                    "zero@gmail.com": 0,
+                    "negative@gmail.com": -3,
+                },
+            },
+        }
+        mock_update.side_effect = lambda mutator: mutator(data)
+        mock_refresh.return_value = {"access_token": "new", "expires_in": 1800}
+
+        manager = AccountManager()
+        selected = manager.select_active_account("gemini-3.5-flash-high")
+
+        self.assertEqual(selected["accessToken"], "new")
+        self.assertEqual(selected["expiresAt"], 2800)
+        self.assertEqual(manager._failures, {"other@gmail.com": 2})
+        self.assertEqual(manager._cooldowns, {"other@gmail.com": 2000.0})
+
     def test_token_expires_in_seconds_falls_back_for_malformed_success_payloads(self):
         for payload in (
             {},
@@ -342,6 +385,12 @@ class TestRegressionFixes(unittest.TestCase):
         manager.mark_failure("limited@gmail.com", "429", retry_after_seconds=600)
 
         self.assertEqual(manager._cooldowns["limited@gmail.com"], 1600)
+
+        manager._failures["malformed@gmail.com"] = -5
+        manager.mark_failure("malformed@gmail.com", "429", retry_after_seconds=True)
+
+        self.assertEqual(manager._failures["malformed@gmail.com"], 1)
+        self.assertEqual(manager._cooldowns["malformed@gmail.com"], 1120)
 
     def test_pkce_verifier_expires(self):
         _pkce_verifier_store["expired_state"] = {
@@ -533,7 +582,7 @@ class TestRegressionFixes(unittest.TestCase):
 
         chunks = [
             'data: {"usageMetadata": "bad", "candidates": "bad"}\n',
-            'data: {"candidates": ["bad", {"content": {"parts": ["bad", {"functionCall": {"id": "call_a", "name": "a", "args": ["not", "object"]}}, {"text": "ok"}]}}]}\n',
+            'data: {"candidates": ["bad", {"content": {"parts": ["bad", {"thought": true, "text": ["bad"]}, {"text": ["bad"]}, {"functionCall": {"id": {"bad": "id"}, "name": ["bad"], "args": {"ignored": true}}}, {"functionCall": {"id": "call_a", "name": "a", "args": ["not", "object"]}}, {"text": "ok"}]}}]}\n',
             "data: [DONE]\n",
         ]
 

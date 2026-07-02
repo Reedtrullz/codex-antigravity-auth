@@ -1,7 +1,7 @@
 # Current Integration Status — 2 July 2026
 
 ## Build & Test Health
-- **local pytest**: 127/127 passing, plus 74 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: 128/128 passing, plus 74 subtests, with `python3 -m pytest -q` ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **install command**: `uv tool install .` for normal use, `uv tool install --editable .` for development
