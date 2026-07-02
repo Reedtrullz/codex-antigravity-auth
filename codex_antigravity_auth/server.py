@@ -17,6 +17,7 @@ from .byok import (
     validate_http_base_url,
     validate_provider_api_key,
     validate_provider_headers,
+    validate_provider_id,
 )
 from .transform import (
     token_count,
@@ -379,7 +380,15 @@ def response_model_id(codex_req: dict) -> str:
 
 
 def validate_provider_model_id(provider_id: str | None, provider_model: str) -> None:
-    if provider_id and not provider_model:
+    if provider_id is None:
+        return
+    if not provider_id:
+        raise HTTPException(status_code=400, detail="BYOK provider id must be non-empty")
+    try:
+        validate_provider_id(provider_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if not provider_model:
         raise HTTPException(status_code=400, detail=f"Provider '{provider_id}' model id must be non-empty")
 
 
@@ -431,7 +440,7 @@ async def create_response(request: Request):
     stream = response_stream_flag(codex_req)
     provider_id, provider_model = split_provider_model(model)
     validate_provider_model_id(provider_id, provider_model)
-    if provider_id:
+    if provider_id is not None:
         providers = all_provider_configs()
         provider = providers.get(provider_id)
         if not provider:

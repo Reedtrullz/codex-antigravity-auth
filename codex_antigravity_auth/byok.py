@@ -606,10 +606,11 @@ def remove_provider_config(provider_id: str) -> bool:
 
 def split_provider_model(model: str) -> tuple[str | None, str]:
     model = str(model)
-    if ":" in model:
+    colon_index = model.find(":")
+    slash_index = model.find("/")
+    if colon_index != -1 and (slash_index == -1 or colon_index < slash_index):
         provider_id, provider_model = model.split(":", 1)
-        if provider_id in PROVIDER_PRESETS or provider_id in all_provider_configs(include_env_enabled=False):
-            return provider_id, provider_model
+        return provider_id, provider_model
     if "/" in model:
         provider_id, provider_model = model.split("/", 1)
         if provider_id in PROVIDER_PRESETS or provider_id in all_provider_configs(include_env_enabled=False):

@@ -36,6 +36,12 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(split_provider_model("deepseek:deepseek-chat"), ("deepseek", "deepseek-chat"))
         self.assertEqual(split_provider_model("openrouter:deepseek/deepseek-chat"), ("openrouter", "deepseek/deepseek-chat"))
         self.assertEqual(split_provider_model("openrouter:openrouter/auto"), ("openrouter", "openrouter/auto"))
+        self.assertEqual(split_provider_model("acme:model"), ("acme", "model"))
+        self.assertEqual(split_provider_model(":model"), ("", "model"))
+        self.assertEqual(
+            split_provider_model("openai-responses/gemini-3.5-flash-high"),
+            (None, "openai-responses/gemini-3.5-flash-high"),
+        )
         self.assertIn("openrouter/auto", PROVIDER_PRESETS["openrouter"]["models"])
 
     def test_byok_provider_id_validation_reserves_model_separators(self):
@@ -202,7 +208,7 @@ class TestBYOKProviders(unittest.TestCase):
             providers = all_provider_configs(include_env_enabled=False)
             self.assertEqual(set(providers), {"good-provider"})
             self.assertEqual(split_provider_model("good-provider:ok"), ("good-provider", "ok"))
-            self.assertEqual(split_provider_model("bad:provider:m"), (None, "bad:provider:m"))
+            self.assertEqual(split_provider_model("bad:provider:m"), ("bad", "provider:m"))
 
             model_ids = [model["id"] for model in TestClient(app).get("/v1/models").json()["data"]]
             self.assertIn("good-provider:ok", model_ids)

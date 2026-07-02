@@ -896,6 +896,39 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("model id must be non-empty", response.json()["detail"])
 
+    def test_responses_endpoint_rejects_unknown_colon_provider_before_google_routing(self):
+        client = TestClient(app)
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
+            with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+                response = client.post(
+                    "/v1/responses",
+                    json={"model": "acme:model", "input": "hello"},
+                )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("BYOK provider 'acme' is not configured", response.json()["detail"])
+        mock_select.assert_not_called()
+
+        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+            invalid_response = client.post(
+                "/v1/responses",
+                json={"model": "bad.provider:model", "input": "hello"},
+            )
+
+        self.assertEqual(invalid_response.status_code, 400)
+        self.assertIn("BYOK provider id", invalid_response.json()["detail"])
+        mock_select.assert_not_called()
+
+        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+            empty_response = client.post(
+                "/v1/responses",
+                json={"model": ":model", "input": "hello"},
+            )
+
+        self.assertEqual(empty_response.status_code, 400)
+        self.assertIn("provider id must be non-empty", empty_response.json()["detail"])
+        mock_select.assert_not_called()
+
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
     @patch("urllib.request.urlopen")
