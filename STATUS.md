@@ -1,7 +1,7 @@
 # Current Integration Status — 2 July 2026
 
 ## Build & Test Health
-- **local pytest**: 147/147 passing, plus 99 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: 148/148 passing, plus 99 subtests, with `python3 -m pytest -q` ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, wrote temp Codex config mode `600`, and verified installed `/v1/models` env-key behavior ✅
@@ -33,6 +33,7 @@
 | BYOK API-key/header value sanitization before config writes | ✅ |
 | BYOK model-picker field sanitization before config writes | ✅ |
 | BYOK config preflight before streaming | ✅ |
+| BYOK streaming tool-call output waits for valid function names | ✅ |
 | Malformed function-tool metadata normalization before routing | ✅ |
 | Malformed generation option and `tool_choice` rejection before routing | ✅ |
 | Google/BYOK `top_p` and stop-sequence generation option forwarding | ✅ |
