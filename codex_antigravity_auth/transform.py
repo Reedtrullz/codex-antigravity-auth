@@ -13,7 +13,8 @@ from typing import Any
 from .models import resolve_backend_model
 from .schema import clean_json_schema
 
-JSON_SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+FUNCTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+JSON_SCHEMA_NAME_PATTERN = FUNCTION_NAME_PATTERN
 
 ANTIGRAVITY_SYSTEM_INSTRUCTION = """You are Antigravity, a powerful agentic AI coding assistant designed by the Google DeepMind team working on Advanced Agentic Coding.
 You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.
@@ -25,7 +26,7 @@ You are pair programming with a USER to solve their coding task. The task may re
 
 
 def normalize_response_function_tool(fn: dict[str, Any]) -> dict[str, Any] | None:
-    if not isinstance(fn.get("name"), str) or not fn.get("name"):
+    if not valid_function_name(fn.get("name")):
         return None
     if "description" in fn and not isinstance(fn["description"], str):
         fn.pop("description")
@@ -59,7 +60,7 @@ def chat_tool_choice(tool_choice: Any) -> Any:
         return None
     nested = tool_choice.get("function")
     name = tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
-    if not isinstance(name, str) or not name:
+    if not valid_function_name(name):
         return None
     return {"type": "function", "function": {"name": name}}
 
@@ -69,7 +70,11 @@ def _tool_choice_function_name(tool_choice: Any) -> str | None:
         return None
     nested = tool_choice.get("function")
     name = tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
-    return name if isinstance(name, str) and name else None
+    return name if valid_function_name(name) else None
+
+
+def valid_function_name(value: Any) -> bool:
+    return isinstance(value, str) and bool(FUNCTION_NAME_PATTERN.fullmatch(value))
 
 
 def _function_call_args(value: Any) -> dict[str, Any]:
@@ -239,7 +244,7 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
         if part_type == "tool_use":
             call_id = part.get("id") or part.get("call_id")
             name = part.get("name")
-            if not isinstance(name, str) or not name:
+            if not valid_function_name(name):
                 return []
             if isinstance(call_id, str) and call_id:
                 function_names_by_call_id[call_id] = name
@@ -254,11 +259,11 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
             if not isinstance(call_id, str):
                 call_id = None
             explicit_name = part.get("name")
-            name = (
-                explicit_name
-                if isinstance(explicit_name, str) and explicit_name
-                else function_names_by_call_id.get(call_id) or call_id or "function_result"
-            )
+            name = "function_result"
+            for candidate in (explicit_name, function_names_by_call_id.get(call_id), call_id):
+                if valid_function_name(candidate):
+                    name = candidate
+                    break
             output = part.get("content", part.get("output", ""))
             return [{
                 "functionResponse": {
@@ -285,7 +290,7 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
                 if not isinstance(call_id, str):
                     call_id = None
                 name = item.get("name")
-                if not isinstance(name, str) or not name:
+                if not valid_function_name(name):
                     continue
                 if call_id:
                     function_names_by_call_id[call_id] = name
@@ -302,9 +307,14 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
                 call_id = item.get("call_id")
                 if not isinstance(call_id, str):
                     call_id = None
+                name = "function_result"
+                for candidate in (function_names_by_call_id.get(call_id), call_id):
+                    if valid_function_name(candidate):
+                        name = candidate
+                        break
                 append_content("user", [{
                     "functionResponse": {
-                        "name": function_names_by_call_id.get(call_id) or call_id or "function_result",
+                        "name": name,
                         "response": _function_response_payload(item.get("output", ""))
                     }
                 }])
@@ -487,7 +497,7 @@ def transform_gemini_candidate(candidate: dict) -> dict:
             if not isinstance(fc, dict):
                 continue
             name = _stream_text(fc.get("name"))
-            if not name:
+            if not valid_function_name(name):
                 continue
             # Auto-generate a call ID if missing so Codex can execute it
             call_id = _stream_text(fc.get("id")) or f"call_{uuid.uuid4().hex[:8]}"
@@ -649,7 +659,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 if not isinstance(call_id, str) or not call_id:
                     call_id = f"call_{uuid.uuid4().hex[:8]}"
                 raw_name = item.get("name")
-                if raw_name is not None and not isinstance(raw_name, str):
+                if raw_name is not None and not valid_function_name(raw_name):
                     continue
                 name = raw_name if raw_name else "function_call"
                 function_names_by_call_id[call_id] = name
@@ -678,7 +688,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 continue
             if item_type == "function_call_output":
                 call_id = item.get("call_id")
-                if not isinstance(call_id, str) or not call_id:
+                if not isinstance(call_id, str) or call_id not in function_names_by_call_id:
                     continue
                 messages.append({
                     "role": "tool",
@@ -800,7 +810,7 @@ def transform_chat_response(chat_resp: dict, model: str) -> dict:
             if not isinstance(fn, dict):
                 continue
             name = fn.get("name")
-            if not isinstance(name, str) or not name:
+            if not valid_function_name(name):
                 continue
             arguments = fn.get("arguments", "{}")
             if isinstance(arguments, dict):

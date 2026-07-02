@@ -1,10 +1,10 @@
 # Current Integration Status — 2 July 2026
 
 ## Build & Test Health
-- **local pytest**: 151/151 passing, plus 101 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: 153/153 passing, plus 103 subtests, with `python3 -m pytest -q` ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
-- **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, wrote temp Codex config mode `600`, and verified installed malformed-request rejection, Google generation controls, and fragmented BYOK tool-name streaming ✅
+- **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, wrote temp Codex config mode `600`, and verified installed malformed-request rejection, function-name filtering, Google generation controls, and fragmented BYOK tool-name streaming ✅
 - **install command**: `uv tool install .` for normal use, `uv tool install --editable .` for development
 - **doctor/connectivity**: available through `codex-antigravity doctor`; not live-verified in this local hardening pass
 
@@ -35,6 +35,7 @@
 | BYOK config preflight before streaming | ✅ |
 | BYOK streaming tool-call output waits for complete valid function names | ✅ |
 | Malformed function-tool metadata normalization before routing | ✅ |
+| Malformed function-call names normalized or dropped before routing | ✅ |
 | Malformed generation option and `tool_choice` rejection before routing | ✅ |
 | Google/BYOK `top_p` and stop-sequence generation option forwarding | ✅ |
 | BYOK structured-output `response_format` normalization before routing | ✅ |

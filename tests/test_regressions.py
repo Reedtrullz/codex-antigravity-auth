@@ -86,8 +86,10 @@ class TestRegressionFixes(unittest.TestCase):
                 {"type": "message", "role": "system", "content": [{"type": "input_text", "text": ["bad"]}]},
                 {"type": "message", "role": "user", "content": [{"type": "input_text", "text": ["bad"]}]},
                 {"type": "function_call", "call_id": "call_bad", "name": ["bad"], "arguments": "{}"},
+                {"type": "function_call", "call_id": "call_bad_name", "name": "bad name", "arguments": "{}"},
                 {"type": "function_call", "call_id": "call_ok", "name": "lookup", "arguments": {"q": "x"}},
                 {"type": "function_call_output", "call_id": ["bad"], "output": "result"},
+                {"type": "function_call_output", "call_id": "bad call id", "output": "result"},
                 {"type": "function_call_output", "call_id": "call_ok", "output": "ok"},
             ],
         }
@@ -103,6 +105,8 @@ class TestRegressionFixes(unittest.TestCase):
 
         rendered = json.dumps(byok)
         self.assertNotIn('["bad"]', rendered)
+        self.assertNotIn("bad name", rendered)
+        self.assertNotIn("bad call id", rendered)
         self.assertEqual(byok["messages"][0]["role"], "assistant")
         self.assertEqual(byok["messages"][0]["tool_calls"][0]["function"]["name"], "lookup")
         self.assertEqual(byok["messages"][1]["role"], "tool")
@@ -122,11 +126,31 @@ class TestRegressionFixes(unittest.TestCase):
                 },
                 {
                     "type": "function",
+                    "name": "bad name",
+                    "description": "bad name should be dropped",
+                    "parameters": {"type": "object"},
+                },
+                {
+                    "type": "function",
+                    "name": "x" * 65,
+                    "description": "too long should be dropped",
+                    "parameters": {"type": "object"},
+                },
+                {
+                    "type": "function",
                     "function": {
                         "name": "nested_lookup",
                         "description": {"bad": True},
                         "parameters": ["bad"],
                         "strict": "yes",
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "bad\nnested",
+                        "description": "control char should be dropped",
+                        "parameters": {"type": "object"},
                     },
                 },
             ],
@@ -145,6 +169,44 @@ class TestRegressionFixes(unittest.TestCase):
         byok = transform_request_to_chat({**request, "model": "deepseek:deepseek-chat"}, "deepseek-chat")
         chat_functions = [tool["function"] for tool in byok["tools"]]
         self.assertEqual(chat_functions, [{"name": "lookup", "parameters": {}}, {"name": "nested_lookup", "parameters": {}}])
+
+    def test_response_transforms_drop_invalid_function_names(self):
+        google = transform_response(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [
+                                {"functionCall": {"id": "call_bad", "name": "bad name", "args": {}}},
+                                {"functionCall": {"id": "call_ok", "name": "lookup", "args": {"q": "x"}}},
+                            ],
+                        }
+                    }
+                ]
+            },
+            "gemini-3.5-flash-high",
+        )
+        google_calls = [item for item in google["output"] if item["type"] == "function_call"]
+        self.assertEqual([call["name"] for call in google_calls], ["lookup"])
+
+        byok = transform_chat_response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {"id": "call_bad", "type": "function", "function": {"name": "bad name", "arguments": "{}"}},
+                                {"id": "call_ok", "type": "function", "function": {"name": "lookup", "arguments": "{}"}},
+                            ]
+                        }
+                    }
+                ]
+            },
+            "deepseek:deepseek-chat",
+        )
+        byok_calls = [item for item in byok["output"] if item["type"] == "function_call"]
+        self.assertEqual([call["name"] for call in byok_calls], ["lookup"])
 
     def test_google_request_transform_treats_developer_messages_as_system_instruction(self):
         transformed = transform_request(
@@ -732,8 +794,10 @@ class TestRegressionFixes(unittest.TestCase):
         invalid_requests = [
             ({"tool_choice": "sometimes"}, "tool_choice must be auto, none, required, or a function choice object"),
             ({"tool_choice": ["bad"]}, "tool_choice must be auto, none, required, or a function choice object"),
-            ({"tool_choice": {"type": "function", "name": ["bad"]}}, "tool_choice function name must be a non-empty string"),
-            ({"tool_choice": {"type": "function", "function": {"name": "bad\nname"}}}, "tool_choice function name must be a non-empty string"),
+            ({"tool_choice": {"type": "function", "name": ["bad"]}}, "tool_choice function name must contain only letters"),
+            ({"tool_choice": {"type": "function", "function": {"name": "bad\nname"}}}, "tool_choice function name must contain only letters"),
+            ({"tool_choice": {"type": "function", "function": {"name": "bad name"}}}, "tool_choice function name must contain only letters"),
+            ({"tool_choice": {"type": "function", "function": {"name": "x" * 65}}}, "tool_choice function name must contain only letters"),
         ]
 
         for extra, expected_detail in invalid_requests:

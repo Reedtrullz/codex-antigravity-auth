@@ -18,7 +18,14 @@ from .byok import (
     validate_provider_api_key,
     validate_provider_headers,
 )
-from .transform import token_count, transform_chat_response, transform_request, transform_request_to_chat, transform_response
+from .transform import (
+    token_count,
+    transform_chat_response,
+    transform_request,
+    transform_request_to_chat,
+    transform_response,
+    valid_function_name,
+)
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform, is_loopback_host
 from .redaction import redact_secret_text
 
@@ -307,8 +314,11 @@ def validate_response_tool_choice(codex_req: dict) -> None:
         raise HTTPException(status_code=400, detail="tool_choice must be auto, none, required, or a function choice object")
     nested = tool_choice.get("function")
     name = tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
-    if not isinstance(name, str) or not name or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
-        raise HTTPException(status_code=400, detail="tool_choice function name must be a non-empty string without control characters")
+    if not valid_function_name(name):
+        raise HTTPException(
+            status_code=400,
+            detail="tool_choice function name must contain only letters, numbers, underscores, and hyphens, and be 1-64 characters",
+        )
 
 
 def response_stream_flag(codex_req: dict) -> bool:
@@ -562,7 +572,7 @@ async def create_response(request: Request):
                         if not isinstance(fc, dict):
                             continue
                         name = stream_string(fc.get("name"))
-                        if not name:
+                        if not valid_function_name(name):
                             continue
                         call_id = stream_string(fc.get("id")) or f"call_{uuid.uuid4().hex[:8]}"
                         item_id = f"fc_{uuid.uuid4().hex[:8]}"
@@ -756,7 +766,12 @@ async def openai_compatible_sse_generator(
                 arguments_delta = stream_string(fn.get("arguments"))
                 if name_delta:
                     state["name"] += name_delta
-                new_tool_item = idx not in tool_output_indices and bool(state["name"]) and bool(arguments_delta)
+                new_tool_item = (
+                    idx not in tool_output_indices
+                    and valid_function_name(state["name"])
+                    and bool(arguments_delta)
+                    and not name_delta
+                )
                 if new_tool_item:
                     tool_output_indices[idx] = next_output_index
                     next_output_index += 1
@@ -795,7 +810,7 @@ async def openai_compatible_sse_generator(
 
     for idx in sorted(tool_calls):
         item = tool_calls[idx]
-        if not item.get("name"):
+        if not valid_function_name(item.get("name")):
             continue
         if idx not in tool_output_indices:
             tool_output_indices[idx] = next_output_index
