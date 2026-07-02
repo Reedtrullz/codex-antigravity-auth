@@ -1,9 +1,10 @@
-# Current Integration Status — 18 June 2026
+# Current Integration Status — 2 July 2026
 
 ## Build & Test Health
-- **local pytest**: 48/48 passing with `python3 -m pytest` ✅
-- **compile check**: `python3 -m compileall codex_antigravity_auth tests` ✅
-- **install command**: `uv pip install -e .`
+- **local pytest**: 120/120 passing, plus 69 subtests, with `python3 -m pytest -q` ✅
+- **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
+- **diff hygiene**: `git diff --check` ✅
+- **install command**: `uv tool install .` for normal use, `uv tool install --editable .` for development
 - **doctor/connectivity**: available through `codex-antigravity doctor`; not live-verified in this local hardening pass
 
 ## Core Features
@@ -25,8 +26,16 @@
 | BYOK provider presets | ✅ |
 | OpenAI-compatible provider routing | ✅ |
 | Encrypted API-key provider config | ✅ |
+| BYOK/Codex URL validation before config writes | ✅ |
+| BYOK managed-header guardrails | ✅ |
+| BYOK API-key/header value sanitization before config writes | ✅ |
+| BYOK model-picker field sanitization before config writes | ✅ |
+| BYOK config preflight before streaming | ✅ |
+| Codex config helper | ✅ |
 | Central redaction for auth/provider errors | ✅ |
 | Retry-After / Google RetryInfo cooldown hints | ✅ |
+| Fail-closed malformed-store write/update guardrails | ✅ |
+| Malformed OAuth `expires_in` fallback handling | ✅ |
 
 ## Known Limitations
 - Live Google Antigravity and BYOK provider smoke tests require configured credentials/API keys.
@@ -34,7 +43,7 @@
 - `/v1/responses/compact` is not implemented.
 - CI proves local unit/compile health only; it does not prove live backend availability.
 
-## Latest Release
+## Last Documented Release
 [v0.1.0-alpha](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v0.1.0-alpha)
 
 ## Next Priorities

@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import secrets
 import httpx
@@ -9,7 +10,14 @@ from typing import AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from .accounts import AccountManager
-from .byok import all_provider_configs, resolve_api_key, split_provider_model
+from .byok import (
+    all_provider_configs,
+    resolve_api_key,
+    split_provider_model,
+    validate_http_base_url,
+    validate_provider_api_key,
+    validate_provider_headers,
+)
 from .transform import transform_chat_response, transform_request, transform_request_to_chat, transform_response
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform, is_loopback_host
 from .redaction import redact_secret_text
@@ -162,26 +170,55 @@ def build_headers(account: dict) -> dict:
 
 def build_openai_compatible_headers(provider: dict) -> dict:
     api_key = resolve_api_key(provider)
+    try:
+        api_key = validate_provider_api_key(api_key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Provider '{provider['id']}' {str(e)}") from e
     if not api_key:
         raise HTTPException(
             status_code=401,
             detail=f"No API key configured for provider '{provider['id']}'. Set {provider.get('apiKeyEnv', 'provider API key')} or run provider set.",
         )
+    provider_headers = provider.get("headers", {}) or {}
+    try:
+        provider_headers = validate_provider_headers(provider_headers)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    headers.update(provider.get("headers", {}) or {})
+    headers.update(provider_headers or {})
     return headers
 
 
 def chat_completions_url(provider: dict) -> str:
-    base_url = provider.get("baseUrl", "").rstrip("/")
-    if not base_url:
+    base_url = provider.get("baseUrl", "")
+    if not isinstance(base_url, str):
+        raise HTTPException(status_code=400, detail=f"Provider '{provider['id']}' baseUrl must be a string")
+    if not base_url.strip():
         raise HTTPException(status_code=500, detail=f"Provider '{provider['id']}' has no baseUrl configured")
+    try:
+        base_url = validate_http_base_url(base_url, label=f"Provider '{provider['id']}' baseUrl")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if base_url.endswith("/chat/completions"):
-        return base_url
-    return f"{base_url}/chat/completions"
+        url = base_url
+    else:
+        url = f"{base_url}/chat/completions"
+    return url
+
+
+def openai_compatible_timeout(provider: dict) -> float:
+    timeout = provider.get("timeout", 120.0)
+    if (
+        not isinstance(timeout, (int, float))
+        or isinstance(timeout, bool)
+        or not math.isfinite(float(timeout))
+        or float(timeout) <= 0
+    ):
+        raise HTTPException(status_code=400, detail=f"Provider '{provider['id']}' timeout must be a positive number")
+    return float(timeout)
 
 
 def reject_unsupported_previous_response(codex_req: dict) -> None:
@@ -198,15 +235,16 @@ def prepare_openai_compatible_request(
     provider_model: str,
     *,
     stream: bool,
-) -> tuple[dict, str, dict]:
+) -> tuple[dict, str, dict, float]:
     try:
         payload = transform_request_to_chat({**codex_req, "stream": stream}, provider_model)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     payload["stream"] = stream
-    url = chat_completions_url(provider)
     headers = build_openai_compatible_headers(provider)
-    return payload, url, headers
+    url = chat_completions_url(provider)
+    timeout = openai_compatible_timeout(provider)
+    return payload, url, headers, timeout
 
 @app.post("/v1/responses")
 async def create_response(request: Request):
@@ -228,9 +266,9 @@ async def create_response(request: Request):
         if provider.get("kind") != "openai_chat":
             raise HTTPException(status_code=500, detail=f"Unsupported BYOK provider kind: {provider.get('kind')}")
         if stream:
-            payload, url, headers = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=True)
+            payload, url, headers, timeout = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=True)
             return StreamingResponse(
-                openai_compatible_sse_generator(payload, url, headers, provider, model),
+                openai_compatible_sse_generator(payload, url, headers, timeout, provider, model),
                 media_type="text/event-stream",
             )
         return await create_openai_compatible_response(codex_req, provider, provider_model, model)
@@ -243,21 +281,19 @@ async def create_response(request: Request):
             detail="No Google accounts available. Run `codex-antigravity login` to connect an account."
         )
         
-    # 2. Translate standard Responses API request to Antigravity request envelope
-    project_id = account.get("projectId") or account.get("managedProjectId")
-    antigravity_req = transform_request(codex_req, project_id=project_id)
-    backend_model = antigravity_req.get("model")
+    def build_google_request(selected_account: dict) -> tuple[dict, dict]:
+        project_id = selected_account.get("projectId") or selected_account.get("managedProjectId")
+        return transform_request(codex_req, project_id=project_id), build_headers(selected_account)
     
     # Route target action based on streaming mode
     action = "streamGenerateContent" if stream else "generateContent"
     backend_url = f"{ANTIGRAVITY_ENDPOINT_PROD}/v1internal:{action}"
     if stream:
         backend_url += "?alt=sse"
-        
-    headers = build_headers(account)
     
     # Perform HTTP POST request to Antigravity endpoint with error recovery & rotation
-    async def request_backend() -> httpx.Response | None:
+    async def request_backend(selected_account: dict) -> httpx.Response | None:
+        antigravity_req, headers = build_google_request(selected_account)
         async with httpx.AsyncClient(timeout=60.0) as client:
             try:
                 # Do NOT stream the response inside this function, we just do normal or stream connection
@@ -268,41 +304,40 @@ async def create_response(request: Request):
                     res = await client.post(backend_url, json=antigravity_req, headers=headers)
                     return res
             except Exception as e:
-                account_manager.mark_failure(account["email"], f"Connection error: {safe_error_detail(e)}")
+                account_manager.mark_failure(selected_account["email"], f"Connection error: {safe_error_detail(e)}")
                 return None
 
     # Handle standard non-streaming response path
     if not stream:
-        res = await request_backend()
+        response_account = account
+        res = await request_backend(response_account)
         if not res:
             # Retry with rotated account on connection failures
             new_account = account_manager.select_active_account(model)
             if new_account:
-                account = new_account
-                headers = build_headers(account)
-                res = await request_backend()
+                response_account = new_account
+                res = await request_backend(response_account)
                 
         if not res:
             raise HTTPException(status_code=502, detail="Failed to communicate with Antigravity backend after rotation")
 
         if res.status_code in (401, 403, 429):
             reason = "Rate limited / Quota exceeded" if res.status_code == 429 else f"Auth failure {res.status_code}: {safe_error_detail(res.text)}"
-            account_manager.mark_failure(account["email"], reason, retry_after_seconds_from_response(res))
+            account_manager.mark_failure(response_account["email"], reason, retry_after_seconds_from_response(res))
             new_account = account_manager.select_active_account(model)
             if new_account:
-                account = new_account
-                headers = build_headers(account)
-                res = await request_backend()
+                response_account = new_account
+                res = await request_backend(response_account)
             if not res:
                 raise HTTPException(status_code=502, detail="Failed to communicate with Antigravity backend after rotation")
             
         if res.status_code in (401, 403):
             # Token might be invalidated or verification required
-            account_manager.mark_failure(account["email"], f"Auth failure {res.status_code}: {safe_error_detail(res.text)}")
+            account_manager.mark_failure(response_account["email"], f"Auth failure {res.status_code}: {safe_error_detail(res.text)}")
             raise HTTPException(status_code=res.status_code, detail=f"Google Authentication failure: {safe_error_detail(res.text)}")
             
         if res.status_code == 429:
-            account_manager.mark_failure(account["email"], "Rate limited / Quota exceeded", retry_after_seconds_from_response(res))
+            account_manager.mark_failure(response_account["email"], "Rate limited / Quota exceeded", retry_after_seconds_from_response(res))
             raise HTTPException(status_code=429, detail="Antigravity account rate limit reached. Auto-switching to next account.")
             
         if res.status_code != 200:
@@ -408,10 +443,10 @@ async def create_response(request: Request):
         attempt_num = 0
         while attempt_num < len(attempts):
             stream_account = attempts[attempt_num]
-            stream_headers = build_headers(stream_account)
+            stream_req, stream_headers = build_google_request(stream_account)
             try:
                 async with httpx.AsyncClient(timeout=60.0) as client:
-                    async with client.stream("POST", backend_url, json=antigravity_req, headers=stream_headers) as res:
+                    async with client.stream("POST", backend_url, json=stream_req, headers=stream_headers) as res:
                         if res.status_code != 200:
                             if res.status_code in (401, 403, 429):
                                 body_bytes = await res.aread()
@@ -466,8 +501,8 @@ async def create_response(request: Request):
 
 
 async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str) -> dict:
-    payload, url, headers = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=False)
-    async with httpx.AsyncClient(timeout=provider.get("timeout", 120.0)) as client:
+    payload, url, headers, timeout = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=False)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             res = await client.post(url, json=payload, headers=headers)
         except Exception as e:
@@ -484,6 +519,7 @@ async def openai_compatible_sse_generator(
     payload: dict,
     url: str,
     headers: dict,
+    timeout: float,
     provider: dict,
     display_model: str,
 ) -> AsyncGenerator[str, None]:
@@ -559,7 +595,7 @@ async def openai_compatible_sse_generator(
                     yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': fn['arguments']})}\n\n"
 
     try:
-        async with httpx.AsyncClient(timeout=provider.get("timeout", 120.0)) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as res:
                 if res.status_code != 200:
                     body = (await res.aread()).decode("utf-8", errors="ignore")

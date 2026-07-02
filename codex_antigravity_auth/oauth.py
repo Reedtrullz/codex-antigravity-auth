@@ -17,6 +17,17 @@ _pkce_verifier_store: dict[str, dict[str, str]] = {}
 _PKCE_VERIFIER_TTL_SECONDS = 600
 OAUTH_HTTP_TIMEOUT_SECONDS = 15.0
 
+
+def token_expires_in_seconds(tokens: dict, default: int = 3600) -> int:
+    try:
+        expires_in = float(tokens.get("expires_in", default))
+    except (AttributeError, TypeError, ValueError):
+        return default
+    if expires_in <= 0:
+        return default
+    return int(expires_in)
+
+
 def generate_pkce() -> dict:
     verifier = secrets.token_urlsafe(64)
     sha256 = hashlib.sha256(verifier.encode("utf-8")).digest()

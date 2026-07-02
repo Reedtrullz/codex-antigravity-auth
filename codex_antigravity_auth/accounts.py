@@ -2,7 +2,7 @@ import time
 import threading
 from typing import Any
 from .storage import load_accounts, get_accounts_json_path, update_accounts
-from .oauth import refresh_access_token
+from .oauth import refresh_access_token, token_expires_in_seconds
 from .fingerprint import generate_fingerprint
 from .redaction import redact_secret_text
 
@@ -101,7 +101,7 @@ class AccountManager:
                             try:
                                 refreshed = refresh_access_token(refresh_tok)
                                 acc["accessToken"] = refreshed["access_token"]
-                                acc["expiresAt"] = current_time + refreshed.get("expires_in", 3600)
+                                acc["expiresAt"] = current_time + token_expires_in_seconds(refreshed)
                                 if refreshed.get("refresh_token"):
                                     acc["refreshToken"] = refreshed["refresh_token"]
                                 dirty = True

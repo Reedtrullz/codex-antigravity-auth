@@ -5,18 +5,48 @@ Create a clean, reliable local gateway server that allows you to use Google Anti
 ## Features
 - **OS-Native Keyring Encryption**: Automatically encrypts OAuth credentials and tokens at rest securely inside macOS Keychain, Windows Credential Manager, or Linux Secret Service via the `keyring` package.
 - **Transaction-Safe Cooldown Rotations**: Automatically rotates accounts on backend failures (such as `401`, `403`, or `429` rate limiters) with clean exponential backoff.
-- **High-Fidelity SSE Translation**: Fully translates complex stream candidate envelopes, role alignments, thoughts token tracking, and VALIDATED tool parameter modes.
+- **High-Fidelity SSE Translation**: Translates stream candidate envelopes, role alignments, reasoning-text deltas, function-call items, and VALIDATED tool parameter modes into Responses API events.
 - **BYOK Provider Routing**: Route model IDs like `deepseek:deepseek-chat`, `xai:grok-code-fast-1`, `kimi:kimi-k2-0711-preview`, `openrouter:deepseek/deepseek-chat`, and custom OpenAI-compatible endpoints through encrypted API-key config.
 
 ## Installation
 
-Ensure you are in the correct Python virtual environment (e.g. one configured under your current shell) and run:
+From GitHub:
+
+```bash
+uv tool install "git+https://github.com/Reedtrullz/codex-antigravity-auth.git"
+```
+
+From a source checkout:
+
+```bash
+uv tool install .
+```
+
+For active development, keep it editable:
+
+```bash
+uv tool install --editable .
+```
+
+If you are already inside a project virtual environment, this also works:
 
 ```bash
 uv pip install -e .
 ```
 
 ## Configuration
+
+Install the Codex provider block:
+
+```bash
+codex-antigravity configure-codex --write
+```
+
+The command updates `~/.codex/config.toml` and writes a timestamped backup first when it changes an existing config. To inspect the TOML without writing it:
+
+```bash
+codex-antigravity configure-codex
+```
 
 Before running `codex-antigravity login`, set up your desktop Google OAuth credentials. Either export them:
 
@@ -39,6 +69,12 @@ Then run the interactive login:
 codex-antigravity login
 ```
 
+Start the local gateway:
+
+```bash
+codex-antigravity start
+```
+
 ### BYOK providers
 
 Built-in presets are available for OpenRouter, DeepSeek, xAI, Kimi/Moonshot, Ollama, OpenCode-compatible local servers, and custom OpenAI-compatible APIs:
@@ -54,8 +90,11 @@ codex-antigravity provider list
 ```
 
 Stored provider keys are encrypted in `~/.codex/antigravity-providers.json`. You can also use provider env vars such as `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `MOONSHOT_API_KEY`, `OLLAMA_API_KEY`, and `OPENCODE_API_KEY`.
+Provider ids reserve model-name separators and may only contain letters, numbers, underscores, and hyphens; model ids themselves may still contain `/` or `:`, but not whitespace or control characters.
+Custom provider and Codex gateway base URLs must be absolute `http` or `https` URLs without embedded credentials, whitespace/control characters, query strings, fragments, invalid ports, or malformed bracketed hosts. Non-preset custom BYOK providers must provide a base URL before models are exposed. Stored BYOK API keys, model-picker display names, and extra BYOK provider header values must not contain control characters; provider API-key env var names must contain only letters, numbers, and underscores and must not start with a number. Extra headers may not override gateway-managed auth, content, host, or transport headers. Invalid BYOK provider URLs, API keys, env vars, model ids, display names, and headers are rejected before config writes; invalid BYOK provider URLs, timeouts, headers, API keys, and missing API keys are also rejected before streaming starts so Codex gets a normal HTTP error instead of a partial SSE response. BYOK structured tool outputs are serialized to JSON text before being sent as Chat Completions tool messages.
 
-Configure your `~/.codex/config.toml` to route Codex models through this server:
+The `configure-codex --write` helper writes this equivalent TOML into `~/.codex/config.toml`:
+It validates the Codex model id, provider id, provider name, and gateway base URL before writing.
 
 ```toml
 model = "gemini-3.5-flash-high"

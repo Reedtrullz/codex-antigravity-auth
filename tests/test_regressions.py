@@ -10,7 +10,14 @@ from fastapi.testclient import TestClient
 from codex_antigravity_auth.accounts import AccountManager
 from codex_antigravity_auth.cli import run_doctor
 from codex_antigravity_auth.models import resolve_backend_model
-from codex_antigravity_auth.oauth import OAUTH_HTTP_TIMEOUT_SECONDS, _pkce_verifier_store, exchange_antigravity, get_pkce_verifier, refresh_access_token
+from codex_antigravity_auth.oauth import (
+    OAUTH_HTTP_TIMEOUT_SECONDS,
+    _pkce_verifier_store,
+    exchange_antigravity,
+    get_pkce_verifier,
+    refresh_access_token,
+    token_expires_in_seconds,
+)
 from codex_antigravity_auth.schema import clean_json_schema
 from codex_antigravity_auth.server import app, retry_after_seconds_from_response
 from codex_antigravity_auth.transform import transform_request, transform_response
@@ -48,6 +55,38 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(contents[1]["parts"][0]["functionResponse"]["name"], "lookup")
         self.assertEqual(contents[1]["parts"][0]["functionResponse"]["response"]["content"], "42")
 
+    def test_non_object_function_call_arguments_are_clamped_for_google(self):
+        for arguments in ('["not", "object"]', '"string"', "42", "null", "true"):
+            with self.subTest(arguments=arguments):
+                req = {
+                    "model": "gemini-3.5-flash-high",
+                    "input": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call_123",
+                            "name": "lookup",
+                            "arguments": arguments,
+                        },
+                    ],
+                }
+
+                parts = transform_request(req)["request"]["contents"][0]["parts"]
+
+                self.assertEqual(parts[0]["functionCall"]["args"], {})
+
+    def test_json_object_tool_output_preserves_structured_google_response(self):
+        req = {
+            "model": "gemini-3.5-flash-high",
+            "input": [
+                {"type": "function_call", "call_id": "call_123", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_123", "output": '{"ok": true, "items": [1, 2]}'},
+            ],
+        }
+
+        response = transform_request(req)["request"]["contents"][1]["parts"][0]["functionResponse"]["response"]
+
+        self.assertEqual(response, {"ok": True, "items": [1, 2]})
+
     def test_transform_request_honors_selected_account_project(self):
         req = {
             "model": "gemini-3.5-flash-high",
@@ -57,6 +96,66 @@ class TestRegressionFixes(unittest.TestCase):
         transformed = transform_request(req, project_id="account-project-123")
 
         self.assertEqual(transformed["project"], "account-project-123")
+
+    def test_rotated_google_account_rebuilds_request_with_rotated_project(self):
+        first_account = {
+            "email": "first@gmail.com",
+            "accessToken": "first-access",
+            "projectId": "project-first",
+        }
+        second_account = {
+            "email": "second@gmail.com",
+            "accessToken": "second-access",
+            "projectId": "project-second",
+        }
+        requests = []
+
+        class MockClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            async def post(self, url, json=None, headers=None):
+                requests.append({"json": json, "headers": headers})
+                if len(requests) == 1:
+                    return httpx.Response(429, json={"error": {"message": "rate limited"}})
+                return httpx.Response(
+                    200,
+                    json={
+                        "candidates": [
+                            {
+                                "content": {
+                                    "role": "model",
+                                    "parts": [{"text": "ok"}],
+                                }
+                            }
+                        ],
+                        "usageMetadata": {},
+                    },
+                )
+
+        with patch(
+            "codex_antigravity_auth.server.account_manager.select_active_account",
+            side_effect=[first_account, second_account],
+        ):
+            with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
+                with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                    response = TestClient(app).post(
+                        "/v1/responses",
+                        json={"model": "gemini-3.5-flash-high", "input": "hello"},
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([request["json"]["project"] for request in requests], ["project-first", "project-second"])
+        self.assertEqual(
+            [request["headers"]["Authorization"] for request in requests],
+            ["Bearer first-access", "Bearer second-access"],
+        )
 
     def test_transform_request_can_use_project_environment_override(self):
         req = {
@@ -172,6 +271,42 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(selected["accessToken"], "new")
         mock_refresh.assert_called_once_with("refresh_1")
         self.assertLess(selected["expiresAt"], 10_000_000_000)
+
+    def test_token_expires_in_seconds_falls_back_for_malformed_success_payloads(self):
+        for payload in (
+            {},
+            {"expires_in": None},
+            {"expires_in": "not-a-number"},
+            {"expires_in": -1},
+            {"expires_in": 0},
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(token_expires_in_seconds(payload), 3600)
+        self.assertEqual(token_expires_in_seconds({"expires_in": "1800"}), 1800)
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.refresh_access_token")
+    @patch("codex_antigravity_auth.accounts.time.time", return_value=1000)
+    def test_malformed_refresh_expires_in_uses_default_lifetime(self, mock_time, mock_refresh, mock_update):
+        data = {
+            "accounts": [
+                {
+                    "email": "primary@gmail.com",
+                    "refreshToken": "refresh_1",
+                    "accessToken": "old",
+                    "expiresAt": 900,
+                }
+            ],
+            "activeIndex": 0,
+            "activeIndexByFamily": {"claude": 0, "gemini": 0},
+        }
+        mock_update.side_effect = lambda mutator: mutator(data)
+        mock_refresh.return_value = {"access_token": "new", "expires_in": "bad-value"}
+
+        selected = AccountManager().select_active_account("gemini-3.5-flash-high")
+
+        self.assertEqual(selected["accessToken"], "new")
+        self.assertEqual(selected["expiresAt"], 4600)
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
     def test_expired_account_without_refresh_token_is_skipped(self, mock_update):

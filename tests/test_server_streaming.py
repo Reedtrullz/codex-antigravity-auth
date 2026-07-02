@@ -1,5 +1,4 @@
 import unittest
-import json
 import httpx
 from unittest.mock import patch, MagicMock
 from codex_antigravity_auth.server import app
@@ -8,8 +7,6 @@ from fastapi.testclient import TestClient
 class TestServerStreaming(unittest.TestCase):
     def test_sse_generator_translation_output(self):
         with TestClient(app) as test_client:
-            import codex_antigravity_auth.server as server
-            
             fake_account = {
                 "email": "test@gmail.com",
                 "accessToken": "dummy_access",
@@ -20,8 +17,6 @@ class TestServerStreaming(unittest.TestCase):
                     "apiClient": "google-cloud-sdk"
                 }
             }
-            
-            server.account_manager.select_active_account = MagicMock(return_value=fake_account)
             
             codex_payload = {
                 "model": "gemini-3.5-flash-high",
@@ -74,8 +69,9 @@ class TestServerStreaming(unittest.TestCase):
                 async def __aexit__(self, exc_type, exc_val, exc_tb):
                     pass
             
-            with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
-                response = test_client.post("/v1/responses", json=codex_payload)
+            with patch("codex_antigravity_auth.server.account_manager.select_active_account", return_value=fake_account):
+                with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                    response = test_client.post("/v1/responses", json=codex_payload)
                 self.assertEqual(response.status_code, 200)
                 
                 lines = response.text.split("\n")
@@ -90,7 +86,6 @@ class TestServerStreaming(unittest.TestCase):
 
     def test_sse_generator_handling_wrapped_responses(self):
         with TestClient(app) as test_client:
-            import codex_antigravity_auth.server as server
             fake_account = {
                 "email": "test@gmail.com",
                 "accessToken": "dummy_access",
@@ -101,8 +96,6 @@ class TestServerStreaming(unittest.TestCase):
                     "apiClient": "google-cloud-sdk"
                 }
             }
-            server.account_manager.select_active_account = MagicMock(return_value=fake_account)
-            
             codex_payload = {
                 "model": "gemini-3.5-flash-high",
                 "input": "Write a short story about AI",
@@ -151,14 +144,105 @@ class TestServerStreaming(unittest.TestCase):
                 async def __aexit__(self, exc_type, exc_val, exc_tb):
                     pass
             
-            with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
-                response = test_client.post("/v1/responses", json=codex_payload)
+            with patch("codex_antigravity_auth.server.account_manager.select_active_account", return_value=fake_account):
+                with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                    response = test_client.post("/v1/responses", json=codex_payload)
                 self.assertEqual(response.status_code, 200)
                 
                 lines = response.text.split("\n")
                 delta_lines = [l for l in lines if "response.output_text.delta" in l]
                 self.assertTrue(len(delta_lines) > 0, "Missing response.output_text.delta event for nested wrapped response")
                 self.assertIn("Hello stream", delta_lines[0])
+
+    def test_streaming_rotation_rebuilds_request_with_rotated_project(self):
+        with TestClient(app) as test_client:
+            first_account = {
+                "email": "first@gmail.com",
+                "accessToken": "first-access",
+                "projectId": "project-first",
+                "fingerprint": {"userAgent": "Antigravity/2.0.0", "apiClient": "google-cloud-sdk"},
+            }
+            second_account = {
+                "email": "second@gmail.com",
+                "accessToken": "second-access",
+                "projectId": "project-second",
+                "fingerprint": {"userAgent": "Antigravity/2.0.0", "apiClient": "google-cloud-sdk"},
+            }
+            requests = []
+
+            class AsyncAiterText:
+                def __init__(self, chunks):
+                    self.chunks = list(chunks)
+
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    if not self.chunks:
+                        raise StopAsyncIteration
+                    return self.chunks.pop(0)
+
+            class StreamContext:
+                def __init__(self, response):
+                    self.response = response
+
+                async def __aenter__(self):
+                    return self.response
+
+                async def __aexit__(self, exc_type, exc_val, exc_tb):
+                    pass
+
+            class MockClientInstance:
+                def stream(self, method, url, json=None, headers=None):
+                    requests.append({"json": json, "headers": headers})
+                    if len(requests) == 1:
+                        response = MagicMock(spec=httpx.Response)
+                        response.status_code = 429
+                        response.aread.return_value = b"rate limited"
+                        return StreamContext(response)
+
+                    response = MagicMock(spec=httpx.Response)
+                    response.status_code = 200
+                    response.aiter_text = MagicMock(return_value=AsyncAiterText([
+                        'data: {"candidates": [{"content": {"parts": [{"text": "rotated ok"}]}}]}\n',
+                        'data: [DONE]\n',
+                    ]))
+                    return StreamContext(response)
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc_val, exc_tb):
+                    pass
+
+            class CleanAsyncClientMock:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def __aenter__(self):
+                    return MockClientInstance()
+
+                async def __aexit__(self, exc_type, exc_val, exc_tb):
+                    pass
+
+            with patch(
+                "codex_antigravity_auth.server.account_manager.select_active_account",
+                side_effect=[first_account, second_account],
+            ):
+                with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
+                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                        response = test_client.post(
+                            "/v1/responses",
+                            json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
+                        )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("rotated ok", response.text)
+            self.assertEqual([request["json"]["project"] for request in requests], ["project-first", "project-second"])
+            self.assertEqual(
+                [request["headers"]["Authorization"] for request in requests],
+                ["Bearer first-access", "Bearer second-access"],
+            )
 
 if __name__ == "__main__":
     unittest.main()

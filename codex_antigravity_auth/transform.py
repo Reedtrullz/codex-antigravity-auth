@@ -56,6 +56,45 @@ def _tool_choice_function_name(tool_choice: Any) -> str | None:
     nested = tool_choice.get("function")
     return tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
 
+
+def _function_call_args(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {"arguments": value}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _function_response_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+    return {"content": value if value is not None else ""}
+
+
+def _chat_tool_output_content(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value)
+    except TypeError:
+        return str(value)
+
+
 def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     """Translate standard Codex Responses API request body to Antigravity format."""
     model = codex_req.get("model", "gemini-3.5-flash-high")
@@ -118,16 +157,17 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
             return [{
                 "functionCall": {
                     "name": part.get("name"),
-                    "args": part.get("input", {})
+                    "args": _function_call_args(part.get("input", {}))
                 }
             }]
         if part_type in ("tool_result", "function_call_output"):
             call_id = part.get("tool_use_id") or part.get("call_id")
             name = part.get("name") or function_names_by_call_id.get(call_id) or call_id or "function_result"
+            output = part.get("content", part.get("output", ""))
             return [{
                 "functionResponse": {
                     "name": name,
-                    "response": {"content": part.get("content", part.get("output", ""))}
+                    "response": _function_response_payload(output)
                 }
             }]
         return []
@@ -148,12 +188,7 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
                 call_id = item.get("call_id") or item.get("id")
                 if call_id and item.get("name"):
                     function_names_by_call_id[call_id] = item.get("name")
-                args = item.get("arguments", {})
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except Exception:
-                        args = {"arguments": args}
+                args = _function_call_args(item.get("arguments", {}))
                 append_content("assistant", [{
                     "functionCall": {
                         "name": item.get("name"),
@@ -167,7 +202,7 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
                 append_content("user", [{
                     "functionResponse": {
                         "name": function_names_by_call_id.get(call_id) or call_id or "function_result",
-                        "response": {"content": item.get("output", "")}
+                        "response": _function_response_payload(item.get("output", ""))
                     }
                 }])
                 continue
@@ -333,7 +368,7 @@ def transform_gemini_candidate(candidate: dict) -> dict:
                 "id": f"fc_{uuid.uuid4().hex[:8]}",
                 "call_id": call_id,
                 "name": fc.get("name"),
-                "arguments": json.dumps(fc.get("args", {}))
+                "arguments": json.dumps(fc.get("args", {}) if isinstance(fc.get("args", {}), dict) else {})
             })
             
     # Assemble structured Responses API message output
@@ -509,7 +544,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                     "role": "tool",
                     "tool_call_id": call_id,
                     "name": function_names_by_call_id.get(call_id),
-                    "content": item.get("output", ""),
+                    "content": _chat_tool_output_content(item.get("output", "")),
                 })
                 continue
 

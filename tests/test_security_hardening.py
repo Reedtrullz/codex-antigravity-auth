@@ -26,8 +26,9 @@ class TestRedaction(unittest.TestCase):
                 "access_token_cached": True,
                 "access_token_expires_at": 456,
             },
+            "Set-Cookie": "session=raw-cookie",
             "url": "https://example.test/callback?code=oauth-code-secret&client_secret=client-secret",
-            "body": '{"apiKey":"json-api-key"} x-goog-api-key: header-api-key',
+            "body": '{"apiKey":"json-api-key"} x-goog-api-key: header-api-key authorization=form-secret Cookie: inline-cookie',
         }
 
         redacted = redact_secrets(raw)
@@ -40,6 +41,9 @@ class TestRedaction(unittest.TestCase):
             "client-secret",
             "json-api-key",
             "header-api-key",
+            "raw-cookie",
+            "form-secret",
+            "inline-cookie",
         ):
             self.assertNotIn(secret, rendered)
         self.assertEqual(redacted["tokens"]["accessToken"], REDACTED)
@@ -61,6 +65,14 @@ class TestRedaction(unittest.TestCase):
         self.assertNotIn("provider-token", rendered)
         self.assertNotIn("provider-credential", rendered)
         self.assertIn(REDACTED, rendered)
+
+    def test_redacts_cookie_and_authorization_form_values(self):
+        rendered = redact_secret_text("authorization=form-secret&cookie=cookie-secret")
+
+        self.assertNotIn("form-secret", rendered)
+        self.assertNotIn("cookie-secret", rendered)
+        self.assertIn(f"authorization={REDACTED}", rendered)
+        self.assertIn(f"cookie={REDACTED}", rendered)
 
 
 class TestCredentialResolution(unittest.TestCase):
@@ -122,6 +134,20 @@ class TestProviderStorage(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(providers_path.stat().st_mode), 0o600)
             with self.assertRaises(json.JSONDecodeError):
                 json.loads(providers_path.read_text(encoding="utf-8"))
+
+    def test_provider_config_normalizes_malformed_provider_map(self):
+        from codex_antigravity_auth.byok import all_provider_configs, load_provider_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            providers_path = Path(tmp) / "providers.json"
+            providers_path.write_text(json.dumps({"providers": []}), encoding="utf-8")
+
+            with patch("codex_antigravity_auth.byok.get_providers_json_path", return_value=providers_path):
+                loaded = load_provider_config()
+                providers = all_provider_configs(include_env_enabled=False)
+
+            self.assertEqual(loaded["providers"], {})
+            self.assertEqual(providers, {})
 
 
 class TestGatewayRemoteAccess(unittest.TestCase):
