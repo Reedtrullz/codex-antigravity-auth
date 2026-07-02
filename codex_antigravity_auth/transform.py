@@ -4,6 +4,7 @@
 import uuid
 import json
 import time
+import math
 import base64
 import os
 import copy
@@ -54,7 +55,8 @@ def _tool_choice_function_name(tool_choice: Any) -> str | None:
     if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
         return None
     nested = tool_choice.get("function")
-    return tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
+    name = tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
+    return name if isinstance(name, str) and name else None
 
 
 def _function_call_args(value: Any) -> dict[str, Any]:
@@ -95,6 +97,20 @@ def _chat_tool_output_content(value: Any) -> str:
         return str(value)
 
 
+def _stream_text(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _created_at(value: Any) -> int:
+    try:
+        created_at = float(value or time.time())
+    except (TypeError, ValueError):
+        return int(time.time())
+    if not math.isfinite(created_at):
+        return int(time.time())
+    return int(created_at)
+
+
 def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     """Translate standard Codex Responses API request body to Antigravity format."""
     model = codex_req.get("model", "gemini-3.5-flash-high")
@@ -132,7 +148,8 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     def content_part_to_gemini(part: dict) -> list[dict]:
         part_type = part.get("type")
         if part_type in ("input_text", "text", "output_text"):
-            return [{"text": part.get("text", "")}]
+            text = _stream_text(part.get("text"))
+            return [{"text": text}] if text is not None else []
         if part_type in ("input_image", "image"):
             image_url = part.get("image_url") or part.get("url")
             if isinstance(image_url, dict):
@@ -140,29 +157,39 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
             inline_data = data_url_to_inline_data(image_url)
             if inline_data:
                 return [inline_data]
-            if image_url:
+            if isinstance(image_url, str) and image_url:
                 return [{"fileData": {"mimeType": part.get("mime_type", "image/*"), "fileUri": image_url}}]
         if part_type in ("input_file", "file"):
             file_url = part.get("file_url") or part.get("url")
             if isinstance(file_url, dict):
                 file_url = file_url.get("url")
-            if file_url:
+            if isinstance(file_url, str) and file_url:
                 return [{"fileData": {"mimeType": part.get("mime_type", "application/octet-stream"), "fileUri": file_url}}]
             if part.get("filename") or part.get("file_id"):
                 return [{"text": json.dumps({k: v for k, v in part.items() if k != "type"})}]
         if part_type == "tool_use":
             call_id = part.get("id") or part.get("call_id")
-            if call_id and part.get("name"):
-                function_names_by_call_id[call_id] = part.get("name")
+            name = part.get("name")
+            if not isinstance(name, str) or not name:
+                return []
+            if isinstance(call_id, str) and call_id:
+                function_names_by_call_id[call_id] = name
             return [{
                 "functionCall": {
-                    "name": part.get("name"),
+                    "name": name,
                     "args": _function_call_args(part.get("input", {}))
                 }
             }]
         if part_type in ("tool_result", "function_call_output"):
             call_id = part.get("tool_use_id") or part.get("call_id")
-            name = part.get("name") or function_names_by_call_id.get(call_id) or call_id or "function_result"
+            if not isinstance(call_id, str):
+                call_id = None
+            explicit_name = part.get("name")
+            name = (
+                explicit_name
+                if isinstance(explicit_name, str) and explicit_name
+                else function_names_by_call_id.get(call_id) or call_id or "function_result"
+            )
             output = part.get("content", part.get("output", ""))
             return [{
                 "functionResponse": {
@@ -186,12 +213,17 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
 
             if item_type == "function_call":
                 call_id = item.get("call_id") or item.get("id")
-                if call_id and item.get("name"):
-                    function_names_by_call_id[call_id] = item.get("name")
+                if not isinstance(call_id, str):
+                    call_id = None
+                name = item.get("name")
+                if not isinstance(name, str) or not name:
+                    continue
+                if call_id:
+                    function_names_by_call_id[call_id] = name
                 args = _function_call_args(item.get("arguments", {}))
                 append_content("assistant", [{
                     "functionCall": {
-                        "name": item.get("name"),
+                        "name": name,
                         "args": args
                     }
                 }])
@@ -199,6 +231,8 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
 
             if item_type == "function_call_output":
                 call_id = item.get("call_id")
+                if not isinstance(call_id, str):
+                    call_id = None
                 append_content("user", [{
                     "functionResponse": {
                         "name": function_names_by_call_id.get(call_id) or call_id or "function_result",
@@ -325,15 +359,25 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
 
 def transform_gemini_candidate(candidate: dict) -> dict:
     """Extract standard Codex message / content parts from a Gemini candidate."""
+    if not isinstance(candidate, dict):
+        candidate = {}
     # Support both "response" outer wrap or candidate directly
     if "response" in candidate and isinstance(candidate["response"], dict):
         candidate = candidate["response"]
     if "candidates" in candidate and isinstance(candidate["candidates"], list) and candidate["candidates"]:
         candidate = candidate["candidates"][0]
+    if not isinstance(candidate, dict):
+        candidate = {}
 
     content = candidate.get("content", {})
+    if not isinstance(content, dict):
+        content = {}
     parts = content.get("parts", [])
+    if not isinstance(parts, list):
+        parts = []
     role = content.get("role", "assistant")
+    if not isinstance(role, str):
+        role = "assistant"
     if role == "model":
         role = "assistant"
     
@@ -347,27 +391,37 @@ def transform_gemini_candidate(candidate: dict) -> dict:
             
         # 1. Handle thoughts / thinking blocks
         if part.get("thought") is True or part.get("type") == "thinking":
-            reasoning_text += part.get("text", "") or part.get("thinking", "")
+            thought_text = _stream_text(part.get("text")) or _stream_text(part.get("thinking"))
+            if thought_text:
+                reasoning_text += thought_text
             continue
 
         # 2. Handle standard text
         if "text" in part:
+            text = _stream_text(part.get("text"))
+            if text is None:
+                continue
             output_parts.append({
                 "type": "output_text",
-                "text": part["text"],
+                "text": text,
                 "annotations": []
             })
 
         # 3. Handle tool calls
         elif "functionCall" in part:
             fc = part["functionCall"]
+            if not isinstance(fc, dict):
+                continue
+            name = _stream_text(fc.get("name"))
+            if not name:
+                continue
             # Auto-generate a call ID if missing so Codex can execute it
-            call_id = fc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+            call_id = _stream_text(fc.get("id")) or f"call_{uuid.uuid4().hex[:8]}"
             function_calls.append({
                 "type": "function_call",
                 "id": f"fc_{uuid.uuid4().hex[:8]}",
                 "call_id": call_id,
-                "name": fc.get("name"),
+                "name": name,
                 "arguments": json.dumps(fc.get("args", {}) if isinstance(fc.get("args", {}), dict) else {})
             })
             
@@ -400,13 +454,19 @@ def transform_response(gemini_resp: dict, model: str) -> dict:
     # { "id": "resp_...", "object": "response", "created_at": 1234, "model": "...", "output": [ ... ], "usage": { ... }, "status": "completed" }
     
     # Handle response wrapping
+    if not isinstance(gemini_resp, dict):
+        gemini_resp = {}
     if "response" in gemini_resp and isinstance(gemini_resp["response"], dict):
         gemini_resp = gemini_resp["response"]
 
     candidates = gemini_resp.get("candidates", [])
+    if not isinstance(candidates, list):
+        candidates = []
     output_items = []
     
     for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
         transformed = transform_gemini_candidate(cand)
         if "reasoning" in transformed:
             output_items.append(transformed["reasoning"])
@@ -415,6 +475,8 @@ def transform_response(gemini_resp: dict, model: str) -> dict:
         output_items.extend(transformed.get("function_calls", []))
         
     usage = gemini_resp.get("usageMetadata", {})
+    if not isinstance(usage, dict):
+        usage = {}
     translated_usage = {
         "input_tokens": usage.get("promptTokenCount", 0),
         "output_tokens": usage.get("candidatesTokenCount", 0),
@@ -445,18 +507,19 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
     def content_part_to_chat(part: dict) -> list[dict]:
         part_type = part.get("type")
         if part_type in ("input_text", "text", "output_text"):
-            return [{"type": "text", "text": part.get("text", "")}]
+            text = _stream_text(part.get("text"))
+            return [{"type": "text", "text": text}] if text is not None else []
         if part_type in ("input_image", "image"):
             image_url = part.get("image_url") or part.get("url")
             if isinstance(image_url, dict):
                 image_url = image_url.get("url")
-            if image_url:
+            if isinstance(image_url, str) and image_url:
                 return [{"type": "image_url", "image_url": {"url": image_url}}]
         if part_type in ("input_file", "file"):
             file_url = part.get("file_url") or part.get("url")
             if isinstance(file_url, dict):
                 file_url = file_url.get("url")
-            if file_url:
+            if isinstance(file_url, str) and file_url:
                 return [{"type": "text", "text": f"[file] {file_url}"}]
             return [{"type": "text", "text": json.dumps({k: v for k, v in part.items() if k != "type"})}]
         return []
@@ -465,7 +528,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
         if not parts:
             return ""
         if all(p.get("type") == "text" for p in parts):
-            return "".join(p.get("text", "") for p in parts)
+            return "".join(p.get("text", "") for p in parts if isinstance(p.get("text"), str))
         return parts
 
     def text_format_to_chat_response_format() -> dict | None:
@@ -515,12 +578,20 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 )
                 continue
             if item_type == "function_call":
-                call_id = item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:8]}"
-                name = item.get("name") or "function_call"
+                call_id = item.get("call_id") or item.get("id")
+                if not isinstance(call_id, str) or not call_id:
+                    call_id = f"call_{uuid.uuid4().hex[:8]}"
+                raw_name = item.get("name")
+                if raw_name is not None and not isinstance(raw_name, str):
+                    continue
+                name = raw_name if raw_name else "function_call"
                 function_names_by_call_id[call_id] = name
                 arguments = item.get("arguments", "{}")
                 if not isinstance(arguments, str):
-                    arguments = json.dumps(arguments)
+                    try:
+                        arguments = json.dumps(arguments)
+                    except TypeError:
+                        arguments = "{}"
                 assistant_message = {
                     "role": "assistant",
                     "content": None,
@@ -539,7 +610,9 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 messages.append(assistant_message)
                 continue
             if item_type == "function_call_output":
-                call_id = item.get("call_id") or f"call_{uuid.uuid4().hex[:8]}"
+                call_id = item.get("call_id")
+                if not isinstance(call_id, str) or not call_id:
+                    continue
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
@@ -559,16 +632,19 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                         parts.extend(content_part_to_chat(part))
 
             if role in ("system", "developer"):
-                system_texts.append("".join(p.get("text", "") for p in parts if p.get("type") == "text"))
+                system_texts.append("".join(p.get("text", "") for p in parts if p.get("type") == "text" and isinstance(p.get("text"), str)))
             else:
+                if not parts and not isinstance(raw_content, str):
+                    continue
                 chat_message = {"role": "assistant" if role == "assistant" else "user", "content": normalize_content(parts)}
                 if role == "assistant" and pending_reasoning_content:
                     chat_message["reasoning_content"] = pending_reasoning_content
                     pending_reasoning_content = None
                 messages.append(chat_message)
 
-    if system_texts:
-        messages.insert(0, {"role": "system", "content": "\n\n".join(t for t in system_texts if t)})
+    system_prompt = "\n\n".join(t for t in system_texts if t)
+    if system_prompt:
+        messages.insert(0, {"role": "system", "content": system_prompt})
 
     payload = {
         "model": provider_model,
@@ -610,12 +686,20 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
 
 def transform_chat_response(chat_resp: dict, model: str) -> dict:
     """Translate OpenAI-compatible Chat Completions response to Responses API."""
+    if not isinstance(chat_resp, dict):
+        chat_resp = {}
     output_items = []
     choices = chat_resp.get("choices", [])
+    if not isinstance(choices, list):
+        choices = []
     for choice in choices:
+        if not isinstance(choice, dict):
+            continue
         message = choice.get("message", {}) or {}
+        if not isinstance(message, dict):
+            continue
         reasoning_content = message.get("reasoning_content")
-        if reasoning_content:
+        if isinstance(reasoning_content, str) and reasoning_content:
             output_items.append({
                 "type": "reasoning",
                 "id": f"rs_{uuid.uuid4().hex[:8]}",
@@ -623,11 +707,13 @@ def transform_chat_response(chat_resp: dict, model: str) -> dict:
                 "step_by_step_summary": str(reasoning_content),
             })
         content = message.get("content")
-        if content:
-            if isinstance(content, list):
-                text = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-            else:
-                text = str(content)
+        if isinstance(content, str) and content:
+            text = content
+        elif isinstance(content, list):
+            text = "".join(part.get("text", "") for part in content if isinstance(part, dict) and isinstance(part.get("text"), str))
+        else:
+            text = ""
+        if text:
             output_items.append({
                 "type": "message",
                 "id": f"msg_{uuid.uuid4().hex[:8]}",
@@ -635,17 +721,37 @@ def transform_chat_response(chat_resp: dict, model: str) -> dict:
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": text, "annotations": []}],
             })
-        for tool_call in message.get("tool_calls", []) or []:
+        tool_calls = message.get("tool_calls", []) or []
+        if not isinstance(tool_calls, list):
+            tool_calls = []
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
             fn = tool_call.get("function", {}) or {}
+            if not isinstance(fn, dict):
+                continue
+            name = fn.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            arguments = fn.get("arguments", "{}")
+            if isinstance(arguments, dict):
+                arguments = json.dumps(arguments)
+            elif not isinstance(arguments, str):
+                arguments = "{}"
+            provider_call_id = tool_call.get("id") if isinstance(tool_call.get("id"), str) and tool_call.get("id") else None
+            item_id = provider_call_id or f"fc_{uuid.uuid4().hex[:8]}"
+            call_id = provider_call_id or f"call_{uuid.uuid4().hex[:8]}"
             output_items.append({
                 "type": "function_call",
-                "id": tool_call.get("id") or f"fc_{uuid.uuid4().hex[:8]}",
-                "call_id": tool_call.get("id") or f"call_{uuid.uuid4().hex[:8]}",
-                "name": fn.get("name"),
-                "arguments": fn.get("arguments", "{}"),
+                "id": item_id,
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments,
             })
 
     usage = chat_resp.get("usage", {}) or {}
+    if not isinstance(usage, dict):
+        usage = {}
     translated_usage = {
         "input_tokens": usage.get("prompt_tokens", usage.get("input_tokens", 0)),
         "output_tokens": usage.get("completion_tokens", usage.get("output_tokens", 0)),
@@ -655,7 +761,7 @@ def transform_chat_response(chat_resp: dict, model: str) -> dict:
     return {
         "id": f"resp_{uuid.uuid4().hex[:12]}",
         "object": "response",
-        "created_at": int(chat_resp.get("created") or time.time()),
+        "created_at": _created_at(chat_resp.get("created")),
         "model": model,
         "output": output_items,
         "usage": translated_usage,

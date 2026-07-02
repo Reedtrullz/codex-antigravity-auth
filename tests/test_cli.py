@@ -11,6 +11,7 @@ from codex_antigravity_auth.cli import (
     configure_codex_write_command,
     main,
     merge_codex_config,
+    normalize_epoch_seconds,
     provider_key_status,
     render_codex_config_snippet,
     require_safe_gateway_host,
@@ -68,6 +69,11 @@ class TestCliDoctor(unittest.TestCase):
         printed_text = "\n".join(printed_args)
         self.assertIn("malformed key", printed_text)
         self.assertNotIn("secret", printed_text)
+
+    def test_normalize_epoch_seconds_treats_non_finite_values_as_expired(self):
+        for value in (float("nan"), float("inf"), "-inf"):
+            with self.subTest(value=repr(value)):
+                self.assertEqual(normalize_epoch_seconds(value), 0)
 
 
 class TestCliStartSafety(unittest.TestCase):

@@ -2,6 +2,7 @@ import sys
 import os
 import argparse
 import http.server
+import math
 import re
 import shlex
 import socketserver
@@ -87,6 +88,8 @@ def normalize_epoch_seconds(value):
     try:
         ts = float(value or 0)
     except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(ts):
         return 0
     if ts > 10_000_000_000:
         ts = ts / 1000

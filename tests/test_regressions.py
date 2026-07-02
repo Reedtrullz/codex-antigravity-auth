@@ -20,7 +20,12 @@ from codex_antigravity_auth.oauth import (
 )
 from codex_antigravity_auth.schema import clean_json_schema
 from codex_antigravity_auth.server import app, retry_after_seconds_from_response
-from codex_antigravity_auth.transform import transform_request, transform_response
+from codex_antigravity_auth.transform import (
+    transform_chat_response,
+    transform_request,
+    transform_request_to_chat,
+    transform_response,
+)
 
 
 class TestRegressionFixes(unittest.TestCase):
@@ -73,6 +78,35 @@ class TestRegressionFixes(unittest.TestCase):
                 parts = transform_request(req)["request"]["contents"][0]["parts"]
 
                 self.assertEqual(parts[0]["functionCall"]["args"], {})
+
+    def test_request_transforms_drop_malformed_text_and_function_names(self):
+        request = {
+            "model": "gemini-3.5-flash-high",
+            "input": [
+                {"type": "message", "role": "system", "content": [{"type": "input_text", "text": ["bad"]}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": ["bad"]}]},
+                {"type": "function_call", "call_id": "call_bad", "name": ["bad"], "arguments": "{}"},
+                {"type": "function_call", "call_id": "call_ok", "name": "lookup", "arguments": {"q": "x"}},
+                {"type": "function_call_output", "call_id": ["bad"], "output": "result"},
+                {"type": "function_call_output", "call_id": "call_ok", "output": "ok"},
+            ],
+        }
+
+        google = transform_request(request)
+        google_parts = [part for content in google["request"]["contents"] for part in content["parts"]]
+
+        self.assertNotIn({"text": ["bad"]}, google_parts)
+        self.assertNotIn({"functionCall": {"name": ["bad"], "args": {}}}, google_parts)
+        self.assertIn({"functionCall": {"name": "lookup", "args": {"q": "x"}}}, google_parts)
+
+        byok = transform_request_to_chat({**request, "model": "deepseek:deepseek-chat"}, "deepseek-chat")
+
+        rendered = json.dumps(byok)
+        self.assertNotIn('["bad"]', rendered)
+        self.assertEqual(byok["messages"][0]["role"], "assistant")
+        self.assertEqual(byok["messages"][0]["tool_calls"][0]["function"]["name"], "lookup")
+        self.assertEqual(byok["messages"][1]["role"], "tool")
+        self.assertEqual(byok["messages"][1]["tool_call_id"], "call_ok")
 
     def test_json_object_tool_output_preserves_structured_google_response(self):
         req = {
@@ -227,6 +261,87 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(output[0]["type"], "function_call")
         self.assertEqual(output[0]["call_id"], "call_123")
         self.assertEqual(json.loads(output[0]["arguments"]), {"query": "answer"})
+
+    def test_non_streaming_google_response_skips_malformed_backend_shapes(self):
+        response = transform_response(
+            {
+                "usageMetadata": "bad",
+                "candidates": [
+                    "bad",
+                    {"content": "bad"},
+                    {"content": {"parts": "bad"}},
+                    {
+                        "content": {
+                            "role": 123,
+                            "parts": [
+                                {"thought": True, "text": ["bad"]},
+                                {"type": "thinking", "thinking": "reason"},
+                                {"text": ["bad"]},
+                                {"functionCall": "bad"},
+                                {"functionCall": {"id": {"bad": "id"}, "name": ["bad"], "args": {"ignored": True}}},
+                                {"functionCall": {"id": "call_123", "name": "lookup", "args": ["not", "object"]}},
+                                {"text": "ok"},
+                            ],
+                        }
+                    },
+                ],
+            },
+            "gemini-3.5-flash-high",
+        )
+
+        output = response["output"]
+
+        self.assertEqual(output[0]["type"], "reasoning")
+        self.assertEqual(output[0]["step_by_step_summary"], "reason")
+        self.assertEqual(output[1]["content"][0]["text"], "ok")
+        self.assertEqual(output[2]["type"], "function_call")
+        self.assertEqual(output[2]["call_id"], "call_123")
+        self.assertEqual(output[2]["name"], "lookup")
+        self.assertEqual(output[2]["arguments"], "{}")
+        self.assertEqual(response["usage"]["total_tokens"], 0)
+
+    def test_non_streaming_byok_response_skips_malformed_provider_shapes(self):
+        response = transform_chat_response(
+            {
+                "created": "NaN",
+                "usage": "bad",
+                "choices": [
+                    "bad",
+                    {"message": "bad"},
+                    {
+                        "message": {
+                            "reasoning_content": ["bad"],
+                            "content": ["bad"],
+                            "tool_calls": "bad",
+                        }
+                    },
+                    {
+                        "message": {
+                            "reasoning_content": "reason",
+                            "content": [{"text": "ok"}, {"text": ["bad"]}],
+                            "tool_calls": [
+                                "bad",
+                                {"id": {"bad": "id"}, "function": "bad"},
+                                {"id": "call_bad", "function": {"name": ["bad"], "arguments": "{}"}},
+                                {"id": "call_123", "function": {"name": "lookup", "arguments": {"q": "x"}}},
+                            ],
+                        }
+                    },
+                ],
+            },
+            "deepseek:deepseek-chat",
+        )
+
+        output = response["output"]
+
+        self.assertEqual(output[0]["type"], "reasoning")
+        self.assertEqual(output[0]["step_by_step_summary"], "reason")
+        self.assertEqual(output[1]["content"][0]["text"], "ok")
+        self.assertEqual(output[2]["type"], "function_call")
+        self.assertEqual(output[2]["call_id"], "call_123")
+        self.assertEqual(output[2]["name"], "lookup")
+        self.assertEqual(json.loads(output[2]["arguments"]), {"q": "x"})
+        self.assertEqual(response["usage"]["total_tokens"], 0)
 
     def test_schema_refs_are_resolved_without_nested_placeholder_injection(self):
         raw_schema = {

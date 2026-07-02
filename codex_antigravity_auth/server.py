@@ -405,7 +405,7 @@ async def create_response(request: Request):
             codex_resp = transform_response(gemini_resp, model)
             return codex_resp
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Response translation failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
 
     # Handle standard SSE streaming response path
     async def sse_generator() -> AsyncGenerator[str, None]:
@@ -586,7 +586,7 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
     try:
         return transform_chat_response(res.json(), display_model)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"{provider['id']} response translation failed: {e}") from e
+        raise HTTPException(status_code=500, detail=f"{provider['id']} response translation failed: {safe_error_detail(e)}") from e
 
 
 async def openai_compatible_sse_generator(
