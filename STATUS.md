@@ -1,10 +1,10 @@
 # Current Integration Status — 2 July 2026
 
 ## Build & Test Health
-- **local pytest**: 157/157 passing, plus 106 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: 158/158 passing, plus 115 subtests, with `python3 -m pytest -q` ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
-- **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, verified console script importability, and verified installed malformed Google account fingerprint handling. Earlier install smoke also verified temp Codex config mode `600`, malformed-request rejection, function-name filtering, keyless-loopback BYOK gating, Google generation controls, and fragmented BYOK tool-name streaming ✅
+- **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, verified console script importability, and verified installed malformed Google account fingerprint plus non-ASCII BYOK API-key/header handling. Earlier install smoke also verified temp Codex config mode `600`, malformed-request rejection, function-name filtering, keyless-loopback BYOK gating, Google generation controls, and fragmented BYOK tool-name streaming ✅
 - **install command**: `uv tool install .` for normal use, `uv tool install --editable .` for development
 - **doctor/connectivity**: available through `codex-antigravity doctor`; not live-verified in this local hardening pass
 
@@ -31,6 +31,7 @@
 | BYOK/Codex URL validation before config writes | ✅ |
 | BYOK managed-header guardrails | ✅ |
 | BYOK API-key/header value sanitization before config writes | ✅ |
+| BYOK API-key/header values limited to HTTP header-safe ASCII | ✅ |
 | BYOK model-picker field sanitization before config writes | ✅ |
 | BYOK config preflight before streaming | ✅ |
 | BYOK streaming tool-call output waits for complete valid function names | ✅ |

@@ -146,6 +146,10 @@ def _contains_control_character(value: str) -> bool:
     return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
 
 
+def _contains_header_unsafe_character(value: str) -> bool:
+    return any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in value)
+
+
 def validate_provider_api_key(api_key: Any) -> str | None:
     if api_key is None:
         return None
@@ -154,8 +158,8 @@ def validate_provider_api_key(api_key: Any) -> str | None:
     value = api_key.strip()
     if not value:
         return ""
-    if _contains_control_character(value):
-        raise ValueError("BYOK provider API key must not contain control characters")
+    if _contains_header_unsafe_character(value):
+        raise ValueError("BYOK provider API key must not contain control characters or non-ASCII characters")
     return value
 
 
@@ -278,7 +282,7 @@ def _normalize_headers(value: Any) -> dict[str, str]:
             or not header_value
             or not HTTP_HEADER_NAME_RE.fullmatch(header_name)
             or header_name.lower() in RESERVED_PROVIDER_HEADER_NAMES
-            or _contains_control_character(header_value)
+            or _contains_header_unsafe_character(header_value)
         ):
             continue
         headers[header_name] = header_value
@@ -300,8 +304,8 @@ def validate_provider_headers(headers: dict[str, Any] | None) -> dict[str, str] 
             raise ValueError("BYOK provider header names must be valid HTTP header names")
         if header_name.lower() in RESERVED_PROVIDER_HEADER_NAMES:
             raise ValueError(f"BYOK provider headers must not override managed headers: {reserved}")
-        if not header_value or _contains_control_character(header_value):
-            raise ValueError("BYOK provider header values must be non-empty and must not contain control characters")
+        if not header_value or _contains_header_unsafe_character(header_value):
+            raise ValueError("BYOK provider header values must be non-empty and must not contain control characters or non-ASCII characters")
         normalized[header_name] = header_value
     return normalized or None
 

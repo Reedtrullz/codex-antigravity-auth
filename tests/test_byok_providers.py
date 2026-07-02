@@ -105,6 +105,7 @@ class TestBYOKProviders(unittest.TestCase):
             ({"X-Bad": "line\nbreak"}, "control characters"),
             ({"X-Bad": "bad\x00value"}, "control characters"),
             ({"X-Bad": "bad\x7fvalue"}, "control characters"),
+            ({"X-Bad": "caf\u00e9"}, "non-ASCII"),
         ]
         for headers, expected_error in invalid_headers:
             with self.subTest(headers=headers):
@@ -115,11 +116,16 @@ class TestBYOKProviders(unittest.TestCase):
                 mock_update.assert_not_called()
 
     def test_set_provider_config_rejects_malformed_api_key_before_write(self):
-        invalid_api_keys = ["secret\nbad", "secret\rbad", "secret\x00bad"]
-        for api_key in invalid_api_keys:
+        invalid_api_keys = [
+            ("secret\nbad", "control characters"),
+            ("secret\rbad", "control characters"),
+            ("secret\x00bad", "control characters"),
+            ("secret\u00e9bad", "non-ASCII"),
+        ]
+        for api_key, expected_error in invalid_api_keys:
             with self.subTest(api_key=repr(api_key)):
                 with patch("codex_antigravity_auth.byok.update_secure_json_file") as mock_update:
-                    with self.assertRaisesRegex(ValueError, "API key must not contain control characters"):
+                    with self.assertRaisesRegex(ValueError, expected_error):
                         set_provider_config("deepseek", api_key=api_key)
 
                 mock_update.assert_not_called()
@@ -237,6 +243,7 @@ class TestBYOKProviders(unittest.TestCase):
                         " X-Spaced ": " ok ",
                         "Bad Header": "nope",
                         "X-Bad": "line\nbreak",
+                        "X-Non-Ascii": "caf\u00e9",
                         "X-Nul": "bad\x00value",
                         "X-Del": "bad\x7fvalue",
                         "X-Empty": None,
@@ -290,8 +297,10 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertNotIn("apiKeyEnv", custom_two)
         self.assertEqual(custom_two["apiKeyEnvAliases"], ["GOOD_ENV"])
 
-        malformed_key = normalize_provider_entry({"apiKey": "secret\nbad"})
-        self.assertNotIn("apiKey", malformed_key)
+        for api_key in ("secret\nbad", "secret\u00e9bad"):
+            with self.subTest(api_key=repr(api_key)):
+                malformed_key = normalize_provider_entry({"apiKey": api_key})
+                self.assertNotIn("apiKey", malformed_key)
 
         reserved = normalize_provider_entry(
             {"headers": {"Authorization": "Bearer override", "Content-Type": "text/plain", "Host": "example.com", "X-Ok": "yes"}}
@@ -309,13 +318,18 @@ class TestBYOKProviders(unittest.TestCase):
 
         self.assertEqual(normalized["models"], ["abc"])
 
-    def test_validate_provider_api_key_strips_valid_keys_and_rejects_control_characters(self):
+    def test_validate_provider_api_key_strips_valid_keys_and_rejects_header_unsafe_characters(self):
         self.assertEqual(validate_provider_api_key(" secret "), "secret")
         self.assertEqual(validate_provider_api_key(""), "")
         self.assertIsNone(validate_provider_api_key(None))
-        for api_key in ("secret\nbad", "secret\rbad", "secret\x7fbad"):
+        for api_key, expected_error in (
+            ("secret\nbad", "control characters"),
+            ("secret\rbad", "control characters"),
+            ("secret\x7fbad", "control characters"),
+            ("secret\u00e9bad", "non-ASCII"),
+        ):
             with self.subTest(api_key=repr(api_key)):
-                with self.assertRaisesRegex(ValueError, "control characters"):
+                with self.assertRaisesRegex(ValueError, expected_error):
                     validate_provider_api_key(api_key)
 
     def test_provider_picker_field_validators_reject_control_characters(self):
@@ -789,12 +803,14 @@ class TestBYOKProviders(unittest.TestCase):
         )
 
         with patch("codex_antigravity_auth.byok.load_provider_config", return_value={"providers": {}}):
-            with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "bad\nkey"}, clear=True):
-                providers = all_provider_configs(include_env_enabled=True)
-                self.assertNotIn("deepseek", providers)
-                response = TestClient(app).get("/v1/models")
-                model_ids = [model["id"] for model in response.json()["data"]]
-                self.assertFalse([model_id for model_id in model_ids if model_id.startswith("deepseek:")])
+            for bad_env_key in ("bad\nkey", "bad\u00e9key"):
+                with self.subTest(bad_env_key=repr(bad_env_key)):
+                    with patch.dict("os.environ", {"DEEPSEEK_API_KEY": bad_env_key}, clear=True):
+                        providers = all_provider_configs(include_env_enabled=True)
+                        self.assertNotIn("deepseek", providers)
+                        response = TestClient(app).get("/v1/models")
+                        model_ids = [model["id"] for model in response.json()["data"]]
+                        self.assertFalse([model_id for model_id in model_ids if model_id.startswith("deepseek:")])
 
             with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "valid-key"}, clear=True):
                 providers = all_provider_configs(include_env_enabled=True)
@@ -1362,6 +1378,34 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("API key must not contain control characters", response.json()["detail"])
         self.assertNotIn("response.created", response.text)
+
+    def test_streaming_byok_non_ascii_header_material_fails_before_sse_starts(self):
+        for provider_update, expected_error in (
+            ({"apiKey": "secret\u00e9bad"}, "non-ASCII"),
+            ({"apiKey": "secret", "headers": {"X-Test": "caf\u00e9"}}, "non-ASCII"),
+        ):
+            with self.subTest(provider_update=provider_update):
+                provider = {
+                    "id": "deepseek",
+                    "displayName": "Custom",
+                    "kind": "openai_chat",
+                    "baseUrl": "http://localhost:8000/v1",
+                    "apiKey": "secret",
+                    "models": ["model"],
+                    **provider_update,
+                }
+
+                with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"deepseek": provider}):
+                    with patch("codex_antigravity_auth.server.httpx.AsyncClient") as mock_client:
+                        response = TestClient(app).post(
+                            "/v1/responses",
+                            json={"model": "deepseek:model", "input": "hello", "stream": True},
+                        )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(expected_error, response.json()["detail"])
+                self.assertNotIn("response.created", response.text)
+                mock_client.assert_not_called()
 
 
 if __name__ == "__main__":
