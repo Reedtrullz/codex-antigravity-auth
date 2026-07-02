@@ -193,8 +193,9 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     codex_input = codex_req.get("input")
     contents = []
     system_texts = []
-    if codex_req.get("instructions"):
-        system_texts.append(str(codex_req["instructions"]))
+    instructions = codex_req.get("instructions")
+    if isinstance(instructions, str) and instructions:
+        system_texts.append(instructions)
     function_names_by_call_id = {}
 
     def response_role_to_gemini(role: str) -> str:
@@ -574,8 +575,9 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
     function_names_by_call_id = {}
     pending_reasoning_content = None
 
-    if codex_req.get("instructions"):
-        system_texts.append(str(codex_req["instructions"]))
+    instructions = codex_req.get("instructions")
+    if isinstance(instructions, str) and instructions:
+        system_texts.append(instructions)
 
     def content_part_to_chat(part: dict) -> list[dict]:
         part_type = part.get("type")

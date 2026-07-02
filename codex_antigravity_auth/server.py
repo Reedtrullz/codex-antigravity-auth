@@ -255,6 +255,9 @@ def reject_unsupported_previous_response(codex_req: dict) -> None:
 def validate_response_request_body(value: object) -> dict:
     if not isinstance(value, dict):
         raise HTTPException(status_code=400, detail="Request JSON body must be an object")
+    instructions = value.get("instructions")
+    if instructions is not None and not isinstance(instructions, str):
+        raise HTTPException(status_code=400, detail="instructions must be a string")
     reasoning = value.get("reasoning")
     if reasoning is not None and not isinstance(reasoning, dict):
         raise HTTPException(status_code=400, detail="reasoning must be an object")

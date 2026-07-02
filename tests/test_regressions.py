@@ -625,6 +625,49 @@ class TestRegressionFixes(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertIn("JSON body must be an object", response.json()["detail"])
 
+    def test_responses_endpoint_rejects_malformed_instructions_before_routing(self):
+        client = TestClient(app)
+        with (
+            patch("codex_antigravity_auth.server.all_provider_configs") as mock_providers,
+            patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select_account,
+        ):
+            for model, instructions in (
+                ("gemini-3.5-flash-high", {"leaked": "system prompt"}),
+                ("deepseek:deepseek-chat", ["leaked system prompt"]),
+            ):
+                with self.subTest(model=model, instructions=instructions):
+                    response = client.post(
+                        "/v1/responses",
+                        json={"model": model, "input": "hello", "instructions": instructions},
+                    )
+
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn("instructions must be a string", response.json()["detail"])
+
+        mock_providers.assert_not_called()
+        mock_select_account.assert_not_called()
+
+    def test_transform_helpers_do_not_stringify_malformed_instructions(self):
+        google_payload = transform_request(
+            {
+                "model": "gemini-3.5-flash-high",
+                "input": "hello",
+                "instructions": {"leaked": "system prompt"},
+            }
+        )
+        system_text = google_payload["request"]["systemInstruction"]["parts"][0]["text"]
+        self.assertNotIn("leaked", system_text)
+
+        chat_payload = transform_request_to_chat(
+            {
+                "model": "deepseek:deepseek-chat",
+                "input": "hello",
+                "instructions": ["leaked system prompt"],
+            },
+            "deepseek-chat",
+        )
+        self.assertNotEqual(chat_payload["messages"][0]["role"], "system")
+
     def test_responses_endpoint_rejects_malformed_stream_and_model_fields(self):
         client = TestClient(app)
 
