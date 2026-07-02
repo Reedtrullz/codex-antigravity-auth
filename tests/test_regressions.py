@@ -19,7 +19,7 @@ from codex_antigravity_auth.oauth import (
     token_expires_in_seconds,
 )
 from codex_antigravity_auth.schema import clean_json_schema
-from codex_antigravity_auth.server import app, retry_after_seconds_from_response
+from codex_antigravity_auth.server import app, build_headers, retry_after_seconds_from_response
 from codex_antigravity_auth.transform import (
     transform_chat_response,
     transform_request,
@@ -846,6 +846,55 @@ class TestRegressionFixes(unittest.TestCase):
 
         printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
         self.assertIn("ONLINE (authentication required)", printed_text)
+
+    def test_google_headers_ignore_malformed_account_fingerprint_container(self):
+        for fingerprint in (["bad"], "bad", 123):
+            with self.subTest(fingerprint=fingerprint):
+                headers = build_headers({"accessToken": "tok", "fingerprint": fingerprint})
+
+                self.assertEqual(headers["Authorization"], "Bearer tok")
+                self.assertIsInstance(headers["User-Agent"], str)
+                self.assertIsInstance(headers["X-Goog-Api-Client"], str)
+                self.assertEqual(json.loads(headers["Client-Metadata"])["ideType"], "ANTIGRAVITY")
+
+    def test_google_headers_filter_malformed_account_fingerprint_values(self):
+        headers = build_headers(
+            {
+                "accessToken": "tok",
+                "fingerprint": {
+                    "userAgent": ["not", "a", "string"],
+                    "apiClient": "google-cloud-sdk\nbad",
+                    "deviceId": "device-1",
+                    "sessionToken": {"bad": "token"},
+                    "clientMetadata": {
+                        "ideType": "ANTIGRAVITY",
+                        "nonAscii": "caf\u00e9",
+                        "bad\nkey": "ignored",
+                        "badValue": "ignored\nvalue",
+                        "nested": {"ignored": True},
+                        "floatNaN": float("nan"),
+                        "count": 1,
+                        "enabled": True,
+                    },
+                },
+            }
+        )
+
+        metadata = json.loads(headers["Client-Metadata"])
+
+        self.assertIsInstance(headers["User-Agent"], str)
+        self.assertIn("Antigravity/2.0.0", headers["User-Agent"])
+        self.assertEqual(headers["X-Goog-Api-Client"], "google-cloud-sdk vscode_cloudshelleditor/0.1")
+        self.assertEqual(metadata["ideType"], "ANTIGRAVITY")
+        self.assertEqual(metadata["deviceId"], "device-1")
+        self.assertEqual(metadata["count"], 1)
+        self.assertIs(metadata["enabled"], True)
+        self.assertNotIn("bad\nkey", metadata)
+        self.assertNotIn("badValue", metadata)
+        self.assertNotIn("nonAscii", metadata)
+        self.assertNotIn("nested", metadata)
+        self.assertNotIn("floatNaN", metadata)
+        self.assertNotIn("sessionToken", metadata)
 
     def test_streaming_function_calls_use_stable_unique_output_items(self):
         fake_account = {

@@ -1,10 +1,10 @@
 # Current Integration Status — 2 July 2026
 
 ## Build & Test Health
-- **local pytest**: 155/155 passing, plus 103 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: 157/157 passing, plus 106 subtests, with `python3 -m pytest -q` ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
-- **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, wrote temp Codex config mode `600`, and verified installed malformed-request rejection, function-name filtering, keyless-loopback BYOK gating, Google generation controls, and fragmented BYOK tool-name streaming ✅
+- **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, verified console script importability, and verified installed malformed Google account fingerprint handling. Earlier install smoke also verified temp Codex config mode `600`, malformed-request rejection, function-name filtering, keyless-loopback BYOK gating, Google generation controls, and fragmented BYOK tool-name streaming ✅
 - **install command**: `uv tool install .` for normal use, `uv tool install --editable .` for development
 - **doctor/connectivity**: available through `codex-antigravity doctor`; not live-verified in this local hardening pass
 
@@ -41,6 +41,7 @@
 | BYOK structured-output `response_format` normalization before routing | ✅ |
 | Malformed provider/backend usage-counter normalization | ✅ |
 | Google `developer` messages preserved as system instructions | ✅ |
+| Malformed Google account fingerprint data ignored before routing | ✅ |
 | Codex config helper with private atomic symlink-safe backups | ✅ |
 | CLI setup/provider write failures reported without traceback | ✅ |
 | `/v1/responses` request-shape validation | ✅ |

@@ -172,6 +172,34 @@ async def list_models():
         ] + byok_models,
     }
 
+def safe_header_string(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in value):
+        return None
+    return value
+
+
+def safe_client_metadata(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+
+    metadata = {}
+    for key, raw_value in value.items():
+        safe_key = safe_header_string(key)
+        if safe_key is None:
+            continue
+        if isinstance(raw_value, str):
+            safe_value = safe_header_string(raw_value)
+            if safe_value is not None:
+                metadata[safe_key] = safe_value
+        elif raw_value is None or isinstance(raw_value, bool):
+            metadata[safe_key] = raw_value
+        elif isinstance(raw_value, (int, float)) and math.isfinite(raw_value):
+            metadata[safe_key] = raw_value
+    return metadata
+
+
 def build_headers(account: dict) -> dict:
     platform = get_platform()
     headers = {
@@ -182,18 +210,25 @@ def build_headers(account: dict) -> dict:
         "Authorization": f"Bearer {account['accessToken']}",
     }
     
-    # Inject fingerprint if available
+    # Fingerprints are locally persisted, so tolerate stale or malformed data.
     fp = account.get("fingerprint")
-    if fp:
-        headers["User-Agent"] = fp.get("userAgent", headers["User-Agent"])
-        headers["X-Goog-Api-Client"] = fp.get("apiClient", headers["X-Goog-Api-Client"])
+    if isinstance(fp, dict):
+        user_agent = safe_header_string(fp.get("userAgent"))
+        api_client = safe_header_string(fp.get("apiClient"))
+        if user_agent is not None:
+            headers["User-Agent"] = user_agent
+        if api_client is not None:
+            headers["X-Goog-Api-Client"] = api_client
         if fp.get("clientMetadata"):
-            metadata = dict(fp["clientMetadata"])
-            if fp.get("deviceId"):
-                metadata["deviceId"] = fp["deviceId"]
-            if fp.get("sessionToken"):
-                metadata["sessionToken"] = fp["sessionToken"]
-            headers["Client-Metadata"] = json.dumps(metadata)
+            metadata = safe_client_metadata(fp.get("clientMetadata"))
+            device_id = safe_header_string(fp.get("deviceId"))
+            session_token = safe_header_string(fp.get("sessionToken"))
+            if device_id is not None:
+                metadata["deviceId"] = device_id
+            if session_token is not None:
+                metadata["sessionToken"] = session_token
+            if metadata:
+                headers["Client-Metadata"] = json.dumps(metadata)
             
     return headers
 
