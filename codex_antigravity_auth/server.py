@@ -115,12 +115,22 @@ def retry_after_seconds_from_response(res: httpx.Response) -> float | None:
                 return parsed_seconds
     return None
 
+
+def provider_has_usable_key(provider: dict) -> bool:
+    try:
+        return bool(validate_provider_api_key(resolve_api_key(provider)))
+    except ValueError:
+        return False
+
+
 @app.get("/v1/models")
 async def list_models():
     """Return model catalog so Codex Desktop can populate its picker dropdown."""
     import time
     byok_models = []
     for provider_id, provider in all_provider_configs().items():
+        if not provider_has_usable_key(provider):
+            continue
         for model_entry in provider.get("models", []):
             if isinstance(model_entry, dict):
                 provider_model = model_entry.get("id")

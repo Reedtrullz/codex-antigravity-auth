@@ -63,7 +63,7 @@ codex-antigravity start
 ### 6. Verify
 ```bash
 codex-antigravity doctor        # diagnostics
-python3 -m pytest -q             # current local suite, 145 tests plus 99 subtests
+python3 -m pytest -q             # current local suite, 147 tests plus 99 subtests
 curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
 ```
 

@@ -176,7 +176,12 @@ class TestBYOKProviders(unittest.TestCase):
             "providers": {
                 "bad:provider": {"kind": "openai_chat", "baseUrl": "http://localhost:8000/v1", "models": ["m"]},
                 "bad/provider": {"kind": "openai_chat", "baseUrl": "http://localhost:8001/v1", "models": ["m"]},
-                "good-provider": {"kind": "openai_chat", "baseUrl": "http://localhost:8002/v1", "models": ["ok"]},
+                "good-provider": {
+                    "kind": "openai_chat",
+                    "baseUrl": "http://localhost:8002/v1",
+                    "apiKey": "secret",
+                    "models": ["ok"],
+                },
                 "custom-missing-base": {"kind": "openai_chat", "models": ["ghost"]},
                 "custom-invalid-base": {"kind": "openai_chat", "baseUrl": "localhost:8000/v1", "models": ["ghost"]},
             }
@@ -334,6 +339,7 @@ class TestBYOKProviders(unittest.TestCase):
             "providers": {
                 "deepseek": {
                     "displayName": "Deep\nSeek",
+                    "apiKey": "secret",
                     "models": ["ok", "bad\nmodel", {"id": "bad dict"}, {"id": "good", "displayName": "Good\nBad"}],
                 }
             }
@@ -680,6 +686,39 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         model_ids = [m["id"] for m in response.json()["data"]]
         self.assertIn("deepseek:deepseek-chat", model_ids)
+
+    def test_models_endpoint_hides_byok_models_without_usable_key(self):
+        provider = {
+            "id": "deepseek",
+            "displayName": "DeepSeek",
+            "kind": "openai_chat",
+            "baseUrl": "https://api.deepseek.com",
+            "models": ["deepseek-chat"],
+        }
+
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"deepseek": provider}):
+            response = TestClient(app).get("/v1/models")
+
+        self.assertEqual(response.status_code, 200)
+        model_ids = [m["id"] for m in response.json()["data"]]
+        self.assertNotIn("deepseek:deepseek-chat", model_ids)
+
+    def test_models_endpoint_includes_key_optional_byok_models(self):
+        provider = {
+            "id": "ollama",
+            "displayName": "Ollama",
+            "kind": "openai_chat",
+            "baseUrl": "http://localhost:11434/v1",
+            "apiKeyOptional": True,
+            "models": ["gpt-oss:20b"],
+        }
+
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"ollama": provider}):
+            response = TestClient(app).get("/v1/models")
+
+        self.assertEqual(response.status_code, 200)
+        model_ids = [m["id"] for m in response.json()["data"]]
+        self.assertIn("ollama:gpt-oss:20b", model_ids)
 
     def test_models_endpoint_includes_documented_builtin_aliases(self):
         with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):

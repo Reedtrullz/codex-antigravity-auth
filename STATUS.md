@@ -1,7 +1,7 @@
 # Current Integration Status — 2 July 2026
 
 ## Build & Test Health
-- **local pytest**: 145/145 passing, plus 99 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: 147/147 passing, plus 99 subtests, with `python3 -m pytest -q` ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, wrote temp Codex config mode `600`, and verified installed `/v1/models` env-key behavior ✅
@@ -27,7 +27,7 @@
 | BYOK provider presets | ✅ |
 | OpenAI-compatible provider routing | ✅ |
 | Encrypted API-key provider config | ✅ |
-| Env-enabled BYOK model exposure requires valid API-key values | ✅ |
+| BYOK model exposure requires valid or optional API-key paths | ✅ |
 | BYOK/Codex URL validation before config writes | ✅ |
 | BYOK managed-header guardrails | ✅ |
 | BYOK API-key/header value sanitization before config writes | ✅ |
