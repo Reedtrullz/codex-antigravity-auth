@@ -1063,7 +1063,7 @@ class TestBYOKProviders(unittest.TestCase):
         }
 
         chunks = [
-            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_frag","function":{"name":"look"}}]}}]}\n',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_frag","function":{"name":"look","arguments":""}}]}}]}\n',
             'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"up"}}]}}]}\n',
             'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}\n',
             "data: [DONE]\n",

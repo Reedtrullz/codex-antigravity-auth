@@ -753,7 +753,7 @@ async def openai_compatible_sse_generator(
                 arguments_delta = stream_string(fn.get("arguments"))
                 if name_delta:
                     state["name"] += name_delta
-                new_tool_item = idx not in tool_output_indices and bool(state["name"]) and arguments_delta is not None
+                new_tool_item = idx not in tool_output_indices and bool(state["name"]) and bool(arguments_delta)
                 if new_tool_item:
                     tool_output_indices[idx] = next_output_index
                     next_output_index += 1
