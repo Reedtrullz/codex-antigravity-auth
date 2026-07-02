@@ -460,6 +460,29 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertTrue(payload["response_format"]["json_schema"]["strict"])
         self.assertEqual(payload["response_format"]["json_schema"]["schema"]["required"], ["answer"])
 
+    def test_transform_text_format_json_schema_normalizes_malformed_metadata(self):
+        for name in (["bad"], "bad name!"):
+            with self.subTest(name=name):
+                payload = transform_request_to_chat(
+                    {
+                        "model": "deepseek:deepseek-chat",
+                        "input": "Return JSON.",
+                        "text": {
+                            "format": {
+                                "type": "json_schema",
+                                "name": name,
+                                "description": ["bad"],
+                                "strict": "yes",
+                                "schema": {"type": "object"},
+                            }
+                        },
+                    },
+                    "deepseek-chat",
+                )
+
+                json_schema = payload["response_format"]["json_schema"]
+                self.assertEqual(json_schema, {"name": "response", "schema": {"type": "object"}})
+
     def test_byok_json_schema_preserves_strict_schema_keywords(self):
         payload = transform_request_to_chat(
             {
@@ -499,6 +522,36 @@ class TestBYOKProviders(unittest.TestCase):
 
         self.assertEqual(payload["tool_choice"], {"type": "function", "function": {"name": "lookup"}})
 
+        required_payload = transform_request_to_chat(
+            {
+                "model": "deepseek:deepseek-chat",
+                "input": "Use a tool.",
+                "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object", "properties": {}}}],
+                "tool_choice": "required",
+            },
+            "deepseek-chat",
+        )
+        self.assertEqual(required_payload["tool_choice"], "required")
+
+    def test_malformed_tool_choice_is_not_forwarded_to_chat_provider(self):
+        for tool_choice in (
+            "sometimes",
+            ["bad"],
+            {"type": "function", "name": ["bad"]},
+            {"type": "function", "function": {"name": ["bad"]}},
+        ):
+            with self.subTest(tool_choice=tool_choice):
+                payload = transform_request_to_chat(
+                    {
+                        "model": "deepseek:deepseek-chat",
+                        "input": "Use the tool.",
+                        "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object", "properties": {}}}],
+                        "tool_choice": tool_choice,
+                    },
+                    "deepseek-chat",
+                )
+                self.assertNotIn("tool_choice", payload)
+
     def test_transform_text_format_unsupported_type_fails(self):
         with self.assertRaisesRegex(ValueError, "Unsupported Responses text.format type"):
             transform_request_to_chat(
@@ -506,6 +559,34 @@ class TestBYOKProviders(unittest.TestCase):
                     "model": "deepseek:deepseek-chat",
                     "input": "Return XML.",
                     "text": {"format": {"type": "xml"}},
+                },
+                "deepseek-chat",
+            )
+
+    def test_malformed_response_format_fails_before_byok_provider_call(self):
+        provider = {
+            "id": "deepseek",
+            "displayName": "DeepSeek",
+            "kind": "openai_chat",
+            "baseUrl": "https://api.deepseek.com",
+            "apiKey": "secret",
+            "models": ["deepseek-chat"],
+        }
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"deepseek": provider}):
+            response = TestClient(app).post(
+                "/v1/responses",
+                json={"model": "deepseek:deepseek-chat", "input": "hi", "response_format": ["bad"]},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("response_format must be an object", response.json()["detail"])
+
+        with self.assertRaisesRegex(ValueError, "Unsupported response_format type"):
+            transform_request_to_chat(
+                {
+                    "model": "deepseek:deepseek-chat",
+                    "input": "hi",
+                    "response_format": {"type": "xml"},
                 },
                 "deepseek-chat",
             )
@@ -565,6 +646,22 @@ class TestBYOKProviders(unittest.TestCase):
 
         self.assertEqual(payload["messages"][0]["role"], "assistant")
         self.assertEqual(payload["messages"][0]["reasoning_content"], "need a lookup")
+        self.assertEqual(payload["messages"][0]["tool_calls"][0]["function"]["name"], "lookup")
+
+    def test_malformed_replayed_reasoning_content_is_not_forwarded_to_chat_provider(self):
+        payload = transform_request_to_chat(
+            {
+                "model": "deepseek:deepseek-reasoner",
+                "input": [
+                    {"type": "reasoning", "step_by_step_summary": ["bad"]},
+                    {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": {"q": "x"}},
+                ],
+            },
+            "deepseek-reasoner",
+        )
+
+        self.assertEqual(payload["messages"][0]["role"], "assistant")
+        self.assertNotIn("reasoning_content", payload["messages"][0])
         self.assertEqual(payload["messages"][0]["tool_calls"][0]["function"]["name"], "lookup")
 
     def test_models_endpoint_includes_configured_byok_models(self):
@@ -769,6 +866,7 @@ class TestBYOKProviders(unittest.TestCase):
             'data: {"choices":[{"delta":{"tool_calls":["bad",{"index":0,"id":"call_1","function":"bad"}]}}]}\n',
             'data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"bad_2","function":"bad"}]}}]}\n',
             'data: {"choices":[{"delta":{"tool_calls":[{"index":"0","function":{"name":"lookup","arguments":"{}"}}]}}]}\n',
+            'data: {"usage":{"prompt_tokens":["bad"],"completion_tokens":"5","total_tokens":-1},"choices":[]}\n',
             'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
             "data: [DONE]\n",
         ]
@@ -831,6 +929,7 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual([e["arguments"] for e in arg_done], ["{}"])
         self.assertEqual(tool_done[0]["name"], "lookup")
         self.assertTrue(completed)
+        self.assertEqual(completed[0]["response"]["usage"], {"input_tokens": 0, "output_tokens": 5, "total_tokens": 0})
 
     def test_streaming_byok_missing_api_key_fails_before_sse_starts(self):
         provider = {

@@ -8,9 +8,12 @@ import math
 import base64
 import os
 import copy
+import re
 from typing import Any
 from .models import resolve_backend_model
 from .schema import clean_json_schema
+
+JSON_SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 ANTIGRAVITY_SYSTEM_INSTRUCTION = """You are Antigravity, a powerful agentic AI coding assistant designed by the Google DeepMind team working on Advanced Agentic Coding.
 You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.
@@ -50,12 +53,14 @@ def response_function_tool(tool: dict[str, Any]) -> dict[str, Any] | None:
 
 def chat_tool_choice(tool_choice: Any) -> Any:
     """Translate Responses forced function choices to Chat Completions shape."""
+    if isinstance(tool_choice, str):
+        return tool_choice if tool_choice in {"auto", "none", "required"} else None
     if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
-        return tool_choice
+        return None
     nested = tool_choice.get("function")
     name = tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
-    if not name:
-        return tool_choice
+    if not isinstance(name, str) or not name:
+        return None
     return {"type": "function", "function": {"name": name}}
 
 
@@ -109,6 +114,25 @@ def _stream_text(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _first_stream_text(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def token_count(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        count = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(count) or count < 0:
+        return 0
+    return int(count)
+
+
 def _created_at(value: Any) -> int:
     try:
         created_at = float(value or time.time())
@@ -117,6 +141,42 @@ def _created_at(value: Any) -> int:
     if not math.isfinite(created_at):
         return int(time.time())
     return int(created_at)
+
+
+def normalize_json_schema_name(value: Any) -> str:
+    if isinstance(value, str) and JSON_SCHEMA_NAME_PATTERN.fullmatch(value):
+        return value
+    return "response"
+
+
+def normalize_json_schema_descriptor(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("response_format json_schema requires a json_schema object")
+    schema = value.get("schema")
+    if not isinstance(schema, dict):
+        raise ValueError("response_format json_schema requires a schema object")
+    json_schema = {
+        "name": normalize_json_schema_name(value.get("name")),
+        "schema": copy.deepcopy(schema),
+    }
+    description = value.get("description")
+    if isinstance(description, str) and description:
+        json_schema["description"] = description
+    strict = value.get("strict")
+    if isinstance(strict, bool):
+        json_schema["strict"] = strict
+    return json_schema
+
+
+def normalize_chat_response_format(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("response_format must be an object")
+    format_type = value.get("type")
+    if format_type == "json_object":
+        return {"type": "json_object"}
+    if format_type == "json_schema":
+        return {"type": "json_schema", "json_schema": normalize_json_schema_descriptor(value.get("json_schema"))}
+    raise ValueError(f"Unsupported response_format type for BYOK provider: {format_type}")
 
 
 def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
@@ -265,7 +325,7 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
                         continue
                     parts.extend(content_part_to_gemini(part))
                         
-            if role == "system":
+            if role in ("system", "developer"):
                 system_texts.extend(p.get("text", "") for p in parts if p.get("text"))
             else:
                 append_content(role, parts)
@@ -486,9 +546,9 @@ def transform_response(gemini_resp: dict, model: str) -> dict:
     if not isinstance(usage, dict):
         usage = {}
     translated_usage = {
-        "input_tokens": usage.get("promptTokenCount", 0),
-        "output_tokens": usage.get("candidatesTokenCount", 0),
-        "total_tokens": usage.get("totalTokenCount", 0)
+        "input_tokens": token_count(usage.get("promptTokenCount", 0)),
+        "output_tokens": token_count(usage.get("candidatesTokenCount", 0)),
+        "total_tokens": token_count(usage.get("totalTokenCount", 0))
     }
     
     return {
@@ -555,19 +615,11 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
             return {"type": "json_object"}
         if format_type == "json_schema":
             if isinstance(text_format.get("json_schema"), dict):
-                return {"type": "json_schema", "json_schema": text_format["json_schema"]}
+                return {"type": "json_schema", "json_schema": normalize_json_schema_descriptor(text_format["json_schema"])}
             schema = text_format.get("schema")
             if not isinstance(schema, dict):
                 raise ValueError("Responses text.format json_schema requires a schema object")
-            json_schema = {
-                "name": text_format.get("name") or "response",
-                "schema": copy.deepcopy(schema),
-            }
-            if "strict" in text_format:
-                json_schema["strict"] = text_format["strict"]
-            if "description" in text_format:
-                json_schema["description"] = text_format["description"]
-            return {"type": "json_schema", "json_schema": json_schema}
+            return {"type": "json_schema", "json_schema": normalize_json_schema_descriptor(text_format)}
         raise ValueError(f"Unsupported Responses text.format type for BYOK provider: {format_type}")
 
     codex_input = codex_req.get("input")
@@ -579,10 +631,10 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 continue
             item_type = item.get("type")
             if item_type == "reasoning":
-                pending_reasoning_content = (
-                    item.get("reasoning_content")
-                    or item.get("step_by_step_summary")
-                    or item.get("summary")
+                pending_reasoning_content = _first_stream_text(
+                    item.get("reasoning_content"),
+                    item.get("step_by_step_summary"),
+                    item.get("summary"),
                 )
                 continue
             if item_type == "function_call":
@@ -674,7 +726,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
     if response_format:
         payload["response_format"] = response_format
     elif "response_format" in codex_req:
-        payload["response_format"] = codex_req["response_format"]
+        payload["response_format"] = normalize_chat_response_format(codex_req["response_format"])
 
     tools = codex_req.get("tools")
     if isinstance(tools, list) and tools:
@@ -687,7 +739,9 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
         if chat_tools:
             payload["tools"] = chat_tools
             if "tool_choice" in codex_req:
-                payload["tool_choice"] = chat_tool_choice(codex_req["tool_choice"])
+                tool_choice = chat_tool_choice(codex_req["tool_choice"])
+                if tool_choice is not None:
+                    payload["tool_choice"] = tool_choice
 
     return payload
 
@@ -761,9 +815,9 @@ def transform_chat_response(chat_resp: dict, model: str) -> dict:
     if not isinstance(usage, dict):
         usage = {}
     translated_usage = {
-        "input_tokens": usage.get("prompt_tokens", usage.get("input_tokens", 0)),
-        "output_tokens": usage.get("completion_tokens", usage.get("output_tokens", 0)),
-        "total_tokens": usage.get("total_tokens", 0),
+        "input_tokens": token_count(usage.get("prompt_tokens", usage.get("input_tokens", 0))),
+        "output_tokens": token_count(usage.get("completion_tokens", usage.get("output_tokens", 0))),
+        "total_tokens": token_count(usage.get("total_tokens", 0)),
     }
 
     return {

@@ -146,6 +146,22 @@ class TestRegressionFixes(unittest.TestCase):
         chat_functions = [tool["function"] for tool in byok["tools"]]
         self.assertEqual(chat_functions, [{"name": "lookup", "parameters": {}}, {"name": "nested_lookup", "parameters": {}}])
 
+    def test_google_request_transform_treats_developer_messages_as_system_instruction(self):
+        transformed = transform_request(
+            {
+                "model": "gemini-3.5-flash-high",
+                "input": [
+                    {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Use terse output."}]},
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hi"}]},
+                ],
+            }
+        )
+
+        request = transformed["request"]
+        system_text = request["systemInstruction"]["parts"][0]["text"]
+        self.assertIn("Use terse output.", system_text)
+        self.assertEqual(request["contents"], [{"role": "user", "parts": [{"text": "Hi"}]}])
+
     def test_json_object_tool_output_preserves_structured_google_response(self):
         req = {
             "model": "gemini-3.5-flash-high",
@@ -273,6 +289,23 @@ class TestRegressionFixes(unittest.TestCase):
         )
         self.assertEqual(retry_after_seconds_from_response(retry_info_response), 3.5)
 
+        for retry_after in ("NaN", "Infinity", "1e999"):
+            with self.subTest(retry_after=retry_after):
+                self.assertIsNone(retry_after_seconds_from_response(httpx.Response(429, headers={"Retry-After": retry_after})))
+
+        mixed_retry_info = httpx.Response(
+            429,
+            json={
+                "error": {
+                    "details": [
+                        {"retryDelay": {"seconds": "Infinity", "nanos": 0}},
+                        {"retryDelay": {"seconds": 4, "nanos": 500000000}},
+                    ]
+                }
+            },
+        )
+        self.assertEqual(retry_after_seconds_from_response(mixed_retry_info), 4.5)
+
     def test_backend_function_call_is_top_level_response_output(self):
         gemini_resp = {
             "candidates": [
@@ -303,7 +336,7 @@ class TestRegressionFixes(unittest.TestCase):
     def test_non_streaming_google_response_skips_malformed_backend_shapes(self):
         response = transform_response(
             {
-                "usageMetadata": "bad",
+                "usageMetadata": {"promptTokenCount": ["bad"], "candidatesTokenCount": "5", "totalTokenCount": -1},
                 "candidates": [
                     "bad",
                     {"content": "bad"},
@@ -336,13 +369,15 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(output[2]["call_id"], "call_123")
         self.assertEqual(output[2]["name"], "lookup")
         self.assertEqual(output[2]["arguments"], "{}")
+        self.assertEqual(response["usage"]["input_tokens"], 0)
+        self.assertEqual(response["usage"]["output_tokens"], 5)
         self.assertEqual(response["usage"]["total_tokens"], 0)
 
     def test_non_streaming_byok_response_skips_malformed_provider_shapes(self):
         response = transform_chat_response(
             {
                 "created": "NaN",
-                "usage": "bad",
+                "usage": {"prompt_tokens": ["bad"], "completion_tokens": "5", "total_tokens": -1},
                 "choices": [
                     "bad",
                     {"message": "bad"},
@@ -379,6 +414,8 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(output[2]["call_id"], "call_123")
         self.assertEqual(output[2]["name"], "lookup")
         self.assertEqual(json.loads(output[2]["arguments"]), {"q": "x"})
+        self.assertEqual(response["usage"]["input_tokens"], 0)
+        self.assertEqual(response["usage"]["output_tokens"], 5)
         self.assertEqual(response["usage"]["total_tokens"], 0)
 
     def test_schema_refs_are_resolved_without_nested_placeholder_injection(self):
@@ -612,6 +649,59 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(reasoning_response.status_code, 400)
         self.assertIn("reasoning must be an object", reasoning_response.json()["detail"])
 
+    def test_responses_endpoint_rejects_malformed_generation_options_before_routing(self):
+        client = TestClient(app)
+        invalid_requests = [
+            ({"temperature": "hot"}, "temperature must be a finite number"),
+            ({"temperature": 3}, "temperature must be between 0 and 2"),
+            ({"top_p": 2}, "top_p must be between 0 and 1"),
+            ({"max_output_tokens": True}, "max_output_tokens must be a positive integer"),
+            ({"max_output_tokens": 0}, "max_output_tokens must be a positive integer"),
+            ({"stop": []}, "stop must be a string or a non-empty list of strings"),
+            ({"stop": ["ok", "bad\nstop"]}, "stop values must be non-empty strings without control characters"),
+        ]
+
+        for extra, expected_detail in invalid_requests:
+            with self.subTest(extra=extra):
+                response = client.post(
+                    "/v1/responses",
+                    json={"model": "gemini-3.5-flash-high", "input": "hello", **extra},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(expected_detail, response.json()["detail"])
+
+        raw_invalid_requests = [
+            ('{"model":"gemini-3.5-flash-high","input":"hello","temperature":NaN}', "temperature must be a finite number"),
+            ('{"model":"gemini-3.5-flash-high","input":"hello","top_p":Infinity}', "top_p must be a finite number"),
+        ]
+        for body, expected_detail in raw_invalid_requests:
+            with self.subTest(body=body):
+                response = client.post(
+                    "/v1/responses",
+                    content=body,
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(expected_detail, response.json()["detail"])
+
+    def test_responses_endpoint_rejects_malformed_tool_choice_before_routing(self):
+        client = TestClient(app)
+        invalid_requests = [
+            ({"tool_choice": "sometimes"}, "tool_choice must be auto, none, required, or a function choice object"),
+            ({"tool_choice": ["bad"]}, "tool_choice must be auto, none, required, or a function choice object"),
+            ({"tool_choice": {"type": "function", "name": ["bad"]}}, "tool_choice function name must be a non-empty string"),
+            ({"tool_choice": {"type": "function", "function": {"name": "bad\nname"}}}, "tool_choice function name must be a non-empty string"),
+        ]
+
+        for extra, expected_detail in invalid_requests:
+            with self.subTest(extra=extra):
+                response = client.post(
+                    "/v1/responses",
+                    json={"model": "gemini-3.5-flash-high", "input": "hello", **extra},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(expected_detail, response.json()["detail"])
+
     def test_responses_endpoint_rejects_empty_provider_model_before_backend_routing(self):
         provider = {
             "id": "deepseek",
@@ -735,6 +825,7 @@ class TestRegressionFixes(unittest.TestCase):
 
         chunks = [
             'data: {"usageMetadata": "bad", "candidates": "bad"}\n',
+            'data: {"usageMetadata": {"promptTokenCount": ["bad"], "candidatesTokenCount": "5", "totalTokenCount": -1}, "candidates": []}\n',
             'data: {"candidates": ["bad", {"content": {"parts": ["bad", {"thought": true, "text": ["bad"]}, {"text": ["bad"]}, {"functionCall": {"id": {"bad": "id"}, "name": ["bad"], "args": {"ignored": true}}}, {"functionCall": {"id": "call_a", "name": "a", "args": ["not", "object"]}}, {"text": "ok"}]}}]}\n',
             "data: [DONE]\n",
         ]
@@ -802,6 +893,7 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual([e["arguments"] for e in arg_done], ["{}"])
         self.assertEqual("".join(deltas), "ok")
         self.assertTrue(completed)
+        self.assertEqual(completed[0]["response"]["usage"], {"input_tokens": 0, "output_tokens": 5, "total_tokens": 0})
 
 
 if __name__ == "__main__":

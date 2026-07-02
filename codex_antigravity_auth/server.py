@@ -18,7 +18,7 @@ from .byok import (
     validate_provider_api_key,
     validate_provider_headers,
 )
-from .transform import transform_chat_response, transform_request, transform_request_to_chat, transform_response
+from .transform import token_count, transform_chat_response, transform_request, transform_request_to_chat, transform_response
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform, is_loopback_host
 from .redaction import redact_secret_text
 
@@ -58,12 +58,23 @@ def safe_error_detail(value: object) -> str:
     return redact_secret_text(str(value))
 
 
+def finite_retry_after_seconds(value: object) -> float | None:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds):
+        return None
+    return max(0.0, seconds)
+
+
 def retry_after_seconds_from_response(res: httpx.Response) -> float | None:
     retry_after = res.headers.get("retry-after")
     if retry_after:
-        try:
-            return max(0.0, float(retry_after))
-        except ValueError:
+        parsed_seconds = finite_retry_after_seconds(retry_after)
+        if parsed_seconds is not None:
+            return parsed_seconds
+        else:
             try:
                 retry_at = email.utils.parsedate_to_datetime(retry_after)
                 if retry_at.tzinfo is None:
@@ -97,9 +108,11 @@ def retry_after_seconds_from_response(res: httpx.Response) -> float | None:
             seconds = retry_delay.get("seconds", 0)
             nanos = retry_delay.get("nanos", 0)
             try:
-                return float(seconds) + (float(nanos) / 1_000_000_000)
+                parsed_seconds = finite_retry_after_seconds(float(seconds) + (float(nanos) / 1_000_000_000))
             except (TypeError, ValueError):
                 continue
+            if parsed_seconds is not None:
+                return parsed_seconds
     return None
 
 @app.get("/v1/models")
@@ -235,7 +248,54 @@ def validate_response_request_body(value: object) -> dict:
     reasoning = value.get("reasoning")
     if reasoning is not None and not isinstance(reasoning, dict):
         raise HTTPException(status_code=400, detail="reasoning must be an object")
+    validate_response_generation_options(value)
+    validate_response_tool_choice(value)
     return value
+
+
+def validate_finite_number_option(value: object, field_name: str, *, minimum: float, maximum: float | None = None) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a finite number")
+    number = float(value)
+    if number < minimum or (maximum is not None and number > maximum):
+        if maximum is None:
+            raise HTTPException(status_code=400, detail=f"{field_name} must be greater than or equal to {minimum:g}")
+        raise HTTPException(status_code=400, detail=f"{field_name} must be between {minimum:g} and {maximum:g}")
+
+
+def validate_response_generation_options(codex_req: dict) -> None:
+    if "temperature" in codex_req:
+        validate_finite_number_option(codex_req["temperature"], "temperature", minimum=0.0, maximum=2.0)
+    if "top_p" in codex_req:
+        validate_finite_number_option(codex_req["top_p"], "top_p", minimum=0.0, maximum=1.0)
+    if "max_output_tokens" in codex_req:
+        value = codex_req["max_output_tokens"]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise HTTPException(status_code=400, detail="max_output_tokens must be a positive integer")
+    if "stop" in codex_req:
+        stop = codex_req["stop"]
+        values = [stop] if isinstance(stop, str) else stop
+        if not isinstance(values, list) or not values:
+            raise HTTPException(status_code=400, detail="stop must be a string or a non-empty list of strings")
+        for item in values:
+            if not isinstance(item, str) or not item or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in item):
+                raise HTTPException(status_code=400, detail="stop values must be non-empty strings without control characters")
+
+
+def validate_response_tool_choice(codex_req: dict) -> None:
+    if "tool_choice" not in codex_req:
+        return
+    tool_choice = codex_req.get("tool_choice")
+    if isinstance(tool_choice, str):
+        if tool_choice not in {"auto", "none", "required"}:
+            raise HTTPException(status_code=400, detail="tool_choice must be auto, none, required, or a function choice object")
+        return
+    if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
+        raise HTTPException(status_code=400, detail="tool_choice must be auto, none, required, or a function choice object")
+    nested = tool_choice.get("function")
+    name = tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
+    if not isinstance(name, str) or not name or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
+        raise HTTPException(status_code=400, detail="tool_choice function name must be a non-empty string without control characters")
 
 
 def response_stream_flag(codex_req: dict) -> bool:
@@ -454,9 +514,9 @@ async def create_response(request: Request):
             if isinstance(parsed.get("usageMetadata"), dict):
                 usage_meta = parsed["usageMetadata"]
                 usage = {
-                    "input_tokens": usage_meta.get("promptTokenCount", 0),
-                    "output_tokens": usage_meta.get("candidatesTokenCount", 0),
-                    "total_tokens": usage_meta.get("totalTokenCount", 0),
+                    "input_tokens": token_count(usage_meta.get("promptTokenCount", 0)),
+                    "output_tokens": token_count(usage_meta.get("candidatesTokenCount", 0)),
+                    "total_tokens": token_count(usage_meta.get("totalTokenCount", 0)),
                 }
             candidates = parsed.get("candidates", [])
             if not isinstance(candidates, list):
@@ -635,9 +695,9 @@ async def openai_compatible_sse_generator(
         if isinstance(parsed.get("usage"), dict):
             provider_usage = parsed["usage"]
             usage = {
-                "input_tokens": provider_usage.get("prompt_tokens", provider_usage.get("input_tokens", 0)),
-                "output_tokens": provider_usage.get("completion_tokens", provider_usage.get("output_tokens", 0)),
-                "total_tokens": provider_usage.get("total_tokens", 0),
+                "input_tokens": token_count(provider_usage.get("prompt_tokens", provider_usage.get("input_tokens", 0))),
+                "output_tokens": token_count(provider_usage.get("completion_tokens", provider_usage.get("output_tokens", 0))),
+                "total_tokens": token_count(provider_usage.get("total_tokens", 0)),
             }
         choices = parsed.get("choices", []) or []
         if not isinstance(choices, list):
