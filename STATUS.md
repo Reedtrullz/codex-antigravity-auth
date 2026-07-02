@@ -1,10 +1,10 @@
 # Current Integration Status — 2 July 2026
 
 ## Build & Test Health
-- **local pytest**: 153/153 passing, plus 103 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: 155/155 passing, plus 103 subtests, with `python3 -m pytest -q` ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
-- **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, wrote temp Codex config mode `600`, and verified installed malformed-request rejection, function-name filtering, Google generation controls, and fragmented BYOK tool-name streaming ✅
+- **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, wrote temp Codex config mode `600`, and verified installed malformed-request rejection, function-name filtering, keyless-loopback BYOK gating, Google generation controls, and fragmented BYOK tool-name streaming ✅
 - **install command**: `uv tool install .` for normal use, `uv tool install --editable .` for development
 - **doctor/connectivity**: available through `codex-antigravity doctor`; not live-verified in this local hardening pass
 
@@ -27,7 +27,7 @@
 | BYOK provider presets | ✅ |
 | OpenAI-compatible provider routing | ✅ |
 | Encrypted API-key provider config | ✅ |
-| BYOK model exposure requires valid or optional API-key paths | ✅ |
+| BYOK model exposure requires valid keys or loopback key-optional paths | ✅ |
 | BYOK/Codex URL validation before config writes | ✅ |
 | BYOK managed-header guardrails | ✅ |
 | BYOK API-key/header value sanitization before config writes | ✅ |

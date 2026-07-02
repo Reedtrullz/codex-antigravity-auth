@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .constants import is_loopback_host
 from .storage import load_secure_json_file, save_secure_json_file, update_secure_json_file
 
 
@@ -448,9 +449,19 @@ def resolve_api_key(provider: dict[str, Any]) -> str | None:
     for env_name in provider_api_key_env_names(provider):
         if os.environ.get(env_name):
             return os.environ[env_name]
-    if provider.get("apiKeyOptional"):
+    if provider_allows_keyless_local_use(provider):
         return provider.get("defaultApiKey", "not-needed")
     return None
+
+
+def provider_allows_keyless_local_use(provider: dict[str, Any]) -> bool:
+    if not provider.get("apiKeyOptional"):
+        return False
+    try:
+        base_url = validate_http_base_url(provider.get("baseUrl"), label="BYOK provider baseUrl")
+    except ValueError:
+        return False
+    return is_loopback_host(urlparse(base_url).hostname)
 
 
 def provider_api_key_env_names(provider: dict[str, Any]) -> list[str]:

@@ -11,6 +11,8 @@ from codex_antigravity_auth.byok import (
     normalize_provider_config,
     normalize_provider_entry,
     provider_api_key_env_names,
+    provider_allows_keyless_local_use,
+    resolve_api_key,
     set_provider_config,
     split_provider_model,
     validate_http_base_url,
@@ -719,6 +721,54 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         model_ids = [m["id"] for m in response.json()["data"]]
         self.assertIn("ollama:gpt-oss:20b", model_ids)
+
+    def test_key_optional_byok_models_require_loopback_base_url(self):
+        local_provider = {
+            "id": "ollama",
+            "displayName": "Ollama",
+            "kind": "openai_chat",
+            "baseUrl": "http://127.0.0.1:11434/v1",
+            "apiKeyOptional": True,
+            "defaultApiKey": "ollama",
+            "models": ["gpt-oss:20b"],
+        }
+        remote_provider = {
+            **local_provider,
+            "baseUrl": "https://ollama.com/v1",
+        }
+
+        self.assertTrue(provider_allows_keyless_local_use(local_provider))
+        self.assertEqual(resolve_api_key(local_provider), "ollama")
+        self.assertFalse(provider_allows_keyless_local_use(remote_provider))
+        self.assertIsNone(resolve_api_key(remote_provider))
+
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"ollama": remote_provider}):
+            response = TestClient(app).get("/v1/models")
+
+        self.assertEqual(response.status_code, 200)
+        model_ids = [m["id"] for m in response.json()["data"]]
+        self.assertNotIn("ollama:gpt-oss:20b", model_ids)
+
+    def test_remote_key_optional_byok_request_fails_before_provider_call_without_key(self):
+        provider = {
+            "id": "custom",
+            "displayName": "Custom",
+            "kind": "openai_chat",
+            "baseUrl": "https://example.com/v1",
+            "apiKeyOptional": True,
+            "models": ["model"],
+        }
+
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"custom": provider}):
+            with patch("codex_antigravity_auth.server.httpx.AsyncClient") as mock_client:
+                response = TestClient(app).post(
+                    "/v1/responses",
+                    json={"model": "custom:model", "input": "hello"},
+                )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("No API key configured", response.json()["detail"])
+        mock_client.assert_not_called()
 
     def test_models_endpoint_includes_documented_builtin_aliases(self):
         with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
