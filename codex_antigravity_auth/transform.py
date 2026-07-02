@@ -77,6 +77,17 @@ def valid_function_name(value: Any) -> bool:
     return isinstance(value, str) and bool(FUNCTION_NAME_PATTERN.fullmatch(value))
 
 
+def safe_project_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) > 0x7E for ch in value):
+        return None
+    return value
+
+
 def _function_call_args(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -425,9 +436,9 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
 
     # Wrap in official Antigravity client outer envelope
     project = (
-        project_id
-        or codex_req.get("project")
-        or os.environ.get("ANTIGRAVITY_PROJECT_ID")
+        safe_project_id(project_id)
+        or safe_project_id(codex_req.get("project"))
+        or safe_project_id(os.environ.get("ANTIGRAVITY_PROJECT_ID"))
         or "rising-fact-p41fc"
     )
     envelope = {

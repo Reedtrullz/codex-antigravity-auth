@@ -21,6 +21,7 @@ from codex_antigravity_auth.oauth import (
 from codex_antigravity_auth.schema import clean_json_schema
 from codex_antigravity_auth.server import app, build_headers, retry_after_seconds_from_response
 from codex_antigravity_auth.transform import (
+    safe_project_id,
     transform_chat_response,
     transform_request,
     transform_request_to_chat,
@@ -317,6 +318,74 @@ class TestRegressionFixes(unittest.TestCase):
             transformed = transform_request(req)
 
         self.assertEqual(transformed["project"], "env-project-123")
+
+    def test_transform_request_ignores_malformed_project_overrides(self):
+        self.assertEqual(safe_project_id(" account-project-123 "), "account-project-123")
+        for project_id in (["bad"], {"bad": True}, "bad project", "bad\nproject", "bad\u00e9project"):
+            with self.subTest(project_id=project_id):
+                self.assertIsNone(safe_project_id(project_id))
+
+        req = {
+            "model": "gemini-3.5-flash-high",
+            "input": "hello",
+            "project": ["bad"],
+        }
+
+        with patch.dict("os.environ", {"ANTIGRAVITY_PROJECT_ID": "env-project-123"}, clear=True):
+            transformed = transform_request(req, project_id=["bad"])
+
+        self.assertEqual(transformed["project"], "env-project-123")
+
+        with patch.dict("os.environ", {"ANTIGRAVITY_PROJECT_ID": "bad\nproject"}, clear=True):
+            transformed = transform_request(req, project_id={"bad": True})
+
+        self.assertEqual(transformed["project"], "rising-fact-p41fc")
+
+    def test_google_route_uses_safe_managed_project_when_account_project_is_malformed(self):
+        fake_account = {
+            "email": "test@gmail.com",
+            "accessToken": "dummy_access",
+            "projectId": ["bad"],
+            "managedProjectId": "managed-project-123",
+        }
+        requests = []
+
+        class MockClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            async def post(self, url, json=None, headers=None):
+                requests.append({"json": json, "headers": headers})
+                return httpx.Response(
+                    200,
+                    json={
+                        "candidates": [
+                            {
+                                "content": {
+                                    "role": "model",
+                                    "parts": [{"text": "ok"}],
+                                }
+                            }
+                        ],
+                        "usageMetadata": {},
+                    },
+                )
+
+        with patch("codex_antigravity_auth.server.account_manager.select_active_account", return_value=fake_account):
+            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                response = TestClient(app).post(
+                    "/v1/responses",
+                    json={"model": "gemini-3.5-flash-high", "input": "hello"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(requests[0]["json"]["project"], "managed-project-123")
 
     def test_forced_tool_choice_maps_to_google_tool_config(self):
         transformed = transform_request(

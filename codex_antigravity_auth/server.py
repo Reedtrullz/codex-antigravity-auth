@@ -20,6 +20,7 @@ from .byok import (
 )
 from .transform import (
     token_count,
+    safe_project_id,
     transform_chat_response,
     transform_request,
     transform_request_to_chat,
@@ -454,7 +455,9 @@ async def create_response(request: Request):
         )
         
     def build_google_request(selected_account: dict) -> tuple[dict, dict]:
-        project_id = selected_account.get("projectId") or selected_account.get("managedProjectId")
+        project_id = safe_project_id(selected_account.get("projectId")) or safe_project_id(
+            selected_account.get("managedProjectId")
+        )
         return transform_request(codex_req, project_id=project_id), build_headers(selected_account)
     
     # Route target action based on streaming mode
