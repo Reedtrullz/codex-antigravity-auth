@@ -396,7 +396,7 @@ def run_configure_codex(args) -> None:
             provider_name=args.provider_name,
             base_url=args.base_url,
         )
-    except ValueError as e:
+    except (OSError, RuntimeError, ValueError) as e:
         raise SystemExit(str(e)) from e
 
     if not args.write:
@@ -413,7 +413,7 @@ def run_configure_codex(args) -> None:
             provider_name=args.provider_name,
             base_url=args.base_url,
         )
-    except ValueError as e:
+    except (OSError, RuntimeError, ValueError) as e:
         raise SystemExit(str(e)) from e
     if changed:
         print(f"[+] Updated Codex config: {config_path}")
@@ -709,7 +709,7 @@ def main():
         elif args.provider_command == "set":
             try:
                 provider_id = validate_provider_id(args.provider)
-            except ValueError as e:
+            except (RuntimeError, ValueError) as e:
                 raise SystemExit(str(e)) from e
             try:
                 preset = provider_preset(provider_id)
@@ -734,7 +734,7 @@ def main():
                     display_name=args.display_name,
                     headers=headers or None,
                 )
-            except ValueError as e:
+            except (RuntimeError, ValueError) as e:
                 raise SystemExit(str(e)) from e
             print(f"[+] Configured BYOK provider {provider['id']} at {provider.get('baseUrl')}")
             if provider.get("models"):
@@ -743,7 +743,10 @@ def main():
                     model_id = model.get("id") if isinstance(model, dict) else model
                     print(f"    {provider['id']}:{model_id}")
         elif args.provider_command == "remove":
-            existed = remove_provider_config(args.provider)
+            try:
+                existed = remove_provider_config(args.provider)
+            except RuntimeError as e:
+                raise SystemExit(str(e)) from e
             if existed:
                 print(f"[+] Removed BYOK provider {args.provider}")
             else:

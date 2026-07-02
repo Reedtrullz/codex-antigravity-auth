@@ -1,7 +1,7 @@
 # Current Integration Status — 2 July 2026
 
 ## Build & Test Health
-- **local pytest**: 141/141 passing, plus 99 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: 145/145 passing, plus 99 subtests, with `python3 -m pytest -q` ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, wrote temp Codex config mode `600`, and verified installed `/v1/models` env-key behavior ✅
@@ -35,10 +35,12 @@
 | BYOK config preflight before streaming | ✅ |
 | Malformed function-tool metadata normalization before routing | ✅ |
 | Malformed generation option and `tool_choice` rejection before routing | ✅ |
+| Google/BYOK `top_p` and stop-sequence generation option forwarding | ✅ |
 | BYOK structured-output `response_format` normalization before routing | ✅ |
 | Malformed provider/backend usage-counter normalization | ✅ |
 | Google `developer` messages preserved as system instructions | ✅ |
 | Codex config helper with private atomic symlink-safe backups | ✅ |
+| CLI setup/provider write failures reported without traceback | ✅ |
 | `/v1/responses` request-shape validation | ✅ |
 | Central redaction for auth/provider errors | ✅ |
 | Finite Retry-After / Google RetryInfo cooldown hints | ✅ |

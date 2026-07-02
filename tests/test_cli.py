@@ -207,6 +207,20 @@ class TestConfigureCodex(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "model id"):
             run_configure_codex(args)
 
+    def test_run_configure_codex_reports_write_failure_without_traceback(self):
+        args = Namespace(
+            config="~/.codex/config.toml",
+            model="gemini-3.5-flash-high",
+            provider="antigravity",
+            provider_name="Google Antigravity",
+            base_url="http://localhost:51122/v1",
+            write=True,
+        )
+
+        with patch("codex_antigravity_auth.cli.write_codex_config", side_effect=RuntimeError("disk full")):
+            with self.assertRaisesRegex(SystemExit, "disk full"):
+                run_configure_codex(args)
+
     def test_merge_codex_config_preserves_unrelated_sections(self):
         existing = "\n".join(
             [
@@ -493,6 +507,32 @@ class TestProviderCli(unittest.TestCase):
                     main()
 
         mock_update.assert_not_called()
+
+    def test_provider_set_reports_storage_failure_without_traceback(self):
+        argv = [
+            "codex-antigravity",
+            "provider",
+            "set",
+            "deepseek",
+            "--model",
+            "deepseek-chat",
+        ]
+        with patch.object(sys, "argv", argv):
+            with patch("codex_antigravity_auth.cli.set_provider_config", side_effect=RuntimeError("provider store locked")):
+                with self.assertRaisesRegex(SystemExit, "provider store locked"):
+                    main()
+
+    def test_provider_remove_reports_storage_failure_without_traceback(self):
+        argv = [
+            "codex-antigravity",
+            "provider",
+            "remove",
+            "deepseek",
+        ]
+        with patch.object(sys, "argv", argv):
+            with patch("codex_antigravity_auth.cli.remove_provider_config", side_effect=RuntimeError("provider store locked")):
+                with self.assertRaisesRegex(SystemExit, "provider store locked"):
+                    main()
 
 if __name__ == "__main__":
     unittest.main()

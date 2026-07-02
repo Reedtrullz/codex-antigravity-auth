@@ -12,6 +12,28 @@ class TestTransform(unittest.TestCase):
         res = transform_request(req)
         self.assertEqual(res["model"], "gemini-3-flash-agent")
         self.assertEqual(res["request"]["contents"][0]["parts"][0]["text"], "What is the meaning of life?")
+
+    def test_google_generation_options_are_forwarded(self):
+        req = {
+            "model": "gemini-3.5-flash-high",
+            "input": "Write a short answer.",
+            "temperature": 0.2,
+            "top_p": 0.7,
+            "max_output_tokens": 123,
+            "stop": ["END", "STOP"],
+        }
+
+        res = transform_request(req)
+
+        self.assertEqual(
+            res["request"]["generationConfig"],
+            {
+                "temperature": 0.2,
+                "topP": 0.7,
+                "maxOutputTokens": 123,
+                "stopSequences": ["END", "STOP"],
+            },
+        )
         
     def test_structured_input_transformation(self):
         req = {

@@ -392,8 +392,13 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     generation_config = {}
     if "temperature" in codex_req:
         generation_config["temperature"] = codex_req["temperature"]
+    if "top_p" in codex_req:
+        generation_config["topP"] = codex_req["top_p"]
     if "max_output_tokens" in codex_req:
         generation_config["maxOutputTokens"] = codex_req["max_output_tokens"]
+    if "stop" in codex_req:
+        stop = codex_req["stop"]
+        generation_config["stopSequences"] = [stop] if isinstance(stop, str) else stop
     
     # Configure reasoning/thinking budget for models supporting thinking
     if "thinking" in backend_model.lower() or "claude" in backend_model.lower():
