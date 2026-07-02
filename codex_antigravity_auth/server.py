@@ -232,6 +232,9 @@ def reject_unsupported_previous_response(codex_req: dict) -> None:
 def validate_response_request_body(value: object) -> dict:
     if not isinstance(value, dict):
         raise HTTPException(status_code=400, detail="Request JSON body must be an object")
+    reasoning = value.get("reasoning")
+    if reasoning is not None and not isinstance(reasoning, dict):
+        raise HTTPException(status_code=400, detail="reasoning must be an object")
     return value
 
 
@@ -254,6 +257,11 @@ def response_model_id(codex_req: dict) -> str:
     if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in model):
         raise HTTPException(status_code=400, detail="model must not contain whitespace or control characters")
     return model
+
+
+def validate_provider_model_id(provider_id: str | None, provider_model: str) -> None:
+    if provider_id and not provider_model:
+        raise HTTPException(status_code=400, detail=f"Provider '{provider_id}' model id must be non-empty")
 
 
 def prepare_openai_compatible_request(
@@ -287,6 +295,7 @@ async def create_response(request: Request):
     codex_req["model"] = model
     stream = response_stream_flag(codex_req)
     provider_id, provider_model = split_provider_model(model)
+    validate_provider_model_id(provider_id, provider_model)
     if provider_id:
         providers = all_provider_configs()
         provider = providers.get(provider_id)

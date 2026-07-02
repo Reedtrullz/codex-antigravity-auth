@@ -42,7 +42,7 @@ Install the Codex provider block:
 codex-antigravity configure-codex --write
 ```
 
-The command validates the Codex model id, provider id, provider name, and gateway base URL before writing. It updates `~/.codex/config.toml` through a private atomic write and writes a timestamped private backup first when it changes an existing config. To inspect the TOML without writing it:
+The command validates the Codex model id, provider id, provider name, and gateway base URL before writing. It updates `~/.codex/config.toml` through a private atomic write, follows an existing symlink to update the real config target, and writes a timestamped private backup first when it changes an existing config. To inspect the TOML without writing it:
 
 ```bash
 codex-antigravity configure-codex

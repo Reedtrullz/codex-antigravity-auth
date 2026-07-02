@@ -348,7 +348,8 @@ def write_codex_config(
     model = validate_codex_model_id(model)
     provider_id = validate_codex_provider_id(provider_id)
     provider_name = validate_codex_provider_name(provider_name)
-    existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    target_path = config_path.resolve() if config_path.is_symlink() else config_path
+    existing = target_path.read_text(encoding="utf-8") if target_path.exists() else ""
     updated = merge_codex_config(
         existing,
         model=model,
@@ -359,12 +360,12 @@ def write_codex_config(
     if existing == updated:
         return False, None
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
     backup_path = None
-    if config_path.exists():
-        backup_path = _codex_config_backup_path(config_path)
+    if target_path.exists():
+        backup_path = _codex_config_backup_path(target_path)
         _write_private_text(backup_path, existing)
-    _write_private_text(config_path, updated)
+    _write_private_text(target_path, updated)
     return True, backup_path
 
 

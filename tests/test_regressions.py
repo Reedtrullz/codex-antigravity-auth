@@ -401,6 +401,31 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(model_response.status_code, 400)
         self.assertIn("model must not contain whitespace", model_response.json()["detail"])
 
+        reasoning_response = client.post(
+            "/v1/responses",
+            json={"model": "gemini-3.5-flash-high", "input": "hello", "reasoning": "high"},
+        )
+        self.assertEqual(reasoning_response.status_code, 400)
+        self.assertIn("reasoning must be an object", reasoning_response.json()["detail"])
+
+    def test_responses_endpoint_rejects_empty_provider_model_before_backend_routing(self):
+        provider = {
+            "id": "deepseek",
+            "displayName": "DeepSeek",
+            "kind": "openai_chat",
+            "baseUrl": "https://api.deepseek.com",
+            "apiKey": "secret",
+            "models": ["deepseek-chat"],
+        }
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"deepseek": provider}):
+            response = TestClient(app).post(
+                "/v1/responses",
+                json={"model": "deepseek:", "input": "hello"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("model id must be non-empty", response.json()["detail"])
+
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
     @patch("urllib.request.urlopen")

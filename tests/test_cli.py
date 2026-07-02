@@ -305,6 +305,29 @@ class TestConfigureCodex(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
             self.assertEqual(list(Path(tmp).glob(".config.toml.*.tmp")), [])
 
+    def test_write_codex_config_preserves_symlinked_config_path(self):
+        with TemporaryDirectory() as tmp:
+            target_path = Path(tmp) / "dotfiles" / "config.toml"
+            target_path.parent.mkdir()
+            target_path.write_text('model = "gpt-5"\n', encoding="utf-8")
+            config_path = Path(tmp) / "config.toml"
+            try:
+                os.symlink(target_path, config_path)
+            except (AttributeError, NotImplementedError, OSError) as e:
+                self.skipTest(f"symlink unavailable: {e}")
+
+            changed, backup_path = write_codex_config(config_path)
+
+            self.assertTrue(changed)
+            self.assertTrue(config_path.is_symlink())
+            self.assertEqual(config_path.resolve(), target_path.resolve())
+            self.assertIn('model_provider = "antigravity"', target_path.read_text(encoding="utf-8"))
+            self.assertEqual(stat.S_IMODE(target_path.stat().st_mode), 0o600)
+            self.assertIsNotNone(backup_path)
+            self.assertEqual(backup_path.parent.resolve(), target_path.parent.resolve())
+            self.assertEqual(backup_path.read_text(encoding="utf-8"), 'model = "gpt-5"\n')
+            self.assertEqual(stat.S_IMODE(backup_path.stat().st_mode), 0o600)
+
 
 class TestProviderCli(unittest.TestCase):
     def test_provider_key_status_validates_keys_without_rendering_secrets(self):
