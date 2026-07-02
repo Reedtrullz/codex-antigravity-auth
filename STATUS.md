@@ -1,9 +1,10 @@
 # Current Integration Status — 2 July 2026
 
 ## Build & Test Health
-- **local pytest**: 132/132 passing, plus 77 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: 134/134 passing, plus 77 subtests, with `python3 -m pytest -q` ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
+- **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, wrote temp Codex config mode `600`, and verified installed `/v1/models` env-key behavior ✅
 - **install command**: `uv tool install .` for normal use, `uv tool install --editable .` for development
 - **doctor/connectivity**: available through `codex-antigravity doctor`; not live-verified in this local hardening pass
 
@@ -26,11 +27,13 @@
 | BYOK provider presets | ✅ |
 | OpenAI-compatible provider routing | ✅ |
 | Encrypted API-key provider config | ✅ |
+| Env-enabled BYOK model exposure requires valid API-key values | ✅ |
 | BYOK/Codex URL validation before config writes | ✅ |
 | BYOK managed-header guardrails | ✅ |
 | BYOK API-key/header value sanitization before config writes | ✅ |
 | BYOK model-picker field sanitization before config writes | ✅ |
 | BYOK config preflight before streaming | ✅ |
+| Malformed function-tool metadata normalization before routing | ✅ |
 | Codex config helper with private atomic symlink-safe backups | ✅ |
 | `/v1/responses` request-shape validation | ✅ |
 | Central redaction for auth/provider errors | ✅ |

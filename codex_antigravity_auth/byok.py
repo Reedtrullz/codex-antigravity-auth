@@ -445,11 +445,7 @@ def resolve_api_key(provider: dict[str, Any]) -> str | None:
     api_key = _non_empty_string(provider.get("apiKey"))
     if api_key:
         return api_key
-    env_names = []
-    if provider.get("apiKeyEnv"):
-        env_names.append(provider["apiKeyEnv"])
-    env_names.extend(provider.get("apiKeyEnvAliases", []))
-    for env_name in env_names:
+    for env_name in provider_api_key_env_names(provider):
         if os.environ.get(env_name):
             return os.environ[env_name]
     if provider.get("apiKeyOptional"):
@@ -457,12 +453,38 @@ def resolve_api_key(provider: dict[str, Any]) -> str | None:
     return None
 
 
-def has_provider_api_key_env(provider: dict[str, Any]) -> bool:
+def provider_api_key_env_names(provider: dict[str, Any]) -> list[str]:
     env_names = []
     if provider.get("apiKeyEnv"):
         env_names.append(provider["apiKeyEnv"])
-    env_names.extend(provider.get("apiKeyEnvAliases", []))
-    return any(os.environ.get(env_name) for env_name in env_names)
+    aliases = provider.get("apiKeyEnvAliases", [])
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    if isinstance(aliases, list):
+        env_names.extend(aliases)
+
+    normalized = []
+    for env_name in env_names:
+        try:
+            valid_env_name = validate_provider_api_key_env(env_name)
+        except ValueError:
+            continue
+        if valid_env_name:
+            normalized.append(valid_env_name)
+    return normalized
+
+
+def has_provider_api_key_env(provider: dict[str, Any]) -> bool:
+    for env_name in provider_api_key_env_names(provider):
+        api_key = os.environ.get(env_name)
+        if not api_key:
+            continue
+        try:
+            if validate_provider_api_key(api_key):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def merged_provider_config(provider_id: str, stored: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -21,6 +21,18 @@ You are pair programming with a USER to solve their coding task. The task may re
 """
 
 
+def normalize_response_function_tool(fn: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(fn.get("name"), str) or not fn.get("name"):
+        return None
+    if "description" in fn and not isinstance(fn["description"], str):
+        fn.pop("description")
+    if "parameters" in fn and not isinstance(fn["parameters"], dict):
+        fn["parameters"] = {}
+    if "strict" in fn and not isinstance(fn["strict"], bool):
+        fn.pop("strict")
+    return fn
+
+
 def response_function_tool(tool: dict[str, Any]) -> dict[str, Any] | None:
     """Return the function payload from flat Responses or nested Chat-style tools."""
     if not isinstance(tool, dict) or tool.get("type") != "function":
@@ -28,16 +40,12 @@ def response_function_tool(tool: dict[str, Any]) -> dict[str, Any] | None:
     nested = tool.get("function")
     if isinstance(nested, dict):
         fn = copy.deepcopy(nested)
-        if not isinstance(fn.get("name"), str) or not fn.get("name"):
-            return None
-        return fn
+        return normalize_response_function_tool(fn)
     fn: dict[str, Any] = {}
     for key in ("name", "description", "parameters", "strict"):
         if key in tool:
             fn[key] = copy.deepcopy(tool[key])
-    if not isinstance(fn.get("name"), str) or not fn.get("name"):
-        return None
-    return fn
+    return normalize_response_function_tool(fn)
 
 
 def chat_tool_choice(tool_choice: Any) -> Any:

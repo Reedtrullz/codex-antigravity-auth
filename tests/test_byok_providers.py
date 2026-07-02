@@ -10,6 +10,7 @@ from codex_antigravity_auth.byok import (
     all_provider_configs,
     normalize_provider_config,
     normalize_provider_entry,
+    provider_api_key_env_names,
     set_provider_config,
     split_provider_model,
     validate_http_base_url,
@@ -594,6 +595,27 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertIn("gemini-3.1-pro-high", model_ids)
         self.assertIn("claude-3.5-sonnet", model_ids)
         self.assertIn("claude-opus-4-6", model_ids)
+
+    def test_env_enabled_providers_require_valid_env_key_before_advertising(self):
+        self.assertEqual(
+            provider_api_key_env_names({"apiKeyEnv": "DEEPSEEK_API_KEY", "apiKeyEnvAliases": ["BAD-ENV", "ALT_KEY"]}),
+            ["DEEPSEEK_API_KEY", "ALT_KEY"],
+        )
+
+        with patch("codex_antigravity_auth.byok.load_provider_config", return_value={"providers": {}}):
+            with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "bad\nkey"}, clear=True):
+                providers = all_provider_configs(include_env_enabled=True)
+                self.assertNotIn("deepseek", providers)
+                response = TestClient(app).get("/v1/models")
+                model_ids = [model["id"] for model in response.json()["data"]]
+                self.assertFalse([model_id for model_id in model_ids if model_id.startswith("deepseek:")])
+
+            with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "valid-key"}, clear=True):
+                providers = all_provider_configs(include_env_enabled=True)
+                self.assertIn("deepseek", providers)
+                response = TestClient(app).get("/v1/models")
+                model_ids = [model["id"] for model in response.json()["data"]]
+                self.assertIn("deepseek:deepseek-chat", model_ids)
 
     def test_non_streaming_byok_route_posts_chat_completion(self):
         provider = {

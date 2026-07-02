@@ -108,6 +108,44 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(byok["messages"][1]["role"], "tool")
         self.assertEqual(byok["messages"][1]["tool_call_id"], "call_ok")
 
+    def test_request_transforms_normalize_malformed_tool_metadata(self):
+        request = {
+            "model": "gemini-3.5-flash-high",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "description": ["bad"],
+                    "parameters": ["bad"],
+                    "strict": "yes",
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "nested_lookup",
+                        "description": {"bad": True},
+                        "parameters": ["bad"],
+                        "strict": "yes",
+                    },
+                },
+            ],
+        }
+
+        google = transform_request(request)
+        declarations = google["request"]["tools"][0]["functionDeclarations"]
+        self.assertEqual(
+            declarations,
+            [
+                {"name": "lookup", "description": "", "parameters": {}},
+                {"name": "nested_lookup", "description": "", "parameters": {}},
+            ],
+        )
+
+        byok = transform_request_to_chat({**request, "model": "deepseek:deepseek-chat"}, "deepseek-chat")
+        chat_functions = [tool["function"] for tool in byok["tools"]]
+        self.assertEqual(chat_functions, [{"name": "lookup", "parameters": {}}, {"name": "nested_lookup", "parameters": {}}])
+
     def test_json_object_tool_output_preserves_structured_google_response(self):
         req = {
             "model": "gemini-3.5-flash-high",
