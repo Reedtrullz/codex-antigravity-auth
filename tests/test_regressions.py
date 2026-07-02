@@ -371,6 +371,36 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("previous_response_id is not supported", response.json()["detail"])
 
+    def test_responses_endpoint_rejects_non_object_json_before_routing(self):
+        client = TestClient(app)
+        for body in ([], "hello", None):
+            with self.subTest(body=body):
+                response = client.post(
+                    "/v1/responses",
+                    content=json.dumps(body),
+                    headers={"Content-Type": "application/json"},
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("JSON body must be an object", response.json()["detail"])
+
+    def test_responses_endpoint_rejects_malformed_stream_and_model_fields(self):
+        client = TestClient(app)
+
+        stream_response = client.post(
+            "/v1/responses",
+            json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": "false"},
+        )
+        self.assertEqual(stream_response.status_code, 400)
+        self.assertIn("stream must be a boolean", stream_response.json()["detail"])
+
+        model_response = client.post(
+            "/v1/responses",
+            json={"model": "gemini bad", "input": "hello"},
+        )
+        self.assertEqual(model_response.status_code, 400)
+        self.assertIn("model must not contain whitespace", model_response.json()["detail"])
+
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
     @patch("urllib.request.urlopen")

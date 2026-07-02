@@ -278,6 +278,33 @@ class TestConfigureCodex(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(first_backup.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(second_backup.stat().st_mode), 0o600)
 
+    def test_write_codex_config_keeps_original_when_replace_fails(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('model = "gpt-5"\n', encoding="utf-8")
+            os.chmod(config_path, 0o644)
+            original_replace = os.replace
+            observed_config_temp_modes = []
+
+            def fail_config_replace(src, dst):
+                if Path(dst) == config_path:
+                    observed_config_temp_modes.append(stat.S_IMODE(os.stat(src).st_mode))
+                    raise RuntimeError("replace failed")
+                return original_replace(src, dst)
+
+            with patch("codex_antigravity_auth.cli.os.replace", side_effect=fail_config_replace):
+                with self.assertRaises(RuntimeError):
+                    write_codex_config(config_path)
+
+            self.assertEqual(config_path.read_text(encoding="utf-8"), 'model = "gpt-5"\n')
+            self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o644)
+            self.assertEqual(observed_config_temp_modes, [0o600])
+            backups = list(Path(tmp).glob("config.toml.bak-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_text(encoding="utf-8"), 'model = "gpt-5"\n')
+            self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
+            self.assertEqual(list(Path(tmp).glob(".config.toml.*.tmp")), [])
+
 
 class TestProviderCli(unittest.TestCase):
     def test_provider_key_status_validates_keys_without_rendering_secrets(self):

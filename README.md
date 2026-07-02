@@ -42,7 +42,7 @@ Install the Codex provider block:
 codex-antigravity configure-codex --write
 ```
 
-The command updates `~/.codex/config.toml` and writes a timestamped backup first when it changes an existing config. To inspect the TOML without writing it:
+The command validates the Codex model id, provider id, provider name, and gateway base URL before writing. It updates `~/.codex/config.toml` through a private atomic write and writes a timestamped private backup first when it changes an existing config. To inspect the TOML without writing it:
 
 ```bash
 codex-antigravity configure-codex
@@ -93,8 +93,7 @@ Stored provider keys are encrypted in `~/.codex/antigravity-providers.json`. You
 Provider ids reserve model-name separators and may only contain letters, numbers, underscores, and hyphens; model ids themselves may still contain `/` or `:`, but not whitespace or control characters.
 Custom provider and Codex gateway base URLs must be absolute `http` or `https` URLs without embedded credentials, whitespace/control characters, query strings, fragments, invalid ports, or malformed bracketed hosts. Non-preset custom BYOK providers must provide a base URL before models are exposed. Stored BYOK API keys, model-picker display names, and extra BYOK provider header values must not contain control characters; provider API-key env var names must contain only letters, numbers, and underscores and must not start with a number. Extra headers may not override gateway-managed auth, content, host, or transport headers. Invalid BYOK provider URLs, API keys, env vars, model ids, display names, and headers are rejected before config writes; invalid BYOK provider URLs, timeouts, headers, API keys, and missing API keys are also rejected before streaming starts so Codex gets a normal HTTP error instead of a partial SSE response. BYOK structured tool outputs are serialized to JSON text before being sent as Chat Completions tool messages.
 
-The `configure-codex --write` helper writes this equivalent TOML into `~/.codex/config.toml`:
-It validates the Codex model id, provider id, provider name, and gateway base URL before writing.
+The `configure-codex --write` helper writes this equivalent TOML into `~/.codex/config.toml` after validation:
 
 ```toml
 model = "gemini-3.5-flash-high"

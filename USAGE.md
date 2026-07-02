@@ -14,7 +14,7 @@ codex-antigravity start
 codex-antigravity doctor
 ```
 
-`configure-codex` validates the Codex model id, provider id, provider name, and gateway base URL before writing.
+`configure-codex` validates the Codex model id, provider id, provider name, and gateway base URL before writing. `--write` uses private atomic writes and creates a private timestamped backup before changing an existing Codex config.
 
 For BYOK-only use, replace `codex-antigravity login` with a provider setup command such as:
 

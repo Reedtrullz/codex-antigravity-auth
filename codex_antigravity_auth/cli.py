@@ -8,6 +8,7 @@ import socketserver
 import webbrowser
 import time
 import json
+import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from .byok import (
@@ -30,6 +31,7 @@ from .oauth import (
 )
 from .storage import load_accounts, save_accounts
 from .constants import is_loopback_host, resolve_oauth_credentials
+from .redaction import redact_secret_text
 
 DEFAULT_CODEX_PROVIDER_ID = "antigravity"
 DEFAULT_CODEX_PROVIDER_NAME = "Google Antigravity"
@@ -297,8 +299,31 @@ def merge_codex_config(
 
 
 def _write_private_text(path: Path, text: str) -> None:
-    path.write_text(text, encoding="utf-8")
-    os.chmod(path, 0o600)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            delete=False,
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        ) as f:
+            temp_path = Path(f.name)
+            os.chmod(temp_path, 0o600)
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+        os.chmod(path, 0o600)
+    except Exception:
+        if temp_path and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+        raise
 
 
 def _codex_config_backup_path(config_path: Path) -> Path:
@@ -455,7 +480,7 @@ def run_local_oauth_flow():
             user_info = json.loads(resp.read().decode("utf-8"))
             email = user_info.get("email")
     except Exception as e:
-        print(f"[!] Could not retrieve Google account email: {e}")
+        print(f"[!] Could not retrieve Google account email: {redact_secret_text(str(e))}")
         sys.exit(1)
     if not email:
         print("[!] Google account email was missing from userinfo response.")
@@ -519,7 +544,7 @@ def run_doctor():
         else:
             print("[WARN] Token Storage Encryption: PARTIAL (Using fallback key; keyring password lookup returned empty)")
     except Exception as e:
-        print(f"[WARN] Token Storage Encryption: PARTIAL (Fallback active. Error: {e})")
+        print(f"[WARN] Token Storage Encryption: PARTIAL (Fallback active. Error: {redact_secret_text(str(e))})")
         
     # Check network connectivity to Google Antigravity backend
     try:
@@ -544,7 +569,7 @@ def run_doctor():
                 else:
                     print(f"[FAIL] Google Antigravity Connectivity: REACHABLE but status {resp.status}")
     except Exception as e:
-        print(f"[FAIL] Google Antigravity Connectivity: OFFLINE / TIMEOUT ({e})")
+        print(f"[FAIL] Google Antigravity Connectivity: OFFLINE / TIMEOUT ({redact_secret_text(str(e))})")
         
     # Check accounts
     data = load_accounts()
@@ -572,7 +597,7 @@ def run_doctor():
         else:
             print("[INFO] BYOK Providers: none configured.")
     except Exception as e:
-        print(f"[WARN] BYOK Providers: could not load provider config ({e})")
+        print(f"[WARN] BYOK Providers: could not load provider config ({redact_secret_text(str(e))})")
         
     # Check Codex config
     codex_config = Path(os.path.expanduser("~/.codex/config.toml"))

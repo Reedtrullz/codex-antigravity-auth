@@ -1,7 +1,7 @@
 # Current Integration Status — 2 July 2026
 
 ## Build & Test Health
-- **local pytest**: 120/120 passing, plus 69 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: 123/123 passing, plus 72 subtests, with `python3 -m pytest -q` ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **install command**: `uv tool install .` for normal use, `uv tool install --editable .` for development
@@ -31,7 +31,8 @@
 | BYOK API-key/header value sanitization before config writes | ✅ |
 | BYOK model-picker field sanitization before config writes | ✅ |
 | BYOK config preflight before streaming | ✅ |
-| Codex config helper | ✅ |
+| Codex config helper with private atomic backups | ✅ |
+| `/v1/responses` request-shape validation | ✅ |
 | Central redaction for auth/provider errors | ✅ |
 | Retry-After / Google RetryInfo cooldown hints | ✅ |
 | Fail-closed malformed-store write/update guardrails | ✅ |

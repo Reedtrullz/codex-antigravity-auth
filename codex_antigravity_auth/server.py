@@ -229,6 +229,33 @@ def reject_unsupported_previous_response(codex_req: dict) -> None:
         )
 
 
+def validate_response_request_body(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail="Request JSON body must be an object")
+    return value
+
+
+def response_stream_flag(codex_req: dict) -> bool:
+    if "stream" not in codex_req:
+        return False
+    stream = codex_req.get("stream")
+    if not isinstance(stream, bool):
+        raise HTTPException(status_code=400, detail="stream must be a boolean")
+    return stream
+
+
+def response_model_id(codex_req: dict) -> str:
+    raw_model = codex_req.get("model", "gemini-3.5-flash-high")
+    if not isinstance(raw_model, str):
+        raise HTTPException(status_code=400, detail="model must be a string")
+    model = raw_model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="model must be non-empty")
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in model):
+        raise HTTPException(status_code=400, detail="model must not contain whitespace or control characters")
+    return model
+
+
 def prepare_openai_compatible_request(
     codex_req: dict,
     provider: dict,
@@ -252,11 +279,13 @@ async def create_response(request: Request):
         codex_req = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
+    codex_req = validate_response_request_body(codex_req)
 
     reject_unsupported_previous_response(codex_req)
         
-    model = codex_req.get("model", "gemini-3.5-flash-high")
-    stream = codex_req.get("stream", False)
+    model = response_model_id(codex_req)
+    codex_req["model"] = model
+    stream = response_stream_flag(codex_req)
     provider_id, provider_model = split_provider_model(model)
     if provider_id:
         providers = all_provider_configs()
