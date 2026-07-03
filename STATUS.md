@@ -5,8 +5,9 @@
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, verified console script importability, and verified installed malformed Google project override/account fingerprint, non-ASCII BYOK API-key/header handling, and unknown BYOK provider-prefix rejection. Earlier install smoke also verified temp Codex config mode `600`, malformed-request rejection, function-name filtering, keyless-loopback BYOK gating, Google generation controls, and fragmented BYOK tool-name streaming ✅
+- **live backend smoke**: live Google OAuth/runtime smoke passed for `claude-3.5-sonnet`; live BYOK smoke passed for `deepseek:deepseek-v4-flash` through transient `DEEPSEEK_API_KEY` env only, with `/v1/models` exposure plus exact non-streaming and streaming `/v1/responses` sentinels ✅
 - **install command**: `uv tool install .` for normal use, `uv tool install --editable .` for development
-- **doctor/connectivity**: available through `codex-antigravity doctor`; not live-verified in this local hardening pass
+- **doctor/connectivity**: redacted `codex-antigravity doctor` passed after live Google OAuth smoke
 
 ## Core Features
 | Feature | Status |
@@ -56,15 +57,15 @@
 | Malformed OAuth `expires_in` fallback handling | ✅ |
 
 ## Known Limitations
-- Live Google Antigravity and BYOK provider smoke tests require configured credentials/API keys.
+- Live Google Antigravity and DeepSeek V4 Flash BYOK smokes have passed with configured credentials/API keys; other BYOK providers still need their own live-key smoke.
 - `previous_response_id` is rejected by design in this stateless gateway; replay the full conversation, including tool calls and outputs, in `input`.
 - `/v1/responses/compact` is not implemented.
-- CI proves local unit/compile health only; it does not prove live backend availability.
+- CI proves local unit/compile health only; live backend availability is covered only by the credentialed smoke runs noted above.
 
 ## Last Documented Release
 [v0.1.0-alpha](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v0.1.0-alpha)
 
 ## Next Priorities
 1. Add `/v1/responses/compact` support
-2. Expand live backend smoke coverage for BYOK providers
+2. Expand live backend smoke coverage beyond DeepSeek to additional BYOK providers
 3. Add a credentialed smoke-test profile for Google and configured BYOK providers

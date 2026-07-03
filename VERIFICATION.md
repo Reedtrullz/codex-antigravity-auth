@@ -75,6 +75,19 @@ curl -s -X POST http://localhost:51122/v1/responses \
 # Expect: 200 with output containing text
 ```
 
+### Optional BYOK Smoke
+With a provider API key exported only in the shell environment:
+
+```bash
+export DEEPSEEK_API_KEY="..."
+curl -s http://localhost:51122/v1/models | python3 -m json.tool
+curl -s -X POST http://localhost:51122/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek:deepseek-v4-flash","input":"Return exactly: byok-smoke-ok","max_output_tokens":256}'
+```
+
+The latest credentialed smoke used a transient `DEEPSEEK_API_KEY` environment variable only, did not persist the key, exposed `deepseek:deepseek-v4-flash` in `/v1/models`, and returned exact sentinels for both non-streaming and streaming `/v1/responses`.
+
 ## Switching Between ChatGPT and Antigravity
 - **Use ChatGPT**: Remove `model_provider` line from config.toml
 - **Use Antigravity**: Add `model_provider = "antigravity"`, ensure gateway is running
@@ -85,6 +98,7 @@ curl -s -X POST http://localhost:51122/v1/responses \
 - `gemini-3.1-pro-high` → Gemini 3.1 Pro (Reasoning)
 - `claude-3.5-sonnet` → Claude Sonnet 4.6 (Google)
 - `claude-opus-4-6` → Claude Opus 4.6 (Google)
+- `deepseek:deepseek-v4-flash` → DeepSeek V4 Flash BYOK
 - `deepseek:deepseek-chat` → DeepSeek BYOK
 - `openrouter:deepseek/deepseek-chat` → OpenRouter BYOK
 - `xai:grok-code-fast-1` → xAI BYOK
