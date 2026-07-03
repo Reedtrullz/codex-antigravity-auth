@@ -14,6 +14,7 @@ class AccountManager:
         self._cooldowns = {} # email -> cooldown end timestamp
 
     def _sync_state_from_storage(self, data: dict[str, Any]) -> bool:
+        state_missing = "accountState" not in data
         state = data.get("accountState", {})
         previous_state = state if isinstance(state, dict) else {}
         accounts = data.get("accounts", [])
@@ -25,6 +26,17 @@ class AccountManager:
         if isinstance(state, dict):
             failures = state.get("failures", {})
             cooldowns = state.get("cooldowns", {})
+            if state_missing:
+                if self._failures:
+                    failures = {
+                        **(failures if isinstance(failures, dict) else {}),
+                        **self._failures,
+                    }
+                if self._cooldowns:
+                    cooldowns = {
+                        **(cooldowns if isinstance(cooldowns, dict) else {}),
+                        **self._cooldowns,
+                    }
             active_cooldown_emails = set()
             cleaned_cooldowns = {}
             if isinstance(cooldowns, dict):
