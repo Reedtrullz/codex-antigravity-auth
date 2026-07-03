@@ -76,7 +76,7 @@ curl -s -X POST http://localhost:51122/v1/responses \
 ```
 
 ### Optional BYOK Smoke
-With a provider API key exported only in the shell environment:
+With provider API keys exported only in the shell environment:
 
 ```bash
 export DEEPSEEK_API_KEY="..."
@@ -84,9 +84,16 @@ curl -s http://localhost:51122/v1/models | python3 -m json.tool
 curl -s -X POST http://localhost:51122/v1/responses \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek:deepseek-v4-flash","input":"Return exactly: byok-smoke-ok","max_output_tokens":256}'
+
+export OPENROUTER_API_KEY="..."
+curl -s http://localhost:51122/v1/models | python3 -m json.tool
+curl -s -X POST http://localhost:51122/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"openrouter:openrouter/auto","input":"Return exactly: openrouter-smoke-ok","max_output_tokens":256}'
 ```
 
 The latest credentialed smoke used a transient `DEEPSEEK_API_KEY` environment variable only, did not persist the key, exposed `deepseek:deepseek-v4-flash` in `/v1/models`, and returned exact sentinels for both non-streaming and streaming `/v1/responses`.
+OpenRouter was also smoke-tested with a transient `OPENROUTER_API_KEY` environment variable only: `/v1/models` exposed `openrouter:openrouter/auto`, non-streaming and streaming `/v1/responses` returned exact sentinels for `openrouter:openrouter/auto`, and manual explicit routing returned an exact non-streaming sentinel for `openrouter:deepseek/deepseek-chat`.
 
 ## Switching Between ChatGPT and Antigravity
 - **Use ChatGPT**: Remove `model_provider` line from config.toml
@@ -100,6 +107,7 @@ The latest credentialed smoke used a transient `DEEPSEEK_API_KEY` environment va
 - `claude-opus-4-6` → Claude Opus 4.6 (Google)
 - `deepseek:deepseek-v4-flash` → DeepSeek V4 Flash BYOK
 - `deepseek:deepseek-chat` → DeepSeek BYOK
+- `openrouter:openrouter/auto` → OpenRouter BYOK auto-router
 - `openrouter:deepseek/deepseek-chat` → OpenRouter BYOK
 - `xai:grok-code-fast-1` → xAI BYOK
 - `kimi:kimi-k2-0711-preview` → Kimi/Moonshot BYOK
