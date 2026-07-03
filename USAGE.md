@@ -16,6 +16,15 @@ codex-antigravity doctor
 
 `configure-codex` validates the Codex model id, provider id, provider name, and gateway base URL before writing. `--write` uses private atomic writes, preserves a symlinked Codex config path by updating its real target, and creates a private timestamped backup before changing an existing Codex config.
 
+For the easiest Google Antigravity OAuth setup, use the guided command:
+
+```bash
+codex-antigravity setup-google --accounts 2
+codex-antigravity start
+```
+
+This writes the Codex provider block, runs one browser OAuth flow per requested account, forces Google's account chooser when adding multiple accounts, stores every successful login in the encrypted rotation pool, clears stale cooldown state on re-authentication, prints the active Gemini/Claude rotation status, and runs `doctor`. To add more accounts later, run `codex-antigravity login --count 2`; to inspect rotation state, run `codex-antigravity accounts`.
+
 For BYOK-only use, replace `codex-antigravity login` with a provider setup command such as:
 
 ```bash

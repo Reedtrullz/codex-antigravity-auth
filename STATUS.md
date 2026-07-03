@@ -1,7 +1,7 @@
-# Current Integration Status — 2 July 2026
+# Current Integration Status — 3 July 2026
 
 ## Build & Test Health
-- **local pytest**: 161/161 passing, plus 120 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: 168/168 passing, plus 120 subtests, with `python3 -m pytest -q` ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **wheel install smoke**: built wheel, installed into a clean venv, ran `pip check`, verified console script importability, and verified installed malformed Google project override/account fingerprint, non-ASCII BYOK API-key/header handling, and unknown BYOK provider-prefix rejection. Earlier install smoke also verified temp Codex config mode `600`, malformed-request rejection, function-name filtering, keyless-loopback BYOK gating, Google generation controls, and fragmented BYOK tool-name streaming ✅
@@ -12,6 +12,7 @@
 | Feature | Status |
 |---|---|
 | OAuth PKCE login | ✅ |
+| Guided multi-account OAuth setup | ✅ |
 | OS keyring token encryption | ✅ |
 | Multi-account rotation | ✅ |
 | Exponential cooldown backoff | ✅ |
@@ -21,6 +22,7 @@
 | Tool/function calling | ✅ |
 | Reasoning/thinking isolation | ✅ |
 | `/v1/models` endpoint | ✅ |
+| Codex CLI model refresh-compatible `/v1/models` catalog metadata | ✅ |
 | Codex Desktop model picker | ✅ |
 | Schema sanitization | ✅ |
 | Device fingerprinting | ✅ |

@@ -132,6 +132,46 @@ def provider_has_usable_key(provider: dict) -> bool:
         return False
 
 
+def codex_model_metadata(model_id: str, display_name: str, context_window: int, owned_by: str, created: int) -> dict:
+    reasoning_levels = [
+        {"effort": "low", "description": "Fast responses with lighter reasoning"},
+        {"effort": "medium", "description": "Balances speed and reasoning depth"},
+        {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+        {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
+    ]
+    return {
+        "id": model_id,
+        "slug": model_id,
+        "object": "model",
+        "created": created,
+        "owned_by": owned_by,
+        "display_name": display_name,
+        "description": f"{display_name} via the local Codex Antigravity gateway.",
+        "supports_parallel_tool_calls": True,
+        "context_window": context_window,
+        "max_context_window": context_window,
+        "auto_compact_token_limit": None,
+        "reasoning_summary_format": "experimental",
+        "default_reasoning_summary": "none",
+        "supports_reasoning_summaries": False,
+        "supported_reasoning_levels": reasoning_levels,
+        "default_reasoning_level": "high",
+        "support_verbosity": False,
+        "default_verbosity": "medium",
+        "truncation_policy": {"mode": "tokens", "limit": 10000},
+        "experimental_supported_tools": [],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "minimal_client_version": "0.124.0",
+        "supported_in_api": True,
+        "availability_nux": None,
+        "upgrade": None,
+        "priority": 0,
+        "base_instructions": "Follow the instructions supplied by the Codex client for each request.",
+        "instructions_variables": {},
+    }
+
+
 @app.get("/v1/models")
 async def list_models():
     """Return model catalog so Codex Desktop can populate its picker dropdown."""
@@ -151,27 +191,30 @@ async def list_models():
                 context_window = 128000
             if not provider_model:
                 continue
+            model_id = f"{provider_id}:{provider_model}"
             byok_models.append({
-                "id": f"{provider_id}:{provider_model}",
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": provider_id,
-                "display_name": f"{provider.get('displayName', provider_id)}: {display_name}",
-                "context_window": context_window,
+                **codex_model_metadata(
+                    model_id,
+                    f"{provider.get('displayName', provider_id)}: {display_name}",
+                    context_window,
+                    provider_id,
+                    int(time.time()),
+                )
             })
+    models = [
+        codex_model_metadata(
+            m["id"],
+            m["display_name"],
+            m["context_window"],
+            "google-antigravity",
+            int(time.time()),
+        )
+        for m in AVAILABLE_MODELS
+    ] + byok_models
     return {
         "object": "list",
-        "data": [
-            {
-                "id": m["id"],
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "google-antigravity",
-                "display_name": m["display_name"],
-                "context_window": m["context_window"],
-            }
-            for m in AVAILABLE_MODELS
-        ] + byok_models,
+        "data": models,
+        "models": models,
     }
 
 def safe_header_string(value: object) -> str | None:

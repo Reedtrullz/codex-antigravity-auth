@@ -13,14 +13,39 @@ class AccountManager:
         self._failures = {} # email -> failure count
         self._cooldowns = {} # email -> cooldown end timestamp
 
-    def _sync_state_from_storage(self, data: dict[str, Any]) -> None:
+    def _sync_state_from_storage(self, data: dict[str, Any]) -> bool:
         state = data.get("accountState", {})
+        previous_state = state if isinstance(state, dict) else {}
+        accounts = data.get("accounts", [])
+        account_emails = {
+            str(account.get("email"))
+            for account in accounts
+            if isinstance(account, dict) and account.get("email")
+        }
         if isinstance(state, dict):
             failures = state.get("failures", {})
             cooldowns = state.get("cooldowns", {})
+            active_cooldown_emails = set()
+            cleaned_cooldowns = {}
+            if isinstance(cooldowns, dict):
+                current_time = time.time()
+                for k, v in cooldowns.items():
+                    email = str(k)
+                    if email not in account_emails:
+                        continue
+                    if not isinstance(v, (int, float)) or isinstance(v, bool):
+                        continue
+                    cooldown_end = float(v)
+                    if math.isfinite(cooldown_end) and cooldown_end > current_time:
+                        cleaned_cooldowns[email] = cooldown_end
+                        active_cooldown_emails.add(email)
+            self._cooldowns = cleaned_cooldowns
+            cleaned_failures = {}
             if isinstance(failures, dict):
-                cleaned_failures = {}
                 for k, v in failures.items():
+                    email = str(k)
+                    if email not in active_cooldown_emails:
+                        continue
                     if not isinstance(v, (int, float)) or isinstance(v, bool):
                         continue
                     failure_number = float(v)
@@ -28,17 +53,16 @@ class AccountManager:
                         continue
                     failure_count = int(failure_number)
                     if failure_count > 0:
-                        cleaned_failures[str(k)] = failure_count
-                self._failures.update(cleaned_failures)
-            if isinstance(cooldowns, dict):
-                cleaned_cooldowns = {}
-                for k, v in cooldowns.items():
-                    if not isinstance(v, (int, float)) or isinstance(v, bool):
-                        continue
-                    cooldown_end = float(v)
-                    if math.isfinite(cooldown_end) and cooldown_end > 0:
-                        cleaned_cooldowns[str(k)] = cooldown_end
-                self._cooldowns.update(cleaned_cooldowns)
+                        cleaned_failures[email] = failure_count
+            self._failures = cleaned_failures
+        else:
+            self._failures = {}
+            self._cooldowns = {}
+        cleaned_state = {
+            "failures": self._failures,
+            "cooldowns": self._cooldowns,
+        }
+        return previous_state != cleaned_state
 
     def _save_state_to_storage(self) -> None:
         if not get_accounts_json_path().exists():
@@ -76,11 +100,15 @@ class AccountManager:
 
             def mutate(data: dict[str, Any]) -> bool:
                 nonlocal selected
-                self._sync_state_from_storage(data)
+                dirty = self._sync_state_from_storage(data)
                 accounts = data.get("accounts", [])
                 if not accounts:
-                    return False
-                dirty = False
+                    if dirty:
+                        data["accountState"] = {
+                            "failures": self._failures,
+                            "cooldowns": self._cooldowns,
+                        }
+                    return dirty
 
                 family = "claude" if "claude" in model.lower() else "gemini"
                 family_map = data.setdefault("activeIndexByFamily", {"claude": 0, "gemini": 0})
@@ -152,7 +180,12 @@ class AccountManager:
                         data["accountState"] = state_payload
                     selected = acc
                     return dirty
-                return False
+                if dirty:
+                    data["accountState"] = {
+                        "failures": self._failures,
+                        "cooldowns": self._cooldowns,
+                    }
+                return dirty
 
             update_accounts(mutate)
             return selected

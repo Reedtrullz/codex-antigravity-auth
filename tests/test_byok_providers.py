@@ -795,12 +795,31 @@ class TestBYOKProviders(unittest.TestCase):
             response = TestClient(app).get("/v1/models")
 
         self.assertEqual(response.status_code, 200)
-        model_ids = [m["id"] for m in response.json()["data"]]
+        payload = response.json()
+        self.assertEqual(payload["models"], payload["data"])
+        model_ids = [m["id"] for m in payload["data"]]
         self.assertIn("gemini-3.5-flash-high", model_ids)
         self.assertIn("gemini-3.5-flash-medium", model_ids)
         self.assertIn("gemini-3.1-pro-high", model_ids)
         self.assertIn("claude-3.5-sonnet", model_ids)
         self.assertIn("claude-opus-4-6", model_ids)
+        for model in payload["models"]:
+            self.assertEqual(model["slug"], model["id"])
+            self.assertEqual(model["shell_type"], "shell_command")
+            self.assertEqual(model["visibility"], "list")
+            self.assertIs(model["supported_in_api"], True)
+            self.assertEqual(model["max_context_window"], model["context_window"])
+            self.assertEqual(model["priority"], 0)
+            self.assertIsNone(model["availability_nux"])
+            self.assertIsNone(model["upgrade"])
+            self.assertIn("Codex client", model["base_instructions"])
+            self.assertEqual(model["instructions_variables"], {})
+            self.assertIs(model["supports_reasoning_summaries"], False)
+            self.assertIs(model["support_verbosity"], False)
+            self.assertEqual(model["default_verbosity"], "medium")
+            self.assertEqual(model["truncation_policy"], {"mode": "tokens", "limit": 10000})
+            self.assertEqual(model["experimental_supported_tools"], [])
+            self.assertIsInstance(model["supported_reasoning_levels"][0], dict)
 
     def test_env_enabled_providers_require_valid_env_key_before_advertising(self):
         self.assertEqual(

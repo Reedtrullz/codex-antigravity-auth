@@ -69,6 +69,19 @@ Then run the interactive login:
 codex-antigravity login
 ```
 
+For first-run Google setup, or when you want several Google accounts in the rotation pool, use the guided setup instead:
+
+```bash
+codex-antigravity setup-google --accounts 2
+```
+
+`setup-google` writes the Codex provider block, opens one browser OAuth flow per requested account, forces Google's account chooser for multi-account setup, stores each account in the encrypted rotation pool, clears stale cooldown state for re-authenticated accounts, prints the rotation summary, and runs `doctor` unless `--skip-doctor` is passed. You can also add more accounts later:
+
+```bash
+codex-antigravity login --count 2
+codex-antigravity accounts
+```
+
 Start the local gateway:
 
 ```bash

@@ -149,6 +149,30 @@ def token_count(value: Any) -> int:
     return int(count)
 
 
+def positive_int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def thinking_budget_for_request(codex_req: dict[str, Any], backend_model: str) -> int | None:
+    if "thinking" not in backend_model.lower() and "claude" not in backend_model.lower():
+        return None
+    reasoning = codex_req.get("reasoning")
+    effort = reasoning.get("effort", "high") if isinstance(reasoning, dict) else "high"
+    budget = 16000 if effort == "high" else 4000
+    max_output_tokens = positive_int_value(codex_req.get("max_output_tokens"))
+    if max_output_tokens is not None and max_output_tokens <= 1024:
+        return None
+    if max_output_tokens is not None and budget >= max_output_tokens:
+        budget = max_output_tokens - 1
+    return budget if budget > 0 else None
+
+
 def _created_at(value: Any) -> int:
     try:
         created_at = float(value or time.time())
@@ -422,10 +446,11 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
         stop = codex_req["stop"]
         generation_config["stopSequences"] = [stop] if isinstance(stop, str) else stop
     
-    # Configure reasoning/thinking budget for models supporting thinking
-    if "thinking" in backend_model.lower() or "claude" in backend_model.lower():
-        effort = codex_req.get("reasoning", {}).get("effort", "high")
-        budget = 16000 if effort == "high" else 4000
+    # Configure reasoning/thinking budget for models supporting thinking.
+    # Claude rejects requests where max output tokens do not exceed the
+    # thinking budget, so cap the budget to stay below explicit Codex limits.
+    budget = thinking_budget_for_request(codex_req, backend_model)
+    if budget is not None:
         generation_config["thinkingConfig"] = {
             "thinking_budget": budget,
             "include_thoughts": True

@@ -63,7 +63,7 @@ def get_pkce_verifier(state_id: str) -> dict[str, str] | None:
         return None
     return verifier_info
 
-def authorize_antigravity() -> dict:
+def authorize_antigravity(*, select_account: bool = False) -> dict:
     cid, csec = require_credentials()
     pkce = generate_pkce()
     
@@ -85,7 +85,7 @@ def authorize_antigravity() -> dict:
         "code_challenge_method": "S256",
         "state": encoded_state,
         "access_type": "offline",
-        "prompt": "consent",
+        "prompt": "consent select_account" if select_account else "consent",
     }
     
     url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"

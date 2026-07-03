@@ -6,8 +6,11 @@ from argparse import Namespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import urllib.request
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch, MagicMock
+from codex_antigravity_auth.oauth import authorize_antigravity
 from codex_antigravity_auth.cli import (
+    account_rotation_lines,
     configure_codex_write_command,
     main,
     merge_codex_config,
@@ -17,6 +20,9 @@ from codex_antigravity_auth.cli import (
     require_safe_gateway_host,
     run_configure_codex,
     run_doctor,
+    run_login,
+    run_setup_google,
+    upsert_google_account,
     validate_codex_model_id,
     validate_codex_provider_name,
     write_codex_config,
@@ -93,6 +99,105 @@ class TestCliStartSafety(unittest.TestCase):
         with patch.dict("os.environ", {"ANTIGRAVITY_GATEWAY_TOKEN": "gateway-secret"}, clear=True):
             require_safe_gateway_host("0.0.0.0", allow_remote=True)
             self.assertEqual(os.environ["ANTIGRAVITY_ALLOW_REMOTE"], "1")
+
+
+class TestGoogleAccountSetup(unittest.TestCase):
+    @patch("codex_antigravity_auth.oauth.require_credentials", return_value=("client-id", "client-secret"))
+    def test_authorize_antigravity_can_force_google_account_chooser(self, _mock_credentials):
+        auth_info = authorize_antigravity(select_account=True)
+        query = parse_qs(urlparse(auth_info["url"]).query)
+
+        self.assertEqual(query["prompt"], ["consent select_account"])
+
+    def test_upsert_google_account_adds_to_rotation_and_clears_stale_state(self):
+        data = {
+            "accounts": [
+                {
+                    "email": "old@example.com",
+                    "refreshToken": "old-refresh",
+                    "accessToken": "old-access",
+                    "expiresAt": 100,
+                }
+            ],
+            "accountState": {
+                "failures": {"old@example.com": 3, "other@example.com": 1},
+                "cooldowns": {"old@example.com": 9000, "other@example.com": 8000},
+            },
+        }
+
+        result = upsert_google_account(
+            data,
+            {
+                "email": "old@example.com",
+                "refreshToken": "new-refresh",
+                "accessToken": "new-access",
+                "expiresAt": 200,
+            },
+        )
+
+        self.assertEqual(result, {"email": "old@example.com", "created": False, "account_count": 1})
+        self.assertEqual(data["accounts"][0]["refreshToken"], "new-refresh")
+        self.assertNotIn("old@example.com", data["accountState"]["failures"])
+        self.assertNotIn("old@example.com", data["accountState"]["cooldowns"])
+        self.assertIn("other@example.com", data["accountState"]["failures"])
+        self.assertIn("other@example.com", data["accountState"]["cooldowns"])
+
+    def test_account_rotation_lines_show_active_families_and_cooldowns(self):
+        data = {
+            "accounts": [
+                {"email": "first@example.com", "expiresAt": 5000},
+                {"email": "second@example.com", "expiresAt": 900},
+            ],
+            "activeIndexByFamily": {"gemini": 0, "claude": 1},
+            "accountState": {
+                "failures": {"second@example.com": 2},
+                "cooldowns": {"second@example.com": 1120},
+            },
+        }
+
+        with patch("codex_antigravity_auth.cli.time.time", return_value=1000):
+            lines = account_rotation_lines(data)
+
+        self.assertIn("2 account(s)", lines[0])
+        self.assertIn("first@example.com [gemini active] - token OK, available", lines[1])
+        self.assertIn("second@example.com [claude active] - will refresh, cooldown 120s, failures=2", lines[2])
+
+    @patch("codex_antigravity_auth.cli.print_account_rotation_summary")
+    @patch("codex_antigravity_auth.cli.run_local_oauth_flow")
+    def test_run_login_count_forces_google_account_chooser(self, mock_login, mock_summary):
+        run_login(Namespace(count=2, select_account=False))
+
+        self.assertEqual(mock_login.call_count, 2)
+        for call in mock_login.call_args_list:
+            self.assertEqual(call.kwargs, {"select_account": True})
+        mock_summary.assert_called_once()
+
+    @patch("codex_antigravity_auth.cli.run_doctor")
+    @patch("codex_antigravity_auth.cli.run_login")
+    @patch("codex_antigravity_auth.cli.run_configure_codex")
+    def test_setup_google_writes_codex_config_and_logs_accounts_in(self, mock_configure, mock_login, mock_doctor):
+        run_setup_google(
+            Namespace(
+                accounts=3,
+                skip_codex_config=False,
+                skip_doctor=False,
+                config="/tmp/codex.toml",
+                model="gemini-3.5-flash-high",
+                provider="antigravity",
+                provider_name="Google Antigravity",
+                base_url="http://localhost:51122/v1",
+                port=51122,
+            )
+        )
+
+        configure_args = mock_configure.call_args.args[0]
+        self.assertTrue(configure_args.write)
+        self.assertEqual(configure_args.config, "/tmp/codex.toml")
+        mock_login.assert_called_once()
+        login_args = mock_login.call_args.args[0]
+        self.assertEqual(login_args.count, 3)
+        self.assertTrue(login_args.select_account)
+        mock_doctor.assert_called_once()
 
 
 class TestConfigureCodex(unittest.TestCase):

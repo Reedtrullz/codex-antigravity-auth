@@ -96,6 +96,76 @@ def normalize_epoch_seconds(value):
     return ts
 
 
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as e:
+        raise argparse.ArgumentTypeError("must be a positive integer") from e
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def account_rotation_lines(data: dict | None = None) -> list[str]:
+    data = data or load_accounts()
+    accounts = data.get("accounts", [])
+    family_map = data.get("activeIndexByFamily", {}) if isinstance(data.get("activeIndexByFamily"), dict) else {}
+    state = data.get("accountState", {}) if isinstance(data.get("accountState"), dict) else {}
+    failures = state.get("failures", {}) if isinstance(state.get("failures"), dict) else {}
+    cooldowns = state.get("cooldowns", {}) if isinstance(state.get("cooldowns"), dict) else {}
+    now = time.time()
+    lines = [f"[*] Google account rotation pool: {len(accounts)} account(s)"]
+    for idx, acc in enumerate(accounts):
+        email = acc.get("email", "(missing email)")
+        markers = []
+        for family in ("gemini", "claude"):
+            if family_map.get(family, 0) == idx:
+                markers.append(f"{family} active")
+        expires_at = normalize_epoch_seconds(acc.get("expiresAt", 0))
+        token_status = "token OK" if expires_at > now + 300 else "will refresh"
+        cooldown_end = normalize_epoch_seconds(cooldowns.get(email, 0))
+        if cooldown_end > now:
+            cooldown_status = f"cooldown {int(cooldown_end - now)}s"
+        else:
+            cooldown_status = "available"
+        failure_count = failures.get(email, 0)
+        failure_text = f", failures={failure_count}" if failure_count else ""
+        marker_text = f" [{', '.join(markers)}]" if markers else ""
+        lines.append(f"    [{idx}] {email}{marker_text} - {token_status}, {cooldown_status}{failure_text}")
+    return lines
+
+
+def print_account_rotation_summary(data: dict | None = None) -> None:
+    for line in account_rotation_lines(data):
+        print(line)
+
+
+def upsert_google_account(data: dict, account_entry: dict) -> dict:
+    email = account_entry.get("email")
+    if not email:
+        raise ValueError("Google account email is required")
+    accounts = data.setdefault("accounts", [])
+    existing_idx = None
+    for idx, acc in enumerate(accounts):
+        if acc.get("email") == email:
+            existing_idx = idx
+            break
+
+    if existing_idx is not None:
+        accounts[existing_idx].update(account_entry)
+    else:
+        accounts.append(account_entry)
+
+    state = data.setdefault("accountState", {})
+    if isinstance(state, dict):
+        for bucket_name in ("failures", "cooldowns"):
+            bucket = state.get(bucket_name)
+            if isinstance(bucket, dict):
+                bucket.pop(email, None)
+
+    return {"email": email, "created": existing_idx is None, "account_count": len(accounts)}
+
+
 def require_safe_gateway_host(host: str, allow_remote: bool) -> None:
     if is_loopback_host(host):
         return
@@ -423,7 +493,7 @@ def run_configure_codex(args) -> None:
         print(f"[*] Codex config already points at this gateway: {config_path}")
     print("[*] Start the gateway with: codex-antigravity start")
 
-def run_local_oauth_flow():
+def run_local_oauth_flow(*, select_account: bool = False) -> dict:
     # Verify environment credentials or credentials file exists
     cid, csec = resolve_oauth_credentials()
     if not cid or not csec:
@@ -433,7 +503,7 @@ def run_local_oauth_flow():
         sys.exit(1)
 
     print("[*] Initiating Google Antigravity OAuth login...")
-    auth_info = authorize_antigravity()
+    auth_info = authorize_antigravity(select_account=select_account)
     url = auth_info["url"]
     
     server = OAuthServer(("localhost", 51121), OAuthCallbackHandler)
@@ -515,14 +585,53 @@ def run_local_oauth_flow():
         "expiresAt": int(time.time()) + token_expires_in_seconds(tokens),
     }
     
-    if existing_idx is not None:
-        accounts[existing_idx].update(account_entry)
-        print(f"[+] Successfully re-authenticated and updated Google Account: {email}")
-    else:
-        accounts.append(account_entry)
+    result = upsert_google_account(data, account_entry)
+    if result["created"]:
         print(f"[+] Successfully authenticated new Google Account: {email}")
+    else:
+        print(f"[+] Successfully re-authenticated and updated Google Account: {email}")
         
     save_accounts(data)
+    print(f"[+] {email} is in the Google account rotation pool ({result['account_count']} total).")
+    return result
+
+
+def run_login(args) -> None:
+    count = getattr(args, "count", 1)
+    select_account = getattr(args, "select_account", False) or count > 1
+    if count > 1:
+        print(f"[*] Running {count} Google OAuth login flows.")
+        print("[*] Choose a different Google account in each browser flow to build the rotation pool.")
+    for attempt in range(count):
+        if count > 1:
+            print(f"[*] Login {attempt + 1}/{count}")
+        run_local_oauth_flow(select_account=select_account)
+    print_account_rotation_summary()
+
+
+def run_setup_google(args) -> None:
+    if not args.skip_codex_config:
+        print("[*] Installing Codex provider block...")
+        run_configure_codex(
+            argparse.Namespace(
+                write=True,
+                config=args.config,
+                model=args.model,
+                provider=args.provider,
+                provider_name=args.provider_name,
+                base_url=args.base_url,
+            )
+        )
+    else:
+        print("[*] Skipping Codex config write.")
+
+    run_login(argparse.Namespace(count=args.accounts, select_account=True))
+
+    if not args.skip_doctor:
+        print("[*] Running post-setup doctor...")
+        run_doctor()
+    print("[+] Google Antigravity OAuth setup is ready.")
+    print(f"    Start the gateway with: codex-antigravity start --port {args.port}")
 
 def run_doctor():
     print("=" * 60)
@@ -585,6 +694,9 @@ def run_doctor():
             expires_at = normalize_epoch_seconds(acc.get("expiresAt", 0))
             status = "ACTIVE" if expires_at > time.time() else "EXPIRED (will auto-refresh)"
             print(f"       - {email} ({status})")
+        print("       Rotation:")
+        for line in account_rotation_lines(data)[1:]:
+            print(f"       {line.strip()}")
     else:
         print("[WARN] Authenticated Accounts: 0 accounts found.")
         print("       Run `codex-antigravity login` to add an account.")
@@ -627,7 +739,23 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True)
     
     # login
-    subparsers.add_parser("login", help="Authenticate with a Google account using OAuth PKCE flow")
+    login_parser = subparsers.add_parser("login", help="Authenticate Google Antigravity account(s) into the rotation pool")
+    login_parser.add_argument("--count", type=positive_int, default=1, help="Number of browser login flows to run")
+    login_parser.add_argument("--select-account", action="store_true", help="Force Google's account chooser during login")
+
+    setup_google_parser = subparsers.add_parser(
+        "setup-google",
+        help="Write Codex config and sign Google Antigravity account(s) into rotation",
+    )
+    setup_google_parser.add_argument("--accounts", type=positive_int, default=1, help="Number of browser login flows to run")
+    setup_google_parser.add_argument("--skip-codex-config", action="store_true", help="Do not write ~/.codex/config.toml")
+    setup_google_parser.add_argument("--skip-doctor", action="store_true", help="Do not run doctor after login")
+    setup_google_parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path")
+    setup_google_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Default Codex model to select")
+    setup_google_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id")
+    setup_google_parser.add_argument("--provider-name", default=DEFAULT_CODEX_PROVIDER_NAME, help="Provider display name")
+    setup_google_parser.add_argument("--base-url", default=DEFAULT_CODEX_BASE_URL, help="Gateway base URL")
+    setup_google_parser.add_argument("--port", type=int, default=51122, help="Gateway server port to show in next-step output")
     
     # doctor
     subparsers.add_parser("doctor", help="Check status, health, configurations, and diagnosis")
@@ -673,7 +801,9 @@ def main():
     args = parser.parse_args()
     
     if args.command == "login":
-        run_local_oauth_flow()
+        run_login(args)
+    elif args.command == "setup-google":
+        run_setup_google(args)
     elif args.command == "doctor":
         run_doctor()
     elif args.command == "accounts":
@@ -683,8 +813,7 @@ def main():
             print("[*] No configured accounts found. Run `codex-antigravity login` first.")
             return
         print("[*] Configured Google Accounts:")
-        for idx, acc in enumerate(accounts):
-            print(f"[{idx}] {acc.get('email')} (Expires: {time.ctime(normalize_epoch_seconds(acc.get('expiresAt', 0)))})")
+        print_account_rotation_summary(data)
     elif args.command == "configure-codex":
         run_configure_codex(args)
     elif args.command == "provider":

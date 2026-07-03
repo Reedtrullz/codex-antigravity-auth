@@ -604,7 +604,13 @@ class TestRegressionFixes(unittest.TestCase):
                     "refreshToken": "refresh_1",
                     "accessToken": "old",
                     "expiresAt": float("nan"),
-                }
+                },
+                {
+                    "email": "other@gmail.com",
+                    "refreshToken": "refresh_2",
+                    "accessToken": "usable",
+                    "expiresAt": 2000,
+                },
             ],
             "activeIndex": 0,
             "activeIndexByFamily": {"claude": 0, "gemini": 0},
@@ -612,6 +618,8 @@ class TestRegressionFixes(unittest.TestCase):
                 "failures": {
                     "primary@gmail.com": float("nan"),
                     "other@gmail.com": 2,
+                    "expired@gmail.com": 2,
+                    "orphan@gmail.com": 2,
                     "bool@gmail.com": True,
                     "zero@gmail.com": 0,
                     "negative@gmail.com": -3,
@@ -619,6 +627,7 @@ class TestRegressionFixes(unittest.TestCase):
                 "cooldowns": {
                     "primary@gmail.com": float("inf"),
                     "other@gmail.com": 2000,
+                    "expired@gmail.com": 900,
                     "bool@gmail.com": False,
                     "zero@gmail.com": 0,
                     "negative@gmail.com": -3,
@@ -635,6 +644,8 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(selected["expiresAt"], 2800)
         self.assertEqual(manager._failures, {"other@gmail.com": 2})
         self.assertEqual(manager._cooldowns, {"other@gmail.com": 2000.0})
+        self.assertEqual(data["accountState"]["failures"], {"other@gmail.com": 2})
+        self.assertEqual(data["accountState"]["cooldowns"], {"other@gmail.com": 2000.0})
 
     def test_token_expires_in_seconds_falls_back_for_malformed_success_payloads(self):
         for payload in (
