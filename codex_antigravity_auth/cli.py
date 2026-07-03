@@ -2,10 +2,14 @@ import sys
 import os
 import argparse
 import http.server
+import math
+import re
+import shlex
 import socketserver
 import webbrowser
 import time
 import json
+import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from .byok import (
@@ -15,10 +19,27 @@ from .byok import (
     remove_provider_config,
     resolve_api_key,
     set_provider_config,
+    validate_http_base_url,
+    validate_provider_api_key,
+    validate_provider_id,
 )
-from .oauth import authorize_antigravity, decode_state, exchange_antigravity
+from .oauth import (
+    OAUTH_HTTP_TIMEOUT_SECONDS,
+    authorize_antigravity,
+    decode_state,
+    exchange_antigravity,
+    token_expires_in_seconds,
+)
 from .storage import load_accounts, save_accounts
 from .constants import is_loopback_host, resolve_oauth_credentials
+from .redaction import redact_secret_text
+
+DEFAULT_CODEX_PROVIDER_ID = "antigravity"
+DEFAULT_CODEX_PROVIDER_NAME = "Google Antigravity"
+DEFAULT_CODEX_MODEL = "gemini-3.5-flash-high"
+DEFAULT_CODEX_BASE_URL = "http://localhost:51122/v1"
+CODEX_PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 
 class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -68,9 +89,81 @@ def normalize_epoch_seconds(value):
         ts = float(value or 0)
     except (TypeError, ValueError):
         return 0
+    if not math.isfinite(ts):
+        return 0
     if ts > 10_000_000_000:
         ts = ts / 1000
     return ts
+
+
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as e:
+        raise argparse.ArgumentTypeError("must be a positive integer") from e
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def account_rotation_lines(data: dict | None = None) -> list[str]:
+    data = data or load_accounts()
+    accounts = data.get("accounts", [])
+    family_map = data.get("activeIndexByFamily", {}) if isinstance(data.get("activeIndexByFamily"), dict) else {}
+    state = data.get("accountState", {}) if isinstance(data.get("accountState"), dict) else {}
+    failures = state.get("failures", {}) if isinstance(state.get("failures"), dict) else {}
+    cooldowns = state.get("cooldowns", {}) if isinstance(state.get("cooldowns"), dict) else {}
+    now = time.time()
+    lines = [f"[*] Google account rotation pool: {len(accounts)} account(s)"]
+    for idx, acc in enumerate(accounts):
+        email = acc.get("email", "(missing email)")
+        markers = []
+        for family in ("gemini", "claude"):
+            if family_map.get(family, 0) == idx:
+                markers.append(f"{family} active")
+        expires_at = normalize_epoch_seconds(acc.get("expiresAt", 0))
+        token_status = "token OK" if expires_at > now + 300 else "will refresh"
+        cooldown_end = normalize_epoch_seconds(cooldowns.get(email, 0))
+        if cooldown_end > now:
+            cooldown_status = f"cooldown {int(cooldown_end - now)}s"
+        else:
+            cooldown_status = "available"
+        failure_count = failures.get(email, 0)
+        failure_text = f", failures={failure_count}" if failure_count else ""
+        marker_text = f" [{', '.join(markers)}]" if markers else ""
+        lines.append(f"    [{idx}] {email}{marker_text} - {token_status}, {cooldown_status}{failure_text}")
+    return lines
+
+
+def print_account_rotation_summary(data: dict | None = None) -> None:
+    for line in account_rotation_lines(data):
+        print(line)
+
+
+def upsert_google_account(data: dict, account_entry: dict) -> dict:
+    email = account_entry.get("email")
+    if not email:
+        raise ValueError("Google account email is required")
+    accounts = data.setdefault("accounts", [])
+    existing_idx = None
+    for idx, acc in enumerate(accounts):
+        if acc.get("email") == email:
+            existing_idx = idx
+            break
+
+    if existing_idx is not None:
+        accounts[existing_idx].update(account_entry)
+    else:
+        accounts.append(account_entry)
+
+    state = data.setdefault("accountState", {})
+    if isinstance(state, dict):
+        for bucket_name in ("failures", "cooldowns"):
+            bucket = state.get(bucket_name)
+            if isinstance(bucket, dict):
+                bucket.pop(email, None)
+
+    return {"email": email, "created": existing_idx is None, "account_count": len(accounts)}
 
 
 def require_safe_gateway_host(host: str, allow_remote: bool) -> None:
@@ -85,7 +178,322 @@ def require_safe_gateway_host(host: str, allow_remote: bool) -> None:
         raise SystemExit("ANTIGRAVITY_GATEWAY_TOKEN must be set when --allow-remote is used.")
     os.environ["ANTIGRAVITY_ALLOW_REMOTE"] = "1"
 
-def run_local_oauth_flow():
+
+def provider_key_status(provider: dict, *, configured_label: str) -> str:
+    try:
+        api_key = validate_provider_api_key(resolve_api_key(provider))
+    except ValueError:
+        return "malformed key"
+    return configured_label if api_key else "missing key"
+
+
+def toml_string(value: str) -> str:
+    return json.dumps(str(value))
+
+
+def validate_codex_provider_id(provider_id: str) -> str:
+    if not CODEX_PROVIDER_ID_RE.fullmatch(str(provider_id)):
+        raise ValueError("Codex provider id may only contain letters, numbers, underscores, and hyphens")
+    return str(provider_id)
+
+
+def validate_codex_model_id(model: str) -> str:
+    value = str(model).strip()
+    if not value:
+        raise ValueError("Codex model id must be non-empty")
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        raise ValueError("Codex model id must not contain whitespace or control characters")
+    return value
+
+
+def validate_codex_provider_name(provider_name: str) -> str:
+    value = str(provider_name).strip()
+    if not value:
+        raise ValueError("Codex provider name must be non-empty")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        raise ValueError("Codex provider name must not contain control characters")
+    return value
+
+
+def render_codex_provider_table(
+    *,
+    provider_id: str = DEFAULT_CODEX_PROVIDER_ID,
+    provider_name: str = DEFAULT_CODEX_PROVIDER_NAME,
+    base_url: str = DEFAULT_CODEX_BASE_URL,
+) -> str:
+    provider_id = validate_codex_provider_id(provider_id)
+    provider_name = validate_codex_provider_name(provider_name)
+    base_url = validate_http_base_url(base_url, label="Codex gateway base URL")
+    return "\n".join(
+        [
+            f"[model_providers.{provider_id}]",
+            f"name = {toml_string(provider_name)}",
+            f"base_url = {toml_string(base_url)}",
+            'wire_api = "responses"',
+        ]
+    )
+
+
+def render_codex_config_snippet(
+    *,
+    model: str = DEFAULT_CODEX_MODEL,
+    provider_id: str = DEFAULT_CODEX_PROVIDER_ID,
+    provider_name: str = DEFAULT_CODEX_PROVIDER_NAME,
+    base_url: str = DEFAULT_CODEX_BASE_URL,
+) -> str:
+    model = validate_codex_model_id(model)
+    provider_id = validate_codex_provider_id(provider_id)
+    return "\n".join(
+        [
+            f"model = {toml_string(model)}",
+            f"model_provider = {toml_string(provider_id)}",
+            'wire_api = "responses"',
+            "",
+            render_codex_provider_table(
+                provider_id=provider_id,
+                provider_name=provider_name,
+                base_url=base_url,
+            ),
+            "",
+        ]
+    )
+
+
+def _toml_key(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None
+    return stripped.split("=", 1)[0].strip()
+
+
+def _is_toml_section(line: str) -> bool:
+    stripped = line.split("#", 1)[0].strip()
+    return stripped.startswith("[") and stripped.endswith("]")
+
+
+def _toml_section_name(line: str) -> str | None:
+    stripped = line.split("#", 1)[0].strip()
+    if not stripped.startswith("[") or not stripped.endswith("]"):
+        return None
+    return stripped.strip("[]").strip()
+
+
+def _upsert_root_keys(lines: list[str], values: dict[str, str]) -> list[str]:
+    first_section = next((idx for idx, line in enumerate(lines) if _is_toml_section(line)), len(lines))
+    root = list(lines[:first_section])
+    rest = list(lines[first_section:])
+    seen: set[str] = set()
+
+    for idx, line in enumerate(root):
+        key = _toml_key(line)
+        if key in values:
+            root[idx] = f"{key} = {values[key]}"
+            seen.add(key)
+
+    missing = [key for key in values if key not in seen]
+    if missing:
+        while root and not root[-1].strip():
+            root.pop()
+        if root:
+            root.append("")
+        root.extend(f"{key} = {values[key]}" for key in missing)
+        if rest:
+            root.append("")
+
+    return root + rest
+
+
+def _upsert_table(lines: list[str], section_name: str, values: dict[str, str]) -> list[str]:
+    header = f"[{section_name}]"
+    start = next((idx for idx, line in enumerate(lines) if _toml_section_name(line) == section_name), None)
+    if start is None:
+        updated = list(lines)
+        while updated and not updated[-1].strip():
+            updated.pop()
+        if updated:
+            updated.extend(["", header])
+        else:
+            updated.append(header)
+        updated.extend(f"{key} = {value}" for key, value in values.items())
+        return updated
+
+    end = next((idx for idx in range(start + 1, len(lines)) if _is_toml_section(lines[idx])), len(lines))
+    section = list(lines[start:end])
+    seen: set[str] = set()
+    for idx, line in enumerate(section[1:], start=1):
+        key = _toml_key(line)
+        if key in values:
+            section[idx] = f"{key} = {values[key]}"
+            seen.add(key)
+
+    section.extend(f"{key} = {value}" for key, value in values.items() if key not in seen)
+    return lines[:start] + section + lines[end:]
+
+
+def merge_codex_config(
+    existing: str,
+    *,
+    model: str = DEFAULT_CODEX_MODEL,
+    provider_id: str = DEFAULT_CODEX_PROVIDER_ID,
+    provider_name: str = DEFAULT_CODEX_PROVIDER_NAME,
+    base_url: str = DEFAULT_CODEX_BASE_URL,
+) -> str:
+    model = validate_codex_model_id(model)
+    provider_id = validate_codex_provider_id(provider_id)
+    provider_name = validate_codex_provider_name(provider_name)
+    base_url = validate_http_base_url(base_url, label="Codex gateway base URL")
+    if not existing.strip():
+        return render_codex_config_snippet(
+            model=model,
+            provider_id=provider_id,
+            provider_name=provider_name,
+            base_url=base_url,
+        )
+
+    lines = existing.splitlines()
+    lines = _upsert_root_keys(
+        lines,
+        {
+            "model": toml_string(model),
+            "model_provider": toml_string(provider_id),
+            "wire_api": '"responses"',
+        },
+    )
+    lines = _upsert_table(
+        lines,
+        f"model_providers.{provider_id}",
+        {
+            "name": toml_string(provider_name),
+            "base_url": toml_string(base_url),
+            "wire_api": '"responses"',
+        },
+    )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _write_private_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            delete=False,
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        ) as f:
+            temp_path = Path(f.name)
+            os.chmod(temp_path, 0o600)
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+        os.chmod(path, 0o600)
+    except Exception:
+        if temp_path and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+        raise
+
+
+def _codex_config_backup_path(config_path: Path) -> Path:
+    backup_path = config_path.with_name(f"{config_path.name}.bak-{time.strftime('%Y%m%d%H%M%S')}")
+    if not backup_path.exists():
+        return backup_path
+    for suffix in range(2, 100):
+        candidate = config_path.with_name(f"{backup_path.name}-{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Could not allocate a unique backup path for {config_path}")
+
+
+def write_codex_config(
+    config_path: Path,
+    *,
+    model: str = DEFAULT_CODEX_MODEL,
+    provider_id: str = DEFAULT_CODEX_PROVIDER_ID,
+    provider_name: str = DEFAULT_CODEX_PROVIDER_NAME,
+    base_url: str = DEFAULT_CODEX_BASE_URL,
+) -> tuple[bool, Path | None]:
+    model = validate_codex_model_id(model)
+    provider_id = validate_codex_provider_id(provider_id)
+    provider_name = validate_codex_provider_name(provider_name)
+    target_path = config_path.resolve() if config_path.is_symlink() else config_path
+    existing = target_path.read_text(encoding="utf-8") if target_path.exists() else ""
+    updated = merge_codex_config(
+        existing,
+        model=model,
+        provider_id=provider_id,
+        provider_name=provider_name,
+        base_url=base_url,
+    )
+    if existing == updated:
+        return False, None
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_path = None
+    if target_path.exists():
+        backup_path = _codex_config_backup_path(target_path)
+        _write_private_text(backup_path, existing)
+    _write_private_text(target_path, updated)
+    return True, backup_path
+
+
+def configure_codex_write_command(args) -> str:
+    parts = ["codex-antigravity", "configure-codex", "--write"]
+    if args.config != "~/.codex/config.toml":
+        parts.extend(["--config", args.config])
+    if args.model != DEFAULT_CODEX_MODEL:
+        parts.extend(["--model", args.model])
+    if args.provider != DEFAULT_CODEX_PROVIDER_ID:
+        parts.extend(["--provider", args.provider])
+    if args.provider_name != DEFAULT_CODEX_PROVIDER_NAME:
+        parts.extend(["--provider-name", args.provider_name])
+    if args.base_url != DEFAULT_CODEX_BASE_URL:
+        parts.extend(["--base-url", args.base_url])
+    return " ".join(shlex.quote(part) for part in parts)
+
+
+def run_configure_codex(args) -> None:
+    config_path = Path(os.path.expanduser(args.config))
+    try:
+        snippet = render_codex_config_snippet(
+            model=args.model,
+            provider_id=args.provider,
+            provider_name=args.provider_name,
+            base_url=args.base_url,
+        )
+    except (OSError, RuntimeError, ValueError) as e:
+        raise SystemExit(str(e)) from e
+
+    if not args.write:
+        print(snippet, end="")
+        print(f"# To write this into {config_path}, run:")
+        print(configure_codex_write_command(args))
+        return
+
+    try:
+        changed, backup_path = write_codex_config(
+            config_path,
+            model=args.model,
+            provider_id=args.provider,
+            provider_name=args.provider_name,
+            base_url=args.base_url,
+        )
+    except (OSError, RuntimeError, ValueError) as e:
+        raise SystemExit(str(e)) from e
+    if changed:
+        print(f"[+] Updated Codex config: {config_path}")
+        if backup_path:
+            print(f"[+] Backup written: {backup_path}")
+    else:
+        print(f"[*] Codex config already points at this gateway: {config_path}")
+    print("[*] Start the gateway with: codex-antigravity start")
+
+def run_local_oauth_flow(*, select_account: bool = False) -> dict:
     # Verify environment credentials or credentials file exists
     cid, csec = resolve_oauth_credentials()
     if not cid or not csec:
@@ -95,7 +503,7 @@ def run_local_oauth_flow():
         sys.exit(1)
 
     print("[*] Initiating Google Antigravity OAuth login...")
-    auth_info = authorize_antigravity()
+    auth_info = authorize_antigravity(select_account=select_account)
     url = auth_info["url"]
     
     server = OAuthServer(("localhost", 51121), OAuthCallbackHandler)
@@ -142,11 +550,11 @@ def run_local_oauth_flow():
             "https://www.googleapis.com/oauth2/v2/userinfo",
             headers={"Authorization": f"Bearer {tokens['access_token']}"}
         )
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=OAUTH_HTTP_TIMEOUT_SECONDS) as resp:
             user_info = json.loads(resp.read().decode("utf-8"))
             email = user_info.get("email")
     except Exception as e:
-        print(f"[!] Could not retrieve Google account email: {e}")
+        print(f"[!] Could not retrieve Google account email: {redact_secret_text(str(e))}")
         sys.exit(1)
     if not email:
         print("[!] Google account email was missing from userinfo response.")
@@ -174,17 +582,56 @@ def run_local_oauth_flow():
         "email": email,
         "refreshToken": refresh_token,
         "accessToken": tokens["access_token"],
-        "expiresAt": int(time.time()) + tokens.get("expires_in", 3600),
+        "expiresAt": int(time.time()) + token_expires_in_seconds(tokens),
     }
     
-    if existing_idx is not None:
-        accounts[existing_idx].update(account_entry)
-        print(f"[+] Successfully re-authenticated and updated Google Account: {email}")
-    else:
-        accounts.append(account_entry)
+    result = upsert_google_account(data, account_entry)
+    if result["created"]:
         print(f"[+] Successfully authenticated new Google Account: {email}")
+    else:
+        print(f"[+] Successfully re-authenticated and updated Google Account: {email}")
         
     save_accounts(data)
+    print(f"[+] {email} is in the Google account rotation pool ({result['account_count']} total).")
+    return result
+
+
+def run_login(args) -> None:
+    count = getattr(args, "count", 1)
+    select_account = getattr(args, "select_account", False) or count > 1
+    if count > 1:
+        print(f"[*] Running {count} Google OAuth login flows.")
+        print("[*] Choose a different Google account in each browser flow to build the rotation pool.")
+    for attempt in range(count):
+        if count > 1:
+            print(f"[*] Login {attempt + 1}/{count}")
+        run_local_oauth_flow(select_account=select_account)
+    print_account_rotation_summary()
+
+
+def run_setup_google(args) -> None:
+    if not args.skip_codex_config:
+        print("[*] Installing Codex provider block...")
+        run_configure_codex(
+            argparse.Namespace(
+                write=True,
+                config=args.config,
+                model=args.model,
+                provider=args.provider,
+                provider_name=args.provider_name,
+                base_url=args.base_url,
+            )
+        )
+    else:
+        print("[*] Skipping Codex config write.")
+
+    run_login(argparse.Namespace(count=args.accounts, select_account=True))
+
+    if not args.skip_doctor:
+        print("[*] Running post-setup doctor...")
+        run_doctor()
+    print("[+] Google Antigravity OAuth setup is ready.")
+    print(f"    Start the gateway with: codex-antigravity start --port {args.port}")
 
 def run_doctor():
     print("=" * 60)
@@ -210,7 +657,7 @@ def run_doctor():
         else:
             print("[WARN] Token Storage Encryption: PARTIAL (Using fallback key; keyring password lookup returned empty)")
     except Exception as e:
-        print(f"[WARN] Token Storage Encryption: PARTIAL (Fallback active. Error: {e})")
+        print(f"[WARN] Token Storage Encryption: PARTIAL (Fallback active. Error: {redact_secret_text(str(e))})")
         
     # Check network connectivity to Google Antigravity backend
     try:
@@ -235,7 +682,7 @@ def run_doctor():
                 else:
                     print(f"[FAIL] Google Antigravity Connectivity: REACHABLE but status {resp.status}")
     except Exception as e:
-        print(f"[FAIL] Google Antigravity Connectivity: OFFLINE / TIMEOUT ({e})")
+        print(f"[FAIL] Google Antigravity Connectivity: OFFLINE / TIMEOUT ({redact_secret_text(str(e))})")
         
     # Check accounts
     data = load_accounts()
@@ -247,6 +694,9 @@ def run_doctor():
             expires_at = normalize_epoch_seconds(acc.get("expiresAt", 0))
             status = "ACTIVE" if expires_at > time.time() else "EXPIRED (will auto-refresh)"
             print(f"       - {email} ({status})")
+        print("       Rotation:")
+        for line in account_rotation_lines(data)[1:]:
+            print(f"       {line.strip()}")
     else:
         print("[WARN] Authenticated Accounts: 0 accounts found.")
         print("       Run `codex-antigravity login` to add an account.")
@@ -257,13 +707,13 @@ def run_doctor():
         if providers:
             print(f"[PASS] BYOK Providers: {len(providers)} configured or env-enabled")
             for provider_id, provider in providers.items():
-                api_key_status = "key OK" if resolve_api_key(provider) else "missing key"
+                api_key_status = provider_key_status(provider, configured_label="key OK")
                 models = provider.get("models", [])
                 print(f"       - {provider_id} ({api_key_status}, {len(models)} model(s), {provider.get('baseUrl')})")
         else:
             print("[INFO] BYOK Providers: none configured.")
     except Exception as e:
-        print(f"[WARN] BYOK Providers: could not load provider config ({e})")
+        print(f"[WARN] BYOK Providers: could not load provider config ({redact_secret_text(str(e))})")
         
     # Check Codex config
     codex_config = Path(os.path.expanduser("~/.codex/config.toml"))
@@ -280,7 +730,7 @@ def run_doctor():
             pass
     else:
         print("[WARN] Codex config.toml: Not found.")
-        print("       Configure model_provider to point to http://localhost:51122/v1.")
+        print("       Run `codex-antigravity configure-codex --write` to install the gateway provider block.")
         
     print("=" * 60)
 
@@ -289,13 +739,40 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True)
     
     # login
-    subparsers.add_parser("login", help="Authenticate with a Google account using OAuth PKCE flow")
+    login_parser = subparsers.add_parser("login", help="Authenticate Google Antigravity account(s) into the rotation pool")
+    login_parser.add_argument("--count", type=positive_int, default=1, help="Number of browser login flows to run")
+    login_parser.add_argument("--select-account", action="store_true", help="Force Google's account chooser during login")
+
+    setup_google_parser = subparsers.add_parser(
+        "setup-google",
+        help="Write Codex config and sign Google Antigravity account(s) into rotation",
+    )
+    setup_google_parser.add_argument("--accounts", type=positive_int, default=1, help="Number of browser login flows to run")
+    setup_google_parser.add_argument("--skip-codex-config", action="store_true", help="Do not write ~/.codex/config.toml")
+    setup_google_parser.add_argument("--skip-doctor", action="store_true", help="Do not run doctor after login")
+    setup_google_parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path")
+    setup_google_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Default Codex model to select")
+    setup_google_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id")
+    setup_google_parser.add_argument("--provider-name", default=DEFAULT_CODEX_PROVIDER_NAME, help="Provider display name")
+    setup_google_parser.add_argument("--base-url", default=DEFAULT_CODEX_BASE_URL, help="Gateway base URL")
+    setup_google_parser.add_argument("--port", type=int, default=51122, help="Gateway server port to show in next-step output")
     
     # doctor
     subparsers.add_parser("doctor", help="Check status, health, configurations, and diagnosis")
     
     # accounts
     subparsers.add_parser("accounts", help="List all configured accounts")
+
+    configure_parser = subparsers.add_parser(
+        "configure-codex",
+        help="Print or write Codex config.toml settings for this gateway",
+    )
+    configure_parser.add_argument("--write", action="store_true", help="Update ~/.codex/config.toml in place")
+    configure_parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path")
+    configure_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Default Codex model to select")
+    configure_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id")
+    configure_parser.add_argument("--provider-name", default=DEFAULT_CODEX_PROVIDER_NAME, help="Provider display name")
+    configure_parser.add_argument("--base-url", default=DEFAULT_CODEX_BASE_URL, help="Gateway base URL")
 
     provider_parser = subparsers.add_parser("provider", help="Manage BYOK OpenAI-compatible providers")
     provider_sub = provider_parser.add_subparsers(dest="provider_command", required=True)
@@ -324,7 +801,9 @@ def main():
     args = parser.parse_args()
     
     if args.command == "login":
-        run_local_oauth_flow()
+        run_login(args)
+    elif args.command == "setup-google":
+        run_setup_google(args)
     elif args.command == "doctor":
         run_doctor()
     elif args.command == "accounts":
@@ -334,8 +813,9 @@ def main():
             print("[*] No configured accounts found. Run `codex-antigravity login` first.")
             return
         print("[*] Configured Google Accounts:")
-        for idx, acc in enumerate(accounts):
-            print(f"[{idx}] {acc.get('email')} (Expires: {time.ctime(normalize_epoch_seconds(acc.get('expiresAt', 0)))})")
+        print_account_rotation_summary(data)
+    elif args.command == "configure-codex":
+        run_configure_codex(args)
     elif args.command == "provider":
         if args.provider_command == "presets":
             print("[*] Built-in BYOK provider presets:")
@@ -349,7 +829,7 @@ def main():
                 return
             print("[*] BYOK Providers:")
             for provider_id, provider in providers.items():
-                key_status = "configured" if resolve_api_key(provider) else "missing key"
+                key_status = provider_key_status(provider, configured_label="configured")
                 models = provider.get("models", [])
                 model_list = ", ".join(str(m.get("id") if isinstance(m, dict) else m) for m in models) or "(no models)"
                 print(f"- {provider_id}: {provider.get('displayName', provider_id)} ({key_status})")
@@ -357,7 +837,11 @@ def main():
                 print(f"  models: {model_list}")
         elif args.provider_command == "set":
             try:
-                preset = provider_preset(args.provider)
+                provider_id = validate_provider_id(args.provider)
+            except (RuntimeError, ValueError) as e:
+                raise SystemExit(str(e)) from e
+            try:
+                preset = provider_preset(provider_id)
             except ValueError:
                 preset = {}
             base_url = args.base_url
@@ -369,15 +853,18 @@ def main():
                 if not sep or not name.strip():
                     raise SystemExit(f"Invalid --header value {header!r}; use Name:Value")
                 headers[name.strip()] = value.strip()
-            provider = set_provider_config(
-                args.provider,
-                api_key=args.api_key,
-                api_key_env=args.api_key_env,
-                base_url=base_url,
-                models=args.models,
-                display_name=args.display_name,
-                headers=headers or None,
-            )
+            try:
+                provider = set_provider_config(
+                    provider_id,
+                    api_key=args.api_key,
+                    api_key_env=args.api_key_env,
+                    base_url=base_url,
+                    models=args.models,
+                    display_name=args.display_name,
+                    headers=headers or None,
+                )
+            except (RuntimeError, ValueError) as e:
+                raise SystemExit(str(e)) from e
             print(f"[+] Configured BYOK provider {provider['id']} at {provider.get('baseUrl')}")
             if provider.get("models"):
                 print("[+] Exposed models:")
@@ -385,7 +872,10 @@ def main():
                     model_id = model.get("id") if isinstance(model, dict) else model
                     print(f"    {provider['id']}:{model_id}")
         elif args.provider_command == "remove":
-            existed = remove_provider_config(args.provider)
+            try:
+                existed = remove_provider_config(args.provider)
+            except RuntimeError as e:
+                raise SystemExit(str(e)) from e
             if existed:
                 print(f"[+] Removed BYOK provider {args.provider}")
             else:

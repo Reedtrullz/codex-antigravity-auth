@@ -1,5 +1,7 @@
 import unittest
 import time
+import tempfile
+from pathlib import Path
 from codex_antigravity_auth.accounts import AccountManager
 from unittest.mock import patch
 
@@ -28,15 +30,18 @@ class TestAccounts(unittest.TestCase):
     @patch("codex_antigravity_auth.accounts.update_accounts")
     def test_account_rotation_on_failure_cooldown(self, mock_update):
         mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
-        manager = AccountManager()
-        
-        # Mark primary as failed/cooling down
-        manager.mark_failure("primary@gmail.com", "Too many requests")
-        
-        # Selecting an account should now rotate to secondary
-        selected = manager.select_active_account("gemini-3.5-flash-high")
-        self.assertIsNotNone(selected)
-        self.assertEqual(selected["email"], "secondary@gmail.com")
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_accounts_file = Path(tmp) / "antigravity-accounts.json"
+            with patch("codex_antigravity_auth.accounts.get_accounts_json_path", return_value=missing_accounts_file):
+                manager = AccountManager()
+
+                # Mark primary as failed/cooling down
+                manager.mark_failure("primary@gmail.com", "Too many requests")
+
+                # Selecting an account should now rotate to secondary
+                selected = manager.select_active_account("gemini-3.5-flash-high")
+                self.assertIsNotNone(selected)
+                self.assertEqual(selected["email"], "secondary@gmail.com")
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
     @patch("codex_antigravity_auth.accounts.refresh_access_token")

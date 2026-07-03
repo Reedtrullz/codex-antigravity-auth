@@ -4,10 +4,10 @@
 
 ### 1. Install
 ```bash
-git clone https://github.com/Reedtrullz/codex-antigravity-auth
-cd codex-antigravity-auth
-uv pip install -e .
+uv tool install "git+https://github.com/Reedtrullz/codex-antigravity-auth.git"
 ```
+
+From a checkout, use `uv tool install .` instead.
 
 ### 2. Configure Credentials
 Write `~/.codex/antigravity-credentials.json`:
@@ -33,9 +33,17 @@ codex-antigravity provider set xai --api-key "$XAI_API_KEY" --model grok-code-fa
 codex-antigravity provider set kimi --api-key "$KIMI_API_KEY" --model kimi-k2-0711-preview
 codex-antigravity provider set ollama --base-url http://localhost:11434/v1 --model gpt-oss:20b
 ```
+Provider ids may only contain letters, numbers, underscores, and hyphens; provider model ids may still contain `/` or `:`, but not whitespace or control characters.
 
 ### 4. Configure Codex
 Add to `~/.codex/config.toml`:
+
+```bash
+codex-antigravity configure-codex --write
+```
+
+Equivalent manual TOML:
+
 ```toml
 model = "gemini-3.5-flash-high"
 model_provider = "antigravity"
@@ -55,7 +63,7 @@ codex-antigravity start
 ### 6. Verify
 ```bash
 codex-antigravity doctor        # diagnostics
-python3 -m pytest                # 48 tests, all must pass
+python3 -m pytest -q             # current local suite, 168 tests plus 120 subtests
 curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
 ```
 
@@ -67,16 +75,39 @@ curl -s -X POST http://localhost:51122/v1/responses \
 # Expect: 200 with output containing text
 ```
 
+### Optional BYOK Smoke
+With provider API keys exported only in the shell environment:
+
+```bash
+export DEEPSEEK_API_KEY="..."
+curl -s http://localhost:51122/v1/models | python3 -m json.tool
+curl -s -X POST http://localhost:51122/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek:deepseek-v4-flash","input":"Return exactly: byok-smoke-ok","max_output_tokens":256}'
+
+export OPENROUTER_API_KEY="..."
+curl -s http://localhost:51122/v1/models | python3 -m json.tool
+curl -s -X POST http://localhost:51122/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"openrouter:openrouter/auto","input":"Return exactly: openrouter-smoke-ok","max_output_tokens":256}'
+```
+
+The latest credentialed smoke used a transient `DEEPSEEK_API_KEY` environment variable only, did not persist the key, exposed `deepseek:deepseek-v4-flash` in `/v1/models`, and returned exact sentinels for both non-streaming and streaming `/v1/responses`.
+OpenRouter was also smoke-tested with a transient `OPENROUTER_API_KEY` environment variable only: `/v1/models` exposed `openrouter:openrouter/auto`, non-streaming and streaming `/v1/responses` returned exact sentinels for `openrouter:openrouter/auto`, and manual explicit routing returned an exact non-streaming sentinel for `openrouter:deepseek/deepseek-chat`.
+
 ## Switching Between ChatGPT and Antigravity
 - **Use ChatGPT**: Remove `model_provider` line from config.toml
 - **Use Antigravity**: Add `model_provider = "antigravity"`, ensure gateway is running
 
 ## Available Models
 - `gemini-3.5-flash-high` → Gemini 3.5 Flash (Agent High)
+- `gemini-3.5-flash-medium` → Gemini 3.5 Flash (General)
 - `gemini-3.1-pro-high` → Gemini 3.1 Pro (Reasoning)
 - `claude-3.5-sonnet` → Claude Sonnet 4.6 (Google)
 - `claude-opus-4-6` → Claude Opus 4.6 (Google)
+- `deepseek:deepseek-v4-flash` → DeepSeek V4 Flash BYOK
 - `deepseek:deepseek-chat` → DeepSeek BYOK
+- `openrouter:openrouter/auto` → OpenRouter BYOK auto-router
 - `openrouter:deepseek/deepseek-chat` → OpenRouter BYOK
 - `xai:grok-code-fast-1` → xAI BYOK
 - `kimi:kimi-k2-0711-preview` → Kimi/Moonshot BYOK

@@ -32,9 +32,34 @@ def default_accounts_data() -> dict[str, Any]:
 def normalize_accounts_data(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data, dict):
         data = {}
-    data.setdefault("accounts", [])
-    data.setdefault("activeIndex", 0)
-    data.setdefault("activeIndexByFamily", {"claude": 0, "gemini": 0})
+    accounts = data.get("accounts")
+    if not isinstance(accounts, list):
+        accounts = []
+    data["accounts"] = [account for account in accounts if isinstance(account, dict)]
+
+    active_index = data.get("activeIndex")
+    if not isinstance(active_index, int) or isinstance(active_index, bool):
+        active_index = 0
+    if active_index < 0 or active_index >= max(len(data["accounts"]), 1):
+        active_index = 0
+    data["activeIndex"] = active_index
+
+    family_map = data.get("activeIndexByFamily")
+    if not isinstance(family_map, dict):
+        family_map = {}
+    normalized_family_map: dict[str, int] = {}
+    for family in ("claude", "gemini"):
+        value = family_map.get(family, 0)
+        if not isinstance(value, int) or isinstance(value, bool):
+            value = 0
+        if value < 0 or value >= max(len(data["accounts"]), 1):
+            value = 0
+        normalized_family_map[family] = value
+    data["activeIndexByFamily"] = normalized_family_map
+
+    account_state = data.get("accountState")
+    if account_state is not None and not isinstance(account_state, dict):
+        data["accountState"] = {}
     return data
 
 
@@ -120,7 +145,12 @@ def get_accounts_json_path() -> Path:
     return p
 
 
-def _load_secure_json_unlocked(path: Path, default_factory: Callable[[], dict[str, Any]]) -> tuple[dict[str, Any], bool]:
+def _load_secure_json_unlocked(
+    path: Path,
+    default_factory: Callable[[], dict[str, Any]],
+    *,
+    strict: bool = False,
+) -> tuple[dict[str, Any], bool]:
     if not path.is_file():
         return default_factory(), False
     _ensure_private_file(path)
@@ -133,6 +163,8 @@ def _load_secure_json_unlocked(path: Path, default_factory: Callable[[], dict[st
         data = json.loads(encrypted_data.decode("utf-8"))
         plaintext = True
     if not isinstance(data, dict):
+        if strict:
+            raise ValueError(f"{path} top-level JSON value is not an object")
         data = default_factory()
     return data, plaintext
 
@@ -177,9 +209,20 @@ def load_secure_json_file(
         raise RuntimeError(f"Failed to load {error_label} file {path}: {e}") from e
 
 
-def save_secure_json_file(path: Path, data: dict[str, Any], *, error_label: str) -> None:
+def save_secure_json_file(
+    path: Path,
+    data: dict[str, Any],
+    *,
+    error_label: str,
+    default_factory: Callable[[], dict[str, Any]] | None = None,
+    normalize: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> None:
     try:
         with _exclusive_file_lock(path):
+            if path.exists() and default_factory is not None:
+                existing, _ = _load_secure_json_unlocked(path, default_factory, strict=True)
+                if normalize:
+                    normalize(existing)
             _save_secure_json_unlocked(path, data)
     except Exception as e:
         raise RuntimeError(f"Failed to save {error_label} file securely: {e}") from e
@@ -195,7 +238,7 @@ def update_secure_json_file(
 ) -> Any:
     try:
         with _exclusive_file_lock(path):
-            data, plaintext = _load_secure_json_unlocked(path, default_factory)
+            data, plaintext = _load_secure_json_unlocked(path, default_factory, strict=True)
             if normalize:
                 data = normalize(data)
             result = mutator(data)
@@ -220,7 +263,13 @@ def load_accounts() -> dict[str, Any]:
 def save_accounts(data: dict[str, Any]) -> None:
     with _accounts_lock:
         path = get_accounts_json_path()
-        save_secure_json_file(path, normalize_accounts_data(data), error_label="accounts")
+        save_secure_json_file(
+            path,
+            normalize_accounts_data(data),
+            error_label="accounts",
+            default_factory=default_accounts_data,
+            normalize=normalize_accounts_data,
+        )
 
 
 def update_accounts(mutator: Callable[[dict[str, Any]], Any]) -> Any:

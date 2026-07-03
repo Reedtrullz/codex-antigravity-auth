@@ -2,6 +2,37 @@
 
 This guide describes real-world examples, advanced configurations, and diagnostics routines to run Google Antigravity models inside OpenAI Codex efficiently.
 
+## 0. Quick Codex Setup
+
+Install the command from a checkout, write the Codex provider block, authenticate or configure a BYOK provider, then start the gateway:
+
+```bash
+uv tool install .
+codex-antigravity configure-codex --write
+codex-antigravity login
+codex-antigravity start
+codex-antigravity doctor
+```
+
+`configure-codex` validates the Codex model id, provider id, provider name, and gateway base URL before writing. `--write` uses private atomic writes, preserves a symlinked Codex config path by updating its real target, and creates a private timestamped backup before changing an existing Codex config.
+
+For the easiest Google Antigravity OAuth setup, use the guided command:
+
+```bash
+codex-antigravity setup-google --accounts 2
+codex-antigravity start
+```
+
+This writes the Codex provider block, runs one browser OAuth flow per requested account, forces Google's account chooser when adding multiple accounts, stores every successful login in the encrypted rotation pool, clears stale cooldown state on re-authentication, prints the active Gemini/Claude rotation status, and runs `doctor`. To add more accounts later, run `codex-antigravity login --count 2`; to inspect rotation state, run `codex-antigravity accounts`.
+
+For BYOK-only use, replace `codex-antigravity login` with a provider setup command such as:
+
+```bash
+codex-antigravity provider set deepseek --api-key "$DEEPSEEK_API_KEY" --model deepseek-chat
+```
+
+BYOK provider ids may contain only letters, numbers, underscores, and hyphens. Provider model ids may contain `/` or `:`, but not whitespace or control characters. Unknown `provider:model` prefixes are rejected as BYOK routing errors before any Google account selection. Non-preset custom BYOK providers must provide a base URL. Stored/env BYOK API keys and extra provider header values must be printable ASCII without control characters; model-picker display names must not contain control characters. Provider API-key env var names must contain only letters, numbers, and underscores and must not start with a number. Custom provider and Codex gateway base URLs must be absolute `http` or `https` URLs without embedded credentials, whitespace/control characters, query strings, fragments, invalid ports, or malformed bracketed hosts. Extra BYOK provider headers may not override gateway-managed auth, content, host, or transport headers; malformed provider config is rejected before it is written and before streaming begins. Key-optional BYOK providers are only keyless on loopback/local base URLs; remote custom or cloud endpoints need a stored or env API key. BYOK streams ignore never-named tool-call deltas and wait for complete streamed function names before emitting function-call items.
+
 ## 1. Supported Models & Aliases
 You can use standard, developer-friendly names in your `~/.codex/config.toml` that the gateway automatically translates to the official Google Antigravity backend model definitions:
 
@@ -23,6 +54,6 @@ When multiple Google accounts are registered, the gateway automatically rotates 
 ---
 
 ## 3. High-Fidelity Streaming & Reasoning
-The local server natively isolates thinking blocks and stream envelopes, ensuring standard formatting:
-- **Thinking/Reasoning block**: Emits standard `response.reasoning.delta` containing self-reflection tokens cleanly, avoiding text stream pollution.
-- **SSE Stream**: Formats candidates, annotations, and metadata into exact Response API SSE stream chunks parsed correctly by both Codex CLI and Codex Desktop.
+The local server natively isolates explicit thinking blocks and stream envelopes, ensuring standard formatting:
+- **Thinking/Reasoning block**: Emits `response.reasoning_text.delta` for explicit backend thinking parts while preserving regular `thoughtSignature` text as visible output.
+- **SSE Stream**: Formats candidates, function calls, usage metadata, and completion events into Responses API SSE chunks parsed correctly by both Codex CLI and Codex Desktop.

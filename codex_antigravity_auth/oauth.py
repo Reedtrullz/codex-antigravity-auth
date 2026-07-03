@@ -2,6 +2,7 @@ import secrets
 import hashlib
 import base64
 import json
+import math
 import time
 import urllib.request
 import urllib.error
@@ -16,6 +17,17 @@ from .redaction import redact_secret_text
 _pkce_verifier_store: dict[str, dict[str, str]] = {}
 _PKCE_VERIFIER_TTL_SECONDS = 600
 OAUTH_HTTP_TIMEOUT_SECONDS = 15.0
+
+
+def token_expires_in_seconds(tokens: dict, default: int = 3600) -> int:
+    try:
+        expires_in = float(tokens.get("expires_in", default))
+    except (AttributeError, TypeError, ValueError):
+        return default
+    if not math.isfinite(expires_in) or expires_in <= 0:
+        return default
+    return int(expires_in)
+
 
 def generate_pkce() -> dict:
     verifier = secrets.token_urlsafe(64)
@@ -51,7 +63,7 @@ def get_pkce_verifier(state_id: str) -> dict[str, str] | None:
         return None
     return verifier_info
 
-def authorize_antigravity() -> dict:
+def authorize_antigravity(*, select_account: bool = False) -> dict:
     cid, csec = require_credentials()
     pkce = generate_pkce()
     
@@ -73,7 +85,7 @@ def authorize_antigravity() -> dict:
         "code_challenge_method": "S256",
         "state": encoded_state,
         "access_type": "offline",
-        "prompt": "consent",
+        "prompt": "consent select_account" if select_account else "consent",
     }
     
     url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"

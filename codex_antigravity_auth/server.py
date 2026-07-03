@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import secrets
 import httpx
@@ -9,8 +10,24 @@ from typing import AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from .accounts import AccountManager
-from .byok import all_provider_configs, resolve_api_key, split_provider_model
-from .transform import transform_chat_response, transform_request, transform_request_to_chat, transform_response
+from .byok import (
+    all_provider_configs,
+    resolve_api_key,
+    split_provider_model,
+    validate_http_base_url,
+    validate_provider_api_key,
+    validate_provider_headers,
+    validate_provider_id,
+)
+from .transform import (
+    token_count,
+    safe_project_id,
+    transform_chat_response,
+    transform_request,
+    transform_request_to_chat,
+    transform_response,
+    valid_function_name,
+)
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform, is_loopback_host
 from .redaction import redact_secret_text
 
@@ -50,12 +67,23 @@ def safe_error_detail(value: object) -> str:
     return redact_secret_text(str(value))
 
 
+def finite_retry_after_seconds(value: object) -> float | None:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds):
+        return None
+    return max(0.0, seconds)
+
+
 def retry_after_seconds_from_response(res: httpx.Response) -> float | None:
     retry_after = res.headers.get("retry-after")
     if retry_after:
-        try:
-            return max(0.0, float(retry_after))
-        except ValueError:
+        parsed_seconds = finite_retry_after_seconds(retry_after)
+        if parsed_seconds is not None:
+            return parsed_seconds
+        else:
             try:
                 retry_at = email.utils.parsedate_to_datetime(retry_after)
                 if retry_at.tzinfo is None:
@@ -89,10 +117,60 @@ def retry_after_seconds_from_response(res: httpx.Response) -> float | None:
             seconds = retry_delay.get("seconds", 0)
             nanos = retry_delay.get("nanos", 0)
             try:
-                return float(seconds) + (float(nanos) / 1_000_000_000)
+                parsed_seconds = finite_retry_after_seconds(float(seconds) + (float(nanos) / 1_000_000_000))
             except (TypeError, ValueError):
                 continue
+            if parsed_seconds is not None:
+                return parsed_seconds
     return None
+
+
+def provider_has_usable_key(provider: dict) -> bool:
+    try:
+        return bool(validate_provider_api_key(resolve_api_key(provider)))
+    except ValueError:
+        return False
+
+
+def codex_model_metadata(model_id: str, display_name: str, context_window: int, owned_by: str, created: int) -> dict:
+    reasoning_levels = [
+        {"effort": "low", "description": "Fast responses with lighter reasoning"},
+        {"effort": "medium", "description": "Balances speed and reasoning depth"},
+        {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+        {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
+    ]
+    return {
+        "id": model_id,
+        "slug": model_id,
+        "object": "model",
+        "created": created,
+        "owned_by": owned_by,
+        "display_name": display_name,
+        "description": f"{display_name} via the local Codex Antigravity gateway.",
+        "supports_parallel_tool_calls": True,
+        "context_window": context_window,
+        "max_context_window": context_window,
+        "auto_compact_token_limit": None,
+        "reasoning_summary_format": "experimental",
+        "default_reasoning_summary": "none",
+        "supports_reasoning_summaries": False,
+        "supported_reasoning_levels": reasoning_levels,
+        "default_reasoning_level": "high",
+        "support_verbosity": False,
+        "default_verbosity": "medium",
+        "truncation_policy": {"mode": "tokens", "limit": 10000},
+        "experimental_supported_tools": [],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "minimal_client_version": "0.124.0",
+        "supported_in_api": True,
+        "availability_nux": None,
+        "upgrade": None,
+        "priority": 0,
+        "base_instructions": "Follow the instructions supplied by the Codex client for each request.",
+        "instructions_variables": {},
+    }
+
 
 @app.get("/v1/models")
 async def list_models():
@@ -100,6 +178,8 @@ async def list_models():
     import time
     byok_models = []
     for provider_id, provider in all_provider_configs().items():
+        if not provider_has_usable_key(provider):
+            continue
         for model_entry in provider.get("models", []):
             if isinstance(model_entry, dict):
                 provider_model = model_entry.get("id")
@@ -111,28 +191,59 @@ async def list_models():
                 context_window = 128000
             if not provider_model:
                 continue
+            model_id = f"{provider_id}:{provider_model}"
             byok_models.append({
-                "id": f"{provider_id}:{provider_model}",
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": provider_id,
-                "display_name": f"{provider.get('displayName', provider_id)}: {display_name}",
-                "context_window": context_window,
+                **codex_model_metadata(
+                    model_id,
+                    f"{provider.get('displayName', provider_id)}: {display_name}",
+                    context_window,
+                    provider_id,
+                    int(time.time()),
+                )
             })
+    models = [
+        codex_model_metadata(
+            m["id"],
+            m["display_name"],
+            m["context_window"],
+            "google-antigravity",
+            int(time.time()),
+        )
+        for m in AVAILABLE_MODELS
+    ] + byok_models
     return {
         "object": "list",
-        "data": [
-            {
-                "id": m["id"],
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "google-antigravity",
-                "display_name": m["display_name"],
-                "context_window": m["context_window"],
-            }
-            for m in AVAILABLE_MODELS
-        ] + byok_models,
+        "data": models,
+        "models": models,
     }
+
+def safe_header_string(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in value):
+        return None
+    return value
+
+
+def safe_client_metadata(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+
+    metadata = {}
+    for key, raw_value in value.items():
+        safe_key = safe_header_string(key)
+        if safe_key is None:
+            continue
+        if isinstance(raw_value, str):
+            safe_value = safe_header_string(raw_value)
+            if safe_value is not None:
+                metadata[safe_key] = safe_value
+        elif raw_value is None or isinstance(raw_value, bool):
+            metadata[safe_key] = raw_value
+        elif isinstance(raw_value, (int, float)) and math.isfinite(raw_value):
+            metadata[safe_key] = raw_value
+    return metadata
+
 
 def build_headers(account: dict) -> dict:
     platform = get_platform()
@@ -144,44 +255,80 @@ def build_headers(account: dict) -> dict:
         "Authorization": f"Bearer {account['accessToken']}",
     }
     
-    # Inject fingerprint if available
+    # Fingerprints are locally persisted, so tolerate stale or malformed data.
     fp = account.get("fingerprint")
-    if fp:
-        headers["User-Agent"] = fp.get("userAgent", headers["User-Agent"])
-        headers["X-Goog-Api-Client"] = fp.get("apiClient", headers["X-Goog-Api-Client"])
+    if isinstance(fp, dict):
+        user_agent = safe_header_string(fp.get("userAgent"))
+        api_client = safe_header_string(fp.get("apiClient"))
+        if user_agent is not None:
+            headers["User-Agent"] = user_agent
+        if api_client is not None:
+            headers["X-Goog-Api-Client"] = api_client
         if fp.get("clientMetadata"):
-            metadata = dict(fp["clientMetadata"])
-            if fp.get("deviceId"):
-                metadata["deviceId"] = fp["deviceId"]
-            if fp.get("sessionToken"):
-                metadata["sessionToken"] = fp["sessionToken"]
-            headers["Client-Metadata"] = json.dumps(metadata)
+            metadata = safe_client_metadata(fp.get("clientMetadata"))
+            device_id = safe_header_string(fp.get("deviceId"))
+            session_token = safe_header_string(fp.get("sessionToken"))
+            if device_id is not None:
+                metadata["deviceId"] = device_id
+            if session_token is not None:
+                metadata["sessionToken"] = session_token
+            if metadata:
+                headers["Client-Metadata"] = json.dumps(metadata)
             
     return headers
 
 
 def build_openai_compatible_headers(provider: dict) -> dict:
     api_key = resolve_api_key(provider)
+    try:
+        api_key = validate_provider_api_key(api_key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Provider '{provider['id']}' {str(e)}") from e
     if not api_key:
         raise HTTPException(
             status_code=401,
             detail=f"No API key configured for provider '{provider['id']}'. Set {provider.get('apiKeyEnv', 'provider API key')} or run provider set.",
         )
+    provider_headers = provider.get("headers", {}) or {}
+    try:
+        provider_headers = validate_provider_headers(provider_headers)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    headers.update(provider.get("headers", {}) or {})
+    headers.update(provider_headers or {})
     return headers
 
 
 def chat_completions_url(provider: dict) -> str:
-    base_url = provider.get("baseUrl", "").rstrip("/")
-    if not base_url:
+    base_url = provider.get("baseUrl", "")
+    if not isinstance(base_url, str):
+        raise HTTPException(status_code=400, detail=f"Provider '{provider['id']}' baseUrl must be a string")
+    if not base_url.strip():
         raise HTTPException(status_code=500, detail=f"Provider '{provider['id']}' has no baseUrl configured")
+    try:
+        base_url = validate_http_base_url(base_url, label=f"Provider '{provider['id']}' baseUrl")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if base_url.endswith("/chat/completions"):
-        return base_url
-    return f"{base_url}/chat/completions"
+        url = base_url
+    else:
+        url = f"{base_url}/chat/completions"
+    return url
+
+
+def openai_compatible_timeout(provider: dict) -> float:
+    timeout = provider.get("timeout", 120.0)
+    if (
+        not isinstance(timeout, (int, float))
+        or isinstance(timeout, bool)
+        or not math.isfinite(float(timeout))
+        or float(timeout) <= 0
+    ):
+        raise HTTPException(status_code=400, detail=f"Provider '{provider['id']}' timeout must be a positive number")
+    return float(timeout)
 
 
 def reject_unsupported_previous_response(codex_req: dict) -> None:
@@ -192,21 +339,134 @@ def reject_unsupported_previous_response(codex_req: dict) -> None:
         )
 
 
+def validate_response_request_body(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail="Request JSON body must be an object")
+    instructions = value.get("instructions")
+    if instructions is not None and not isinstance(instructions, str):
+        raise HTTPException(status_code=400, detail="instructions must be a string")
+    reasoning = value.get("reasoning")
+    if reasoning is not None and not isinstance(reasoning, dict):
+        raise HTTPException(status_code=400, detail="reasoning must be an object")
+    validate_response_generation_options(value)
+    validate_response_tool_choice(value)
+    return value
+
+
+def validate_finite_number_option(value: object, field_name: str, *, minimum: float, maximum: float | None = None) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a finite number")
+    number = float(value)
+    if number < minimum or (maximum is not None and number > maximum):
+        if maximum is None:
+            raise HTTPException(status_code=400, detail=f"{field_name} must be greater than or equal to {minimum:g}")
+        raise HTTPException(status_code=400, detail=f"{field_name} must be between {minimum:g} and {maximum:g}")
+
+
+def validate_response_generation_options(codex_req: dict) -> None:
+    if "temperature" in codex_req:
+        validate_finite_number_option(codex_req["temperature"], "temperature", minimum=0.0, maximum=2.0)
+    if "top_p" in codex_req:
+        validate_finite_number_option(codex_req["top_p"], "top_p", minimum=0.0, maximum=1.0)
+    if "max_output_tokens" in codex_req:
+        value = codex_req["max_output_tokens"]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise HTTPException(status_code=400, detail="max_output_tokens must be a positive integer")
+    if "stop" in codex_req:
+        stop = codex_req["stop"]
+        values = [stop] if isinstance(stop, str) else stop
+        if not isinstance(values, list) or not values:
+            raise HTTPException(status_code=400, detail="stop must be a string or a non-empty list of strings")
+        for item in values:
+            if not isinstance(item, str) or not item or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in item):
+                raise HTTPException(status_code=400, detail="stop values must be non-empty strings without control characters")
+
+
+def validate_response_tool_choice(codex_req: dict) -> None:
+    if "tool_choice" not in codex_req:
+        return
+    tool_choice = codex_req.get("tool_choice")
+    if isinstance(tool_choice, str):
+        if tool_choice not in {"auto", "none", "required"}:
+            raise HTTPException(status_code=400, detail="tool_choice must be auto, none, required, or a function choice object")
+        return
+    if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
+        raise HTTPException(status_code=400, detail="tool_choice must be auto, none, required, or a function choice object")
+    nested = tool_choice.get("function")
+    name = tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
+    if not valid_function_name(name):
+        raise HTTPException(
+            status_code=400,
+            detail="tool_choice function name must contain only letters, numbers, underscores, and hyphens, and be 1-64 characters",
+        )
+
+
+def response_stream_flag(codex_req: dict) -> bool:
+    if "stream" not in codex_req:
+        return False
+    stream = codex_req.get("stream")
+    if not isinstance(stream, bool):
+        raise HTTPException(status_code=400, detail="stream must be a boolean")
+    return stream
+
+
+def response_model_id(codex_req: dict) -> str:
+    raw_model = codex_req.get("model", "gemini-3.5-flash-high")
+    if not isinstance(raw_model, str):
+        raise HTTPException(status_code=400, detail="model must be a string")
+    model = raw_model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="model must be non-empty")
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in model):
+        raise HTTPException(status_code=400, detail="model must not contain whitespace or control characters")
+    return model
+
+
+def validate_provider_model_id(provider_id: str | None, provider_model: str) -> None:
+    if provider_id is None:
+        return
+    if not provider_id:
+        raise HTTPException(status_code=400, detail="BYOK provider id must be non-empty")
+    try:
+        validate_provider_id(provider_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if not provider_model:
+        raise HTTPException(status_code=400, detail=f"Provider '{provider_id}' model id must be non-empty")
+
+
+def chat_tool_call_delta_index(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return None
+    if index < 0:
+        return None
+    return index
+
+
+def stream_string(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 def prepare_openai_compatible_request(
     codex_req: dict,
     provider: dict,
     provider_model: str,
     *,
     stream: bool,
-) -> tuple[dict, str, dict]:
+) -> tuple[dict, str, dict, float]:
     try:
         payload = transform_request_to_chat({**codex_req, "stream": stream}, provider_model)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     payload["stream"] = stream
-    url = chat_completions_url(provider)
     headers = build_openai_compatible_headers(provider)
-    return payload, url, headers
+    url = chat_completions_url(provider)
+    timeout = openai_compatible_timeout(provider)
+    return payload, url, headers, timeout
 
 @app.post("/v1/responses")
 async def create_response(request: Request):
@@ -214,13 +474,16 @@ async def create_response(request: Request):
         codex_req = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
+    codex_req = validate_response_request_body(codex_req)
 
     reject_unsupported_previous_response(codex_req)
         
-    model = codex_req.get("model", "gemini-3.5-flash-high")
-    stream = codex_req.get("stream", False)
+    model = response_model_id(codex_req)
+    codex_req["model"] = model
+    stream = response_stream_flag(codex_req)
     provider_id, provider_model = split_provider_model(model)
-    if provider_id:
+    validate_provider_model_id(provider_id, provider_model)
+    if provider_id is not None:
         providers = all_provider_configs()
         provider = providers.get(provider_id)
         if not provider:
@@ -228,9 +491,9 @@ async def create_response(request: Request):
         if provider.get("kind") != "openai_chat":
             raise HTTPException(status_code=500, detail=f"Unsupported BYOK provider kind: {provider.get('kind')}")
         if stream:
-            payload, url, headers = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=True)
+            payload, url, headers, timeout = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=True)
             return StreamingResponse(
-                openai_compatible_sse_generator(payload, url, headers, provider, model),
+                openai_compatible_sse_generator(payload, url, headers, timeout, provider, model),
                 media_type="text/event-stream",
             )
         return await create_openai_compatible_response(codex_req, provider, provider_model, model)
@@ -243,21 +506,21 @@ async def create_response(request: Request):
             detail="No Google accounts available. Run `codex-antigravity login` to connect an account."
         )
         
-    # 2. Translate standard Responses API request to Antigravity request envelope
-    project_id = account.get("projectId") or account.get("managedProjectId")
-    antigravity_req = transform_request(codex_req, project_id=project_id)
-    backend_model = antigravity_req.get("model")
+    def build_google_request(selected_account: dict) -> tuple[dict, dict]:
+        project_id = safe_project_id(selected_account.get("projectId")) or safe_project_id(
+            selected_account.get("managedProjectId")
+        )
+        return transform_request(codex_req, project_id=project_id), build_headers(selected_account)
     
     # Route target action based on streaming mode
     action = "streamGenerateContent" if stream else "generateContent"
     backend_url = f"{ANTIGRAVITY_ENDPOINT_PROD}/v1internal:{action}"
     if stream:
         backend_url += "?alt=sse"
-        
-    headers = build_headers(account)
     
     # Perform HTTP POST request to Antigravity endpoint with error recovery & rotation
-    async def request_backend() -> httpx.Response | None:
+    async def request_backend(selected_account: dict) -> httpx.Response | None:
+        antigravity_req, headers = build_google_request(selected_account)
         async with httpx.AsyncClient(timeout=60.0) as client:
             try:
                 # Do NOT stream the response inside this function, we just do normal or stream connection
@@ -268,41 +531,40 @@ async def create_response(request: Request):
                     res = await client.post(backend_url, json=antigravity_req, headers=headers)
                     return res
             except Exception as e:
-                account_manager.mark_failure(account["email"], f"Connection error: {safe_error_detail(e)}")
+                account_manager.mark_failure(selected_account["email"], f"Connection error: {safe_error_detail(e)}")
                 return None
 
     # Handle standard non-streaming response path
     if not stream:
-        res = await request_backend()
+        response_account = account
+        res = await request_backend(response_account)
         if not res:
             # Retry with rotated account on connection failures
             new_account = account_manager.select_active_account(model)
             if new_account:
-                account = new_account
-                headers = build_headers(account)
-                res = await request_backend()
+                response_account = new_account
+                res = await request_backend(response_account)
                 
         if not res:
             raise HTTPException(status_code=502, detail="Failed to communicate with Antigravity backend after rotation")
 
         if res.status_code in (401, 403, 429):
             reason = "Rate limited / Quota exceeded" if res.status_code == 429 else f"Auth failure {res.status_code}: {safe_error_detail(res.text)}"
-            account_manager.mark_failure(account["email"], reason, retry_after_seconds_from_response(res))
+            account_manager.mark_failure(response_account["email"], reason, retry_after_seconds_from_response(res))
             new_account = account_manager.select_active_account(model)
             if new_account:
-                account = new_account
-                headers = build_headers(account)
-                res = await request_backend()
+                response_account = new_account
+                res = await request_backend(response_account)
             if not res:
                 raise HTTPException(status_code=502, detail="Failed to communicate with Antigravity backend after rotation")
             
         if res.status_code in (401, 403):
             # Token might be invalidated or verification required
-            account_manager.mark_failure(account["email"], f"Auth failure {res.status_code}: {safe_error_detail(res.text)}")
+            account_manager.mark_failure(response_account["email"], f"Auth failure {res.status_code}: {safe_error_detail(res.text)}")
             raise HTTPException(status_code=res.status_code, detail=f"Google Authentication failure: {safe_error_detail(res.text)}")
             
         if res.status_code == 429:
-            account_manager.mark_failure(account["email"], "Rate limited / Quota exceeded", retry_after_seconds_from_response(res))
+            account_manager.mark_failure(response_account["email"], "Rate limited / Quota exceeded", retry_after_seconds_from_response(res))
             raise HTTPException(status_code=429, detail="Antigravity account rate limit reached. Auto-switching to next account.")
             
         if res.status_code != 200:
@@ -316,7 +578,7 @@ async def create_response(request: Request):
             codex_resp = transform_response(gemini_resp, model)
             return codex_resp
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Response translation failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
 
     # Handle standard SSE streaming response path
     async def sse_generator() -> AsyncGenerator[str, None]:
@@ -362,37 +624,57 @@ async def create_response(request: Request):
                 return
             if "response" in parsed and isinstance(parsed["response"], dict):
                 parsed = parsed["response"]
-            if parsed.get("usageMetadata"):
+            if isinstance(parsed.get("usageMetadata"), dict):
                 usage_meta = parsed["usageMetadata"]
                 usage = {
-                    "input_tokens": usage_meta.get("promptTokenCount", 0),
-                    "output_tokens": usage_meta.get("candidatesTokenCount", 0),
-                    "total_tokens": usage_meta.get("totalTokenCount", 0),
+                    "input_tokens": token_count(usage_meta.get("promptTokenCount", 0)),
+                    "output_tokens": token_count(usage_meta.get("candidatesTokenCount", 0)),
+                    "total_tokens": token_count(usage_meta.get("totalTokenCount", 0)),
                 }
             candidates = parsed.get("candidates", [])
+            if not isinstance(candidates, list):
+                return
             for cand in candidates:
+                if not isinstance(cand, dict):
+                    continue
                 content = cand.get("content", {})
+                if not isinstance(content, dict):
+                    continue
                 parts = content.get("parts", [])
+                if not isinstance(parts, list):
+                    continue
                 for part in parts:
+                    if not isinstance(part, dict):
+                        continue
                     # Yield reasoning/thinking blocks in separate reasoning events
                     if part.get("thought") is True or part.get("type") == "thinking":
-                        thought_text = part.get("text", "") or part.get("thinking", "")
-                        yield f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': thought_text})}\n\n"
+                        thought_text = stream_string(part.get("text")) or stream_string(part.get("thinking"))
+                        if thought_text:
+                            yield f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': thought_text})}\n\n"
                     elif "text" in part:
-                        output_text += part["text"]
-                        yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': part['text']})}\n\n"
+                        text = stream_string(part.get("text"))
+                        if text is None:
+                            continue
+                        output_text += text
+                        yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': text})}\n\n"
                     elif "functionCall" in part:
                         fc = part["functionCall"]
-                        call_id = fc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                        if not isinstance(fc, dict):
+                            continue
+                        name = stream_string(fc.get("name"))
+                        if not valid_function_name(name):
+                            continue
+                        call_id = stream_string(fc.get("id")) or f"call_{uuid.uuid4().hex[:8]}"
                         item_id = f"fc_{uuid.uuid4().hex[:8]}"
                         output_index = next_output_index
                         next_output_index += 1
-                        arguments = json.dumps(fc.get("args", {}))
+                        args = fc.get("args", {})
+                        arguments = json.dumps(args if isinstance(args, dict) else {})
                         item = {
                             "type": "function_call",
                             "id": item_id,
                             "call_id": call_id,
-                            "name": fc.get("name"),
+                            "name": name,
                             "arguments": "",
                         }
                         yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': output_index, 'item': item})}\n\n"
@@ -408,10 +690,10 @@ async def create_response(request: Request):
         attempt_num = 0
         while attempt_num < len(attempts):
             stream_account = attempts[attempt_num]
-            stream_headers = build_headers(stream_account)
+            stream_req, stream_headers = build_google_request(stream_account)
             try:
                 async with httpx.AsyncClient(timeout=60.0) as client:
-                    async with client.stream("POST", backend_url, json=antigravity_req, headers=stream_headers) as res:
+                    async with client.stream("POST", backend_url, json=stream_req, headers=stream_headers) as res:
                         if res.status_code != 200:
                             if res.status_code in (401, 403, 429):
                                 body_bytes = await res.aread()
@@ -466,8 +748,8 @@ async def create_response(request: Request):
 
 
 async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str) -> dict:
-    payload, url, headers = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=False)
-    async with httpx.AsyncClient(timeout=provider.get("timeout", 120.0)) as client:
+    payload, url, headers, timeout = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=False)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             res = await client.post(url, json=payload, headers=headers)
         except Exception as e:
@@ -477,13 +759,14 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
     try:
         return transform_chat_response(res.json(), display_model)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"{provider['id']} response translation failed: {e}") from e
+        raise HTTPException(status_code=500, detail=f"{provider['id']} response translation failed: {safe_error_detail(e)}") from e
 
 
 async def openai_compatible_sse_generator(
     payload: dict,
     url: str,
     headers: dict,
+    timeout: float,
     provider: dict,
     display_model: str,
 ) -> AsyncGenerator[str, None]:
@@ -520,23 +803,44 @@ async def openai_compatible_sse_generator(
         except json.JSONDecodeError as e:
             print(f"[*] Skipping invalid {provider['id']} SSE JSON chunk: {e}")
             return
-        if parsed.get("usage"):
+        if not isinstance(parsed, dict):
+            return
+        if isinstance(parsed.get("usage"), dict):
             provider_usage = parsed["usage"]
             usage = {
-                "input_tokens": provider_usage.get("prompt_tokens", provider_usage.get("input_tokens", 0)),
-                "output_tokens": provider_usage.get("completion_tokens", provider_usage.get("output_tokens", 0)),
-                "total_tokens": provider_usage.get("total_tokens", 0),
+                "input_tokens": token_count(provider_usage.get("prompt_tokens", provider_usage.get("input_tokens", 0))),
+                "output_tokens": token_count(provider_usage.get("completion_tokens", provider_usage.get("output_tokens", 0))),
+                "total_tokens": token_count(provider_usage.get("total_tokens", 0)),
             }
-        for choice in parsed.get("choices", []) or []:
+        choices = parsed.get("choices", []) or []
+        if not isinstance(choices, list):
+            return
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
             delta = choice.get("delta", {}) or {}
-            if delta.get("reasoning_content"):
-                yield f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': delta['reasoning_content']})}\n\n"
-            if delta.get("content"):
-                output_text += delta["content"]
-                yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': delta['content']})}\n\n"
-            for tool_delta in delta.get("tool_calls", []) or []:
-                idx = int(tool_delta.get("index", 0))
-                generated_call_id = tool_delta.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+            if not isinstance(delta, dict):
+                continue
+            reasoning_content = stream_string(delta.get("reasoning_content"))
+            if reasoning_content:
+                yield f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': reasoning_content})}\n\n"
+            content_delta = stream_string(delta.get("content"))
+            if content_delta:
+                output_text += content_delta
+                yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': content_delta})}\n\n"
+            tool_deltas = delta.get("tool_calls", []) or []
+            if not isinstance(tool_deltas, list):
+                continue
+            for tool_delta in tool_deltas:
+                if not isinstance(tool_delta, dict):
+                    continue
+                idx = chat_tool_call_delta_index(tool_delta.get("index", 0))
+                if idx is None:
+                    continue
+                fn = tool_delta.get("function", {}) or {}
+                if not isinstance(fn, dict):
+                    continue
+                generated_call_id = stream_string(tool_delta.get("id")) or f"call_{uuid.uuid4().hex[:8]}"
                 state = tool_calls.setdefault(idx, {
                     "id": f"fc_{uuid.uuid4().hex[:8]}",
                     "type": "function_call",
@@ -544,22 +848,35 @@ async def openai_compatible_sse_generator(
                     "name": "",
                     "arguments": "",
                 })
-                if tool_delta.get("id"):
-                    state["call_id"] = tool_delta["id"]
-                fn = tool_delta.get("function", {}) or {}
-                new_tool_item = idx not in tool_output_indices
-                if fn.get("name"):
-                    state["name"] += fn["name"]
+                tool_call_id = stream_string(tool_delta.get("id"))
+                if tool_call_id:
+                    state["call_id"] = tool_call_id
+                buffered_arguments = state.get("arguments", "")
+                name_delta = stream_string(fn.get("name"))
+                arguments_delta = stream_string(fn.get("arguments"))
+                if name_delta:
+                    state["name"] += name_delta
+                new_tool_item = (
+                    idx not in tool_output_indices
+                    and valid_function_name(state["name"])
+                    and bool(arguments_delta)
+                    and not name_delta
+                )
                 if new_tool_item:
                     tool_output_indices[idx] = next_output_index
                     next_output_index += 1
-                    yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': tool_output_indices[idx], 'item': dict(state)})}\n\n"
-                if fn.get("arguments"):
-                    state["arguments"] += fn["arguments"]
-                    yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': fn['arguments']})}\n\n"
+                    item = dict(state)
+                    item["arguments"] = ""
+                    yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': tool_output_indices[idx], 'item': item})}\n\n"
+                    if buffered_arguments:
+                        yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': buffered_arguments})}\n\n"
+                if arguments_delta:
+                    state["arguments"] += arguments_delta
+                    if idx in tool_output_indices:
+                        yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': arguments_delta})}\n\n"
 
     try:
-        async with httpx.AsyncClient(timeout=provider.get("timeout", 120.0)) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as res:
                 if res.status_code != 200:
                     body = (await res.aread()).decode("utf-8", errors="ignore")
@@ -583,6 +900,16 @@ async def openai_compatible_sse_generator(
 
     for idx in sorted(tool_calls):
         item = tool_calls[idx]
+        if not valid_function_name(item.get("name")):
+            continue
+        if idx not in tool_output_indices:
+            tool_output_indices[idx] = next_output_index
+            next_output_index += 1
+            added_item = dict(item)
+            added_item["arguments"] = ""
+            yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': tool_output_indices[idx], 'item': added_item})}\n\n"
+            if item.get("arguments"):
+                yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': item['id'], 'output_index': tool_output_indices[idx], 'delta': item['arguments']})}\n\n"
         output_index = tool_output_indices[idx]
         arguments = item.get("arguments", "")
         yield f"data: {json.dumps({'type': 'response.function_call_arguments.done', 'response_id': response_id, 'item_id': item['id'], 'output_index': output_index, 'arguments': arguments})}\n\n"

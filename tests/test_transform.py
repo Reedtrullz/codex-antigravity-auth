@@ -12,6 +12,28 @@ class TestTransform(unittest.TestCase):
         res = transform_request(req)
         self.assertEqual(res["model"], "gemini-3-flash-agent")
         self.assertEqual(res["request"]["contents"][0]["parts"][0]["text"], "What is the meaning of life?")
+
+    def test_google_generation_options_are_forwarded(self):
+        req = {
+            "model": "gemini-3.5-flash-high",
+            "input": "Write a short answer.",
+            "temperature": 0.2,
+            "top_p": 0.7,
+            "max_output_tokens": 123,
+            "stop": ["END", "STOP"],
+        }
+
+        res = transform_request(req)
+
+        self.assertEqual(
+            res["request"]["generationConfig"],
+            {
+                "temperature": 0.2,
+                "topP": 0.7,
+                "maxOutputTokens": 123,
+                "stopSequences": ["END", "STOP"],
+            },
+        )
         
     def test_structured_input_transformation(self):
         req = {
@@ -34,6 +56,31 @@ class TestTransform(unittest.TestCase):
         self.assertEqual(res["request"]["contents"][0]["parts"][0]["text"], "Hello, how are you?")
         # No tools in request → no toolConfig key
         self.assertNotIn("toolConfig", res["request"])
+
+    def test_claude_thinking_budget_stays_below_explicit_max_output_tokens(self):
+        req = {
+            "model": "claude-3.5-sonnet",
+            "input": "Hello",
+            "max_output_tokens": 4096,
+        }
+
+        res = transform_request(req)
+
+        generation_config = res["request"]["generationConfig"]
+        self.assertEqual(generation_config["maxOutputTokens"], 4096)
+        self.assertEqual(generation_config["thinkingConfig"]["thinking_budget"], 4095)
+
+    def test_claude_omits_thinking_config_when_token_cap_cannot_exceed_budget(self):
+        req = {
+            "model": "claude-3.5-sonnet",
+            "input": "Hello",
+            "max_output_tokens": 1024,
+        }
+
+        res = transform_request(req)
+
+        self.assertEqual(res["request"]["generationConfig"]["maxOutputTokens"], 1024)
+        self.assertNotIn("thinkingConfig", res["request"]["generationConfig"])
 
     def test_response_transformation(self):
         gemini_resp = {
