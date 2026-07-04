@@ -20,16 +20,18 @@ MODEL_MAP = {
     "claude-opus-4-6": "claude-opus-4-6-thinking",
     "claude-opus-4-6-thinking": "claude-opus-4-6-thinking",
 }
+RESERVED_GOOGLE_MODEL_PREFIXES = {"openai", "openai-responses"}
 
 def resolve_backend_model(model: str) -> str:
     """Resolve Codex-provided model name to official Antigravity backend model."""
     lower = str(model).lower()
     if lower in MODEL_MAP:
         return MODEL_MAP[lower]
-    # Remove any provider prefixes like "openai-responses/" or "openai/"
     if "/" in lower:
-        parts = lower.split("/")
-        return resolve_backend_model(parts[-1])
+        prefix, rest = lower.split("/", 1)
+        if prefix in RESERVED_GOOGLE_MODEL_PREFIXES:
+            return resolve_backend_model(rest)
+        return lower
     # Normalize hyphens to dots (codex-shim slug normalization)
     slug_variants = {
         lower.replace("-3-5-", "-3.5-"),

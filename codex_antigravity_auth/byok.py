@@ -13,13 +13,21 @@ PROVIDERS_FILE = "~/.codex/antigravity-providers.json"
 PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+RESERVED_SLASH_PROVIDER_PREFIXES = {"openai", "openai-responses"}
 RESERVED_PROVIDER_HEADER_NAMES = {
+    "accept-encoding",
     "authorization",
+    "connection",
     "proxy-authorization",
+    "proxy-connection",
     "content-type",
     "content-length",
+    "keep-alive",
+    "te",
+    "trailer",
     "host",
     "transfer-encoding",
+    "upgrade",
 }
 
 
@@ -81,6 +89,7 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "apiKeyEnv": "OPENAI_COMPATIBLE_API_KEY",
         "models": [],
         "apiKeyOptional": True,
+        "autoEnable": False,
     },
 }
 
@@ -132,6 +141,8 @@ def validate_http_base_url(base_url: Any, *, label: str = "base URL") -> str:
         raise ValueError(f"{label} must not include username or password")
     if parsed.query or parsed.fragment:
         raise ValueError(f"{label} must not include query strings or fragments")
+    if parsed.scheme == "http" and not is_loopback_host(hostname):
+        raise ValueError(f"{label} must use https unless it points at a loopback/local host")
     return value
 
 
@@ -525,7 +536,8 @@ def all_provider_configs(include_env_enabled: bool = True) -> dict[str, dict[str
             if provider_id in providers:
                 continue
             merged = merged_provider_config(provider_id, None)
-            if has_provider_api_key_env(merged):
+            auto_enable_keyless = merged.get("autoEnable", True) is not False
+            if has_provider_api_key_env(merged) or (auto_enable_keyless and provider_allows_keyless_local_use(merged)):
                 providers[provider_id] = merged
 
     return providers
@@ -613,6 +625,8 @@ def split_provider_model(model: str) -> tuple[str | None, str]:
         return provider_id, provider_model
     if "/" in model:
         provider_id, provider_model = model.split("/", 1)
+        if provider_id in RESERVED_SLASH_PROVIDER_PREFIXES:
+            return None, model
         if provider_id in PROVIDER_PRESETS or provider_id in all_provider_configs(include_env_enabled=False):
             return provider_id, provider_model
     return None, model

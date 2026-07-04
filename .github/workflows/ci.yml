@@ -29,3 +29,56 @@ jobs:
 
       - name: Compile sources
         run: python -m compileall codex_antigravity_auth tests
+
+  package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packaging tools
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build artifacts
+        run: python -m build --sdist --wheel
+
+      - name: Check artifact metadata
+        run: python -m twine check dist/*
+
+      - name: Check artifacts include license
+        run: |
+          python - <<'PY'
+          import pathlib
+          import tarfile
+          import zipfile
+
+          dist = pathlib.Path("dist")
+          wheel = next(dist.glob("*.whl"))
+          sdist = next(dist.glob("*.tar.gz"))
+
+          with zipfile.ZipFile(wheel) as zf:
+              wheel_names = zf.namelist()
+          if not any(name.endswith(".dist-info/licenses/LICENSE") or name.endswith("/LICENSE") for name in wheel_names):
+              raise SystemExit(f"LICENSE missing from wheel {wheel}")
+
+          with tarfile.open(sdist) as tf:
+              sdist_names = tf.getnames()
+          if not any(name.endswith("/LICENSE") for name in sdist_names):
+              raise SystemExit(f"LICENSE missing from sdist {sdist}")
+          PY
+
+      - name: Install wheel in a clean venv
+        run: |
+          python -m venv /tmp/codex-antigravity-wheel
+          /tmp/codex-antigravity-wheel/bin/python -m pip install --upgrade pip
+          /tmp/codex-antigravity-wheel/bin/python -m pip install dist/*.whl
+          /tmp/codex-antigravity-wheel/bin/python -m pip check
+          /tmp/codex-antigravity-wheel/bin/codex-antigravity --help
+          /tmp/codex-antigravity-wheel/bin/codex-antigravity doctor --help
+          /tmp/codex-antigravity-wheel/bin/codex-antigravity provider presets

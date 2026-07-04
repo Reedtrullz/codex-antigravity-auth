@@ -9,7 +9,13 @@ uv tool install "git+https://github.com/Reedtrullz/codex-antigravity-auth.git"
 
 From a checkout, use `uv tool install .` instead.
 
-### 2. Configure Credentials
+### 2. Configure Google Credentials
+Create a Google OAuth desktop client with this local callback:
+
+```text
+http://localhost:51121/oauth-callback
+```
+
 Write `~/.codex/antigravity-credentials.json`:
 ```json
 {
@@ -17,7 +23,7 @@ Write `~/.codex/antigravity-credentials.json`:
   "client_secret": "YOUR_CLIENT_SECRET"
 }
 ```
-Or export: `ANTIGRAVITY_CLIENT_ID` + `ANTIGRAVITY_CLIENT_SECRET`.
+Or export: `ANTIGRAVITY_CLIENT_ID` + `ANTIGRAVITY_CLIENT_SECRET`. The credential JSON is plaintext but permission-repaired to `0600`; login tokens are stored separately in encrypted storage.
 
 ### 3. Login Or Configure BYOK
 ```bash
@@ -27,10 +33,10 @@ Opens browser → pick Google account → tokens stored encrypted.
 
 For BYOK providers:
 ```bash
-codex-antigravity provider set deepseek --api-key "$DEEPSEEK_API_KEY" --model deepseek-chat
-codex-antigravity provider set openrouter --api-key "$OPENROUTER_API_KEY" --model deepseek/deepseek-chat
-codex-antigravity provider set xai --api-key "$XAI_API_KEY" --model grok-code-fast-1
-codex-antigravity provider set kimi --api-key "$KIMI_API_KEY" --model kimi-k2-0711-preview
+codex-antigravity provider set deepseek --api-key-env DEEPSEEK_API_KEY --model deepseek-chat
+codex-antigravity provider set openrouter --api-key-env OPENROUTER_API_KEY --model deepseek/deepseek-chat
+codex-antigravity provider set xai --api-key-env XAI_API_KEY --model grok-code-fast-1
+codex-antigravity provider set kimi --api-key-env KIMI_API_KEY --model kimi-k2-0711-preview
 codex-antigravity provider set ollama --base-url http://localhost:11434/v1 --model gpt-oss:20b
 ```
 Provider ids may only contain letters, numbers, underscores, and hyphens; provider model ids may still contain `/` or `:`, but not whitespace or control characters.
@@ -40,6 +46,8 @@ Add to `~/.codex/config.toml`:
 
 ```bash
 codex-antigravity configure-codex --write
+# BYOK-only example:
+codex-antigravity configure-codex --write --model deepseek:deepseek-chat
 ```
 
 Equivalent manual TOML:
@@ -63,7 +71,8 @@ codex-antigravity start
 ### 6. Verify
 ```bash
 codex-antigravity doctor        # diagnostics
-python3 -m pytest -q             # current local suite, 168 tests plus 120 subtests
+codex-antigravity doctor --byok-only
+python3 -m pytest -q             # current local suite, 215 tests plus 128 subtests
 curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
 ```
 
@@ -83,7 +92,7 @@ export DEEPSEEK_API_KEY="..."
 curl -s http://localhost:51122/v1/models | python3 -m json.tool
 curl -s -X POST http://localhost:51122/v1/responses \
   -H "Content-Type: application/json" \
-  -d '{"model":"deepseek:deepseek-v4-flash","input":"Return exactly: byok-smoke-ok","max_output_tokens":256}'
+  -d '{"model":"deepseek:deepseek-chat","input":"Return exactly: byok-smoke-ok","max_output_tokens":256}'
 
 export OPENROUTER_API_KEY="..."
 curl -s http://localhost:51122/v1/models | python3 -m json.tool
@@ -92,8 +101,10 @@ curl -s -X POST http://localhost:51122/v1/responses \
   -d '{"model":"openrouter:openrouter/auto","input":"Return exactly: openrouter-smoke-ok","max_output_tokens":256}'
 ```
 
-The latest credentialed smoke used a transient `DEEPSEEK_API_KEY` environment variable only, did not persist the key, exposed `deepseek:deepseek-v4-flash` in `/v1/models`, and returned exact sentinels for both non-streaming and streaming `/v1/responses`.
-OpenRouter was also smoke-tested with a transient `OPENROUTER_API_KEY` environment variable only: `/v1/models` exposed `openrouter:openrouter/auto`, non-streaming and streaming `/v1/responses` returned exact sentinels for `openrouter:openrouter/auto`, and manual explicit routing returned an exact non-streaming sentinel for `openrouter:deepseek/deepseek-chat`.
+If you want to smoke `deepseek:deepseek-v4-flash` instead, include `--model deepseek-v4-flash` in the DeepSeek `provider set` command so it appears in `/v1/models`.
+
+The latest credentialed smokes were run on 2026-07-03 against PR #1 head `e6a81ac` before squash merge `191daa4`. DeepSeek used a transient `DEEPSEEK_API_KEY` environment variable only, did not persist the key, exposed `deepseek:deepseek-v4-flash` in `/v1/models`, and returned exact sentinels for both non-streaming and streaming `/v1/responses`.
+OpenRouter was also smoke-tested with a transient `OPENROUTER_API_KEY` environment variable only: `/v1/models` exposed `openrouter:openrouter/auto`, non-streaming and streaming `/v1/responses` returned exact sentinels for `openrouter:openrouter/auto`, and manual explicit routing returned an exact non-streaming sentinel for `openrouter:deepseek/deepseek-chat`. This uncommitted local review patch has local package/unit proof but has not rerun credentialed live smokes.
 
 ## Switching Between ChatGPT and Antigravity
 - **Use ChatGPT**: Remove `model_provider` line from config.toml

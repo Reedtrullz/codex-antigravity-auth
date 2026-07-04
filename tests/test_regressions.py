@@ -34,6 +34,9 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(resolve_backend_model("gemini-3-5-flash-high"), "gemini-3-flash-agent")
         self.assertEqual(resolve_backend_model("openai-responses/gemini-3-5-flash-high"), "gemini-3-flash-agent")
 
+    def test_unknown_slash_prefixed_google_model_is_not_retargeted_to_last_segment(self):
+        self.assertEqual(resolve_backend_model("foo/bar/baz"), "foo/bar/baz")
+
     def test_responses_tool_loop_input_round_trips_to_function_response(self):
         req = {
             "model": "gemini-3.5-flash-high",
@@ -464,6 +467,31 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(output[0]["call_id"], "call_123")
         self.assertEqual(json.loads(output[0]["arguments"]), {"query": "answer"})
 
+    def test_internal_placeholder_function_arg_is_stripped_from_google_response(self):
+        gemini_resp = {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {
+                                "functionCall": {
+                                    "id": "call_123",
+                                    "name": "lookup",
+                                    "args": {"_placeholder": True},
+                                }
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+
+        output = transform_response(gemini_resp, "gemini-3.5-flash-high")["output"]
+
+        self.assertEqual(output[0]["type"], "function_call")
+        self.assertEqual(output[0]["arguments"], "{}")
+
     def test_non_streaming_google_response_skips_malformed_backend_shapes(self):
         response = transform_response(
             {
@@ -502,7 +530,7 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(output[2]["arguments"], "{}")
         self.assertEqual(response["usage"]["input_tokens"], 0)
         self.assertEqual(response["usage"]["output_tokens"], 5)
-        self.assertEqual(response["usage"]["total_tokens"], 0)
+        self.assertEqual(response["usage"]["total_tokens"], 5)
 
     def test_non_streaming_byok_response_skips_malformed_provider_shapes(self):
         response = transform_chat_response(
@@ -547,7 +575,7 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(json.loads(output[2]["arguments"]), {"q": "x"})
         self.assertEqual(response["usage"]["input_tokens"], 0)
         self.assertEqual(response["usage"]["output_tokens"], 5)
-        self.assertEqual(response["usage"]["total_tokens"], 0)
+        self.assertEqual(response["usage"]["total_tokens"], 5)
 
     def test_schema_refs_are_resolved_without_nested_placeholder_injection(self):
         raw_schema = {
@@ -1079,11 +1107,13 @@ class TestRegressionFixes(unittest.TestCase):
         added = [e for e in events if e.get("type") == "response.output_item.added" and e["item"]["type"] == "function_call"]
         arg_done = [e for e in events if e.get("type") == "response.function_call_arguments.done"]
         done = [e for e in events if e.get("type") == "response.output_item.done" and e["item"]["type"] == "function_call"]
+        completed = [e for e in events if e.get("type") == "response.completed"]
 
-        self.assertEqual([e["output_index"] for e in added], [1, 2])
+        self.assertEqual([e["output_index"] for e in added], [0, 1])
         self.assertEqual([e["arguments"] for e in arg_done], ['{"x": 1}', '{"y": 2}'])
-        self.assertEqual([e["output_index"] for e in done], [1, 2])
+        self.assertEqual([e["output_index"] for e in done], [0, 1])
         self.assertEqual([e["item"]["id"] for e in added], [e["item"]["id"] for e in done])
+        self.assertEqual([item["type"] for item in completed[0]["response"]["output"]], ["function_call", "function_call"])
 
     def test_google_streaming_skips_malformed_chunks_and_clamps_function_args(self):
         fake_account = {
@@ -1162,7 +1192,7 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual([e["arguments"] for e in arg_done], ["{}"])
         self.assertEqual("".join(deltas), "ok")
         self.assertTrue(completed)
-        self.assertEqual(completed[0]["response"]["usage"], {"input_tokens": 0, "output_tokens": 5, "total_tokens": 0})
+        self.assertEqual(completed[0]["response"]["usage"], {"input_tokens": 0, "output_tokens": 5, "total_tokens": 5})
 
 
 if __name__ == "__main__":
