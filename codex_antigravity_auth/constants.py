@@ -21,6 +21,7 @@ SCOPES = [
 ANTIGRAVITY_ENDPOINT_PROD = "https://cloudcode-pa.googleapis.com"
 ANTIGRAVITY_ACCOUNTS_FILE = "~/.codex/antigravity-accounts.json"
 CREDENTIALS_FILE = "~/.codex/antigravity-credentials.json"
+GATEWAY_TOKEN_MIN_LENGTH = 32
 
 
 def get_platform() -> str:
@@ -39,6 +40,19 @@ def is_loopback_host(host: str | None) -> bool:
         return False
 
 
+def validate_gateway_token_strength(token: str | None) -> str:
+    token = _strip(token)
+    if not token:
+        raise ValueError("ANTIGRAVITY_GATEWAY_TOKEN must be set when remote access is enabled.")
+    if len(token) < GATEWAY_TOKEN_MIN_LENGTH:
+        raise ValueError(
+            f"ANTIGRAVITY_GATEWAY_TOKEN must be at least {GATEWAY_TOKEN_MIN_LENGTH} visible characters when remote access is enabled."
+        )
+    if any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in token):
+        raise ValueError("ANTIGRAVITY_GATEWAY_TOKEN must contain only visible ASCII characters without whitespace.")
+    return token
+
+
 def get_codex_home() -> Path:
     p = Path(os.path.expanduser("~/.codex"))
     p.mkdir(parents=True, exist_ok=True)
@@ -51,16 +65,29 @@ def _strip(value) -> str:
 
 def _load_file_credentials() -> tuple[str | None, str | None]:
     cred_path = Path(os.path.expanduser(CREDENTIALS_FILE))
-    if not cred_path.is_file():
-        return None, None
+    fd = None
     try:
-        mode = stat.S_IMODE(cred_path.stat().st_mode)
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(cred_path, flags)
+        stat_result = os.fstat(fd)
+        if not stat.S_ISREG(stat_result.st_mode):
+            return None, None
+        mode = stat.S_IMODE(stat_result.st_mode)
         if mode & 0o077:
-            os.chmod(cred_path, 0o600)
-        with open(cred_path, "r", encoding="utf-8") as f:
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            else:
+                os.chmod(cred_path, 0o600)
+        with os.fdopen(fd, "r", encoding="utf-8") as f:
+            fd = None
             data = json.load(f)
     except Exception:
         return None, None
+    finally:
+        if fd is not None:
+            os.close(fd)
 
     if not isinstance(data, dict):
         return None, None

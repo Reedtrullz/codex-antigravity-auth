@@ -1,6 +1,8 @@
 # Codex Antigravity Auth Integration & Reliability Plan
 
-> **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
+> **Historical note:** This plan was adapted from Hermes-era work; use the current Codex-specific docs before following any task details below.
+
+> Historical implementation plan retained for provenance. Some specific commands and implementation notes below have been superseded by later hardening; use `STATUS.md`, `README.md`, and `VERIFICATION.md` for current install and verification behavior.
 
 **Goal:** Create a highly reliable, robust, secure and production-ready Google Antigravity to OpenAI Codex responses-api translation proxy.
 

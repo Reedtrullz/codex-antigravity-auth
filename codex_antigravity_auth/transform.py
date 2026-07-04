@@ -15,6 +15,7 @@ from .schema import clean_json_schema
 
 FUNCTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 JSON_SCHEMA_NAME_PATTERN = FUNCTION_NAME_PATTERN
+INTERNAL_PLACEHOLDER_ARGUMENT = "_placeholder"
 
 ANTIGRAVITY_SYSTEM_INSTRUCTION = """You are Antigravity, a powerful agentic AI coding assistant designed by the Google DeepMind team working on Advanced Agentic Coding.
 You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.
@@ -75,6 +76,38 @@ def _tool_choice_function_name(tool_choice: Any) -> str | None:
 
 def valid_function_name(value: Any) -> bool:
     return isinstance(value, str) and bool(FUNCTION_NAME_PATTERN.fullmatch(value))
+
+
+def valid_tool_call_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(value) and not any(
+        ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value
+    )
+
+
+def clean_function_call_args(value: Any) -> dict[str, Any]:
+    args = value if isinstance(value, dict) else {}
+    if args == {INTERNAL_PLACEHOLDER_ARGUMENT: True}:
+        return {}
+    return args
+
+
+def function_call_arguments_json(value: Any) -> str:
+    return json.dumps(clean_function_call_args(value))
+
+
+def function_call_arguments_string(value: Any) -> str:
+    if isinstance(value, dict):
+        return function_call_arguments_json(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return value
+        if isinstance(parsed, dict):
+            cleaned = clean_function_call_args(parsed)
+            return function_call_arguments_json(cleaned) if cleaned != parsed else value
+        return value
+    return "{}"
 
 
 def safe_project_id(value: Any) -> str | None:
@@ -149,6 +182,19 @@ def token_count(value: Any) -> int:
     return int(count)
 
 
+def usage_counts(input_value: Any, output_value: Any, total_value: Any) -> dict[str, int]:
+    input_tokens = token_count(input_value)
+    output_tokens = token_count(output_value)
+    total_tokens = token_count(total_value)
+    if total_tokens <= 0 and (input_tokens or output_tokens):
+        total_tokens = input_tokens + output_tokens
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
 def positive_int_value(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -164,7 +210,13 @@ def thinking_budget_for_request(codex_req: dict[str, Any], backend_model: str) -
         return None
     reasoning = codex_req.get("reasoning")
     effort = reasoning.get("effort", "high") if isinstance(reasoning, dict) else "high"
-    budget = 16000 if effort == "high" else 4000
+    effort_budgets = {
+        "low": 4000,
+        "medium": 8000,
+        "high": 16000,
+        "xhigh": 32000,
+    }
+    budget = effort_budgets.get(effort, effort_budgets["high"])
     max_output_tokens = positive_int_value(codex_req.get("max_output_tokens"))
     if max_output_tokens is not None and max_output_tokens <= 1024:
         return None
@@ -542,7 +594,7 @@ def transform_gemini_candidate(candidate: dict) -> dict:
                 "id": f"fc_{uuid.uuid4().hex[:8]}",
                 "call_id": call_id,
                 "name": name,
-                "arguments": json.dumps(fc.get("args", {}) if isinstance(fc.get("args", {}), dict) else {})
+                "arguments": function_call_arguments_json(fc.get("args", {})),
             })
             
     # Assemble structured Responses API message output
@@ -597,11 +649,11 @@ def transform_response(gemini_resp: dict, model: str) -> dict:
     usage = gemini_resp.get("usageMetadata", {})
     if not isinstance(usage, dict):
         usage = {}
-    translated_usage = {
-        "input_tokens": token_count(usage.get("promptTokenCount", 0)),
-        "output_tokens": token_count(usage.get("candidatesTokenCount", 0)),
-        "total_tokens": token_count(usage.get("totalTokenCount", 0))
-    }
+    translated_usage = usage_counts(
+        usage.get("promptTokenCount", 0),
+        usage.get("candidatesTokenCount", 0),
+        usage.get("totalTokenCount", 0),
+    )
     
     return {
         "id": f"resp_{uuid.uuid4().hex[:12]}",
@@ -644,6 +696,21 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 return [{"type": "text", "text": f"[file] {file_url}"}]
             return [{"type": "text", "text": json.dumps({k: v for k, v in part.items() if k != "type"})}]
         return []
+
+    def tool_output_part_to_chat_message(part: dict) -> dict | None:
+        call_id = part.get("tool_use_id") or part.get("call_id")
+        if not valid_tool_call_id(call_id):
+            return None
+        explicit_name = part.get("name")
+        name = explicit_name if valid_function_name(explicit_name) else function_names_by_call_id.get(call_id)
+        message = {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": _chat_tool_output_content(part.get("output", part.get("content", ""))),
+        }
+        if valid_function_name(name):
+            message["name"] = name
+        return message
 
     def normalize_content(parts: list[dict]) -> str | list[dict]:
         if not parts:
@@ -724,36 +791,45 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 continue
             if item_type == "function_call_output":
                 call_id = item.get("call_id")
-                if not isinstance(call_id, str) or call_id not in function_names_by_call_id:
+                if not valid_tool_call_id(call_id):
                     continue
-                messages.append({
+                message = {
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "name": function_names_by_call_id.get(call_id),
                     "content": _chat_tool_output_content(item.get("output", "")),
-                })
+                }
+                name = function_names_by_call_id.get(call_id)
+                if valid_function_name(name):
+                    message["name"] = name
+                messages.append(message)
                 continue
 
             role = item.get("role", "user")
             raw_content = item.get("content", "")
             parts = []
+            tool_messages = []
             if isinstance(raw_content, str):
                 parts.append({"type": "text", "text": raw_content})
             elif isinstance(raw_content, list):
                 for part in raw_content:
                     if isinstance(part, dict):
-                        parts.extend(content_part_to_chat(part))
+                        if part.get("type") in ("tool_result", "function_call_output"):
+                            tool_message = tool_output_part_to_chat_message(part)
+                            if tool_message:
+                                tool_messages.append(tool_message)
+                        else:
+                            parts.extend(content_part_to_chat(part))
 
             if role in ("system", "developer"):
                 system_texts.append("".join(p.get("text", "") for p in parts if p.get("type") == "text" and isinstance(p.get("text"), str)))
             else:
-                if not parts and not isinstance(raw_content, str):
-                    continue
-                chat_message = {"role": "assistant" if role == "assistant" else "user", "content": normalize_content(parts)}
-                if role == "assistant" and pending_reasoning_content:
-                    chat_message["reasoning_content"] = pending_reasoning_content
-                    pending_reasoning_content = None
-                messages.append(chat_message)
+                if parts or isinstance(raw_content, str):
+                    chat_message = {"role": "assistant" if role == "assistant" else "user", "content": normalize_content(parts)}
+                    if role == "assistant" and pending_reasoning_content:
+                        chat_message["reasoning_content"] = pending_reasoning_content
+                        pending_reasoning_content = None
+                    messages.append(chat_message)
+                messages.extend(tool_messages)
 
     system_prompt = "\n\n".join(t for t in system_texts if t)
     if system_prompt:
@@ -849,10 +925,7 @@ def transform_chat_response(chat_resp: dict, model: str) -> dict:
             if not valid_function_name(name):
                 continue
             arguments = fn.get("arguments", "{}")
-            if isinstance(arguments, dict):
-                arguments = json.dumps(arguments)
-            elif not isinstance(arguments, str):
-                arguments = "{}"
+            arguments = function_call_arguments_string(arguments)
             provider_call_id = tool_call.get("id") if isinstance(tool_call.get("id"), str) and tool_call.get("id") else None
             item_id = provider_call_id or f"fc_{uuid.uuid4().hex[:8]}"
             call_id = provider_call_id or f"call_{uuid.uuid4().hex[:8]}"
@@ -867,11 +940,11 @@ def transform_chat_response(chat_resp: dict, model: str) -> dict:
     usage = chat_resp.get("usage", {}) or {}
     if not isinstance(usage, dict):
         usage = {}
-    translated_usage = {
-        "input_tokens": token_count(usage.get("prompt_tokens", usage.get("input_tokens", 0))),
-        "output_tokens": token_count(usage.get("completion_tokens", usage.get("output_tokens", 0))),
-        "total_tokens": token_count(usage.get("total_tokens", 0)),
-    }
+    translated_usage = usage_counts(
+        usage.get("prompt_tokens", usage.get("input_tokens", 0)),
+        usage.get("completion_tokens", usage.get("output_tokens", 0)),
+        usage.get("total_tokens", 0),
+    )
 
     return {
         "id": f"resp_{uuid.uuid4().hex[:12]}",

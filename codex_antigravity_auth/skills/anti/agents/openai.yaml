@@ -1,0 +1,4 @@
+interface:
+  display_name: "Anti"
+  short_description: "Antigravity Opus/Sonnet reviews and plans"
+  default_prompt: "Use $anti to ask Antigravity Opus for a deep work plan or sidecar review."

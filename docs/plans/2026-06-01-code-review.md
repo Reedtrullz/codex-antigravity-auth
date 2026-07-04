@@ -1,5 +1,7 @@
 # Comprehensive Codebase Review — `codex-antigravity-auth`
 
+> Historical review artifact retained for provenance. Several issues below have since been fixed and covered by regression tests; use `STATUS.md` as the current integration state.
+
 ## Critical Issues (Should Fix)
 
 ### 1. Non-streaming response text is swallowed — `transform.py:176-178`

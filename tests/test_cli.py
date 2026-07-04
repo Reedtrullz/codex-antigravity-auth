@@ -12,6 +12,9 @@ from codex_antigravity_auth.oauth import authorize_antigravity
 from codex_antigravity_auth.cli import (
     account_rotation_lines,
     configure_codex_write_command,
+    gateway_start_command,
+    install_codex_skill,
+    inspect_codex_gateway_config,
     main,
     merge_codex_config,
     normalize_epoch_seconds,
@@ -20,7 +23,9 @@ from codex_antigravity_auth.cli import (
     require_safe_gateway_host,
     run_configure_codex,
     run_doctor,
+    run_install_skill,
     run_login,
+    run_local_oauth_flow,
     run_setup_google,
     upsert_google_account,
     validate_codex_model_id,
@@ -28,21 +33,44 @@ from codex_antigravity_auth.cli import (
     write_codex_config,
 )
 
+
+def write_ready_codex_config(
+    path: Path,
+    *,
+    base_url: str = "http://localhost:51122/v1",
+    model: str = "gemini-3.5-flash-high",
+    provider_id: str = "antigravity",
+    provider_name: str = "Google Antigravity",
+) -> None:
+    path.write_text(
+        render_codex_config_snippet(
+            model=model,
+            provider_id=provider_id,
+            provider_name=provider_name,
+            base_url=base_url,
+        ),
+        encoding="utf-8",
+    )
+
 class TestCliDoctor(unittest.TestCase):
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
     @patch("urllib.request.urlopen")
     def test_run_doctor_displays_accurate_information(self, mock_urlopen, mock_load, mock_creds):
         mock_creds.return_value = ("client_id_val", "client_secret_val")
-        mock_load.return_value = {"accounts": []}
+        mock_load.return_value = {"accounts": [{"email": "test@example.com", "expiresAt": 9_999_999_999}]}
         
         # Mock successful network check
         mock_resp = MagicMock()
         mock_resp.status = 200
         mock_urlopen.return_value.__enter__.return_value = mock_resp
-        
-        with patch("builtins.print") as mock_print:
-            run_doctor()
+
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path)
+            with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={}):
+                with patch("builtins.print") as mock_print:
+                    self.assertTrue(run_doctor(config=str(config_path)))
             
             # Extract printed strings
             printed_args = [call[0][0] for call in mock_print.call_args_list if call[0]]
@@ -50,6 +78,46 @@ class TestCliDoctor(unittest.TestCase):
             
             self.assertIn("Configured", printed_text)
             self.assertIn("Token Storage Encryption", printed_text)
+
+    @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
+    @patch("codex_antigravity_auth.cli.load_accounts")
+    @patch("urllib.request.urlopen")
+    def test_main_doctor_exits_nonzero_on_hard_failure(self, mock_urlopen, mock_load, mock_creds):
+        mock_creds.return_value = (None, None)
+        mock_load.return_value = {"accounts": []}
+        mock_urlopen.side_effect = TimeoutError("offline")
+
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path)
+            with patch.object(sys, "argv", ["codex-antigravity", "doctor", "--config", str(config_path)]):
+                with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={}):
+                    with patch("builtins.print"):
+                        with self.assertRaises(SystemExit) as raised:
+                            main()
+
+        self.assertEqual(raised.exception.code, 1)
+
+    @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
+    @patch("codex_antigravity_auth.cli.load_accounts")
+    @patch("urllib.request.urlopen")
+    def test_main_doctor_exits_nonzero_without_google_accounts(self, mock_urlopen, mock_load, mock_creds):
+        mock_creds.return_value = ("client_id_val", "client_secret_val")
+        mock_load.return_value = {"accounts": []}
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path)
+            with patch.object(sys, "argv", ["codex-antigravity", "doctor", "--config", str(config_path)]):
+                with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={}):
+                    with patch("builtins.print"):
+                        with self.assertRaises(SystemExit) as raised:
+                            main()
+
+        self.assertEqual(raised.exception.code, 1)
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
@@ -67,14 +135,139 @@ class TestCliDoctor(unittest.TestCase):
             "apiKey": "secret\nbad",
             "models": ["deepseek-chat"],
         }
-        with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"deepseek": provider}):
-            with patch("builtins.print") as mock_print:
-                run_doctor()
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path)
+            with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"deepseek": provider}):
+                with patch("builtins.print") as mock_print:
+                    self.assertFalse(run_doctor(config=str(config_path)))
 
         printed_args = [call[0][0] for call in mock_print.call_args_list if call[0]]
         printed_text = "\n".join(printed_args)
         self.assertIn("malformed key", printed_text)
         self.assertNotIn("secret", printed_text)
+
+    @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
+    @patch("codex_antigravity_auth.cli.load_accounts")
+    @patch("urllib.request.urlopen")
+    def test_run_doctor_byok_only_skips_google_checks(self, mock_urlopen, mock_load, mock_creds):
+        provider = {
+            "displayName": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com",
+            "apiKey": "secret",
+            "models": ["deepseek-chat"],
+        }
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path)
+            with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"deepseek": provider}):
+                with patch("builtins.print") as mock_print:
+                    self.assertTrue(run_doctor(byok_only=True, config=str(config_path)))
+
+        printed_args = [call[0][0] for call in mock_print.call_args_list if call[0]]
+        printed_text = "\n".join(printed_args)
+        self.assertIn("skipped (--byok-only)", printed_text)
+        self.assertIn("BYOK Providers: 1 configured, env-enabled, or local", printed_text)
+        mock_creds.assert_not_called()
+        mock_load.assert_not_called()
+        mock_urlopen.assert_not_called()
+
+    def test_doctor_rejects_gateway_url_in_comment_for_inactive_provider(self):
+        content = """model = "gpt-5"
+model_provider = "openai"
+# base_url = "http://localhost:51122/v1"
+
+[model_providers.antigravity]
+name = "Google Antigravity"
+base_url = "http://localhost:51122/v1"
+wire_api = "responses"
+"""
+
+        ready, reason = inspect_codex_gateway_config(
+            content,
+            provider_id="antigravity",
+            expected_base_url="http://localhost:51122/v1",
+        )
+
+        self.assertFalse(ready)
+        self.assertIn("active model_provider", reason)
+
+    def test_run_doctor_byok_only_fails_for_missing_provider_key(self):
+        provider = {
+            "displayName": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com",
+            "apiKeyEnv": "MISSING_DEEPSEEK_KEY",
+            "models": ["deepseek-chat"],
+        }
+
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path)
+            with patch.dict(os.environ, {}, clear=True):
+                with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"deepseek": provider}):
+                    with patch("builtins.print") as mock_print:
+                        self.assertFalse(run_doctor(byok_only=True, config=str(config_path)))
+
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("[FAIL] BYOK Providers", printed_text)
+        self.assertIn("missing key", printed_text)
+
+    def test_run_doctor_byok_only_fails_when_selected_provider_is_missing(self):
+        ollama = {
+            "id": "ollama",
+            "displayName": "Ollama",
+            "baseUrl": "http://localhost:11434/v1",
+            "apiKeyOptional": True,
+            "defaultApiKey": "ollama",
+            "models": ["gpt-oss:20b"],
+        }
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path, model="deepseek:deepseek-chat")
+            with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"ollama": ollama}):
+                with patch("builtins.print") as mock_print:
+                    self.assertFalse(run_doctor(byok_only=True, config=str(config_path)))
+
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("Selected BYOK model", printed_text)
+        self.assertIn("deepseek", printed_text)
+
+    @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
+    @patch("codex_antigravity_auth.cli.load_accounts")
+    @patch("urllib.request.urlopen")
+    def test_run_doctor_accepts_custom_codex_provider_id(self, mock_urlopen, mock_load, mock_creds):
+        mock_creds.return_value = ("client_id_val", "client_secret_val")
+        mock_load.return_value = {"accounts": [{"email": "test@example.com", "expiresAt": 9_999_999_999}]}
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path, provider_id="ag-local", provider_name="AG Local")
+            with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={}):
+                self.assertTrue(run_doctor(config=str(config_path), provider_id="ag-local"))
+
+    @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
+    @patch("codex_antigravity_auth.cli.load_accounts")
+    @patch("urllib.request.urlopen")
+    def test_run_doctor_reports_env_storage_key_as_configured(self, mock_urlopen, mock_load, mock_creds):
+        mock_creds.return_value = ("client_id_val", "client_secret_val")
+        mock_load.return_value = {"accounts": [{"email": "test@example.com", "expiresAt": 9_999_999_999}]}
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path)
+            with patch.dict(os.environ, {"ANTIGRAVITY_STORAGE_KEY": "test-storage-key"}, clear=True):
+                with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={}):
+                    with patch("builtins.print") as mock_print:
+                        self.assertTrue(run_doctor(config=str(config_path)))
+
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("ANTIGRAVITY_STORAGE_KEY configured", printed_text)
 
     def test_normalize_epoch_seconds_treats_non_finite_values_as_expired(self):
         for value in (float("nan"), float("inf"), "-inf"):
@@ -96,9 +289,14 @@ class TestCliStartSafety(unittest.TestCase):
                 require_safe_gateway_host("0.0.0.0", allow_remote=True)
 
     def test_remote_opt_in_sets_runtime_guard_flag(self):
-        with patch.dict("os.environ", {"ANTIGRAVITY_GATEWAY_TOKEN": "gateway-secret"}, clear=True):
+        with patch.dict("os.environ", {"ANTIGRAVITY_GATEWAY_TOKEN": "x" * 32}, clear=True):
             require_safe_gateway_host("0.0.0.0", allow_remote=True)
             self.assertEqual(os.environ["ANTIGRAVITY_ALLOW_REMOTE"], "1")
+
+    def test_remote_opt_in_rejects_weak_gateway_token(self):
+        with patch.dict("os.environ", {"ANTIGRAVITY_GATEWAY_TOKEN": "short"}, clear=True):
+            with self.assertRaisesRegex(SystemExit, "at least 32"):
+                require_safe_gateway_host("0.0.0.0", allow_remote=True)
 
 
 class TestGoogleAccountSetup(unittest.TestCase):
@@ -176,19 +374,20 @@ class TestGoogleAccountSetup(unittest.TestCase):
     @patch("codex_antigravity_auth.cli.run_login")
     @patch("codex_antigravity_auth.cli.run_configure_codex")
     def test_setup_google_writes_codex_config_and_logs_accounts_in(self, mock_configure, mock_login, mock_doctor):
-        run_setup_google(
-            Namespace(
-                accounts=3,
-                skip_codex_config=False,
-                skip_doctor=False,
-                config="/tmp/codex.toml",
-                model="gemini-3.5-flash-high",
-                provider="antigravity",
-                provider_name="Google Antigravity",
-                base_url="http://localhost:51122/v1",
-                port=51122,
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "client-secret")):
+            run_setup_google(
+                Namespace(
+                    accounts=3,
+                    skip_codex_config=False,
+                    skip_doctor=False,
+                    config="/tmp/codex.toml",
+                    model="gemini-3.5-flash-high",
+                    provider="antigravity",
+                    provider_name="Google Antigravity",
+                    base_url="http://localhost:51122/v1",
+                    port=51122,
+                )
             )
-        )
 
         configure_args = mock_configure.call_args.args[0]
         self.assertTrue(configure_args.write)
@@ -198,6 +397,134 @@ class TestGoogleAccountSetup(unittest.TestCase):
         self.assertEqual(login_args.count, 3)
         self.assertTrue(login_args.select_account)
         mock_doctor.assert_called_once()
+        self.assertEqual(mock_doctor.call_args.kwargs["provider_id"], "antigravity")
+
+    @patch("codex_antigravity_auth.cli.run_doctor")
+    @patch("codex_antigravity_auth.cli.run_login")
+    @patch("codex_antigravity_auth.cli.run_configure_codex")
+    def test_setup_google_derives_base_url_from_custom_port(self, mock_configure, mock_login, mock_doctor):
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "client-secret")):
+            run_setup_google(
+                Namespace(
+                    accounts=1,
+                    skip_codex_config=False,
+                    skip_doctor=False,
+                    config="/tmp/codex.toml",
+                    model="gemini-3.5-flash-high",
+                    provider="antigravity",
+                    provider_name="Google Antigravity",
+                    base_url=None,
+                    port=51123,
+                )
+            )
+
+        configure_args = mock_configure.call_args.args[0]
+        self.assertEqual(configure_args.base_url, "http://localhost:51123/v1")
+        self.assertEqual(mock_doctor.call_args.kwargs["expected_base_url"], "http://localhost:51123/v1")
+
+    @patch("codex_antigravity_auth.cli.run_doctor")
+    @patch("codex_antigravity_auth.cli.run_login")
+    @patch("codex_antigravity_auth.cli.run_configure_codex")
+    def test_setup_google_validates_codex_config_options_before_login(self, mock_configure, mock_login, mock_doctor):
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "client-secret")):
+            with self.assertRaisesRegex(SystemExit, "absolute http\\(s\\) URL"):
+                run_setup_google(
+                    Namespace(
+                        accounts=1,
+                        skip_codex_config=False,
+                        skip_doctor=False,
+                        config="/tmp/codex.toml",
+                        model="gemini-3.5-flash-high",
+                        provider="antigravity",
+                        provider_name="Google Antigravity",
+                        base_url="localhost:51122/v1",
+                        port=51122,
+                    )
+                )
+
+        mock_login.assert_not_called()
+        mock_configure.assert_not_called()
+        mock_doctor.assert_not_called()
+
+    @patch("codex_antigravity_auth.cli.run_doctor")
+    @patch("codex_antigravity_auth.cli.run_login")
+    @patch("codex_antigravity_auth.cli.run_configure_codex")
+    def test_setup_google_preflights_oauth_credentials_before_codex_config(self, mock_configure, mock_login, mock_doctor):
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=(None, None)):
+            with self.assertRaisesRegex(SystemExit, "OAuth client credentials"):
+                run_setup_google(
+                    Namespace(
+                        accounts=1,
+                        skip_codex_config=False,
+                        skip_doctor=False,
+                        config="/tmp/codex.toml",
+                        model="gemini-3.5-flash-high",
+                        provider="antigravity",
+                        provider_name="Google Antigravity",
+                        base_url=None,
+                        port=51122,
+                    )
+                )
+
+        mock_configure.assert_not_called()
+        mock_login.assert_not_called()
+        mock_doctor.assert_not_called()
+
+    @patch("codex_antigravity_auth.cli.run_doctor", return_value=False)
+    @patch("codex_antigravity_auth.cli.run_login")
+    @patch("codex_antigravity_auth.cli.run_configure_codex")
+    def test_setup_google_exits_nonzero_when_post_setup_doctor_fails(self, mock_configure, mock_login, mock_doctor):
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "client-secret")):
+            with self.assertRaisesRegex(SystemExit, "doctor found hard failures"):
+                run_setup_google(
+                    Namespace(
+                        accounts=1,
+                        skip_codex_config=False,
+                        skip_doctor=False,
+                        config="/tmp/codex.toml",
+                        model="gemini-3.5-flash-high",
+                        provider="antigravity",
+                        provider_name="Google Antigravity",
+                        base_url=None,
+                        port=51122,
+                    )
+                )
+
+        mock_configure.assert_called_once()
+        mock_login.assert_called_once()
+        mock_doctor.assert_called_once()
+
+    @patch("codex_antigravity_auth.cli.run_login", side_effect=SystemExit("OAuth callback port 51121 is already in use"))
+    @patch("codex_antigravity_auth.cli.run_configure_codex")
+    def test_setup_google_does_not_write_codex_config_when_oauth_start_fails(self, mock_configure, mock_login):
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "client-secret")):
+            with self.assertRaisesRegex(SystemExit, "OAuth callback port"):
+                run_setup_google(
+                    Namespace(
+                        accounts=1,
+                        skip_codex_config=False,
+                        skip_doctor=False,
+                        config="/tmp/codex.toml",
+                        model="gemini-3.5-flash-high",
+                        provider="antigravity",
+                        provider_name="Google Antigravity",
+                        base_url=None,
+                        port=51122,
+                    )
+                )
+
+        mock_login.assert_called_once()
+        mock_configure.assert_not_called()
+
+    def test_oauth_callback_port_conflict_reports_actionable_error(self):
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "client-secret")):
+            with patch(
+                "codex_antigravity_auth.cli.authorize_antigravity",
+                return_value={"url": "https://accounts.google.example/auth", "state_id": "state"},
+            ):
+                with patch("codex_antigravity_auth.cli.OAuthServer", side_effect=OSError("address in use")):
+                    with self.assertRaisesRegex(SystemExit, "port 51121"):
+                        run_local_oauth_flow()
 
 
 class TestConfigureCodex(unittest.TestCase):
@@ -227,6 +554,13 @@ class TestConfigureCodex(unittest.TestCase):
         self.assertIn("--provider ag-local", command)
         self.assertIn("--provider-name 'AG Local'", command)
         self.assertIn("--base-url http://127.0.0.1:51123/v1", command)
+
+    def test_gateway_start_command_matches_configured_port(self):
+        self.assertEqual(gateway_start_command("http://localhost:51122/v1"), "codex-antigravity start")
+        self.assertEqual(
+            gateway_start_command("http://localhost:51123/v1"),
+            "codex-antigravity start --port 51123",
+        )
 
     def test_configure_codex_rejects_unsafe_provider_id(self):
         with self.assertRaisesRegex(ValueError, "provider id"):
@@ -454,6 +788,86 @@ class TestConfigureCodex(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(backup_path.stat().st_mode), 0o600)
 
 
+class TestInstallSkill(unittest.TestCase):
+    def test_install_codex_skill_copies_bundled_anti_skill(self):
+        with TemporaryDirectory() as tmp:
+            action, destination, backup_path = install_codex_skill(Path(tmp))
+
+            self.assertEqual(action, "installed")
+            self.assertIsNone(backup_path)
+            self.assertTrue((destination / "SKILL.md").is_file())
+            self.assertTrue((destination / "agents" / "openai.yaml").is_file())
+            self.assertTrue((destination / "scripts" / "anti.py").is_file())
+            self.assertTrue((destination / "tests" / "test_anti.py").is_file())
+            self.assertEqual(stat.S_IMODE((destination / "scripts" / "anti.py").stat().st_mode), 0o755)
+            self.assertIn("$anti", (destination / "SKILL.md").read_text(encoding="utf-8"))
+
+            action_again, destination_again, backup_again = install_codex_skill(Path(tmp))
+            self.assertEqual(action_again, "unchanged")
+            self.assertEqual(destination_again, destination)
+            self.assertIsNone(backup_again)
+
+    def test_install_codex_skill_requires_force_before_replacing_existing_skill(self):
+        with TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp)
+            existing = skill_dir / "anti"
+            existing.mkdir()
+            (existing / "SKILL.md").write_text("local edit\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "--force"):
+                install_codex_skill(skill_dir)
+
+            action, destination, backup_path = install_codex_skill(skill_dir, force=True)
+
+            self.assertEqual(action, "replaced")
+            self.assertEqual(destination, existing)
+            self.assertIsNotNone(backup_path)
+            self.assertEqual((backup_path / "SKILL.md").read_text(encoding="utf-8"), "local edit\n")
+            self.assertIn("$anti", (destination / "SKILL.md").read_text(encoding="utf-8"))
+
+    def test_install_codex_skill_does_not_follow_symlinked_existing_files(self):
+        with TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp)
+            existing = skill_dir / "anti"
+            existing.mkdir()
+            secret_path = Path(tmp) / "outside-secret.txt"
+            secret_path.write_text("do not read me\n", encoding="utf-8")
+            try:
+                os.symlink(secret_path, existing / "SKILL.md")
+            except (AttributeError, NotImplementedError, OSError) as e:
+                self.skipTest(f"symlink unavailable: {e}")
+
+            with self.assertRaisesRegex(RuntimeError, "--force"):
+                install_codex_skill(skill_dir)
+
+    def test_install_codex_skill_dry_run_does_not_write(self):
+        with TemporaryDirectory() as tmp:
+            action, destination, backup_path = install_codex_skill(Path(tmp), dry_run=True)
+
+            self.assertEqual(action, "installed")
+            self.assertIsNone(backup_path)
+            self.assertFalse(destination.exists())
+
+    def test_run_install_skill_prints_install_location(self):
+        with TemporaryDirectory() as tmp:
+            args = Namespace(skill_dir=tmp, force=False, dry_run=False)
+            with patch("builtins.print") as mock_print:
+                run_install_skill(args)
+
+            printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+            self.assertIn("Installed Codex Anti skill", printed_text)
+            self.assertIn("$anti review this diff with opus", printed_text)
+
+    def test_main_install_skill_command_uses_temp_skill_dir(self):
+        with TemporaryDirectory() as tmp:
+            argv = ["codex-antigravity", "install-skill", "--skill-dir", tmp]
+            with patch.object(sys, "argv", argv):
+                with patch("builtins.print"):
+                    main()
+
+            self.assertTrue((Path(tmp) / "anti" / "SKILL.md").is_file())
+
+
 class TestProviderCli(unittest.TestCase):
     def test_provider_key_status_validates_keys_without_rendering_secrets(self):
         self.assertEqual(provider_key_status({"apiKey": " secret "}, configured_label="configured"), "configured")
@@ -481,6 +895,27 @@ class TestProviderCli(unittest.TestCase):
         printed_text = "\n".join(printed_args)
         self.assertIn("malformed key", printed_text)
         self.assertNotIn("secret", printed_text)
+
+    def test_provider_list_labels_implicit_loopback_provider_as_local_preset(self):
+        argv = ["codex-antigravity", "provider", "list"]
+        provider = {
+            "id": "ollama",
+            "displayName": "Ollama",
+            "baseUrl": "http://localhost:11434/v1",
+            "apiKeyOptional": True,
+            "defaultApiKey": "ollama",
+            "models": ["gpt-oss:20b"],
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"ollama": provider}):
+                with patch("codex_antigravity_auth.cli.load_provider_config", return_value={"providers": {}}):
+                    with patch("builtins.print") as mock_print:
+                        main()
+
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("Ollama (local preset)", printed_text)
+        self.assertNotIn("Ollama (configured)", printed_text)
 
     def test_provider_set_requires_base_url_for_new_custom_provider_without_traceback(self):
         argv = [
@@ -532,6 +967,35 @@ class TestProviderCli(unittest.TestCase):
                     main()
 
         mock_update.assert_not_called()
+
+    def test_provider_set_reports_models_hidden_when_env_key_is_missing(self):
+        argv = [
+            "codex-antigravity",
+            "provider",
+            "set",
+            "deepseek",
+            "--api-key-env",
+            "MISSING_DEEPSEEK_KEY",
+            "--model",
+            "deepseek-chat",
+        ]
+        provider = {
+            "id": "deepseek",
+            "displayName": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com",
+            "apiKeyEnv": "MISSING_DEEPSEEK_KEY",
+            "models": ["deepseek-chat"],
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch.dict(os.environ, {}, clear=True):
+                with patch("codex_antigravity_auth.cli.set_provider_config", return_value=provider):
+                    with patch("builtins.print") as mock_print:
+                        main()
+
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("hidden until MISSING_DEEPSEEK_KEY", printed_text)
+        self.assertNotIn("Exposed models", printed_text)
 
     def test_provider_set_reports_malformed_header_without_traceback(self):
         argv = [

@@ -9,6 +9,19 @@ description = "Google Antigravity OAuth model access for OpenAI Codex"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
+keywords = ["codex", "google-antigravity", "oauth", "responses-api", "byok"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet :: Proxy Servers",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
   "httpx>=0.28",
   "fastapi>=0.110",
@@ -26,8 +39,21 @@ dev = [
 [project.scripts]
 codex-antigravity = "codex_antigravity_auth.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/Reedtrullz/codex-antigravity-auth"
+Repository = "https://github.com/Reedtrullz/codex-antigravity-auth"
+Issues = "https://github.com/Reedtrullz/codex-antigravity-auth/issues"
+
 [tool.setuptools.packages.find]
 include = ["codex_antigravity_auth*"]
+
+[tool.setuptools.package-data]
+codex_antigravity_auth = [
+  "skills/anti/SKILL.md",
+  "skills/anti/agents/*.yaml",
+  "skills/anti/scripts/*.py",
+  "skills/anti/tests/*.py",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

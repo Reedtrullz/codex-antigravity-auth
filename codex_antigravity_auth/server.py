@@ -2,10 +2,12 @@ import json
 import math
 import os
 import secrets
+import time
 import httpx
 import email.utils
 import re
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from typing import AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -20,32 +22,115 @@ from .byok import (
     validate_provider_id,
 )
 from .transform import (
-    token_count,
+    function_call_arguments_json,
+    function_call_arguments_string,
     safe_project_id,
     transform_chat_response,
     transform_request,
     transform_request_to_chat,
     transform_response,
+    usage_counts,
     valid_function_name,
 )
-from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform, is_loopback_host
+from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform, is_loopback_host, validate_gateway_token_strength
 from .redaction import redact_secret_text
 
 app = FastAPI(title="Codex Antigravity Gateway")
 account_manager = AccountManager()
+STREAM_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+MUTATING_JSON_PATHS = {"/v1/responses"}
+TEST_CLIENT_HOSTS = {"testserver"}
+GOOGLE_ACCOUNT_SCOPED_STREAM_ERROR_TERMS = (
+    "401",
+    "403",
+    "429",
+    "auth",
+    "permission_denied",
+    "quota",
+    "rate limit",
+    "rate_limit",
+    "resource_exhausted",
+    "unauthenticated",
+)
+
+
+def request_origin_matches(request: Request, origin: str) -> bool:
+    try:
+        parsed_origin = urlparse(origin)
+        origin_port = parsed_origin.port
+    except ValueError:
+        return False
+    if parsed_origin.scheme not in {"http", "https"} or not parsed_origin.hostname:
+        return False
+
+    request_url = request.url
+    request_port = request_url.port
+    if origin_port is None:
+        origin_port = 443 if parsed_origin.scheme == "https" else 80
+    if request_port is None:
+        request_port = 443 if request_url.scheme == "https" else 80
+    return (
+        parsed_origin.scheme == request_url.scheme
+        and parsed_origin.hostname.lower() == (request_url.hostname or "").lower()
+        and origin_port == request_port
+    )
+
+
+def request_uses_loopback_host(request: Request, client_host: str | None = None) -> bool:
+    hostname = request.url.hostname
+    if is_loopback_host(hostname):
+        return True
+    return (hostname or "").lower() in TEST_CLIENT_HOSTS and client_host == "testclient"
+
+
+def mutating_json_request_guard(request: Request) -> JSONResponse | None:
+    if request.method.upper() not in {"POST", "PUT", "PATCH"}:
+        return None
+    if request.url.path not in MUTATING_JSON_PATHS:
+        return None
+
+    content_type = request.headers.get("content-type", "")
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        return JSONResponse(
+            status_code=415,
+            content={"detail": "Mutating gateway requests must use Content-Type: application/json."},
+        )
+
+    client_host = request.client.host if request.client else None
+    if is_loopback_host(client_host) and not request_uses_loopback_host(request, client_host):
+        return JSONResponse(status_code=403, content={"detail": "Loopback gateway requests must use a loopback Host."})
+
+    if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+        return JSONResponse(status_code=403, content={"detail": "Cross-site browser requests are not allowed."})
+
+    origin = request.headers.get("origin")
+    if origin and not request_origin_matches(request, origin):
+        return JSONResponse(status_code=403, content={"detail": "Cross-origin browser requests are not allowed."})
+
+    return None
 
 
 @app.middleware("http")
 async def require_remote_gateway_token(request: Request, call_next):
     client_host = request.client.host if request.client else None
     if is_loopback_host(client_host):
+        guard_response = mutating_json_request_guard(request)
+        if guard_response is not None:
+            return guard_response
         return await call_next(request)
 
-    token = os.environ.get("ANTIGRAVITY_GATEWAY_TOKEN")
     allow_remote = os.environ.get("ANTIGRAVITY_ALLOW_REMOTE") == "1"
+    try:
+        token = validate_gateway_token_strength(os.environ.get("ANTIGRAVITY_GATEWAY_TOKEN")) if allow_remote else ""
+    except ValueError as e:
+        return JSONResponse(status_code=403, content={"detail": str(e)})
     expected_auth = f"Bearer {token}" if token else ""
     supplied_auth = request.headers.get("authorization", "")
     if allow_remote and token and secrets.compare_digest(supplied_auth, expected_auth):
+        guard_response = mutating_json_request_guard(request)
+        if guard_response is not None:
+            return guard_response
         return await call_next(request)
 
     return JSONResponse(
@@ -451,6 +536,71 @@ def stream_string(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def safe_stream_error_code(value: object) -> str:
+    if isinstance(value, bool):
+        return "backend_error"
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        value = str(int(value))
+    if isinstance(value, str):
+        value = value.strip()
+        if STREAM_ERROR_CODE_RE.fullmatch(value):
+            return value
+    return "backend_error"
+
+
+def stream_error_from_payload(parsed: object) -> tuple[str, str] | None:
+    if not isinstance(parsed, dict) or "error" not in parsed:
+        return None
+    error = parsed.get("error")
+    if error is None:
+        return None
+    if isinstance(error, dict):
+        raw_code = error.get("code") or error.get("status")
+        message = stream_string(error.get("message")) or stream_string(error.get("status"))
+        if raw_code is None and not message:
+            return None
+        return safe_stream_error_code(raw_code), message or "Backend stream returned an error"
+    if isinstance(error, str):
+        error = error.strip()
+        if error:
+            return "backend_error", error
+        return None
+    if not error:
+        return None
+    return "backend_error", "Backend stream returned an error"
+
+
+def backend_error_from_payload(parsed: object) -> tuple[str, str] | None:
+    stream_error = stream_error_from_payload(parsed)
+    if stream_error is not None:
+        return stream_error
+    if isinstance(parsed, dict) and isinstance(parsed.get("response"), dict):
+        return stream_error_from_payload(parsed["response"])
+    return None
+
+
+def status_code_from_backend_error(code: str, message: str) -> int:
+    combined = f"{code} {message}".lower()
+    if code in {"400", "401", "403", "404", "408", "409", "429"}:
+        return int(code)
+    if "invalid_argument" in combined:
+        return 400
+    if "unauthenticated" in combined:
+        return 401
+    if "permission_denied" in combined:
+        return 403
+    if "not_found" in combined:
+        return 404
+    if "resource_exhausted" in combined or "rate" in combined or "quota" in combined:
+        return 429
+    return 502
+
+
+def google_stream_error_is_account_scoped(code: str, message: str) -> bool:
+    combined = f"{code} {message}".lower()
+    return any(term in combined for term in GOOGLE_ACCOUNT_SCOPED_STREAM_ERROR_TERMS)
+
+
 def prepare_openai_compatible_request(
     codex_req: dict,
     provider: dict,
@@ -575,8 +725,19 @@ async def create_response(request: Request):
             # If the response is wrapped as a list (stream chunk structure)
             if isinstance(gemini_resp, list) and gemini_resp:
                 gemini_resp = gemini_resp[0]
+            backend_error = backend_error_from_payload(gemini_resp)
+            if backend_error:
+                code, message = backend_error
+                if google_stream_error_is_account_scoped(code, message):
+                    account_manager.mark_failure(response_account["email"], f"Backend payload error {code}: {safe_error_detail(message)}")
+                raise HTTPException(
+                    status_code=status_code_from_backend_error(code, message),
+                    detail=f"Google Antigravity API error: {safe_error_detail(message)}",
+                )
             codex_resp = transform_response(gemini_resp, model)
             return codex_resp
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
 
@@ -584,28 +745,49 @@ async def create_response(request: Request):
     async def sse_generator() -> AsyncGenerator[str, None]:
         import uuid
         response_id = f"resp_{uuid.uuid4().hex[:12]}"
+        created_at = int(time.time())
         output_text = ""
+        reasoning_text = ""
+        indexed_output_items = []
         usage = None
-        next_output_index = 1
+        next_output_index = 0
+        text_output_index = None
+        sequence_number = 0
+        stream_failed = False
+        last_error = None
+        last_error_code = "backend_error"
+        backend_output_started = False
+        stream_retry_requested = False
+
+        def stream_event(payload: dict) -> str:
+            nonlocal sequence_number
+            payload = dict(payload)
+            payload["sequence_number"] = sequence_number
+            sequence_number += 1
+            return f"data: {json.dumps(payload)}\n\n"
         
         # 1. response.created
-        yield f"data: {json.dumps({'type': 'response.created', 'response': {'id': response_id, 'object': 'response', 'status': 'in_progress'}})}\n\n"
-        
-        # 2. response.output_item.added (message)
+        yield stream_event({'type': 'response.created', 'response': {'id': response_id, 'object': 'response', 'status': 'in_progress'}})
+
         msg_id = f"msg_{uuid.uuid4().hex[:8]}"
-        yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': 0, 'item': {'type': 'message', 'id': msg_id, 'role': 'assistant', 'status': 'in_progress', 'content': []}})}\n\n"
-        
-        # 3. response.content_part.added
-        yield f"data: {json.dumps({'type': 'response.content_part.added', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': ''}})}\n\n"
+
+        def start_text_message_events():
+            nonlocal next_output_index, text_output_index
+            if text_output_index is not None:
+                return
+            text_output_index = next_output_index
+            next_output_index += 1
+            yield stream_event({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': text_output_index, 'item': {'type': 'message', 'id': msg_id, 'role': 'assistant', 'status': 'in_progress', 'content': []}})
+            yield stream_event({'type': 'response.content_part.added', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'part': {'type': 'output_text', 'text': '', 'annotations': []}})
 
         async def fail_stream(code: str, message: str) -> AsyncGenerator[str, None]:
             message = safe_error_detail(message)
-            yield f"data: {json.dumps({'type': 'error', 'error': {'code': code, 'message': message}})}\n\n"
-            yield f"data: {json.dumps({'type': 'response.failed', 'response': {'id': response_id, 'object': 'response', 'status': 'failed', 'error': {'code': code, 'message': message}}})}\n\n"
+            yield stream_event({'type': 'error', 'error': {'code': code, 'message': message}})
+            yield stream_event({'type': 'response.failed', 'response': {'id': response_id, 'object': 'response', 'status': 'failed', 'error': {'code': code, 'message': message}}})
             yield "data: [DONE]\n\n"
 
         async def parse_stream_line(line: str) -> AsyncGenerator[str, None]:
-            nonlocal output_text, usage, next_output_index
+            nonlocal output_text, reasoning_text, usage, next_output_index, stream_failed, last_error, last_error_code, backend_output_started, stream_retry_requested
             line = line.strip()
             if not line or not line.startswith("data:"):
                 return
@@ -615,22 +797,43 @@ async def create_response(request: Request):
             try:
                 parsed = json.loads(data_payload)
             except json.JSONDecodeError as e:
-                print(f"[*] Skipping invalid Antigravity SSE JSON chunk: {e}")
+                stream_failed = True
+                async for event in fail_stream("invalid_stream_chunk", f"Invalid Antigravity SSE JSON chunk: {e}"):
+                    yield event
                 return
             # If list-wrapped chunk format
             if isinstance(parsed, list) and parsed:
                 parsed = parsed[0]
             if not isinstance(parsed, dict):
                 return
+            stream_error = stream_error_from_payload(parsed)
             if "response" in parsed and isinstance(parsed["response"], dict):
                 parsed = parsed["response"]
+                if stream_error is None:
+                    stream_error = stream_error_from_payload(parsed)
+            if stream_error:
+                code, message = stream_error
+                last_error_code = code
+                last_error = f"Google Antigravity stream returned {code}: {message}"
+                if google_stream_error_is_account_scoped(code, message):
+                    account_manager.mark_failure(
+                        stream_account["email"],
+                        f"Streaming backend error {code}: {safe_error_detail(message)}",
+                    )
+                    if not backend_output_started:
+                        stream_retry_requested = True
+                        return
+                stream_failed = True
+                async for event in fail_stream(code, message):
+                    yield event
+                return
             if isinstance(parsed.get("usageMetadata"), dict):
                 usage_meta = parsed["usageMetadata"]
-                usage = {
-                    "input_tokens": token_count(usage_meta.get("promptTokenCount", 0)),
-                    "output_tokens": token_count(usage_meta.get("candidatesTokenCount", 0)),
-                    "total_tokens": token_count(usage_meta.get("totalTokenCount", 0)),
-                }
+                usage = usage_counts(
+                    usage_meta.get("promptTokenCount", 0),
+                    usage_meta.get("candidatesTokenCount", 0),
+                    usage_meta.get("totalTokenCount", 0),
+                )
             candidates = parsed.get("candidates", [])
             if not isinstance(candidates, list):
                 return
@@ -650,13 +853,18 @@ async def create_response(request: Request):
                     if part.get("thought") is True or part.get("type") == "thinking":
                         thought_text = stream_string(part.get("text")) or stream_string(part.get("thinking"))
                         if thought_text:
-                            yield f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': thought_text})}\n\n"
+                            reasoning_text += thought_text
+                            backend_output_started = True
+                            yield stream_event({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': thought_text})
                     elif "text" in part:
                         text = stream_string(part.get("text"))
                         if text is None:
                             continue
                         output_text += text
-                        yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': text})}\n\n"
+                        backend_output_started = True
+                        for event in start_text_message_events():
+                            yield event
+                        yield stream_event({'type': 'response.output_text.delta', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'delta': text})
                     elif "functionCall" in part:
                         fc = part["functionCall"]
                         if not isinstance(fc, dict):
@@ -669,7 +877,7 @@ async def create_response(request: Request):
                         output_index = next_output_index
                         next_output_index += 1
                         args = fc.get("args", {})
-                        arguments = json.dumps(args if isinstance(args, dict) else {})
+                        arguments = function_call_arguments_json(args)
                         item = {
                             "type": "function_call",
                             "id": item_id,
@@ -677,18 +885,20 @@ async def create_response(request: Request):
                             "name": name,
                             "arguments": "",
                         }
-                        yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': output_index, 'item': item})}\n\n"
+                        backend_output_started = True
+                        yield stream_event({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': output_index, 'item': item})
                         if arguments:
-                            yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': item_id, 'output_index': output_index, 'delta': arguments})}\n\n"
+                            yield stream_event({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': item_id, 'output_index': output_index, 'delta': arguments})
                         item["arguments"] = arguments
-                        yield f"data: {json.dumps({'type': 'response.function_call_arguments.done', 'response_id': response_id, 'item_id': item_id, 'output_index': output_index, 'arguments': arguments})}\n\n"
-                        yield f"data: {json.dumps({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': output_index, 'item': item})}\n\n"
+                        yield stream_event({'type': 'response.function_call_arguments.done', 'response_id': response_id, 'item_id': item_id, 'output_index': output_index, 'name': name, 'arguments': arguments})
+                        yield stream_event({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': output_index, 'item': item})
+                        indexed_output_items.append((output_index, dict(item)))
 
         completed = False
-        last_error = None
         attempts = [account]
         attempt_num = 0
         while attempt_num < len(attempts):
+            stream_retry_requested = False
             stream_account = attempts[attempt_num]
             stream_req, stream_headers = build_google_request(stream_account)
             try:
@@ -703,6 +913,7 @@ async def create_response(request: Request):
                                     f"Streaming HTTP {res.status_code}: {safe_error_detail(body_text)}",
                                     retry_after_seconds_from_response(res),
                                 )
+                            last_error_code = "backend_error"
                             last_error = f"Google Antigravity returned HTTP {res.status_code}"
                         else:
                             buffer = ""
@@ -712,17 +923,34 @@ async def create_response(request: Request):
                                     line, buffer = buffer.split("\n", 1)
                                     async for event in parse_stream_line(line):
                                         yield event
-                            if buffer.strip():
+                                    if stream_failed or stream_retry_requested:
+                                        break
+                                if stream_failed or stream_retry_requested:
+                                    break
+                            if buffer.strip() and not stream_failed and not stream_retry_requested:
                                 async for event in parse_stream_line(buffer):
                                     yield event
-                            completed = True
+                            if not stream_failed and not stream_retry_requested:
+                                completed = True
             except Exception as e:
                 account_manager.mark_failure(stream_account["email"], f"Streaming connection error: {safe_error_detail(e)}")
+                last_error_code = "connection_error"
                 last_error = safe_error_detail(e)
 
+            if stream_failed:
+                return
             if completed:
                 break
-            if attempt_num == 0:
+            if stream_retry_requested and attempt_num == 0:
+                rotated = account_manager.select_active_account(model)
+                if rotated and rotated.get("email") != stream_account.get("email"):
+                    usage = None
+                    last_error = None
+                    last_error_code = "backend_error"
+                    attempts.append(rotated)
+                    attempt_num += 1
+                    continue
+            elif attempt_num == 0:
                 rotated = account_manager.select_active_account(model)
                 if rotated and rotated.get("email") != stream_account.get("email"):
                     attempts.append(rotated)
@@ -731,17 +959,37 @@ async def create_response(request: Request):
             break
 
         if not completed:
-            async for event in fail_stream("backend_error", last_error or "Google Antigravity stream failed"):
+            async for event in fail_stream(last_error_code, last_error or "Google Antigravity stream failed"):
                 yield event
             return
                 
         # 4. Final completion events
-        yield f"data: {json.dumps({'type': 'response.content_part.done', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': output_text}})}\n\n"
-        yield f"data: {json.dumps({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': 0, 'item': {'type': 'message', 'id': msg_id, 'role': 'assistant', 'status': 'completed', 'content': [{'type': 'output_text', 'text': output_text, 'annotations': []}]}})}\n\n"
-        done_response = {'id': response_id, 'object': 'response', 'status': 'completed'}
+        if text_output_index is not None:
+            message_item = {'type': 'message', 'id': msg_id, 'status': 'completed', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': output_text, 'annotations': []}]}
+            yield stream_event({'type': 'response.output_text.done', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'text': output_text})
+            yield stream_event({'type': 'response.content_part.done', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'part': {'type': 'output_text', 'text': output_text, 'annotations': []}})
+            yield stream_event({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': text_output_index, 'item': message_item})
+            indexed_output_items.append((text_output_index, message_item))
+        done_output = []
+        if reasoning_text:
+            done_output.append({
+                "type": "reasoning",
+                "id": f"rs_{uuid.uuid4().hex[:8]}",
+                "encrypted_content": "",
+                "step_by_step_summary": reasoning_text,
+            })
+        done_output.extend(item for _output_index, item in sorted(indexed_output_items, key=lambda entry: entry[0]))
+        done_response = {
+            'id': response_id,
+            'object': 'response',
+            'created_at': created_at,
+            'model': model,
+            'output': done_output,
+            'status': 'completed',
+        }
         if usage:
             done_response["usage"] = usage
-        yield f"data: {json.dumps({'type': 'response.completed', 'response': done_response})}\n\n"
+        yield stream_event({'type': 'response.completed', 'response': done_response})
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
@@ -757,7 +1005,17 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
     if res.status_code != 200:
         raise HTTPException(status_code=res.status_code, detail=f"{provider['id']} API error: {safe_error_detail(res.text)}")
     try:
-        return transform_chat_response(res.json(), display_model)
+        chat_resp = res.json()
+        backend_error = backend_error_from_payload(chat_resp)
+        if backend_error:
+            code, message = backend_error
+            raise HTTPException(
+                status_code=status_code_from_backend_error(code, message),
+                detail=f"{provider['id']} API error: {safe_error_detail(message)}",
+            )
+        return transform_chat_response(chat_resp, display_model)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{provider['id']} response translation failed: {safe_error_detail(e)}") from e
 
@@ -773,25 +1031,46 @@ async def openai_compatible_sse_generator(
     import uuid
 
     response_id = f"resp_{uuid.uuid4().hex[:12]}"
+    created_at = int(time.time())
     msg_id = f"msg_{uuid.uuid4().hex[:8]}"
     output_text = ""
+    reasoning_text = ""
     usage = None
     tool_calls: dict[int, dict] = {}
+    tool_seen_order: list[int] = []
     tool_output_indices: dict[int, int] = {}
-    next_output_index = 1
+    indexed_output_items = []
+    next_output_index = 0
+    text_output_index = None
+    sequence_number = 0
+    stream_failed = False
 
-    yield f"data: {json.dumps({'type': 'response.created', 'response': {'id': response_id, 'object': 'response', 'status': 'in_progress', 'model': display_model}})}\n\n"
-    yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': 0, 'item': {'type': 'message', 'id': msg_id, 'role': 'assistant', 'status': 'in_progress', 'content': []}})}\n\n"
-    yield f"data: {json.dumps({'type': 'response.content_part.added', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': ''}})}\n\n"
+    def stream_event(payload: dict) -> str:
+        nonlocal sequence_number
+        payload = dict(payload)
+        payload["sequence_number"] = sequence_number
+        sequence_number += 1
+        return f"data: {json.dumps(payload)}\n\n"
+
+    yield stream_event({'type': 'response.created', 'response': {'id': response_id, 'object': 'response', 'status': 'in_progress', 'model': display_model}})
+
+    def start_text_message_events():
+        nonlocal next_output_index, text_output_index
+        if text_output_index is not None:
+            return
+        text_output_index = next_output_index
+        next_output_index += 1
+        yield stream_event({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': text_output_index, 'item': {'type': 'message', 'id': msg_id, 'role': 'assistant', 'status': 'in_progress', 'content': []}})
+        yield stream_event({'type': 'response.content_part.added', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'part': {'type': 'output_text', 'text': '', 'annotations': []}})
 
     async def fail_stream(code: str, message: str) -> AsyncGenerator[str, None]:
         message = safe_error_detail(message)
-        yield f"data: {json.dumps({'type': 'error', 'error': {'code': code, 'message': message}})}\n\n"
-        yield f"data: {json.dumps({'type': 'response.failed', 'response': {'id': response_id, 'object': 'response', 'status': 'failed', 'model': display_model, 'error': {'code': code, 'message': message}}})}\n\n"
+        yield stream_event({'type': 'error', 'error': {'code': code, 'message': message}})
+        yield stream_event({'type': 'response.failed', 'response': {'id': response_id, 'object': 'response', 'status': 'failed', 'model': display_model, 'error': {'code': code, 'message': message}}})
         yield "data: [DONE]\n\n"
 
     async def parse_chat_stream_line(line: str) -> AsyncGenerator[str, None]:
-        nonlocal output_text, usage, next_output_index
+        nonlocal output_text, reasoning_text, usage, next_output_index, stream_failed
         line = line.strip()
         if not line or not line.startswith("data:"):
             return
@@ -801,17 +1080,26 @@ async def openai_compatible_sse_generator(
         try:
             parsed = json.loads(data_payload)
         except json.JSONDecodeError as e:
-            print(f"[*] Skipping invalid {provider['id']} SSE JSON chunk: {e}")
+            stream_failed = True
+            async for event in fail_stream("invalid_stream_chunk", f"Invalid {provider['id']} SSE JSON chunk: {e}"):
+                yield event
             return
         if not isinstance(parsed, dict):
             return
+        stream_error = stream_error_from_payload(parsed)
+        if stream_error:
+            code, message = stream_error
+            stream_failed = True
+            async for event in fail_stream(code, message):
+                yield event
+            return
         if isinstance(parsed.get("usage"), dict):
             provider_usage = parsed["usage"]
-            usage = {
-                "input_tokens": token_count(provider_usage.get("prompt_tokens", provider_usage.get("input_tokens", 0))),
-                "output_tokens": token_count(provider_usage.get("completion_tokens", provider_usage.get("output_tokens", 0))),
-                "total_tokens": token_count(provider_usage.get("total_tokens", 0)),
-            }
+            usage = usage_counts(
+                provider_usage.get("prompt_tokens", provider_usage.get("input_tokens", 0)),
+                provider_usage.get("completion_tokens", provider_usage.get("output_tokens", 0)),
+                provider_usage.get("total_tokens", 0),
+            )
         choices = parsed.get("choices", []) or []
         if not isinstance(choices, list):
             return
@@ -823,11 +1111,14 @@ async def openai_compatible_sse_generator(
                 continue
             reasoning_content = stream_string(delta.get("reasoning_content"))
             if reasoning_content:
-                yield f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': reasoning_content})}\n\n"
+                reasoning_text += reasoning_content
+                yield stream_event({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': reasoning_content})
             content_delta = stream_string(delta.get("content"))
             if content_delta:
                 output_text += content_delta
-                yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'delta': content_delta})}\n\n"
+                for event in start_text_message_events():
+                    yield event
+                yield stream_event({'type': 'response.output_text.delta', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'delta': content_delta})
             tool_deltas = delta.get("tool_calls", []) or []
             if not isinstance(tool_deltas, list):
                 continue
@@ -841,13 +1132,16 @@ async def openai_compatible_sse_generator(
                 if not isinstance(fn, dict):
                     continue
                 generated_call_id = stream_string(tool_delta.get("id")) or f"call_{uuid.uuid4().hex[:8]}"
-                state = tool_calls.setdefault(idx, {
-                    "id": f"fc_{uuid.uuid4().hex[:8]}",
-                    "type": "function_call",
-                    "call_id": generated_call_id,
-                    "name": "",
-                    "arguments": "",
-                })
+                if idx not in tool_calls:
+                    tool_seen_order.append(idx)
+                    tool_calls[idx] = {
+                        "id": f"fc_{uuid.uuid4().hex[:8]}",
+                        "type": "function_call",
+                        "call_id": generated_call_id,
+                        "name": "",
+                        "arguments": "",
+                    }
+                state = tool_calls[idx]
                 tool_call_id = stream_string(tool_delta.get("id"))
                 if tool_call_id:
                     state["call_id"] = tool_call_id
@@ -867,13 +1161,13 @@ async def openai_compatible_sse_generator(
                     next_output_index += 1
                     item = dict(state)
                     item["arguments"] = ""
-                    yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': tool_output_indices[idx], 'item': item})}\n\n"
+                    yield stream_event({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': tool_output_indices[idx], 'item': item})
                     if buffered_arguments:
-                        yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': buffered_arguments})}\n\n"
+                        yield stream_event({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': buffered_arguments})
                 if arguments_delta:
                     state["arguments"] += arguments_delta
                     if idx in tool_output_indices:
-                        yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': arguments_delta})}\n\n"
+                        yield stream_event({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': arguments_delta})
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -890,7 +1184,11 @@ async def openai_compatible_sse_generator(
                         line, buffer = buffer.split("\n", 1)
                         async for event in parse_chat_stream_line(line):
                             yield event
-                if buffer.strip():
+                        if stream_failed:
+                            break
+                    if stream_failed:
+                        break
+                if buffer.strip() and not stream_failed:
                     async for event in parse_chat_stream_line(buffer):
                         yield event
     except Exception as e:
@@ -898,7 +1196,10 @@ async def openai_compatible_sse_generator(
             yield event
         return
 
-    for idx in sorted(tool_calls):
+    if stream_failed:
+        return
+
+    for idx in tool_seen_order:
         item = tool_calls[idx]
         if not valid_function_name(item.get("name")):
             continue
@@ -907,18 +1208,45 @@ async def openai_compatible_sse_generator(
             next_output_index += 1
             added_item = dict(item)
             added_item["arguments"] = ""
-            yield f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': tool_output_indices[idx], 'item': added_item})}\n\n"
+            yield stream_event({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': tool_output_indices[idx], 'item': added_item})
             if item.get("arguments"):
-                yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': item['id'], 'output_index': tool_output_indices[idx], 'delta': item['arguments']})}\n\n"
-        output_index = tool_output_indices[idx]
-        arguments = item.get("arguments", "")
-        yield f"data: {json.dumps({'type': 'response.function_call_arguments.done', 'response_id': response_id, 'item_id': item['id'], 'output_index': output_index, 'arguments': arguments})}\n\n"
-        yield f"data: {json.dumps({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': output_index, 'item': item})}\n\n"
+                yield stream_event({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': item['id'], 'output_index': tool_output_indices[idx], 'delta': item['arguments']})
 
-    yield f"data: {json.dumps({'type': 'response.content_part.done', 'response_id': response_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': output_text}})}\n\n"
-    yield f"data: {json.dumps({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': 0, 'item': {'type': 'message', 'id': msg_id, 'role': 'assistant', 'status': 'completed', 'content': [{'type': 'output_text', 'text': output_text, 'annotations': []}]}})}\n\n"
-    done_response = {"id": response_id, "object": "response", "status": "completed", "model": display_model}
+    for idx in sorted(tool_output_indices, key=lambda tool_idx: tool_output_indices[tool_idx]):
+        item = tool_calls[idx]
+        if not valid_function_name(item.get("name")):
+            continue
+        output_index = tool_output_indices[idx]
+        arguments = function_call_arguments_string(item.get("arguments", ""))
+        item["arguments"] = arguments
+        yield stream_event({'type': 'response.function_call_arguments.done', 'response_id': response_id, 'item_id': item['id'], 'output_index': output_index, 'name': item.get('name', ''), 'arguments': arguments})
+        yield stream_event({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': output_index, 'item': item})
+        indexed_output_items.append((output_index, dict(item)))
+
+    if text_output_index is not None:
+        message_item = {'type': 'message', 'id': msg_id, 'status': 'completed', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': output_text, 'annotations': []}]}
+        yield stream_event({'type': 'response.output_text.done', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'text': output_text})
+        yield stream_event({'type': 'response.content_part.done', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'part': {'type': 'output_text', 'text': output_text, 'annotations': []}})
+        yield stream_event({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': text_output_index, 'item': message_item})
+        indexed_output_items.append((text_output_index, message_item))
+    done_output = []
+    if reasoning_text:
+        done_output.append({
+            "type": "reasoning",
+            "id": f"rs_{uuid.uuid4().hex[:8]}",
+            "encrypted_content": "",
+            "step_by_step_summary": reasoning_text,
+        })
+    done_output.extend(item for _output_index, item in sorted(indexed_output_items, key=lambda entry: entry[0]))
+    done_response = {
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "status": "completed",
+        "model": display_model,
+        "output": done_output,
+    }
     if usage:
         done_response["usage"] = usage
-    yield f"data: {json.dumps({'type': 'response.completed', 'response': done_response})}\n\n"
+    yield stream_event({'type': 'response.completed', 'response': done_response})
     yield "data: [DONE]\n\n"

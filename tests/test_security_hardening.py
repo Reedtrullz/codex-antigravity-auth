@@ -93,6 +93,25 @@ class TestCredentialResolution(unittest.TestCase):
 
             self.assertEqual(stat.S_IMODE(creds_path.stat().st_mode), 0o600)
 
+    def test_symlinked_oauth_credentials_file_is_ignored_without_chmodding_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target_path = Path(tmp) / "target-credentials.json"
+            target_path.write_text(
+                json.dumps({"client_id": "file-id", "client_secret": "file-secret"}),
+                encoding="utf-8",
+            )
+            os.chmod(target_path, 0o644)
+            symlink_path = Path(tmp) / "antigravity-credentials.json"
+            symlink_path.symlink_to(target_path)
+
+            with patch("codex_antigravity_auth.constants.CREDENTIALS_FILE", str(symlink_path)):
+                with patch.dict("os.environ", {}, clear=True):
+                    from codex_antigravity_auth.constants import resolve_oauth_credentials
+
+                    self.assertEqual(resolve_oauth_credentials(), (None, None))
+
+            self.assertEqual(stat.S_IMODE(target_path.stat().st_mode), 0o644)
+
 
 class TestProviderStorage(unittest.TestCase):
     def test_provider_config_write_uses_private_temp_and_cleans_failed_replace(self):
@@ -151,6 +170,54 @@ class TestProviderStorage(unittest.TestCase):
 
 
 class TestGatewayRemoteAccess(unittest.TestCase):
+    def test_loopback_responses_reject_browser_plain_text_posts(self):
+        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+            response = TestClient(app).post(
+                "/v1/responses",
+                content='{"model":"gemini-3.5-flash-high","input":"hello"}',
+                headers={"Content-Type": "text/plain"},
+            )
+
+        self.assertEqual(response.status_code, 415)
+        self.assertIn("application/json", response.json()["detail"])
+        mock_select.assert_not_called()
+
+    def test_loopback_responses_reject_cross_site_browser_origin(self):
+        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+            response = TestClient(app).post(
+                "/v1/responses",
+                json={"model": "gemini-3.5-flash-high", "input": "hello"},
+                headers={"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Cross-site", response.json()["detail"])
+        mock_select.assert_not_called()
+
+    def test_loopback_responses_reject_dns_rebinding_host(self):
+        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+            response = TestClient(app).post(
+                "/v1/responses",
+                json={"model": "gemini-3.5-flash-high", "input": "hello"},
+                headers={"Host": "attacker.example:51122", "Origin": "http://attacker.example:51122"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("loopback Host", response.json()["detail"])
+        mock_select.assert_not_called()
+
+    def test_loopback_responses_reject_testserver_host_from_real_loopback_client(self):
+        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+            response = TestClient(app, client=("127.0.0.1", 50000)).post(
+                "/v1/responses",
+                json={"model": "gemini-3.5-flash-high", "input": "hello"},
+                headers={"Host": "testserver:51122", "Origin": "http://testserver:51122"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("loopback Host", response.json()["detail"])
+        mock_select.assert_not_called()
+
     def test_non_loopback_clients_require_opt_in_bearer_token(self):
         with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
             with patch.dict(os.environ, {}, clear=True):
@@ -162,15 +229,30 @@ class TestGatewayRemoteAccess(unittest.TestCase):
         with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
             with patch.dict(
                 os.environ,
-                {"ANTIGRAVITY_ALLOW_REMOTE": "1", "ANTIGRAVITY_GATEWAY_TOKEN": "gateway-secret"},
+                {"ANTIGRAVITY_ALLOW_REMOTE": "1", "ANTIGRAVITY_GATEWAY_TOKEN": "x" * 32},
                 clear=True,
             ):
                 response = TestClient(app, client=("203.0.113.10", 50000)).get(
                     "/v1/models",
-                    headers={"Authorization": "Bearer gateway-secret"},
+                    headers={"Authorization": f"Bearer {'x' * 32}"},
                 )
 
         self.assertEqual(response.status_code, 200)
+
+    def test_non_loopback_clients_reject_weak_remote_token_even_when_supplied(self):
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
+            with patch.dict(
+                os.environ,
+                {"ANTIGRAVITY_ALLOW_REMOTE": "1", "ANTIGRAVITY_GATEWAY_TOKEN": "short"},
+                clear=True,
+            ):
+                response = TestClient(app, client=("203.0.113.10", 50000)).get(
+                    "/v1/models",
+                    headers={"Authorization": "Bearer short"},
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("at least 32", response.json()["detail"])
 
 
 class TestServerErrorRedaction(unittest.TestCase):

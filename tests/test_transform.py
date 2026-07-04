@@ -70,6 +70,17 @@ class TestTransform(unittest.TestCase):
         self.assertEqual(generation_config["maxOutputTokens"], 4096)
         self.assertEqual(generation_config["thinkingConfig"]["thinking_budget"], 4095)
 
+    def test_claude_xhigh_reasoning_budget_is_not_lower_than_high(self):
+        high = transform_request(
+            {"model": "claude-opus-4-6", "input": "Hello", "reasoning": {"effort": "high"}}
+        )
+        xhigh = transform_request(
+            {"model": "claude-opus-4-6", "input": "Hello", "reasoning": {"effort": "xhigh"}}
+        )
+
+        self.assertEqual(high["request"]["generationConfig"]["thinkingConfig"]["thinking_budget"], 16000)
+        self.assertEqual(xhigh["request"]["generationConfig"]["thinkingConfig"]["thinking_budget"], 32000)
+
     def test_claude_omits_thinking_config_when_token_cap_cannot_exceed_budget(self):
         req = {
             "model": "claude-3.5-sonnet",
@@ -103,6 +114,16 @@ class TestTransform(unittest.TestCase):
         res = transform_response(gemini_resp, "gemini-3.5-flash-high")
         self.assertEqual(res["output"][0]["content"][0]["text"], "The meaning of life is 42.")
         self.assertEqual(res["usage"]["total_tokens"], 15)
+
+    def test_response_transformation_sums_total_tokens_when_backend_omits_total(self):
+        gemini_resp = {
+            "candidates": [{"content": {"role": "assistant", "parts": [{"text": "hello"}]}}],
+            "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 3},
+        }
+
+        res = transform_response(gemini_resp, "gemini-3.5-flash-high")
+
+        self.assertEqual(res["usage"], {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5})
 
 if __name__ == "__main__":
     unittest.main()

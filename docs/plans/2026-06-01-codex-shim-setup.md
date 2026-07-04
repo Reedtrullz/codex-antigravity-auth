@@ -1,5 +1,7 @@
 # Setup Custom Models in Codex Desktop via codex-shim
 
+> Historical plan retained for provenance. Current Codex setup should use the native `/v1/models` endpoint plus `codex-antigravity configure-codex --write`; see `README.md`, `USAGE.md`, and `VERIFICATION.md`.
+
 This script automates cloning `codex-shim`, writing a secure local models configuration file containing your Google Antigravity gateway models, and patching Codex Desktop's visual model picker dropdown so that you can select your Antigravity models directly from the GUI.
 
 ## 1. Clone & Install codex-shim
@@ -7,7 +9,8 @@ Open your terminal and run:
 ```bash
 git clone https://github.com/0xSero/codex-shim ~/codex-shim
 cd ~/codex-shim
-source /Users/reidar/Projectos/codex-antigravity-auth/.venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
 ```
 
