@@ -72,7 +72,7 @@ codex-antigravity start
 ```bash
 codex-antigravity doctor        # diagnostics
 codex-antigravity doctor --byok-only
-python3 -m pytest -q             # current local suite, 215 tests plus 128 subtests
+python3 -m pytest -q             # current local suite, 242 tests plus 128 subtests
 curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
 ```
 
