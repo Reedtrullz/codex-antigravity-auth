@@ -1,7 +1,7 @@
-# Current Integration Status — 3 July 2026
+# Current Integration Status — 5 July 2026
 
 ## Build & Test Health
-- **local pytest**: 215/215 passing, plus 128 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: 242/242 passing, plus 128 subtests, with `python3 -m pytest -q` ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **wheel install smoke**: built wheel/sdist from a scratch copy, ran `twine check`, confirmed project URLs/metadata and MIT license inclusion in built artifacts, installed the wheel into a clean venv, ran `pip check`, verified console script help, `doctor --help`, and provider preset listing ✅
@@ -87,13 +87,13 @@
 - Live Google Antigravity, DeepSeek V4 Flash BYOK, and OpenRouter BYOK smokes have passed with configured credentials/API keys; xAI, Kimi/Moonshot, Ollama cloud, and arbitrary custom BYOK providers still need their own live-key smoke.
 - `previous_response_id` is rejected by design in this stateless gateway; replay the full conversation, including tool calls and outputs, in `input`.
 - `/v1/responses/compact` is not implemented.
-- CI includes unit/compile checks and a release-artifact smoke job, but this local review did not trigger a fresh remote CI run for the uncommitted patch.
+- CI includes unit/compile checks and a release-artifact smoke job. PR #3 head `500e22d` passed push and pull-request CI before merge/release.
 - Live backend availability is covered only by the credentialed smoke runs noted above.
 
 ## Release State
-- Current package metadata on `main`: `1.0.0`
-- Last tagged GitHub release: [v0.1.0-alpha](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v0.1.0-alpha)
-- A `v1.0.0` tag/release has not been cut in this local review.
+- Current package metadata: `1.0.1`
+- Previous tagged GitHub release: [v1.0.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.0.0)
+- `v1.0.1` is the release target for the `$anti` helper hardening patch.
 
 ## Next Priorities
 1. Add `/v1/responses/compact` support
