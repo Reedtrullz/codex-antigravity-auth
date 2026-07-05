@@ -1,7 +1,7 @@
 # Current Integration Status — 5 July 2026
 
 ## Build & Test Health
-- **local pytest**: 242/242 passing, plus 128 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: full local suite passing with `python3 -m pytest -q` ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **wheel install smoke**: built wheel/sdist from a scratch copy, ran `twine check`, confirmed project URLs/metadata and MIT license inclusion in built artifacts, installed the wheel into a clean venv, ran `pip check`, verified console script help, `doctor --help`, and provider preset listing ✅

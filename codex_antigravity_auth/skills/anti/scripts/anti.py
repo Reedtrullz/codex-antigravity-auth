@@ -2,17 +2,31 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import fnmatch
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
+
+try:
+    from codex_antigravity_auth.redaction import (
+        redact_secret_text as package_redact_secret_text,
+        redact_secrets as package_redact_secrets,
+    )
+except Exception:  # pragma: no cover - installed personal skills can run without the package import path.
+    package_redact_secret_text = None
+    package_redact_secrets = None
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:51122/v1"
@@ -29,11 +43,76 @@ MODEL_ALIASES = {
 DEFAULT_REVIEW_MODEL = "claude-opus-4-6"
 DEFAULT_CONSULT_MODEL = "claude-3.5-sonnet"
 DEFAULT_PLAN_MODEL = "claude-opus-4-6"
+DEFAULT_PANEL_MODELS = ["claude-3.5-sonnet", "claude-opus-4-6"]
+DEFAULT_PANEL_JUDGE_MODEL = "claude-opus-4-6"
 MAX_FILE_BYTES = 180_000
 DEFAULT_MAX_PROMPT_CHARS = 120_000
 DEFAULT_MAX_SYNTHESIS_CHARS = DEFAULT_MAX_PROMPT_CHARS
 PID_FILE = Path.home() / ".codex" / "anti-gateway.pid"
 LOG_FILE = Path.home() / ".codex" / "anti-gateway.log"
+RUNS_DIR = Path.home() / ".codex" / "anti-runs"
+RUN_OUTPUT_PREVIEW_CHARS = 1600
+FALLBACK_POLICIES = {"never", "on-retryable", "on-timeout"}
+SAVE_OUTPUT_MODES = {"never", "summary", "full"}
+
+REDACTION_MARKER = "<redacted>"
+SECRET_KEY_FRAGMENTS = (
+    "access_token",
+    "accesstoken",
+    "refresh_token",
+    "refreshtoken",
+    "id_token",
+    "idtoken",
+    "authorization",
+    "client_secret",
+    "clientsecret",
+    "code_verifier",
+    "codeverifier",
+    "oauth_code",
+    "oauthcode",
+    "session_token",
+    "sessiontoken",
+    "api_key",
+    "apikey",
+    "api_token",
+    "apitoken",
+    "cookie",
+    "set_cookie",
+    "setcookie",
+    "password",
+)
+EXACT_SECRET_KEYS = {
+    "access",
+    "refresh",
+    "token",
+    "secret",
+    "code",
+    "cookie",
+    "set_cookie",
+    "setcookie",
+    "key",
+}
+SECRET_KEY_REGEX = (
+    r"access_token|accessToken|refresh_token|refreshToken|id_token|idToken|client_secret|clientSecret|"
+    r"code_verifier|codeVerifier|session_token|sessionToken|oauth_code|oauthCode|authorization|refresh|"
+    r"access|code|api_key|apiKey|apikey|api_token|apiToken|x-api-key|x-goog-api-key|cookie|set-cookie|"
+    r"set_cookie|setCookie|password|key"
+)
+TOKEN_REDACTION_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9][A-Za-z0-9_-]{16,}"),
+    re.compile(r"sk-or-v1-[A-Za-z0-9][A-Za-z0-9_-]{16,}"),
+    re.compile(r"ya29\.[A-Za-z0-9_-]+"),
+]
+BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE)
+URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s]+)@")
+JSON_SECRET_RE = re.compile(rf'(?i)("(?:{SECRET_KEY_REGEX})"\s*:\s*")[^"]*(")')
+PYTHON_REPR_SECRET_RE = re.compile(rf"(?i)('(?:{SECRET_KEY_REGEX})'\s*:\s*')[^']*(')")
+FORM_SECRET_RE = re.compile(rf"(?i)\b({SECRET_KEY_REGEX})=([^&\s]+)")
+UNQUOTED_SECRET_RE = re.compile(rf"(?i)\b({SECRET_KEY_REGEX})\s*[:=]\s*([^\s,;}}]+)")
+HEADER_SECRET_RE = re.compile(
+    r"(?im)(^|[ \t])((?:authorization|proxy-authorization|cookie|set-cookie|"
+    r"[\w-]*(?:api[-_]?key|api[-_]?token|token|secret|credential|password)[\w-]*)\s*:\s*)[^\r\n]+"
+)
 
 EXCLUDED_DIRS = {
     ".git",
@@ -72,20 +151,29 @@ EXCLUDED_NAMES = {
     ".env",
     ".env.local",
     ".envrc",
+    "accounts.json",
     "antigravity-accounts.json",
     "antigravity-providers.json",
     "antigravity-credentials.json",
     "antigravity-storage.key",
+    "provider-keys.json",
+    "provider_keys.json",
+    "providers.json",
     "id_rsa",
     "id_ed25519",
     "known_hosts",
 }
 EXCLUDED_PATTERNS = [
     ".env.*",
+    "antigravity-accounts.json.*",
+    "antigravity-credentials.json.*",
+    "antigravity-providers.json.*",
     "*.pem",
     "*.key",
     "*.p12",
     "*.pfx",
+    "*account*key*.json",
+    "*provider*key*.json",
     "*credential*.json",
     "*credentials*.json",
     "*secret*.env",
@@ -103,6 +191,7 @@ EXCLUDED_PATTERNS = [
     "*apikey*",
     "*api-key*",
 ]
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
 class AntiError(Exception):
@@ -113,10 +202,193 @@ def eprint(message: str) -> None:
     print(message, file=sys.stderr)
 
 
+def utc_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def new_run_id() -> str:
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8]
+
+
+def normalize_redaction_markers(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): normalize_redaction_markers(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [normalize_redaction_markers(item) for item in value]
+    if isinstance(value, tuple):
+        return [normalize_redaction_markers(item) for item in value]
+    if isinstance(value, str):
+        return value.replace("[REDACTED]", REDACTION_MARKER)
+    return value
+
+
+def key_looks_secret(key: Any) -> bool:
+    normalized = str(key).replace("-", "_").lower()
+    compact = normalized.replace("_", "")
+    metadata_suffixes = ("_chars", "chars", "_count", "count", "_tokens", "tokens")
+    if normalized.endswith(metadata_suffixes) or compact.endswith(tuple(item.replace("_", "") for item in metadata_suffixes)):
+        return False
+    if normalized in EXACT_SECRET_KEYS:
+        return True
+    return any(fragment in normalized or fragment in compact for fragment in SECRET_KEY_FRAGMENTS)
+
+
+def redact_sensitive_text(text: str) -> str:
+    redacted = str(text)
+    if package_redact_secret_text is not None:
+        try:
+            redacted = str(package_redact_secret_text(redacted))
+        except Exception:
+            pass
+    redacted = str(normalize_redaction_markers(redacted))
+    for pattern in TOKEN_REDACTION_PATTERNS:
+        redacted = pattern.sub(REDACTION_MARKER, redacted)
+    redacted = URL_USERINFO_RE.sub(lambda match: match.group(1) + REDACTION_MARKER + "@", redacted)
+    redacted = BEARER_RE.sub("Bearer " + REDACTION_MARKER, redacted)
+    redacted = HEADER_SECRET_RE.sub(lambda match: match.group(1) + match.group(2) + REDACTION_MARKER, redacted)
+    redacted = JSON_SECRET_RE.sub(lambda match: match.group(1) + REDACTION_MARKER + match.group(2), redacted)
+    redacted = PYTHON_REPR_SECRET_RE.sub(lambda match: match.group(1) + REDACTION_MARKER + match.group(2), redacted)
+    redacted = FORM_SECRET_RE.sub(lambda match: f"{match.group(1)}={REDACTION_MARKER}", redacted)
+    redacted = UNQUOTED_SECRET_RE.sub(lambda match: f"{match.group(1)}={REDACTION_MARKER}", redacted)
+    return redacted
+
+
+def fallback_sanitize_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            result[str(key)] = REDACTION_MARKER if key_looks_secret(key) and item not in (None, "") else fallback_sanitize_json(item)
+        return result
+    if isinstance(value, list):
+        return [fallback_sanitize_json(item) for item in value]
+    if isinstance(value, tuple):
+        return [fallback_sanitize_json(item) for item in value]
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return redact_sensitive_text(str(value))
+
+
+def sanitize_json(value: Any) -> Any:
+    if package_redact_secrets is not None:
+        try:
+            return fallback_sanitize_json(normalize_redaction_markers(package_redact_secrets(value)))
+        except Exception:
+            pass
+    return fallback_sanitize_json(value)
+
+
+def progress(args: argparse.Namespace, message: str) -> None:
+    if getattr(args, "progress", False):
+        eprint(f"[anti] {redact_sensitive_text(message)}")
+
+
+def save_output_mode(args: argparse.Namespace) -> str:
+    value = getattr(args, "save_output", "never")
+    if value not in SAVE_OUTPUT_MODES:
+        raise AntiError(f"unsupported save output mode: {value}")
+    return value
+
+
+def write_run_record(
+    args: argparse.Namespace,
+    *,
+    mode: str,
+    status: str,
+    models: list[str] | None = None,
+    base_url: str | None = None,
+    prompt_text: str | None = None,
+    output_text: str | None = None,
+    caveats: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> Path | None:
+    output_mode = save_output_mode(args)
+    if output_mode == "never":
+        return None
+
+    if RUNS_DIR.exists() and RUNS_DIR.is_symlink():
+        raise AntiError(f"refusing to write Anti run record through symlinked directory: {RUNS_DIR}")
+    os.makedirs(RUNS_DIR, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(RUNS_DIR, 0o700)
+    except OSError:
+        pass
+
+    output_chars = len(output_text or "")
+    prompt_chars = len(prompt_text or "")
+    record: dict[str, Any] = {
+        "id": new_run_id(),
+        "created_at": utc_timestamp(),
+        "command": getattr(args, "command", mode),
+        "workflow": getattr(args, "workflow_name", None),
+        "run_label": getattr(args, "run_label", None),
+        "mode": mode,
+        "status": status,
+        "gateway": base_url,
+        "models": models or [],
+        "prompt_chars": prompt_chars,
+        "output_chars": output_chars,
+        "caveats": caveats or [],
+        "metadata": metadata or {},
+        "save_output": output_mode,
+    }
+    if error:
+        record["error"] = error
+    if output_mode == "summary" and output_text:
+        record["output_preview"] = output_text[:RUN_OUTPUT_PREVIEW_CHARS]
+    elif output_mode == "full":
+        if prompt_text is not None:
+            record["prompt_text"] = prompt_text
+        if output_text is not None:
+            record["output_text"] = output_text
+
+    record = sanitize_json(record)
+    path = RUNS_DIR / f"{record['id']}.json"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+    progress(args, f"saved sanitized run record: {path}")
+    return path
+
+
+def error_is_retryable(error: str) -> bool:
+    lowered = error.lower()
+    if "retryable=true" in lowered:
+        return True
+    return any(f"http {status}" in lowered for status in ("408", "409", "425", "429", "500", "502", "503", "504"))
+
+
+def error_is_timeout(error: str) -> bool:
+    lowered = error.lower()
+    return "timed out" in lowered or "timeouterror" in lowered or "timeout error" in lowered
+
+
+def should_use_fallback(error: str, policy: str) -> bool:
+    if policy == "never":
+        return False
+    if policy == "on-timeout":
+        return error_is_timeout(error)
+    if policy == "on-retryable":
+        return error_is_retryable(error) or error_is_timeout(error)
+    raise AntiError(f"unsupported fallback policy: {policy}")
+
+
 def normalize_base_url(value: str) -> str:
     value = str(value).strip()
     if not value:
         raise AntiError("base URL must be non-empty")
+    if any(ord(char) <= 0x20 for char in value):
+        raise AntiError("base URL must not contain whitespace or control characters")
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.username or parsed.password:
+        raise AntiError("base URL must not contain username or password")
+    if parsed.query or parsed.fragment:
+        raise AntiError("base URL must not contain query strings or fragments")
     return value.rstrip("/")
 
 
@@ -172,7 +444,7 @@ def request_json(
     try:
         decoded = json.loads(raw.decode("utf-8"))
     except Exception as exc:
-        raise AntiError(f"request to {url} returned non-JSON response") from exc
+        raise AntiError(f"request to {url} returned HTTP {status} non-JSON response") from exc
     if not isinstance(decoded, dict):
         raise AntiError(f"request to {url} returned JSON {type(decoded).__name__}, expected object")
     return status, decoded
@@ -254,10 +526,13 @@ def post_response(
     timeout: float,
     token_env: str,
     retries: int = 0,
+    model_ids: set[str] | None = None,
 ) -> str:
-    model_ids = fetch_model_ids(base_url, timeout=timeout, token_env=token_env)
-    if model not in model_ids:
-        sample = ", ".join(sorted(model_ids)[:12])
+    available_model_ids = model_ids
+    if available_model_ids is None:
+        available_model_ids = fetch_model_ids(base_url, timeout=timeout, token_env=token_env)
+    if model not in available_model_ids:
+        sample = ", ".join(sorted(available_model_ids)[:12])
         raise AntiError(f"model {model!r} is not advertised by /v1/models. Available sample: {sample}")
     payload = {
         "model": model,
@@ -304,6 +579,78 @@ def post_response(
         )
 
     raise AssertionError("post_response retry loop should have returned or raised")
+
+
+def generate_with_fallback(
+    args: argparse.Namespace,
+    *,
+    model: str,
+    prompt: str,
+    max_output_tokens: int,
+    purpose: str,
+    model_ids: set[str] | None = None,
+) -> tuple[str, str, dict[str, Any]]:
+    fallback_raw = getattr(args, "fallback_model", None)
+    fallback_model = resolve_model(fallback_raw, default=fallback_raw) if fallback_raw else None
+    fallback_policy = getattr(args, "fallback_policy", "never")
+    if fallback_policy not in FALLBACK_POLICIES:
+        raise AntiError(f"unsupported fallback policy: {fallback_policy}")
+
+    failures: list[dict[str, str]] = []
+    progress(args, f"{purpose}: calling {model} ({len(prompt)} prompt chars)")
+    try:
+        text = post_response(
+            base_url=args.base_url,
+            model=model,
+            prompt=prompt,
+            max_output_tokens=max_output_tokens,
+            timeout=args.timeout,
+            token_env=args.gateway_token_env,
+            retries=args.retry,
+            model_ids=model_ids,
+        )
+        progress(args, f"{purpose}: {model} completed ({len(text)} output chars)")
+        return text, model, {
+            "model_used": model,
+            "primary_model": model,
+            "fallback_model": fallback_model,
+            "fallback_policy": fallback_policy,
+            "fallback_used": False,
+            "generation_failures": failures,
+        }
+    except AntiError as exc:
+        error = redact_sensitive_text(str(exc))
+        failures.append({"model": model, "error": error})
+        if not fallback_model or fallback_model == model or not should_use_fallback(error, fallback_policy):
+            raise
+        progress(args, f"{purpose}: {model} failed; trying fallback {fallback_model}")
+        try:
+            text = post_response(
+                base_url=args.base_url,
+                model=fallback_model,
+                prompt=prompt,
+                max_output_tokens=max_output_tokens,
+                timeout=args.timeout,
+                token_env=args.gateway_token_env,
+                retries=args.retry,
+                model_ids=model_ids,
+            )
+        except AntiError as fallback_exc:
+            fallback_error = redact_sensitive_text(str(fallback_exc))
+            failures.append({"model": fallback_model, "error": fallback_error})
+            raise AntiError(
+                f"{purpose} failed on primary model {model} and fallback model {fallback_model}. "
+                f"Primary error: {error}. Fallback error: {fallback_error}"
+            ) from fallback_exc
+        progress(args, f"{purpose}: fallback {fallback_model} completed ({len(text)} output chars)")
+        return text, fallback_model, {
+            "model_used": fallback_model,
+            "primary_model": model,
+            "fallback_model": fallback_model,
+            "fallback_policy": fallback_policy,
+            "fallback_used": True,
+            "generation_failures": failures,
+        }
 
 
 def find_repo_root(start: Path) -> Path | None:
@@ -368,6 +715,7 @@ def filter_paths(paths: list[str], *, root: Path) -> tuple[list[str], list[str]]
     for raw in paths:
         if not raw:
             continue
+        validate_path_list_item(raw, source="path argument")
         rel = relative_safe_path(root, raw)
         if rel in seen:
             continue
@@ -389,8 +737,17 @@ def read_paths_file(spec: str) -> list[str]:
     except UnicodeDecodeError as exc:
         raise AntiError(f"path list {spec!r} is not valid UTF-8") from exc
     if "\0" in decoded:
-        return [item for item in decoded.split("\0") if item]
-    return [line for line in decoded.splitlines() if line]
+        items = [item for item in decoded.split("\0") if item]
+    else:
+        items = [line for line in decoded.splitlines() if line]
+    for item in items:
+        validate_path_list_item(item, source=spec)
+    return items
+
+
+def validate_path_list_item(value: str, *, source: str) -> None:
+    if redact_sensitive_text(value) != value:
+        raise AntiError(f"path list {source!r} contains secret-like content; refusing to use it")
 
 
 def selected_paths_from_args(args: argparse.Namespace) -> list[str]:
@@ -965,18 +1322,17 @@ def run_chunked_review(
         raise AntiError("chunked review produced no reviewable chunks; narrow the file set or raise --max-prompt-chars")
 
     chunk_outputs: list[str] = []
-    for chunk in chunks:
-        chunk_outputs.append(
-            post_response(
-                base_url=args.base_url,
-                model=model,
-                prompt=chunk["prompt"],
-                max_output_tokens=args.chunk_output_tokens,
-                timeout=args.timeout,
-                token_env=args.gateway_token_env,
-                retries=args.retry,
-            )
+    chunk_generation: list[dict[str, Any]] = []
+    for index, chunk in enumerate(chunks, start=1):
+        chunk_text, chunk_model, generation_metadata = generate_with_fallback(
+            args,
+            model=model,
+            prompt=chunk["prompt"],
+            max_output_tokens=args.chunk_output_tokens,
+            purpose=f"review chunk {index}/{len(chunks)}",
         )
+        chunk_outputs.append(chunk_text)
+        chunk_generation.append({"index": index, "model_used": chunk_model, **generation_metadata})
 
     synthesis_prompt, synthesis_caveats, synthesis_metadata = build_chunk_synthesis_prompt(
         context=context,
@@ -987,14 +1343,12 @@ def run_chunked_review(
     )
     caveats = list(context["caveats"])
     caveats.extend(synthesis_caveats)
-    synthesis = post_response(
-        base_url=args.base_url,
+    synthesis, synthesis_model, synthesis_generation = generate_with_fallback(
+        args,
         model=model,
         prompt=synthesis_prompt,
         max_output_tokens=args.max_output_tokens,
-        timeout=args.timeout,
-        token_env=args.gateway_token_env,
-        retries=args.retry,
+        purpose="review synthesis",
     )
     if chunk_metadata["omitted_items"]:
         caveats.append("Chunked review omitted items: " + ", ".join(chunk_metadata["omitted_items"][:20]))
@@ -1012,16 +1366,20 @@ def run_chunked_review(
                 "kind": chunk["kind"],
                 "label": chunk["label"],
                 "prompt_chars": chunk["prompt_chars"],
+                "model_used": chunk_generation[index - 1]["model_used"],
             }
             for index, chunk in enumerate(chunks, start=1)
         ],
+        "chunk_generation": chunk_generation,
+        "synthesis_model_used": synthesis_model,
+        "synthesis_generation": synthesis_generation,
         "chunk_omitted_items": chunk_metadata["omitted_items"],
         **synthesis_metadata,
     }
     return synthesis, caveats, metadata
 
 
-def assemble_plan_prompt(args: argparse.Namespace) -> tuple[str, list[str]]:
+def assemble_plan_prompt(args: argparse.Namespace, *, apply_limit: bool = True) -> tuple[str, list[str]]:
     user_goal = read_prompt(args)
     context = ""
     caveats: list[str] = []
@@ -1079,8 +1437,117 @@ def assemble_plan_prompt(args: argparse.Namespace) -> tuple[str, list[str]]:
         if part
     )
 
-    prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+    if apply_limit:
+        prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+    elif args.max_prompt_chars > 0 and len(prompt) > args.max_prompt_chars:
+        caveats.append(
+            f"Plan prompt exceeds {args.max_prompt_chars} characters and will be split before generation "
+            f"({len(prompt)} original chars)"
+        )
     return prompt, caveats
+
+
+def should_chunk_plan(args: argparse.Namespace, prompt: str) -> bool:
+    mode = getattr(args, "chunked", "auto")
+    if mode == "off":
+        return False
+    if mode == "always":
+        return True
+    return args.max_prompt_chars > 0 and len(prompt) > args.max_prompt_chars
+
+
+def run_chunked_plan(
+    *,
+    args: argparse.Namespace,
+    model: str,
+    prompt: str,
+    caveats: list[str],
+) -> tuple[str, list[str], dict[str, Any], str]:
+    chunk_wrapper_overhead = len(
+        "\n\n".join(
+            [
+                "You are reviewing one bounded chunk of a larger Codex work-planning prompt.",
+                "Extract concrete implementation tasks, risks, dependencies, validation ideas, and caveats from this chunk only.",
+                f"Chunk {args.max_plan_chunks}/{args.max_plan_chunks}:",
+                "",
+            ]
+        )
+    )
+    chunk_budget = max(1, args.max_prompt_chars - chunk_wrapper_overhead) if args.max_prompt_chars > 0 else len(prompt)
+    prompt_chunks = split_text_by_budget(prompt, chunk_budget)
+    if len(prompt_chunks) > args.max_plan_chunks:
+        caveats.append(
+            f"Plan prompt split into {len(prompt_chunks)} chunks but capped at {args.max_plan_chunks}; "
+            "remaining chunks omitted"
+        )
+        prompt_chunks = prompt_chunks[: args.max_plan_chunks]
+    if not prompt_chunks:
+        raise AntiError("plan chunking produced no prompt chunks")
+
+    chunk_outputs: list[str] = []
+    chunk_generation: list[dict[str, Any]] = []
+    sent_chunk_prompt_chars: list[int] = []
+    for index, chunk in enumerate(prompt_chunks, start=1):
+        chunk_prompt = "\n\n".join(
+            [
+                "You are reviewing one bounded chunk of a larger Codex work-planning prompt.",
+                "Extract concrete implementation tasks, risks, dependencies, validation ideas, and caveats from this chunk only.",
+                f"Chunk {index}/{len(prompt_chunks)}:",
+                chunk,
+            ]
+        )
+        chunk_caveats: list[str] = []
+        chunk_prompt = apply_prompt_limit(chunk_prompt, args.max_prompt_chars, chunk_caveats)
+        if chunk_caveats:
+            caveats.extend(f"Plan chunk {index}: {caveat}" for caveat in chunk_caveats)
+        sent_chunk_prompt_chars.append(len(chunk_prompt))
+        text, model_used, generation_metadata = generate_with_fallback(
+            args,
+            model=model,
+            prompt=chunk_prompt,
+            max_output_tokens=args.chunk_output_tokens,
+            purpose=f"plan chunk {index}/{len(prompt_chunks)}",
+        )
+        chunk_outputs.append(text)
+        chunk_generation.append({"index": index, "model_used": model_used, **generation_metadata})
+
+    synthesis_prompt = "\n\n".join(
+        [
+            "You are synthesizing a decision-complete autonomous work plan from bounded planning chunks.",
+            "Use only the chunk outputs below. Keep explicit caveats and do not claim local verification.",
+            "Return a concise, executable plan with phases, critical path, validation commands, stop conditions, and non-claims.",
+            "## Chunk Outputs",
+            "\n\n".join(
+                f"### Chunk {index}\n{output.strip()}" for index, output in enumerate(chunk_outputs, start=1)
+            ),
+        ]
+    )
+    synthesis_caveats: list[str] = []
+    if args.max_synthesis_chars > 0 and len(synthesis_prompt) > args.max_synthesis_chars:
+        synthesis_prompt = truncate_at_line_boundary(synthesis_prompt, args.max_synthesis_chars)
+        if len(synthesis_prompt) > args.max_synthesis_chars:
+            synthesis_prompt = synthesis_prompt[: args.max_synthesis_chars]
+        synthesis_caveats.append(f"Plan synthesis prompt truncated to {args.max_synthesis_chars} characters")
+    caveats = [*caveats, *synthesis_caveats]
+    text, synthesis_model, synthesis_generation = generate_with_fallback(
+        args,
+        model=model,
+        prompt=synthesis_prompt,
+        max_output_tokens=args.max_output_tokens,
+        purpose="plan synthesis",
+    )
+    metadata = {
+        "prompt_chars": len(prompt),
+        "chunked": True,
+        "chunk_count": len(prompt_chunks),
+        "chunk_prompt_chars": [len(chunk) for chunk in prompt_chunks],
+        "sent_chunk_prompt_chars": sent_chunk_prompt_chars,
+        "chunk_generation": chunk_generation,
+        "synthesis_prompt_chars": len(synthesis_prompt),
+        "synthesis_model_used": synthesis_model,
+        "synthesis_generation": synthesis_generation,
+    }
+    return text, caveats, metadata, synthesis_model
 
 
 def read_prompt(args: argparse.Namespace) -> str:
@@ -1101,6 +1568,12 @@ def read_prompt(args: argparse.Namespace) -> str:
     return prompt
 
 
+def read_optional_prompt(args: argparse.Namespace) -> str:
+    if args.prompt_file or args.prompt or getattr(args, "prompt_parts", None):
+        return read_prompt(args)
+    return ""
+
+
 def print_result(
     *,
     mode: str,
@@ -1111,13 +1584,14 @@ def print_result(
     output_json: bool = False,
     metadata: dict[str, Any] | None = None,
 ) -> None:
+    safe_gateway = redact_sensitive_text(base_url)
     if output_json:
         print(
             json.dumps(
                 {
                     "mode": mode,
                     "model": model,
-                    "gateway": base_url,
+                    "gateway": safe_gateway,
                     "caveats": caveats or [],
                     "metadata": metadata or {},
                     "output_text": text.strip(),
@@ -1128,7 +1602,7 @@ def print_result(
         )
         return
     print(f"## Antigravity {mode} ({model})")
-    print(f"- Gateway: {base_url}")
+    print(f"- Gateway: {safe_gateway}")
     if metadata and metadata.get("status"):
         print(f"- Status: {metadata['status']}")
     if caveats:
@@ -1175,28 +1649,456 @@ def check_gateway(base_url: str, *, timeout: float, token_env: str) -> bool:
         return False
 
 
+def resolve_panel_models(values: list[str] | None) -> list[str]:
+    raw_values = values or list(DEFAULT_PANEL_MODELS)
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for value in raw_values:
+        model = resolve_model(value, default=value)
+        if model in seen:
+            continue
+        seen.add(model)
+        resolved.append(model)
+    if not resolved:
+        raise AntiError("panel requires at least one model")
+    return resolved
+
+
+def ensure_models_available(
+    *,
+    base_url: str,
+    models: list[str],
+    timeout: float,
+    token_env: str,
+) -> set[str]:
+    model_ids = fetch_model_ids(base_url, timeout=timeout, token_env=token_env)
+    missing = [model for model in models if model not in model_ids]
+    if missing:
+        sample = ", ".join(sorted(model_ids)[:12])
+        raise AntiError(
+            "model(s) not advertised by /v1/models: "
+            + ", ".join(missing)
+            + f". Available sample: {sample}"
+        )
+    return model_ids
+
+
+def panel_role_instruction(roles: list[str] | None) -> str:
+    if not roles:
+        return ""
+    clean_roles = []
+    for role in roles:
+        role = role.strip()
+        if role:
+            clean_roles.append(role)
+    if not clean_roles:
+        return ""
+    return (
+        "Panel role lenses requested: "
+        + ", ".join(clean_roles)
+        + ". Apply these as review/planning perspectives, but do not invent findings just to fill a role."
+    )
+
+
+def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[str], dict[str, Any]]:
+    caveats: list[str] = []
+    metadata: dict[str, Any] = {"panel_mode": args.mode, "roles": args.role or []}
+
+    if args.mode == "review":
+        if args.scope == "none":
+            raise AntiError("panel review requires --scope working-tree, staged, files, or diff")
+        context = collect_review_context(args)
+        prompt, _paths, caveats, review_metadata = assemble_review_prompt_from_context(
+            context,
+            max_prompt_chars=args.max_prompt_chars,
+        )
+        extra_prompt = read_optional_prompt(args)
+        if extra_prompt:
+            prompt = "\n\n".join(["Additional review instructions:\n" + extra_prompt, prompt])
+            prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+            review_metadata["additional_prompt_chars"] = len(extra_prompt)
+        metadata.update(review_metadata)
+        metadata["scope"] = context["scope_line"]
+        metadata["prompt_chars"] = len(prompt)
+    elif args.mode == "plan":
+        if args.scope == "diff":
+            raise AntiError("panel plan does not support --scope diff; use working-tree, staged, files, or none")
+        prompt, caveats = assemble_plan_prompt(args)
+        metadata["scope"] = args.scope
+        metadata["prompt_chars"] = len(prompt)
+    else:
+        prompt = read_prompt(args)
+        prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+        metadata["scope"] = "prompt"
+        metadata["prompt_chars"] = len(prompt)
+
+    role_instruction = panel_role_instruction(args.role)
+    if role_instruction:
+        prompt = "\n\n".join([role_instruction, prompt])
+        prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+        metadata["prompt_chars"] = len(prompt)
+
+    return prompt, caveats, metadata
+
+
+def build_panel_synthesis_prompt(
+    *,
+    panel_mode: str,
+    source_prompt: str,
+    panel_results: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    caveats: list[str],
+    roles: list[str],
+    max_chars: int,
+) -> tuple[str, list[str], dict[str, Any]]:
+    manifest = {
+        "panel_mode": panel_mode,
+        "roles": roles,
+        "panel_models": [result["model"] for result in panel_results],
+        "successful_models": [result["model"] for result in panel_results if result["status"] == "success"],
+        "failed_models": [result["model"] for result in panel_results if result["status"] != "success"],
+        "source_metadata": metadata,
+        "source_caveats": caveats,
+    }
+
+    def render(source: str, outputs: list[str]) -> str:
+        result_sections = []
+        for result, output in zip(panel_results, outputs):
+            lines = [
+                f"## Panel Model: {result['model']}",
+                f"- status: {result['status']}",
+            ]
+            if result.get("model_used") and result.get("model_used") != result["model"]:
+                lines.append(f"- model_used: {result['model_used']}")
+            if result["status"] == "success":
+                lines.append(output.strip() or "(empty output)")
+            else:
+                lines.append("error: " + str(result.get("error", "unknown error")))
+            result_sections.append("\n".join(lines))
+        return "\n\n".join(
+            [
+                "You are synthesizing an Antigravity multi-model advisory panel for a Codex coding session.",
+                "Use only the source prompt/context and panel outputs below. Do not claim local verification, tool execution, or proof that is not present.",
+                "Return Markdown with exactly these sections: Consensus, Contradictions, Unique Insights, Blind Spots, Recommended Next Actions, Verification Caveats.",
+                "Consensus is only a prioritization signal, not proof. Clearly mark claims that need native Codex/local verification.",
+                "## Panel Manifest\n```json\n" + json.dumps(manifest, indent=2, sort_keys=True) + "\n```",
+                "## Source Prompt / Context\n" + source.strip(),
+                "## Panel Results\n" + "\n\n".join(result_sections),
+            ]
+        )
+
+    outputs = [str(result.get("output_text", "")).strip() for result in panel_results]
+    prompt = render(source_prompt, outputs)
+    original_len = len(prompt)
+    synthesis_caveats: list[str] = []
+    synthesis_metadata: dict[str, Any] = {
+        "synthesis_prompt_original_chars": original_len,
+        "synthesis_truncated_source": False,
+        "synthesis_truncated_models": [],
+    }
+    if max_chars <= 0 or len(prompt) <= max_chars:
+        synthesis_metadata["synthesis_prompt_chars"] = len(prompt)
+        return prompt, synthesis_caveats, synthesis_metadata
+
+    marker = "\n[Panel content truncated by helper to keep synthesis prompt bounded.]"
+    empty_len = len(render("", ["" for _ in outputs]))
+    available = max_chars - empty_len - len(marker) * (len(outputs) + 1)
+    truncated_source = False
+    truncated_models: list[str] = []
+
+    if available <= 0:
+        limited_source = marker.strip()
+        limited_outputs = [marker.strip() for _ in outputs]
+        truncated_source = bool(source_prompt.strip())
+        truncated_models = [result["model"] for result in panel_results if result["status"] == "success"]
+    else:
+        source_budget = max(1, available // 3)
+        outputs_budget = max(1, available - source_budget)
+        per_output_budget = max(1, outputs_budget // max(1, len(outputs)))
+        if len(source_prompt) > source_budget:
+            cut = truncate_at_line_boundary(source_prompt, source_budget)
+            if len(cut) > source_budget:
+                cut = cut[:source_budget]
+            limited_source = (cut + marker).strip() if cut else marker.strip()
+            truncated_source = True
+        else:
+            limited_source = source_prompt
+
+        limited_outputs = []
+        for result, output in zip(panel_results, outputs):
+            if result["status"] != "success" or len(output) <= per_output_budget:
+                limited_outputs.append(output)
+                continue
+            cut = truncate_at_line_boundary(output, per_output_budget)
+            if len(cut) > per_output_budget:
+                cut = cut[:per_output_budget]
+            limited_outputs.append((cut + marker).strip() if cut else marker.strip())
+            truncated_models.append(result["model"])
+
+    prompt = render(limited_source, limited_outputs)
+    if len(prompt) > max_chars:
+        prompt = truncate_at_line_boundary(prompt, max_chars)
+        if len(prompt) > max_chars:
+            prompt = prompt[:max_chars]
+        truncated_source = True
+        if not truncated_models:
+            truncated_models = [result["model"] for result in panel_results if result["status"] == "success"]
+
+    synthesis_caveats.append(
+        f"Panel synthesis prompt truncated to keep it under {max_chars} characters "
+        f"({original_len} original chars)"
+    )
+    synthesis_metadata["synthesis_prompt_chars"] = len(prompt)
+    synthesis_metadata["synthesis_truncated_source"] = truncated_source
+    synthesis_metadata["synthesis_truncated_models"] = truncated_models
+    return prompt, synthesis_caveats, synthesis_metadata
+
+
+def run_panel_call(
+    *,
+    args: argparse.Namespace,
+    model: str,
+    prompt: str,
+    max_output_tokens: int,
+    model_ids: set[str],
+) -> dict[str, Any]:
+    try:
+        text, model_used, generation_metadata = generate_with_fallback(
+            args,
+            model=model,
+            prompt=prompt,
+            max_output_tokens=max_output_tokens,
+            model_ids=model_ids,
+            purpose=f"panel model {model}",
+        )
+        result: dict[str, Any] = {"model": model, "status": "success", "output_text": text.strip()}
+        if model_used != model:
+            result["model_used"] = model_used
+        result["generation"] = generation_metadata
+        return result
+    except Exception as exc:
+        return {"model": model, "status": "error", "error": redact_sensitive_text(str(exc))}
+
+
+def sanitize_panel_results_for_display(panel_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    for result in panel_results:
+        item = dict(result)
+        if "error" in item:
+            item["error"] = redact_sensitive_text(str(item["error"]))
+        sanitized.append(item)
+    return sanitized
+
+
+def print_panel_result(
+    *,
+    panel_mode: str,
+    base_url: str,
+    judge_model: str,
+    panel_models: list[str],
+    panel_results: list[dict[str, Any]],
+    text: str,
+    caveats: list[str],
+    metadata: dict[str, Any],
+    output_json: bool,
+) -> None:
+    safe_gateway = redact_sensitive_text(base_url)
+    panel_results = sanitize_panel_results_for_display(panel_results)
+    caveats = [redact_sensitive_text(caveat) for caveat in caveats]
+    metadata = sanitize_json(metadata)
+    if output_json:
+        print(
+            json.dumps(
+                {
+                    "mode": "panel",
+                    "panel_mode": panel_mode,
+                    "gateway": safe_gateway,
+                    "judge_model": judge_model,
+                    "panel_models": panel_models,
+                    "panel_results": panel_results,
+                    "caveats": caveats,
+                    "metadata": metadata,
+                    "output_text": text.strip(),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    print(f"## Antigravity panel ({panel_mode})")
+    print(f"- Gateway: {safe_gateway}")
+    print(f"- Panel models: {', '.join(panel_models)}")
+    print(f"- Judge model: {judge_model}")
+    if metadata.get("scope"):
+        print(f"- Scope: {metadata['scope']}")
+    if metadata.get("status"):
+        print(f"- Status: {metadata['status']}")
+    for result in panel_results:
+        if result["status"] == "success":
+            print(f"- {result['model']}: success")
+        else:
+            print(f"- {result['model']}: error: {result.get('error', 'unknown error')}")
+    for caveat in caveats:
+        print(f"- Caveat: {caveat}")
+    print()
+    print(text.strip())
+
+
+def command_panel(args: argparse.Namespace) -> int:
+    panel_models = resolve_panel_models(args.model)
+    judge_model = resolve_model(args.judge, default=DEFAULT_PANEL_JUDGE_MODEL)
+    min_successes = args.min_successes
+    if min_successes is None:
+        min_successes = 2 if len(panel_models) >= 2 else 1
+    if min_successes > len(panel_models):
+        raise AntiError("--min-successes cannot exceed the number of panel models")
+
+    prompt, caveats, metadata = assemble_panel_source_prompt(args)
+    metadata.update(
+        {
+            "panel_mode": args.mode,
+            "panel_models": panel_models,
+            "judge_model": judge_model,
+            "min_successes": min_successes,
+            "max_parallel": args.max_parallel,
+            "prompt_chars": len(prompt),
+        }
+    )
+    if args.print_prompt:
+        payload = {"prompt": prompt, "metadata": metadata, "caveats": caveats}
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(prompt)
+            if caveats:
+                print("\n## Assembly Caveats")
+                for caveat in caveats:
+                    print(f"- {caveat}")
+        return 0
+
+    models_to_validate = [*panel_models, judge_model]
+    if getattr(args, "fallback_model", None):
+        fallback_model = resolve_model(args.fallback_model, default=args.fallback_model)
+        if fallback_model not in models_to_validate:
+            models_to_validate.append(fallback_model)
+    model_ids = ensure_models_available(
+        base_url=args.base_url,
+        models=models_to_validate,
+        timeout=args.timeout,
+        token_env=args.gateway_token_env,
+    )
+    panel_results: list[dict[str, Any]] = [{} for _model in panel_models]
+    max_workers = min(args.max_parallel, len(panel_models))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                run_panel_call,
+                args=args,
+                model=model,
+                prompt=prompt,
+                max_output_tokens=args.max_output_tokens,
+                model_ids=model_ids,
+            ): index
+            for index, model in enumerate(panel_models)
+        }
+        for future in concurrent.futures.as_completed(futures):
+            panel_results[futures[future]] = future.result()
+
+    successes = [result for result in panel_results if result["status"] == "success"]
+    failures = [result for result in panel_results if result["status"] != "success"]
+    if failures:
+        caveats.extend(
+            f"Panel model {result['model']} failed: {redact_sensitive_text(result.get('error', 'unknown error'))}"
+            for result in failures
+        )
+    metadata["successful_models"] = [result["model"] for result in successes]
+    metadata["failed_models"] = [result["model"] for result in failures]
+    metadata["success_count"] = len(successes)
+
+    if len(successes) < min_successes:
+        raise AntiError(
+            f"panel had {len(successes)} successful model(s), below --min-successes {min_successes}"
+        )
+
+    synthesis_prompt, synthesis_caveats, synthesis_metadata = build_panel_synthesis_prompt(
+        panel_mode=args.mode,
+        source_prompt=prompt,
+        panel_results=panel_results,
+        metadata=metadata,
+        caveats=caveats,
+        roles=args.role or [],
+        max_chars=args.max_synthesis_chars,
+    )
+    caveats.extend(synthesis_caveats)
+    metadata.update(synthesis_metadata)
+    judge_text, judge_model_used, judge_generation = generate_with_fallback(
+        args,
+        model=judge_model,
+        prompt=synthesis_prompt,
+        max_output_tokens=args.judge_output_tokens,
+        model_ids=model_ids,
+        purpose="panel judge",
+    )
+    metadata["judge_model_used"] = judge_model_used
+    metadata["judge_generation"] = judge_generation
+    write_run_record(
+        args,
+        mode="panel",
+        status="success",
+        models=[*panel_models, str(judge_model_used)],
+        base_url=args.base_url,
+        prompt_text=prompt,
+        output_text=judge_text,
+        caveats=caveats,
+        metadata=metadata,
+    )
+    print_panel_result(
+        panel_mode=args.mode,
+        base_url=args.base_url,
+        judge_model=str(judge_model_used),
+        panel_models=panel_models,
+        panel_results=panel_results,
+        text=judge_text,
+        caveats=caveats,
+        metadata=metadata,
+        output_json=args.json,
+    )
+    return 0
+
+
 def command_consult(args: argparse.Namespace) -> int:
     model = resolve_model(args.model, default=DEFAULT_CONSULT_MODEL)
     prompt = read_prompt(args)
     caveats: list[str] = []
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
-    text = post_response(
-        base_url=args.base_url,
+    text, model_used, generation_metadata = generate_with_fallback(
+        args,
         model=model,
         prompt=prompt,
         max_output_tokens=args.max_output_tokens,
-        timeout=args.timeout,
-        token_env=args.gateway_token_env,
-        retries=args.retry,
+        purpose="consult",
+    )
+    metadata = {"prompt_chars": len(prompt), **generation_metadata}
+    write_run_record(
+        args,
+        mode="consult",
+        status="success",
+        models=[model_used],
+        base_url=args.base_url,
+        prompt_text=prompt,
+        output_text=text,
+        caveats=caveats,
+        metadata=metadata,
     )
     print_result(
         mode="consult",
-        model=model,
+        model=model_used,
         base_url=args.base_url,
         text=text,
         caveats=caveats,
         output_json=args.json,
-        metadata={"prompt_chars": len(prompt)},
+        metadata=metadata,
     )
     return 0
 
@@ -1225,20 +2127,30 @@ def command_review(args: argparse.Namespace) -> int:
             model=model,
             base_metadata=metadata,
         )
+        model_used = metadata.get("synthesis_model_used", model)
     else:
-        text = post_response(
-            base_url=args.base_url,
+        text, model_used, generation_metadata = generate_with_fallback(
+            args,
             model=model,
             prompt=prompt,
             max_output_tokens=args.max_output_tokens,
-            timeout=args.timeout,
-            token_env=args.gateway_token_env,
-            retries=args.retry,
+            purpose="review",
         )
-        metadata = {**metadata, "chunked": False}
+        metadata = {**metadata, "chunked": False, **generation_metadata}
+    write_run_record(
+        args,
+        mode="review",
+        status="success",
+        models=[str(model_used)],
+        base_url=args.base_url,
+        prompt_text=prompt,
+        output_text=text,
+        caveats=caveats,
+        metadata=metadata,
+    )
     print_result(
         mode="review",
-        model=model,
+        model=str(model_used),
         base_url=args.base_url,
         text=text,
         caveats=caveats,
@@ -1250,34 +2162,57 @@ def command_review(args: argparse.Namespace) -> int:
 
 def command_plan(args: argparse.Namespace) -> int:
     model = resolve_model(args.model, default=DEFAULT_PLAN_MODEL)
-    prompt, caveats = assemble_plan_prompt(args)
+    prompt, caveats = assemble_plan_prompt(args, apply_limit=False)
+    recorded_prompt = prompt
     if args.print_prompt:
+        printable_caveats = list(caveats)
+        printable_prompt = apply_prompt_limit(prompt, args.max_prompt_chars, printable_caveats)
         if args.json:
-            print(json.dumps({"prompt": prompt, "caveats": caveats}, indent=2, sort_keys=True))
+            print(json.dumps({"prompt": printable_prompt, "caveats": printable_caveats}, indent=2, sort_keys=True))
             return 0
-        print(prompt)
-        if caveats:
+        print(printable_prompt)
+        if printable_caveats:
             print("\n## Assembly Caveats")
-            for caveat in caveats:
+            for caveat in printable_caveats:
                 print(f"- {caveat}")
         return 0
-    text = post_response(
+    if should_chunk_plan(args, prompt):
+        text, caveats, metadata, model_used = run_chunked_plan(
+            args=args,
+            model=model,
+            prompt=prompt,
+            caveats=caveats,
+        )
+    else:
+        limited_prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+        recorded_prompt = limited_prompt
+        text, model_used, generation_metadata = generate_with_fallback(
+            args,
+            model=model,
+            prompt=limited_prompt,
+            max_output_tokens=args.max_output_tokens,
+            purpose="plan",
+        )
+        metadata = {"prompt_chars": len(limited_prompt), "chunked": False, **generation_metadata}
+    write_run_record(
+        args,
+        mode="plan",
+        status="success",
+        models=[str(model_used)],
         base_url=args.base_url,
-        model=model,
-        prompt=prompt,
-        max_output_tokens=args.max_output_tokens,
-        timeout=args.timeout,
-        token_env=args.gateway_token_env,
-        retries=args.retry,
+        prompt_text=recorded_prompt,
+        output_text=text,
+        caveats=caveats,
+        metadata=metadata,
     )
     print_result(
         mode="plan",
-        model=model,
+        model=str(model_used),
         base_url=args.base_url,
         text=text,
         caveats=caveats,
         output_json=args.json,
-        metadata={"prompt_chars": len(prompt)},
+        metadata=metadata,
     )
     return 0
 
@@ -1301,9 +2236,10 @@ def command_smoke(args: argparse.Namespace) -> int:
             print(f"[PASS] codex-antigravity CLI: {' '.join(cmd)}")
     except AntiError as exc:
         ok = False
-        statuses["checks"].append({"name": "cli", "status": "fail", "detail": str(exc)})
+        error = redact_sensitive_text(str(exc))
+        statuses["checks"].append({"name": "cli", "status": "fail", "detail": error})
         if not args.json:
-            print(f"[FAIL] codex-antigravity CLI: {exc}")
+            print(f"[FAIL] codex-antigravity CLI: {error}")
 
     try:
         ids = fetch_model_ids(args.base_url, timeout=args.timeout, token_env=args.gateway_token_env)
@@ -1327,9 +2263,10 @@ def command_smoke(args: argparse.Namespace) -> int:
         statuses["sidecar_ready"] = not missing_models and ok
     except AntiError as exc:
         ok = False
-        statuses["checks"].append({"name": "models", "status": "fail", "detail": str(exc)})
+        error = redact_sensitive_text(str(exc))
+        statuses["checks"].append({"name": "models", "status": "fail", "detail": error})
         if not args.json:
-            print(f"[FAIL] Gateway /v1/models: {exc}")
+            print(f"[FAIL] Gateway /v1/models: {error}")
 
     should_run_doctor = args.mode in {"full", "codex-backend"} and not args.skip_doctor
     if should_run_doctor:
@@ -1370,7 +2307,7 @@ def command_smoke(args: argparse.Namespace) -> int:
 
     statuses["blocking"] = not ok
     if args.json:
-        print(json.dumps(statuses, indent=2, sort_keys=True))
+        print(json.dumps(sanitize_json(statuses), indent=2, sort_keys=True))
 
     return 0 if ok else 1
 
@@ -1469,6 +2406,288 @@ def command_doctor(args: argparse.Namespace) -> int:
     return run_cli(cli_args)
 
 
+def workflow_scope(args: argparse.Namespace, *, default: str) -> str:
+    return default if args.scope == "auto" else args.scope
+
+
+def append_if_present(argv: list[str], flag: str, value: str | None) -> None:
+    if value:
+        argv.extend([flag, value])
+
+
+def append_each(argv: list[str], flag: str, values: list[str] | None) -> None:
+    for value in values or []:
+        argv.extend([flag, value])
+
+
+def workflow_command_for_progress(argv: list[str]) -> str:
+    redacted: list[str] = []
+    redact_next = False
+    for item in argv:
+        if redact_next:
+            redacted.append("<redacted>")
+            redact_next = False
+            continue
+        redacted.append(item)
+        if item in {"--prompt", "--prompt-file"}:
+            redact_next = True
+    return shlex.join(["anti.py", *redacted])
+
+
+def workflow_expansion(args: argparse.Namespace) -> list[str]:
+    common = [
+        "--base-url",
+        args.base_url,
+        "--timeout",
+        str(args.timeout),
+        "--gateway-token-env",
+        args.gateway_token_env,
+        "--retry",
+        str(args.retry),
+        "--max-output-tokens",
+        str(args.max_output_tokens),
+        "--max-prompt-chars",
+        str(args.max_prompt_chars),
+        "--fallback-policy",
+        args.fallback_policy,
+        "--save-output",
+        args.save_output,
+    ]
+    if args.fallback_model:
+        common.extend(["--fallback-model", args.fallback_model])
+    if args.progress:
+        common.append("--progress")
+    if args.run_label:
+        common.extend(["--run-label", args.run_label])
+    if args.json:
+        common.append("--json")
+    if args.print_prompt:
+        common.append("--print-prompt")
+
+    if args.name == "review-ready":
+        scope = workflow_scope(args, default="staged")
+        argv = [
+            "panel",
+            "--mode",
+            "review",
+            "--scope",
+            scope,
+            "--judge",
+            args.judge,
+            "--judge-output-tokens",
+            str(args.judge_output_tokens),
+            "--max-synthesis-chars",
+            str(args.max_synthesis_chars),
+            "--max-parallel",
+            str(args.max_parallel),
+            *common,
+        ]
+        if args.min_successes is not None:
+            argv.extend(["--min-successes", str(args.min_successes)])
+        for role in args.role or ["correctness", "security", "tests", "install-docs"]:
+            argv.extend(["--role", role])
+        for model in args.model or []:
+            argv.extend(["--model", model])
+    elif args.name == "plan-deep":
+        scope = workflow_scope(args, default="working-tree")
+        if scope == "diff":
+            raise AntiError("workflow plan-deep does not support --scope diff; use working-tree, staged, files, or none")
+        if args.base:
+            raise AntiError("workflow plan-deep does not support --base")
+        if args.files_from:
+            raise AntiError("workflow plan-deep does not support --files-from")
+        argv = [
+            "plan",
+            "--model",
+            args.model[0] if args.model else "opus",
+            "--scope",
+            scope,
+            "--chunked",
+            args.chunked,
+            "--max-plan-chunks",
+            str(args.max_plan_chunks),
+            "--chunk-output-tokens",
+            str(args.chunk_output_tokens),
+            "--max-synthesis-chars",
+            str(args.max_synthesis_chars),
+            *common,
+        ]
+        if not args.fallback_model:
+            argv.extend(["--fallback-model", "sonnet", "--fallback-policy", "on-retryable"])
+    elif args.name == "ship-gate":
+        scope = workflow_scope(args, default="staged")
+        argv = [
+            "panel",
+            "--mode",
+            "review",
+            "--scope",
+            scope,
+            "--judge",
+            args.judge,
+            "--judge-output-tokens",
+            str(args.judge_output_tokens),
+            "--max-synthesis-chars",
+            str(args.max_synthesis_chars),
+            "--max-parallel",
+            str(args.max_parallel),
+            *common,
+            "--prompt",
+            "Assess merge readiness. Focus on concrete blockers, install/use regressions, missing tests, "
+            "release caveats, and what native Codex must verify locally before commit or merge.",
+        ]
+        if args.min_successes is not None:
+            argv.extend(["--min-successes", str(args.min_successes)])
+        for role in args.role or ["correctness", "security", "tests", "install", "release"]:
+            argv.extend(["--role", role])
+        for model in args.model or []:
+            argv.extend(["--model", model])
+    elif args.name == "provider-compare":
+        if args.base or args.file or args.files_from or workflow_scope(args, default="none") != "none":
+            raise AntiError("workflow provider-compare is prompt-only; omit --scope/--base/--file/--files-from")
+        argv = [
+            "panel",
+            "--mode",
+            "ask",
+            "--judge",
+            args.judge,
+            "--judge-output-tokens",
+            str(args.judge_output_tokens),
+            "--max-synthesis-chars",
+            str(args.max_synthesis_chars),
+            "--max-parallel",
+            str(args.max_parallel),
+            *common,
+        ]
+        if args.min_successes is not None:
+            argv.extend(["--min-successes", str(args.min_successes)])
+        for model in args.model or ["sonnet", "opus"]:
+            argv.extend(["--model", model])
+    else:
+        raise AntiError(f"unknown workflow: {args.name}")
+
+    if args.name in {"review-ready", "ship-gate"}:
+        append_if_present(argv, "--base", args.base)
+        append_each(argv, "--file", args.file)
+        append_each(argv, "--files-from", args.files_from)
+    elif args.name == "plan-deep":
+        append_each(argv, "--file", args.file)
+    append_if_present(argv, "--prompt-file", args.prompt_file)
+    prompt = args.prompt or " ".join(args.prompt_parts or []).strip()
+    if args.name in {"plan-deep", "provider-compare"} and not prompt and not args.prompt_file:
+        if args.name == "plan-deep":
+            prompt = (
+                "Create a decision-complete autonomous implementation plan for the current Codex task. "
+                "Include phases, risks, validation commands, fallback choices, and non-claims."
+            )
+        else:
+            raise AntiError("provider-compare requires --prompt, --prompt-file, or positional prompt text")
+    if prompt:
+        argv.extend(["--prompt", prompt])
+    return argv
+
+
+def command_workflow(args: argparse.Namespace) -> int:
+    args.workflow_name = args.name
+    if not getattr(args, "run_label", None):
+        args.run_label = args.name
+    expanded = workflow_expansion(args)
+    progress(args, "workflow expands to: " + workflow_command_for_progress(expanded))
+    parser = build_parser()
+    expanded_args = parser.parse_args(expanded)
+    expanded_args.workflow_name = args.name
+    if not getattr(expanded_args, "run_label", None):
+        expanded_args.run_label = args.run_label or args.name
+    if hasattr(expanded_args, "base_url") and expanded_args.base_url is not None:
+        expanded_args.base_url = normalize_base_url(expanded_args.base_url)
+    return int(expanded_args.func(expanded_args))
+
+
+def iter_run_records() -> list[Path]:
+    if not RUNS_DIR.exists():
+        return []
+    if RUNS_DIR.is_symlink():
+        raise AntiError(f"refusing to read Anti run records through symlinked directory: {RUNS_DIR}")
+    return sorted(RUNS_DIR.glob("*.json"), reverse=True)
+
+
+def load_run_record(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise AntiError(f"could not read run record {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise AntiError(f"run record {path} is not a JSON object")
+    return data
+
+
+def resolve_run_record_path(run_id: str) -> Path:
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise AntiError("run id must contain only letters, numbers, '_' or '-'")
+    if not RUNS_DIR.exists():
+        raise AntiError(f"run record not found: {run_id}")
+    if RUNS_DIR.is_symlink():
+        raise AntiError(f"refusing to read Anti run records through symlinked directory: {RUNS_DIR}")
+
+    root = RUNS_DIR.resolve()
+    path = RUNS_DIR / f"{run_id}.json"
+    if not path.exists():
+        matches = list(RUNS_DIR.glob(f"{run_id}*.json"))
+        if len(matches) == 1:
+            path = matches[0]
+    if not path.exists():
+        raise AntiError(f"run record not found: {run_id}")
+
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise AntiError(f"run record path escaped Anti run directory: {run_id}") from exc
+    return resolved
+
+
+def command_runs(args: argparse.Namespace) -> int:
+    if args.runs_command == "list":
+        rows = []
+        for path in iter_run_records()[: args.limit]:
+            data = load_run_record(path)
+            rows.append(
+                {
+                    "id": data.get("id") or path.stem,
+                    "created_at": data.get("created_at"),
+                    "mode": data.get("mode"),
+                    "status": data.get("status"),
+                    "workflow": data.get("workflow"),
+                    "models": data.get("models", []),
+                    "run_label": data.get("run_label"),
+                }
+            )
+        if args.json:
+            print(json.dumps(rows, indent=2, sort_keys=True))
+        else:
+            if not rows:
+                print(f"[*] No Anti run records found in {RUNS_DIR}")
+            for row in rows:
+                models = ", ".join(row.get("models") or [])
+                workflow = f" workflow={row['workflow']}" if row.get("workflow") else ""
+                label = f" label={row['run_label']}" if row.get("run_label") else ""
+                print(f"{row['created_at']} {row['id']} {row['mode']} {row['status']}{workflow}{label} [{models}]")
+        return 0
+    if args.runs_command == "show":
+        path = resolve_run_record_path(args.id)
+        print(json.dumps(load_run_record(path), indent=2, sort_keys=True))
+        return 0
+    if args.runs_command == "clean":
+        cutoff = time.time() - (args.older_than * 86400)
+        removed = 0
+        for path in iter_run_records():
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        print(f"[+] Removed {removed} Anti run record(s) older than {args.older_than} day(s)")
+        return 0
+    raise AntiError(f"unknown runs command: {args.runs_command}")
+
+
 def add_gateway_args(
     parser: argparse.ArgumentParser,
     *,
@@ -1484,6 +2703,28 @@ def add_gateway_args(
     )
 
 
+def add_generation_control_args(
+    parser: argparse.ArgumentParser,
+    *,
+    default_save_output: str = "never",
+) -> None:
+    parser.add_argument("--fallback-model", help="Fallback model alias/id for retryable or timeout failures")
+    parser.add_argument(
+        "--fallback-policy",
+        choices=sorted(FALLBACK_POLICIES),
+        default="never",
+        help="When to use --fallback-model",
+    )
+    parser.add_argument("--progress", action="store_true", help="Print long-call progress to stderr")
+    parser.add_argument("--run-label", help="Optional label for saved Anti run metadata")
+    parser.add_argument(
+        "--save-output",
+        choices=sorted(SAVE_OUTPUT_MODES),
+        default=default_save_output,
+        help="Save sanitized run metadata under ~/.codex/anti-runs",
+    )
+
+
 def add_codex_config_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path")
     parser.add_argument("--provider", default="antigravity", help="Codex provider id")
@@ -1494,8 +2735,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Antigravity Opus/Sonnet sidecar helper for Codex")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    panel = sub.add_parser(
+        "panel",
+        aliases=["moa", "fusion"],
+        help="Run a bounded multi-model advisory panel for review, planning, or focused questions",
+    )
+    add_gateway_args(panel, default_timeout=120.0)
+    add_generation_control_args(panel)
+    panel.add_argument("--mode", choices=["review", "plan", "ask"], default="review")
+    panel.add_argument("--model", action="append", help="Panel model alias/id; repeatable; defaults to sonnet + opus")
+    panel.add_argument("--judge", default="opus", help="Judge model alias/id; defaults to opus")
+    panel.add_argument("--role", action="append", help="Review/planning lens such as security, correctness, tests, ux")
+    panel.add_argument("--scope", choices=["none", "working-tree", "staged", "files", "diff"], default="working-tree")
+    panel.add_argument("--base", help="Base ref for --mode review --scope diff; uses <base>...HEAD")
+    panel.add_argument("--changed-files", dest="changed_files_range", help="Git revision range for --mode review --scope diff")
+    panel.add_argument("--file", action="append", help="Add or limit repository file context; repeatable")
+    panel.add_argument("--files-from", action="append", help="Read review paths from a newline- or NUL-delimited file; use - for stdin")
+    panel.add_argument("--prompt", help="Ask/planning prompt text")
+    panel.add_argument("--prompt-file", help="Read ask/planning prompt text from file")
+    panel.add_argument("--max-output-tokens", type=positive_int, default=2048, help="Max output tokens per panel model")
+    panel.add_argument("--judge-output-tokens", type=positive_int, default=4096, help="Max output tokens for judge synthesis")
+    panel.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS)
+    panel.add_argument("--max-synthesis-chars", type=int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
+    panel.add_argument("--min-successes", type=positive_int, help="Minimum successful panel model calls before judging")
+    panel.add_argument("--max-parallel", type=positive_int, default=3, help="Maximum concurrent panel model calls")
+    panel.add_argument("--retry", type=int, default=1, help="Retry transient gateway/backend failures")
+    panel.add_argument("--json", action="store_true", help="Emit structured JSON output")
+    panel.add_argument("--print-prompt", action="store_true", help="Print assembled source prompt without contacting gateway")
+    panel.add_argument("prompt_parts", nargs="*", help="Positional ask/planning prompt text")
+    panel.set_defaults(func=command_panel)
+
     consult = sub.add_parser("consult", aliases=["ask"], help="Ask Antigravity an explicit prompt")
     add_gateway_args(consult, default_timeout=120.0)
+    add_generation_control_args(consult)
     consult.add_argument("--model", default="sonnet", help="opus, sonnet, or full model id")
     consult.add_argument("--prompt", help="Prompt text")
     consult.add_argument("--prompt-file", help="Read prompt text from file")
@@ -1512,6 +2784,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Ask Antigravity Opus for a deep autonomous work plan",
     )
     add_gateway_args(plan, default_timeout=120.0)
+    add_generation_control_args(plan)
     plan.add_argument("--model", default="opus", help="opus, sonnet, or full model id")
     plan.add_argument("--prompt", help="Planning goal text")
     plan.add_argument("--prompt-file", help="Read planning goal from file")
@@ -1519,6 +2792,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--file", action="append", help="Add repository file context; repeatable")
     plan.add_argument("--max-output-tokens", type=positive_int, default=6144)
     plan.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS)
+    plan.add_argument("--chunked", choices=["auto", "always", "off"], default="auto")
+    plan.add_argument("--max-plan-chunks", type=positive_int, default=6)
+    plan.add_argument("--chunk-output-tokens", type=positive_int, default=2048)
+    plan.add_argument("--max-synthesis-chars", type=int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
     plan.add_argument("--retry", type=int, default=1, help="Retry transient gateway/backend failures")
     plan.add_argument("--json", action="store_true", help="Emit structured JSON output")
     plan.add_argument("--print-prompt", action="store_true", help="Print assembled prompt without contacting gateway")
@@ -1527,6 +2804,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     review = sub.add_parser("review", help="Review git diffs or selected files with Antigravity")
     add_gateway_args(review, default_timeout=120.0)
+    add_generation_control_args(review)
     review.add_argument("--model", default="opus", help="opus, sonnet, or full model id")
     review.add_argument("--scope", choices=["working-tree", "staged", "files", "diff"], default="working-tree")
     review.add_argument("--base", help="Base ref for --scope diff; uses <base>...HEAD")
@@ -1553,6 +2831,45 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--json", action="store_true", help="Emit structured JSON output")
     review.add_argument("--print-prompt", action="store_true", help="Print assembled prompt without contacting gateway")
     review.set_defaults(func=command_review)
+
+    workflow = sub.add_parser("workflow", help="Run a named V2 Anti workflow preset")
+    add_gateway_args(workflow, default_timeout=120.0)
+    add_generation_control_args(workflow, default_save_output="summary")
+    workflow.add_argument("name", choices=["review-ready", "plan-deep", "ship-gate", "provider-compare"])
+    workflow.add_argument("--model", action="append", help="Model alias/id for the workflow; repeatable for panels")
+    workflow.add_argument("--judge", default="opus")
+    workflow.add_argument("--role", action="append")
+    workflow.add_argument("--scope", choices=["auto", "none", "working-tree", "staged", "files", "diff"], default="auto")
+    workflow.add_argument("--base")
+    workflow.add_argument("--file", action="append")
+    workflow.add_argument("--files-from", action="append")
+    workflow.add_argument("--prompt")
+    workflow.add_argument("--prompt-file")
+    workflow.add_argument("--max-output-tokens", type=positive_int, default=4096)
+    workflow.add_argument("--judge-output-tokens", type=positive_int, default=4096)
+    workflow.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS)
+    workflow.add_argument("--max-synthesis-chars", type=int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
+    workflow.add_argument("--min-successes", type=positive_int)
+    workflow.add_argument("--max-parallel", type=positive_int, default=3)
+    workflow.add_argument("--retry", type=int, default=1)
+    workflow.add_argument("--chunked", choices=["auto", "always", "off"], default="auto")
+    workflow.add_argument("--max-plan-chunks", type=positive_int, default=6)
+    workflow.add_argument("--chunk-output-tokens", type=positive_int, default=2048)
+    workflow.add_argument("--json", action="store_true")
+    workflow.add_argument("--print-prompt", action="store_true")
+    workflow.add_argument("prompt_parts", nargs="*")
+    workflow.set_defaults(func=command_workflow)
+
+    runs = sub.add_parser("runs", help="List, show, or clean sanitized Anti run records")
+    runs_sub = runs.add_subparsers(dest="runs_command", required=True)
+    runs_list = runs_sub.add_parser("list")
+    runs_list.add_argument("--limit", type=positive_int, default=20)
+    runs_list.add_argument("--json", action="store_true")
+    runs_show = runs_sub.add_parser("show")
+    runs_show.add_argument("id")
+    runs_clean = runs_sub.add_parser("clean")
+    runs_clean.add_argument("--older-than", type=positive_int, required=True, help="Delete records older than N days")
+    runs.set_defaults(func=command_runs)
 
     smoke = sub.add_parser("smoke", help="Check CLI, gateway, models, and doctor readiness")
     add_gateway_args(smoke)
@@ -1602,15 +2919,29 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if hasattr(args, "base_url") and args.base_url is not None:
-        args.base_url = normalize_base_url(args.base_url)
     try:
+        if hasattr(args, "base_url") and args.base_url is not None:
+            args.base_url = normalize_base_url(args.base_url)
         return int(args.func(args))
     except KeyboardInterrupt:
         eprint("Interrupted")
         return 130
     except AntiError as exc:
-        eprint(f"[anti] {exc}")
+        if hasattr(args, "save_output"):
+            try:
+                write_run_record(
+                    args,
+                    mode=getattr(args, "command", "unknown"),
+                    status="error",
+                    models=[],
+                    base_url=getattr(args, "base_url", None),
+                    caveats=[],
+                    metadata={},
+                    error=str(exc),
+                )
+            except Exception:
+                pass
+        eprint(f"[anti] {redact_sensitive_text(str(exc))}")
         return 1
 
 

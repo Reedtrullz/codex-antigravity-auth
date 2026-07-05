@@ -1,4 +1,4 @@
 interface:
   display_name: "Anti"
-  short_description: "Antigravity Opus/Sonnet reviews and plans"
-  default_prompt: "Use $anti to ask Antigravity Opus for a deep work plan or sidecar review."
+  short_description: "Antigravity workflows, reviews, plans, and $anti panel"
+  default_prompt: "Use $anti workflow, $anti panel, $anti moa, or $anti fusion for Antigravity reviews, deep work plans, provider comparisons, and bounded multi-model panels."
