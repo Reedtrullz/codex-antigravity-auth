@@ -594,6 +594,40 @@ class AntiHelperTests(unittest.TestCase):
             anti.workflow_expansion(parser.parse_args(["workflow", "plan-deep", "--files-from", "paths.txt", "--prompt", "plan"]))
         with self.assertRaisesRegex(anti.AntiError, "does not support --scope diff"):
             anti.workflow_expansion(parser.parse_args(["workflow", "plan-deep", "--scope", "diff", "--prompt", "plan"]))
+        with self.assertRaisesRegex(anti.AntiError, "does not support --changed-files"):
+            anti.workflow_expansion(
+                parser.parse_args(["workflow", "plan-deep", "--changed-files", "HEAD~2..HEAD", "--prompt", "plan"])
+            )
+
+    def test_workflow_omits_max_output_tokens_unless_set(self) -> None:
+        anti = load_anti()
+        parser = anti.build_parser()
+
+        default_expansion = anti.workflow_expansion(
+            parser.parse_args(["workflow", "plan-deep", "--prompt", "plan this"])
+        )
+        self.assertNotIn("--max-output-tokens", default_expansion)
+        expanded_args = parser.parse_args(default_expansion)
+        self.assertEqual(expanded_args.max_output_tokens, 6144)
+
+        explicit_expansion = anti.workflow_expansion(
+            parser.parse_args(["workflow", "plan-deep", "--max-output-tokens", "1234", "--prompt", "plan this"])
+        )
+        self.assertEqual(
+            explicit_expansion[explicit_expansion.index("--max-output-tokens") + 1],
+            "1234",
+        )
+
+    def test_workflow_ship_gate_forwards_changed_files_range(self) -> None:
+        anti = load_anti()
+        parser = anti.build_parser()
+
+        expansion = anti.workflow_expansion(
+            parser.parse_args(["workflow", "ship-gate", "--scope", "diff", "--changed-files", "HEAD~3..HEAD"])
+        )
+        self.assertEqual(expansion[expansion.index("--changed-files") + 1], "HEAD~3..HEAD")
+        expanded_args = parser.parse_args(expansion)
+        self.assertEqual(expanded_args.changed_files_range, "HEAD~3..HEAD")
 
     def test_failed_workflow_run_record_keeps_workflow_identity(self) -> None:
         anti = load_anti()
@@ -776,6 +810,93 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(json.loads(list_output.getvalue())[0]["id"], "run-1")
         self.assertEqual(json.loads(show_output.getvalue())["id"], "run-1")
         self.assertIn("Removed 1", clean_output.getvalue())
+
+    def test_runs_clean_dry_run_keeps_records(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            record_path = anti.RUNS_DIR / "run-1.json"
+            record_path.write_text(json.dumps({"id": "run-1"}), encoding="utf-8")
+            old = time.time() - 3 * 86400
+            os.utime(record_path, (old, old))
+            output = io.StringIO()
+
+            with contextlib.redirect_stdout(output):
+                rc = anti.main(["runs", "clean", "--older-than", "1", "--dry-run"])
+
+            self.assertEqual(rc, 0)
+            self.assertTrue(record_path.exists())
+            self.assertIn("Would remove 1", output.getvalue())
+
+    def test_runs_list_skips_symlinked_record_files(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp, tempfile.TemporaryDirectory(
+            prefix="anti-runs-outside-"
+        ) as outside_tmp:
+            anti.RUNS_DIR = Path(tmp)
+            (anti.RUNS_DIR / "run-1.json").write_text(
+                json.dumps({"id": "run-1", "created_at": "2026-07-05T00:00:00Z", "mode": "consult", "status": "success"}),
+                encoding="utf-8",
+            )
+            outside_record = Path(outside_tmp) / "outside.json"
+            outside_record.write_text(
+                json.dumps({"id": "outside", "output_text": "SYNTHETIC_SECRET_VALUE_1234567890"}),
+                encoding="utf-8",
+            )
+            try:
+                (anti.RUNS_DIR / "run-2.json").symlink_to(outside_record)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = anti.main(["runs", "list", "--json"])
+
+            self.assertEqual(rc, 0)
+            rows = json.loads(stdout.getvalue())
+            self.assertEqual([row["id"] for row in rows], ["run-1"])
+            self.assertNotIn("SYNTHETIC_SECRET_VALUE_1234567890", stdout.getvalue())
+            self.assertIn("skipping non-regular run record", stderr.getvalue())
+
+    def test_write_run_record_rejects_dangling_symlink_runs_dir(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-runs-link-") as link_tmp:
+            symlink_path = Path(link_tmp) / "anti-runs"
+            try:
+                symlink_path.symlink_to(Path(link_tmp) / "missing-target")
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+            anti.RUNS_DIR = symlink_path
+            args = anti.build_parser().parse_args(["consult", "--prompt", "x", "--save-output", "summary"])
+
+            with self.assertRaisesRegex(anti.AntiError, "symlinked directory"):
+                anti.write_run_record(
+                    args,
+                    mode="consult",
+                    status="success",
+                    models=["m"],
+                    base_url="http://127.0.0.1:51122/v1",
+                    output_text="ok",
+                )
+
+    def test_sanitize_json_keeps_numeric_and_boolean_leaves_under_secret_keys(self) -> None:
+        anti = load_anti()
+        sanitized = anti.sanitize_json(
+            {
+                "code": 429,
+                "key": True,
+                "access": 1.5,
+                "token": "SECRETTOKENVALUE1234567890",
+                "detail": {"code": "SECRETOAUTHCODE1234567890"},
+            }
+        )
+
+        self.assertEqual(sanitized["code"], 429)
+        self.assertEqual(sanitized["key"], True)
+        self.assertEqual(sanitized["access"], 1.5)
+        self.assertEqual(sanitized["token"], "<redacted>")
+        self.assertEqual(sanitized["detail"]["code"], "<redacted>")
 
     def test_runs_show_rejects_path_like_ids(self) -> None:
         anti = load_anti()
@@ -1130,6 +1251,90 @@ class AntiHelperTests(unittest.TestCase):
 
         self.assertEqual(rc, 1)
         self.assertIn("not advertised", output.getvalue())
+
+    def test_panel_missing_model_becomes_failed_entry_when_min_successes_met(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+
+        def fake_post_response(**kwargs):
+            self.assertEqual(kwargs["model"], "claude-3.5-sonnet")
+            if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
+                return "judge-output"
+            return "sonnet-panel-output"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(
+                [
+                    "panel",
+                    "--mode",
+                    "ask",
+                    "--prompt",
+                    "What next?",
+                    "--model",
+                    "sonnet",
+                    "--model",
+                    "opus",
+                    "--judge",
+                    "sonnet",
+                    "--min-successes",
+                    "1",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(parsed["panel_results"][0]["status"], "success")
+        self.assertEqual(parsed["panel_results"][1]["status"], "error")
+        self.assertIn("not advertised", parsed["panel_results"][1]["error"])
+        self.assertEqual(parsed["output_text"], "judge-output")
+
+    def test_panel_missing_judge_model_still_fails_before_generation(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+        anti.post_response = lambda **kwargs: self.fail("panel should validate the judge before generation")
+        output = io.StringIO()
+
+        with contextlib.redirect_stderr(output):
+            rc = anti.main(["panel", "--mode", "ask", "--prompt", "x", "--model", "sonnet", "--judge", "opus"])
+
+        self.assertEqual(rc, 1)
+        self.assertIn("not advertised", output.getvalue())
+
+    def test_panel_below_min_successes_writes_single_failed_record_with_partial_results(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+
+        def fake_post_response(**kwargs):
+            if kwargs["model"] == "claude-3.5-sonnet":
+                raise anti.AntiError("temporary backend failure")
+            return "opus-panel-output"
+
+        anti.post_response = fake_post_response
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--save-output", "summary"])
+
+            self.assertEqual(rc, 1)
+            records = list(Path(tmp).glob("*.json"))
+            self.assertEqual(len(records), 1)
+            record = json.loads(records[0].read_text(encoding="utf-8"))
+            self.assertEqual(record["status"], "failed")
+            self.assertIn("below --min-successes", record["error"])
+            panel_results = record["metadata"]["panel_results"]
+            self.assertEqual(len(panel_results), 2)
+            statuses = {item["model"]: item["status"] for item in panel_results}
+            self.assertEqual(statuses["claude-3.5-sonnet"], "error")
+            self.assertEqual(statuses["claude-opus-4-6"], "success")
+            success_entry = next(item for item in panel_results if item["status"] == "success")
+            self.assertNotIn("output_text", success_entry)
+            self.assertIn("opus-panel-output", success_entry["output_preview"])
 
     def test_panel_synthesis_prompt_is_bounded(self) -> None:
         anti = load_anti()

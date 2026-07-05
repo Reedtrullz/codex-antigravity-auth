@@ -282,14 +282,26 @@ def run_install_skill(args) -> None:
             raise SystemExit(1)
 
 
-def gateway_model_ids(base_url: str, *, timeout: float = 2.0) -> set[str]:
+def gateway_model_ids(
+    base_url: str,
+    *,
+    timeout: float = 2.0,
+    token_env: str = "ANTIGRAVITY_GATEWAY_TOKEN",
+) -> set[str]:
     url = base_url.rstrip("/") + "/models"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"}, method="GET")
+    headers = {"Accept": "application/json"}
+    token = os.environ.get(token_env, "").strip() if token_env else ""
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
             raw = response.read()
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"{url} returned HTTP {exc.code}") from exc
+        hint = ""
+        if exc.code in (401, 403) and not token:
+            hint = f" (remote gateways require a bearer token; export {token_env})"
+        raise RuntimeError(f"{url} returned HTTP {exc.code}{hint}") from exc
     except Exception as exc:
         raise RuntimeError(f"{url} is not reachable ({exc})") from exc
     try:
@@ -346,7 +358,11 @@ def run_setup_v2(args) -> None:
 
     gateway_ids = None
     try:
-        ids = gateway_model_ids(args.base_url, timeout=args.timeout)
+        ids = gateway_model_ids(
+            args.base_url,
+            timeout=args.timeout,
+            token_env=getattr(args, "gateway_token_env", "ANTIGRAVITY_GATEWAY_TOKEN"),
+        )
         gateway_ids = ids
         print(f"[PASS] Gateway /v1/models: {len(ids)} model(s)")
         for model in ("claude-opus-4-6", "claude-3.5-sonnet"):
@@ -411,7 +427,7 @@ def run_setup_v2(args) -> None:
         elif gateway_ids is None:
             print("[INFO] BYOK local readiness: all visible providers have usable keys or local keyless access")
             print("       Gateway model-picker visibility remains unverified until /v1/models is reachable.")
-        elif providers:
+        else:
             print("[PASS] BYOK readiness: all visible providers have usable keys or local keyless access")
 
     print("=" * 60)
@@ -1289,6 +1305,11 @@ def main():
     setup_v2_parser.add_argument("--skill-dir", default=DEFAULT_CODEX_SKILLS_DIR, help="Directory containing Codex skills")
     setup_v2_parser.add_argument("--base-url", default=DEFAULT_CODEX_BASE_URL, help="Gateway base URL ending in /v1")
     setup_v2_parser.add_argument("--timeout", type=float, default=2.0, help="Gateway model-catalog timeout")
+    setup_v2_parser.add_argument(
+        "--gateway-token-env",
+        default="ANTIGRAVITY_GATEWAY_TOKEN",
+        help="Environment variable holding the gateway bearer token for remote gateways",
+    )
     setup_v2_parser.add_argument("--write", action="store_true", help="Install/update the bundled Anti skill")
     setup_v2_parser.add_argument("--force", action="store_true", help="Back up and replace an existing anti skill when --write is used")
     setup_v2_parser.add_argument("--verify-skill", action="store_true", help="Run installed Anti skill tests when --write is used")

@@ -28,7 +28,7 @@ codex-antigravity install-skill --verify
 codex-antigravity install-skill --force --verify
 ```
 
-Use `setup-v2 --write` only when you want it to install or refresh the bundled skill. It does not write `~/.codex/config.toml`; use `setup-google` or `configure-codex --write` for that.
+Use `setup-v2 --write` only when you want it to install or refresh the bundled skill. It does not write `~/.codex/config.toml`; use `setup-google` or `configure-codex --write` for that. When checking a remote gateway, export the bearer token and pass `--gateway-token-env` (defaults to `ANTIGRAVITY_GATEWAY_TOKEN`) so the `/v1/models` probe can authenticate.
 If the existing `anti` skill is locally modified or stale, add `--force` before verification to back it up under `skills-backups` and replace it. BYOK provider checks are opt-in; add `--check-byok` to inspect provider readiness and compare configured provider models with the gateway's `/v1/models` catalog.
 
 For bounded multi-model advice, use the helper-level panel mode. It does not replace Codex's native acting model loop; it returns advisory synthesis for Codex to verify:

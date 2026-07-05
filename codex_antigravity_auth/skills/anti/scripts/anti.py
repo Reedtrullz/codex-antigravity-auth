@@ -20,13 +20,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from codex_antigravity_auth.redaction import (
-        redact_secret_text as package_redact_secret_text,
-        redact_secrets as package_redact_secrets,
-    )
+    from codex_antigravity_auth.redaction import redact_secret_text as package_redact_secret_text
 except Exception:  # pragma: no cover - installed personal skills can run without the package import path.
     package_redact_secret_text = None
-    package_redact_secrets = None
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:51122/v1"
@@ -253,11 +249,20 @@ def redact_sensitive_text(text: str) -> str:
     return redacted
 
 
+def value_can_hold_secret(item: Any) -> bool:
+    # Numeric and boolean leaves (HTTP codes, counts, flags) cannot carry credential material.
+    return not (item is None or item == "" or isinstance(item, (bool, int, float)))
+
+
 def fallback_sanitize_json(value: Any) -> Any:
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for key, item in value.items():
-            result[str(key)] = REDACTION_MARKER if key_looks_secret(key) and item not in (None, "") else fallback_sanitize_json(item)
+            result[str(key)] = (
+                REDACTION_MARKER
+                if key_looks_secret(key) and value_can_hold_secret(item)
+                else fallback_sanitize_json(item)
+            )
         return result
     if isinstance(value, list):
         return [fallback_sanitize_json(item) for item in value]
@@ -271,12 +276,11 @@ def fallback_sanitize_json(value: Any) -> Any:
 
 
 def sanitize_json(value: Any) -> Any:
-    if package_redact_secrets is not None:
-        try:
-            return fallback_sanitize_json(normalize_redaction_markers(package_redact_secrets(value)))
-        except Exception:
-            pass
-    return fallback_sanitize_json(value)
+    # Key- and text-level redaction here is a superset of the package's redact_secrets
+    # structural pass, and redact_sensitive_text already layers in package
+    # redact_secret_text per string. Skipping the package structural pass keeps
+    # numeric/boolean leaves (HTTP codes, counts, flags) readable in run ledgers.
+    return fallback_sanitize_json(normalize_redaction_markers(value))
 
 
 def progress(args: argparse.Namespace, message: str) -> None:
@@ -308,7 +312,7 @@ def write_run_record(
     if output_mode == "never":
         return None
 
-    if RUNS_DIR.exists() and RUNS_DIR.is_symlink():
+    if RUNS_DIR.is_symlink():
         raise AntiError(f"refusing to write Anti run record through symlinked directory: {RUNS_DIR}")
     os.makedirs(RUNS_DIR, mode=0o700, exist_ok=True)
     try:
@@ -746,8 +750,12 @@ def read_paths_file(spec: str) -> list[str]:
 
 
 def validate_path_list_item(value: str, *, source: str) -> None:
-    if redact_sensitive_text(value) != value:
-        raise AntiError(f"path list {source!r} contains secret-like content; refusing to use it")
+    redacted = redact_sensitive_text(value)
+    if redacted != value:
+        raise AntiError(
+            f"path list {source!r} contains secret-like content; refusing to use it "
+            f"(offending entry, redacted: {redacted!r})"
+        )
 
 
 def selected_paths_from_args(args: argparse.Namespace) -> list[str]:
@@ -1880,6 +1888,18 @@ def run_panel_call(
         return {"model": model, "status": "error", "error": redact_sensitive_text(str(exc))}
 
 
+def panel_results_for_record(panel_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    trimmed: list[dict[str, Any]] = []
+    for result in panel_results:
+        item = dict(result)
+        output_text = item.pop("output_text", None)
+        if isinstance(output_text, str) and output_text:
+            item["output_preview"] = output_text[:RUN_OUTPUT_PREVIEW_CHARS]
+            item["output_chars"] = len(output_text)
+        trimmed.append(item)
+    return trimmed
+
+
 def sanitize_panel_results_for_display(panel_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     sanitized: list[dict[str, Any]] = []
     for result in panel_results:
@@ -1977,19 +1997,35 @@ def command_panel(args: argparse.Namespace) -> int:
                     print(f"- {caveat}")
         return 0
 
-    models_to_validate = [*panel_models, judge_model]
+    required_models = [judge_model]
     if getattr(args, "fallback_model", None):
         fallback_model = resolve_model(args.fallback_model, default=args.fallback_model)
-        if fallback_model not in models_to_validate:
-            models_to_validate.append(fallback_model)
+        if fallback_model not in required_models:
+            required_models.append(fallback_model)
     model_ids = ensure_models_available(
         base_url=args.base_url,
-        models=models_to_validate,
+        models=required_models,
         timeout=args.timeout,
         token_env=args.gateway_token_env,
     )
-    panel_results: list[dict[str, Any]] = [{} for _model in panel_models]
-    max_workers = min(args.max_parallel, len(panel_models))
+    missing_panel_models = [model for model in panel_models if model not in model_ids]
+    available_panel_models = [model for model in panel_models if model in model_ids]
+    if len(available_panel_models) < min_successes:
+        sample = ", ".join(sorted(model_ids)[:12])
+        raise AntiError(
+            "panel model(s) not advertised by /v1/models: "
+            + ", ".join(missing_panel_models)
+            + f"; only {len(available_panel_models)} panel model(s) available, "
+            + f"below --min-successes {min_successes}. Available sample: {sample}"
+        )
+
+    panel_results: list[dict[str, Any]] = [
+        {"model": model, "status": "error", "error": "model not advertised by /v1/models"}
+        if model in missing_panel_models
+        else {}
+        for model in panel_models
+    ]
+    max_workers = min(args.max_parallel, len(available_panel_models))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(
@@ -2001,6 +2037,7 @@ def command_panel(args: argparse.Namespace) -> int:
                 model_ids=model_ids,
             ): index
             for index, model in enumerate(panel_models)
+            if model not in missing_panel_models
         }
         for future in concurrent.futures.as_completed(futures):
             panel_results[futures[future]] = future.result()
@@ -2017,9 +2054,24 @@ def command_panel(args: argparse.Namespace) -> int:
     metadata["success_count"] = len(successes)
 
     if len(successes) < min_successes:
-        raise AntiError(
-            f"panel had {len(successes)} successful model(s), below --min-successes {min_successes}"
-        )
+        metadata["panel_results"] = panel_results_for_record(panel_results)
+        error = f"panel had {len(successes)} successful model(s), below --min-successes {min_successes}"
+        try:
+            write_run_record(
+                args,
+                mode="panel",
+                status="failed",
+                models=panel_models,
+                base_url=args.base_url,
+                prompt_text=prompt,
+                caveats=caveats,
+                metadata=metadata,
+                error=error,
+            )
+        except AntiError:
+            pass
+        args.run_record_written = True
+        raise AntiError(error)
 
     synthesis_prompt, synthesis_caveats, synthesis_metadata = build_panel_synthesis_prompt(
         panel_mode=args.mode,
@@ -2177,6 +2229,8 @@ def command_plan(args: argparse.Namespace) -> int:
                 print(f"- {caveat}")
         return 0
     if should_chunk_plan(args, prompt):
+        if args.max_prompt_chars > 0:
+            recorded_prompt = prompt[: args.max_prompt_chars]
         text, caveats, metadata, model_used = run_chunked_plan(
             args=args,
             model=model,
@@ -2444,8 +2498,6 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         args.gateway_token_env,
         "--retry",
         str(args.retry),
-        "--max-output-tokens",
-        str(args.max_output_tokens),
         "--max-prompt-chars",
         str(args.max_prompt_chars),
         "--fallback-policy",
@@ -2453,6 +2505,8 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         "--save-output",
         args.save_output,
     ]
+    if args.max_output_tokens is not None:
+        common.extend(["--max-output-tokens", str(args.max_output_tokens)])
     if args.fallback_model:
         common.extend(["--fallback-model", args.fallback_model])
     if args.progress:
@@ -2494,6 +2548,8 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             raise AntiError("workflow plan-deep does not support --scope diff; use working-tree, staged, files, or none")
         if args.base:
             raise AntiError("workflow plan-deep does not support --base")
+        if args.changed_files_range:
+            raise AntiError("workflow plan-deep does not support --changed-files")
         if args.files_from:
             raise AntiError("workflow plan-deep does not support --files-from")
         argv = [
@@ -2542,8 +2598,16 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         for model in args.model or []:
             argv.extend(["--model", model])
     elif args.name == "provider-compare":
-        if args.base or args.file or args.files_from or workflow_scope(args, default="none") != "none":
-            raise AntiError("workflow provider-compare is prompt-only; omit --scope/--base/--file/--files-from")
+        if (
+            args.base
+            or args.changed_files_range
+            or args.file
+            or args.files_from
+            or workflow_scope(args, default="none") != "none"
+        ):
+            raise AntiError(
+                "workflow provider-compare is prompt-only; omit --scope/--base/--changed-files/--file/--files-from"
+            )
         argv = [
             "panel",
             "--mode",
@@ -2567,6 +2631,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
 
     if args.name in {"review-ready", "ship-gate"}:
         append_if_present(argv, "--base", args.base)
+        append_if_present(argv, "--changed-files", args.changed_files_range)
         append_each(argv, "--file", args.file)
         append_each(argv, "--files-from", args.files_from)
     elif args.name == "plan-deep":
@@ -2599,15 +2664,25 @@ def command_workflow(args: argparse.Namespace) -> int:
         expanded_args.run_label = args.run_label or args.name
     if hasattr(expanded_args, "base_url") and expanded_args.base_url is not None:
         expanded_args.base_url = normalize_base_url(expanded_args.base_url)
-    return int(expanded_args.func(expanded_args))
+    try:
+        return int(expanded_args.func(expanded_args))
+    finally:
+        if getattr(expanded_args, "run_record_written", False):
+            args.run_record_written = True
 
 
 def iter_run_records() -> list[Path]:
-    if not RUNS_DIR.exists():
-        return []
     if RUNS_DIR.is_symlink():
         raise AntiError(f"refusing to read Anti run records through symlinked directory: {RUNS_DIR}")
-    return sorted(RUNS_DIR.glob("*.json"), reverse=True)
+    if not RUNS_DIR.exists():
+        return []
+    records: list[Path] = []
+    for path in sorted(RUNS_DIR.glob("*.json"), reverse=True):
+        if path.is_symlink() or not path.is_file():
+            eprint(f"[anti] skipping non-regular run record: {path}")
+            continue
+        records.append(path)
+    return records
 
 
 def load_run_record(path: Path) -> dict[str, Any]:
@@ -2681,9 +2756,13 @@ def command_runs(args: argparse.Namespace) -> int:
         removed = 0
         for path in iter_run_records():
             if path.stat().st_mtime < cutoff:
-                path.unlink()
+                if args.dry_run:
+                    print(f"[*] Would remove {path.name}")
+                else:
+                    path.unlink()
                 removed += 1
-        print(f"[+] Removed {removed} Anti run record(s) older than {args.older_than} day(s)")
+        verb = "Would remove" if args.dry_run else "Removed"
+        print(f"[+] {verb} {removed} Anti run record(s) older than {args.older_than} day(s)")
         return 0
     raise AntiError(f"unknown runs command: {args.runs_command}")
 
@@ -2841,11 +2920,17 @@ def build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--role", action="append")
     workflow.add_argument("--scope", choices=["auto", "none", "working-tree", "staged", "files", "diff"], default="auto")
     workflow.add_argument("--base")
+    workflow.add_argument("--changed-files", dest="changed_files_range", help="Git revision range for --scope diff")
     workflow.add_argument("--file", action="append")
     workflow.add_argument("--files-from", action="append")
     workflow.add_argument("--prompt")
     workflow.add_argument("--prompt-file")
-    workflow.add_argument("--max-output-tokens", type=positive_int, default=4096)
+    workflow.add_argument(
+        "--max-output-tokens",
+        type=positive_int,
+        default=None,
+        help="Override the expanded command's own default when set",
+    )
     workflow.add_argument("--judge-output-tokens", type=positive_int, default=4096)
     workflow.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS)
     workflow.add_argument("--max-synthesis-chars", type=int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
@@ -2869,6 +2954,7 @@ def build_parser() -> argparse.ArgumentParser:
     runs_show.add_argument("id")
     runs_clean = runs_sub.add_parser("clean")
     runs_clean.add_argument("--older-than", type=positive_int, required=True, help="Delete records older than N days")
+    runs_clean.add_argument("--dry-run", action="store_true", help="List records that would be removed without deleting")
     runs.set_defaults(func=command_runs)
 
     smoke = sub.add_parser("smoke", help="Check CLI, gateway, models, and doctor readiness")
@@ -2927,7 +3013,7 @@ def main(argv: list[str] | None = None) -> int:
         eprint("Interrupted")
         return 130
     except AntiError as exc:
-        if hasattr(args, "save_output"):
+        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False):
             try:
                 write_run_record(
                     args,

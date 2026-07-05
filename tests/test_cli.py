@@ -12,6 +12,7 @@ from codex_antigravity_auth.oauth import authorize_antigravity
 from codex_antigravity_auth.cli import (
     account_rotation_lines,
     configure_codex_write_command,
+    gateway_model_ids,
     gateway_start_command,
     install_codex_skill,
     inspect_codex_gateway_config,
@@ -978,6 +979,42 @@ class TestInstallSkill(unittest.TestCase):
             printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
             self.assertIn("could not load provider config", printed_text)
             self.assertNotIn("sk-testsecret1234567890", printed_text)
+
+    def test_gateway_model_ids_sends_bearer_token_from_env(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["auth"] = req.get_header("Authorization")
+            response = MagicMock()
+            response.read.return_value = b'{"data": [{"id": "claude-opus-4-6"}]}'
+            response.__enter__ = lambda self_: response
+            response.__exit__ = lambda self_, *exc: False
+            return response
+
+        with patch.dict(os.environ, {"TEST_GATEWAY_TOKEN": "unit-test-token-value"}):
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                ids = gateway_model_ids("https://gateway.example/v1", token_env="TEST_GATEWAY_TOKEN")
+
+        self.assertEqual(ids, {"claude-opus-4-6"})
+        self.assertEqual(captured["auth"], "Bearer unit-test-token-value")
+
+    def test_gateway_model_ids_omits_auth_header_when_env_missing(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["auth"] = req.get_header("Authorization")
+            response = MagicMock()
+            response.read.return_value = b'{"data": [{"id": "claude-opus-4-6"}]}'
+            response.__enter__ = lambda self_: response
+            response.__exit__ = lambda self_, *exc: False
+            return response
+
+        env = {key: value for key, value in os.environ.items() if key != "TEST_GATEWAY_TOKEN"}
+        with patch.dict(os.environ, env, clear=True):
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                gateway_model_ids("https://gateway.example/v1", token_env="TEST_GATEWAY_TOKEN")
+
+        self.assertIsNone(captured["auth"])
 
 
 class TestProviderCli(unittest.TestCase):
