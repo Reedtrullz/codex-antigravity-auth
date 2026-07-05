@@ -1,6 +1,6 @@
 # Codex Antigravity Auth
 
-Create a clean, reliable local gateway server that allows you to use Google Antigravity models and BYOK OpenAI-compatible providers directly in OpenAI Codex (CLI or Desktop).
+Create a clean, reliable local gateway server that makes Google Antigravity Claude Opus/Sonnet feel native in OpenAI Codex (CLI or Desktop), with Gemini and BYOK OpenAI-compatible providers still available.
 
 ## Features
 - **OS-Native Keyring Encryption**: Encrypts Google account tokens and stored BYOK provider config at rest via macOS Keychain, Windows Credential Manager, Linux Secret Service, or a private local fallback key.
@@ -36,6 +36,28 @@ uv pip install -e .
 
 ## Configuration
 
+The recommended first-run path is the primary setup command. It validates OAuth credentials, runs Google login, writes Codex config only when `--write` is present, can install the optional `$anti` helper skill, starts the gateway in the background, checks `/v1/models`, and ends with Codex readiness diagnostics:
+
+```bash
+codex-antigravity setup --write --accounts 1 --model claude-3.5-sonnet --install-skill --start
+```
+
+For a read-only preflight that does not mutate OAuth, Codex config, skills, or gateway state:
+
+```bash
+codex-antigravity setup --check
+codex-antigravity setup --json
+```
+
+After setup, inspect native Codex readiness and gateway lifecycle with:
+
+```bash
+codex-antigravity status
+codex-antigravity doctor --codex-ready
+codex-antigravity doctor --codex-ready --json
+codex-antigravity stop
+```
+
 Install the Codex provider block:
 
 ```bash
@@ -48,13 +70,13 @@ The command validates the Codex model id, provider id, provider name, and gatewa
 codex-antigravity configure-codex
 ```
 
-Install the optional Codex `$anti` sidecar skill that ships with this repo:
+Install the optional Codex `$anti` helper skill that ships with this repo:
 
 ```bash
 codex-antigravity install-skill
 ```
 
-This copies the bundled skill into `~/.codex/skills/anti` so Codex can use Antigravity Opus/Sonnet as a sidecar reviewer, consult lane, deep work planner, and bounded multi-model panel from chat prompts like `$anti review this diff with opus`. If you already have a local `anti` skill, the command refuses to overwrite it unless you pass `--force`; forced installs back up the existing skill under a sibling `skills-backups` directory so backups are not indexed as live skills.
+This copies the bundled skill into `~/.codex/skills/anti` for optional review/planning workflows after Claude is already available in Codex. It can use Antigravity Opus/Sonnet as a helper reviewer, consult lane, deep work planner, and bounded multi-model panel from chat prompts like `$anti review this diff with opus`. If you already have a local `anti` skill, the command refuses to overwrite it unless you pass `--force`; forced installs back up the existing skill under a sibling `skills-backups` directory so backups are not indexed as live skills.
 
 To verify the V2 helper workflow surface without changing Codex config, run:
 
@@ -65,7 +87,7 @@ codex-antigravity install-skill --verify
 codex-antigravity install-skill --force --verify
 ```
 
-`setup-v2 --write` installs or refreshes the bundled skill, but it does not write `~/.codex/config.toml`; use `setup-google` or `configure-codex --write` when you explicitly want Codex itself pointed at the gateway.
+`setup-v2 --write` installs or refreshes the bundled skill, but it does not write `~/.codex/config.toml`; use primary `setup --write`, `setup-google`, or `configure-codex --write` when you explicitly want Codex itself pointed at the gateway.
 If an existing `anti` skill differs from the bundled copy, pass `--force` with `install-skill` or `setup-v2 --write` to back it up and replace it before verifying. BYOK provider identity/key checks are skipped by default; add `--check-byok` when you want setup-v2 to inspect provider readiness and confirm configured provider models are advertised by the running gateway.
 
 The skill also ships a helper-level panel mode inspired by MoA/Fusion workflows. Codex remains the acting agent; the helper fans out to gateway-advertised models, asks a judge model to synthesize consensus, contradictions, blind spots, and next actions, then returns advisory output for Codex to verify:
@@ -117,7 +139,7 @@ Then run the interactive login:
 codex-antigravity login
 ```
 
-For first-run Google setup, or when you want several Google accounts in the rotation pool, use the guided setup instead:
+For first-run native Claude setup, prefer `setup --write`. For the older Google-only flow, or when you want several Google accounts in the rotation pool without installing the skill or starting the gateway, use:
 
 ```bash
 codex-antigravity setup-google --accounts 2
@@ -134,6 +156,7 @@ Start the local gateway:
 
 ```bash
 codex-antigravity start
+codex-antigravity start --background
 ```
 
 ### BYOK providers
@@ -166,7 +189,7 @@ Custom provider and Codex gateway base URLs must be absolute `http` or `https` U
 The `configure-codex --write` helper writes this equivalent TOML into `~/.codex/config.toml` after validation:
 
 ```toml
-model = "gemini-3.5-flash-high"
+model = "claude-3.5-sonnet"
 model_provider = "antigravity"
 wire_api = "responses"
 
@@ -181,10 +204,11 @@ wire_api = "responses"
 To run connection check diagnostics and verify token security:
 ```bash
 codex-antigravity doctor
+codex-antigravity doctor --codex-ready
 codex-antigravity doctor --byok-only
 ```
 
-`doctor` parses the active Codex config, verifies `model_provider = "antigravity"` and the matching provider `base_url`, and exits non-zero on hard readiness failures. Use `--config /path/to/config.toml` to verify a non-default Codex config.
+`doctor` parses the active Codex config, verifies `model_provider = "antigravity"` and the matching provider `base_url`, and exits non-zero on hard readiness failures. `doctor --codex-ready` additionally checks that the gateway is reachable, `/v1/models` advertises the selected Codex model, the model routes to Google or BYOK correctly, and the selected Google family has usable rotation state. Use `--config /path/to/config.toml` to verify a non-default Codex config.
 
 The gateway binds to `127.0.0.1` by default. Binding to a non-loopback host requires both `--allow-remote` and an `ANTIGRAVITY_GATEWAY_TOKEN` of at least 32 visible ASCII characters; remote callers must send `Authorization: Bearer <token>`. The built-in server still speaks plain HTTP, so use remote mode only behind a trusted tunnel, local network boundary, or TLS-terminating proxy.
 

@@ -4,6 +4,7 @@ import argparse
 import http.server
 import math
 import re
+import signal
 import shlex
 import socketserver
 import subprocess
@@ -31,6 +32,12 @@ from .byok import (
     validate_provider_api_key,
     validate_provider_id,
 )
+from .models import (
+    DEFAULT_CODEX_MODEL_ID,
+    canonical_model_id,
+    native_model_definition,
+    native_model_family,
+)
 from .oauth import (
     OAUTH_HTTP_TIMEOUT_SECONDS,
     authorize_antigravity,
@@ -39,16 +46,18 @@ from .oauth import (
     token_expires_in_seconds,
 )
 from .storage import load_accounts, save_accounts
-from .constants import is_loopback_host, resolve_oauth_credentials, validate_gateway_token_strength
+from .constants import get_codex_home, is_loopback_host, resolve_oauth_credentials, validate_gateway_token_strength
 from .redaction import redact_secret_text
 
 DEFAULT_CODEX_PROVIDER_ID = "antigravity"
 DEFAULT_CODEX_PROVIDER_NAME = "Google Antigravity"
-DEFAULT_CODEX_MODEL = "gemini-3.5-flash-high"
+DEFAULT_CODEX_MODEL = DEFAULT_CODEX_MODEL_ID
 DEFAULT_CODEX_BASE_URL = "http://localhost:51122/v1"
 DEFAULT_CODEX_SKILLS_DIR = "~/.codex/skills"
 BUNDLED_CODEX_SKILL_NAME = "anti"
 CODEX_PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+GATEWAY_PID_TEMPLATE = "antigravity-gateway-{port}.pid"
+GATEWAY_LOG_TEMPLATE = "antigravity-gateway-{port}.log"
 
 
 class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
@@ -56,20 +65,41 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         # Suppress logging of HTTP requests to keep CLI clean
         pass
 
+    def _write_html(self, status: int, body: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
-        
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
-        
+
         if "code" in query:
             code = query["code"][0]
+            state = query.get("state", [None])[0]
+            expected_state_id = getattr(self.server, "expected_state_id", None)
+            if expected_state_id:
+                try:
+                    returned_state = decode_state(state or "")
+                except Exception:
+                    returned_state = {}
+                if returned_state.get("id") != expected_state_id:
+                    self.server.auth_error = "state_mismatch"
+                    self._write_html(400, b"""
+                    <html>
+                    <head><style>body { font-family: sans-serif; text-align: center; margin-top: 50px; background-color: #f4f7f6; }</style></head>
+                    <body>
+                        <h1 style="color: #f44336;">Authentication Failed</h1>
+                        <p>The OAuth callback state did not match the active login attempt.</p>
+                    </body>
+                    </html>
+                    """)
+                    return
             # Store globally on server to be grabbed by parent thread
             self.server.auth_code = code
-            self.server.auth_state = query.get("state", [None])[0]
-            self.wfile.write(b"""
+            self.server.auth_state = state
+            self._write_html(200, b"""
             <html>
             <head><style>body { font-family: sans-serif; text-align: center; margin-top: 50px; background-color: #f4f7f6; }</style></head>
             <body>
@@ -79,7 +109,7 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
             </html>
             """)
         else:
-            self.wfile.write(b"""
+            self._write_html(400, b"""
             <html>
             <head><style>body { font-family: sans-serif; text-align: center; margin-top: 50px; background-color: #f4f7f6; }</style></head>
             <body>
@@ -93,6 +123,8 @@ class OAuthServer(socketserver.TCPServer):
     allow_reuse_address = True
     auth_code = None
     auth_state = None
+    expected_state_id = None
+    auth_error = None
 
 def normalize_epoch_seconds(value):
     try:
@@ -101,7 +133,7 @@ def normalize_epoch_seconds(value):
         return 0
     if not math.isfinite(ts):
         return 0
-    if ts > 10_000_000_000:
+    if ts > 1_000_000_000_000:
         ts = ts / 1000
     return ts
 
@@ -319,6 +351,379 @@ def gateway_model_ids(
     if not ids:
         raise RuntimeError(f"{url} returned no model ids")
     return ids
+
+
+def gateway_runtime_paths(port: int) -> tuple[Path, Path]:
+    codex_home = get_codex_home()
+    return codex_home / GATEWAY_PID_TEMPLATE.format(port=port), codex_home / GATEWAY_LOG_TEMPLATE.format(port=port)
+
+
+def process_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def gateway_process_command(pid: int) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=1.0,
+            check=False,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def gateway_pid_matches(pid: int) -> bool | None:
+    command = gateway_process_command(pid)
+    if command is None:
+        return None
+    if not command:
+        return False
+    return "codex_antigravity_auth.server:app" in command and "uvicorn" in command
+
+
+def read_pid_file(path: Path) -> int | None:
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        return int(raw)
+    except Exception:
+        return None
+
+
+def gateway_status_info(port: int) -> dict:
+    pid_path, log_path = gateway_runtime_paths(port)
+    pid = read_pid_file(pid_path) if pid_path.exists() else None
+    process_running = bool(pid and process_is_running(pid))
+    process_matches = gateway_pid_matches(pid) if pid and process_running else None
+    if process_running and process_matches is True:
+        status = "running"
+        running = True
+    elif process_running and process_matches is False:
+        status = "foreign"
+        running = False
+    elif process_running:
+        status = "unknown"
+        running = False
+    else:
+        status = "stale" if pid_path.exists() else "stopped"
+        running = False
+    return {
+        "port": port,
+        "status": status,
+        "running": running,
+        "pid": pid,
+        "pid_file": str(pid_path),
+        "log_file": str(log_path),
+        "process_running": process_running,
+        "process_matches": process_matches,
+    }
+
+
+def run_gateway_status(args) -> dict:
+    info = gateway_status_info(args.port)
+    if getattr(args, "json", False):
+        print(json.dumps(info, indent=2))
+    else:
+        print(f"Gateway status: {info['status']} (port {info['port']})")
+        if info["pid"]:
+            print(f"  pid: {info['pid']}")
+        print(f"  pid_file: {info['pid_file']}")
+        print(f"  log_file: {info['log_file']}")
+    return info
+
+
+def start_gateway_background(args) -> dict:
+    require_safe_gateway_host(args.host, args.allow_remote)
+    pid_path, log_path = gateway_runtime_paths(args.port)
+    current = gateway_status_info(args.port)
+    if current["running"]:
+        raise SystemExit(f"Gateway already running on port {args.port} (pid {current['pid']}).")
+    if current["status"] in {"foreign", "unknown"}:
+        raise SystemExit(
+            f"Gateway pid file exists for port {args.port}, but pid {current['pid']} "
+            "does not look like a codex-antigravity gateway. Refusing stale pid reuse; "
+            f"inspect {current['pid_file']} before removing it."
+        )
+    if pid_path.exists():
+        stale_pid = current.get("pid")
+        pid_path.unlink(missing_ok=True)
+        print(f"[*] Removed stale gateway pid file for pid {stale_pid or 'unknown'}: {pid_path}")
+    cmd = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "codex_antigravity_auth.server:app",
+        "--host",
+        args.host,
+        "--port",
+        str(args.port),
+        "--log-level",
+        "info",
+    ]
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        log_flags |= os.O_NOFOLLOW
+    try:
+        log_fd = os.open(log_path, log_flags, 0o600)
+    except OSError as exc:
+        raise SystemExit(f"Could not open gateway log file {log_path}: {redact_secret_text(str(exc))}") from exc
+    try:
+        os.fchmod(log_fd, 0o600)
+        log_file = os.fdopen(log_fd, "ab")
+    except Exception:
+        os.close(log_fd)
+        raise
+    with log_file:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    time.sleep(0.25)
+    if proc.poll() is not None:
+        raise SystemExit(f"Gateway exited during startup with code {proc.returncode}. See log: {log_path}")
+    _write_private_text(pid_path, f"{proc.pid}\n")
+    info = gateway_status_info(args.port)
+    print(f"[+] Gateway started in background on {args.host}:{args.port} (pid {proc.pid})")
+    print(f"    Log: {log_path}")
+    return info
+
+
+def stop_gateway(args) -> dict:
+    info = gateway_status_info(args.port)
+    pid_path = Path(info["pid_file"])
+    pid = info.get("pid")
+    if not pid:
+        if pid_path.exists():
+            pid_path.unlink()
+        print(f"[*] Gateway is not running on port {args.port}.")
+        return gateway_status_info(args.port)
+    if info["status"] in {"foreign", "unknown"}:
+        raise SystemExit(
+            f"Pid file {pid_path} points at pid {pid}, but it does not look like a "
+            "codex-antigravity gateway. Refusing to stop an unrelated process."
+        )
+    if not info["running"]:
+        pid_path.unlink(missing_ok=True)
+        print(f"[*] Removed stale gateway pid file for pid {pid}: {pid_path}")
+        return gateway_status_info(args.port)
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+    except ProcessLookupError:
+        pid_path.unlink(missing_ok=True)
+        print(f"[*] Removed stale gateway pid file for pid {pid}: {pid_path}")
+        return gateway_status_info(args.port)
+    except PermissionError as exc:
+        raise SystemExit(
+            f"Gateway pid {pid} could not be stopped because permission was denied. "
+            f"Inspect the process manually and remove {pid_path} only if it is stale."
+        ) from exc
+    except OSError as exc:
+        raise SystemExit(f"Gateway pid {pid} could not be stopped: {redact_secret_text(str(exc))}") from exc
+    deadline = time.time() + 5
+    while time.time() < deadline and process_is_running(int(pid)):
+        time.sleep(0.1)
+    if process_is_running(int(pid)):
+        raise SystemExit(f"Gateway pid {pid} did not stop within 5s. Log: {info['log_file']}")
+    pid_path.unlink(missing_ok=True)
+    print(f"[+] Gateway stopped on port {args.port} (pid {pid})")
+    return gateway_status_info(args.port)
+
+
+def google_family_rotation_status(data: dict, family: str) -> dict:
+    accounts = data.get("accounts", []) if isinstance(data, dict) else []
+    state = data.get("accountState", {}) if isinstance(data.get("accountState"), dict) else {}
+    cooldowns = state.get("cooldowns", {}) if isinstance(state.get("cooldowns"), dict) else {}
+    now = time.time()
+    cooldown_count = 0
+    available_count = 0
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        email = account.get("email")
+        cooldown_end = normalize_epoch_seconds(cooldowns.get(email, 0))
+        if cooldown_end > now:
+            cooldown_count += 1
+        else:
+            available_count += 1
+    return {
+        "family": family,
+        "account_count": len(accounts),
+        "available_count": available_count,
+        "cooldown_count": cooldown_count,
+        "all_accounts_cooling_down": bool(accounts) and available_count == 0,
+    }
+
+
+def _read_codex_config_for_readiness(config: str) -> tuple[Path, str | None, str | None]:
+    config_path = Path(os.path.expanduser(config))
+    if not config_path.is_file():
+        return config_path, None, f"Codex config not found: {config_path}"
+    try:
+        return config_path, config_path.read_text(encoding="utf-8"), None
+    except Exception as exc:
+        return config_path, None, f"Could not read Codex config: {redact_secret_text(str(exc))}"
+
+
+def codex_ready_report(
+    *,
+    config: str,
+    provider_id: str,
+    expected_base_url: str,
+    gateway_timeout: float = 2.0,
+    gateway_token_env: str = "ANTIGRAVITY_GATEWAY_TOKEN",
+) -> dict:
+    checks: list[dict] = []
+
+    def add(name: str, status: str, detail: str, **extra) -> None:
+        checks.append({"name": name, "status": status, "detail": detail, **extra})
+
+    config_path, config_content, config_error = _read_codex_config_for_readiness(config)
+    active_model = ""
+    canonical_model = ""
+    gateway_ids: set[str] | None = None
+    route = "unknown"
+
+    if config_error:
+        add("codex_config", "fail", config_error)
+    else:
+        ready, reason = inspect_codex_gateway_config(
+            config_content or "",
+            provider_id=provider_id,
+            expected_base_url=expected_base_url,
+        )
+        add("codex_config", "pass" if ready else "fail", reason, path=str(config_path))
+        parsed = parse_codex_config(config_content or "")
+        active_model = str(parsed.get("active_model") or "")
+        try:
+            canonical_model = validate_codex_model_id(active_model)
+            add("selected_model", "pass", f"Codex model resolves to {canonical_model}", model=canonical_model)
+        except ValueError as exc:
+            add("selected_model", "fail", str(exc), model=active_model)
+
+    try:
+        gateway_ids = gateway_model_ids(expected_base_url, timeout=gateway_timeout, token_env=gateway_token_env)
+        add("gateway_models", "pass", f"Gateway advertised {len(gateway_ids)} model(s)")
+    except RuntimeError as exc:
+        add("gateway_models", "fail", redact_secret_text(str(exc)))
+
+    selected_for_catalog = canonical_model or active_model
+    if selected_for_catalog and gateway_ids is not None:
+        if selected_for_catalog in gateway_ids:
+            add("model_catalog", "pass", f"{selected_for_catalog} is advertised by /v1/models")
+        else:
+            add("model_catalog", "fail", f"{selected_for_catalog} is not advertised by /v1/models")
+
+    provider_prefix, provider_model = split_provider_model(selected_for_catalog) if selected_for_catalog else (None, "")
+    if selected_for_catalog and provider_prefix is not None:
+        route = "byok"
+        try:
+            providers = all_provider_configs()
+        except Exception as exc:
+            add("model_route", "fail", f"Could not load BYOK provider configuration: {redact_secret_text(str(exc))}")
+        else:
+            provider = providers.get(provider_prefix)
+            if not provider:
+                add("model_route", "fail", f"BYOK provider '{provider_prefix}' is not configured")
+            elif provider_key_status(provider, configured_label="key OK") != "key OK":
+                add("model_route", "fail", f"BYOK provider '{provider_prefix}' does not have a usable key")
+            else:
+                configured_models = [
+                    str(model.get("id") if isinstance(model, dict) else model)
+                    for model in provider.get("models", [])
+                ]
+                if provider_model in configured_models:
+                    add("model_route", "pass", f"{selected_for_catalog} routes to configured BYOK provider")
+                else:
+                    add("model_route", "warn", f"{selected_for_catalog} routes to BYOK, but the exact model is not listed")
+    elif selected_for_catalog:
+        route = "google"
+        definition = native_model_definition(selected_for_catalog)
+        if definition:
+            add("model_route", "pass", f"{selected_for_catalog} routes to Google Antigravity backend {definition.backend_id}")
+        else:
+            add("model_route", "warn", f"{selected_for_catalog} is not a known built-in Google Antigravity model")
+        family = native_model_family(selected_for_catalog)
+        try:
+            rotation = google_family_rotation_status(load_accounts(), family)
+        except Exception as exc:
+            add("google_rotation", "fail", f"Could not load Google account rotation state: {redact_secret_text(str(exc))}", family=family)
+        else:
+            if rotation["available_count"] > 0:
+                add("google_rotation", "pass", f"{rotation['available_count']} {family} account(s) available", **rotation)
+            elif rotation["account_count"] > 0:
+                add("google_rotation", "fail", f"All {family} accounts are cooling down", **rotation)
+            else:
+                add("google_rotation", "fail", f"No Google accounts configured for {family}", **rotation)
+
+    failed = [check for check in checks if check["status"] == "fail"]
+    ok = not failed
+    next_command = "codex"
+    if failed:
+        first = failed[0]["name"]
+        if first in {"codex_config", "selected_model"}:
+            next_command = f"codex-antigravity setup --write --accounts 1 --model {DEFAULT_CODEX_MODEL}"
+        elif first == "gateway_models":
+            parsed = urlparse(expected_base_url)
+            next_command = f"codex-antigravity start --background --port {parsed.port or 51122}"
+        elif first == "model_catalog":
+            next_command = "codex-antigravity status && codex-antigravity doctor --codex-ready"
+        elif first == "google_rotation":
+            next_command = "codex-antigravity setup-google --accounts 1"
+        else:
+            next_command = "codex-antigravity doctor --codex-ready"
+    return {
+        "ok": ok,
+        "config": str(config_path),
+        "provider_id": provider_id,
+        "base_url": expected_base_url,
+        "active_model": active_model,
+        "canonical_model": canonical_model,
+        "route": route,
+        "checks": checks,
+        "next_command": next_command,
+    }
+
+
+def run_codex_ready_doctor(args) -> bool:
+    report = codex_ready_report(
+        config=args.config,
+        provider_id=args.provider,
+        expected_base_url=args.gateway_base_url,
+        gateway_timeout=getattr(args, "gateway_timeout", 2.0),
+        gateway_token_env=getattr(args, "gateway_token_env", "ANTIGRAVITY_GATEWAY_TOKEN"),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2))
+        return bool(report["ok"])
+    print("=" * 60)
+    print("              CODEX ANTIGRAVITY READINESS           ")
+    print("=" * 60)
+    for check in report["checks"]:
+        label = {"pass": "PASS", "warn": "WARN", "fail": "FAIL"}.get(check["status"], "INFO")
+        print(f"[{label}] {check['name']}: {check['detail']}")
+    print(f"Next command: {report['next_command']}")
+    print("=" * 60)
+    return bool(report["ok"])
 
 
 def run_setup_v2(args) -> None:
@@ -543,7 +948,9 @@ def validate_codex_model_id(model: str) -> str:
         raise ValueError("Codex model id must be non-empty")
     if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
         raise ValueError("Codex model id must not contain whitespace or control characters")
-    return value
+    if ":" in value:
+        return value
+    return canonical_model_id(value)
 
 
 def validate_codex_provider_name(provider_name: str) -> str:
@@ -956,6 +1363,7 @@ def run_local_oauth_flow(*, select_account: bool = False) -> dict:
             "OAuth callback port 51121 is already in use. "
             "Stop the process using that port and run `codex-antigravity login` again."
         ) from e
+    server.expected_state_id = auth_info["state_id"]
     server.timeout = 600
     try:
         print(f"[*] Opening browser authorization URL...")
@@ -1101,6 +1509,227 @@ def run_setup_google(args) -> None:
     print(f"    Start the gateway with: codex-antigravity start --port {args.port}")
     print("    Optional Codex sidecar skill: codex-antigravity install-skill")
 
+
+def _setup_check(
+    checks: list[dict],
+    name: str,
+    status: str,
+    detail: str,
+    **extra,
+) -> None:
+    checks.append({"name": name, "status": status, "detail": detail, **extra})
+
+
+def _print_setup_report(report: dict) -> None:
+    print("=" * 60)
+    print("              CODEX ANTIGRAVITY SETUP              ")
+    print("=" * 60)
+    mode = report.get("mode")
+    if mode == "check":
+        print("Mode: check (read-only; pass --write to modify Codex config, OAuth state, skills, or gateway processes)")
+    elif mode:
+        print(f"Mode: {mode}")
+    for check in report["checks"]:
+        label = {"pass": "PASS", "warn": "WARN", "fail": "FAIL", "skip": "SKIP"}.get(check["status"], "INFO")
+        print(f"[{label}] {check['name']}: {check['detail']}")
+    print(f"Next command: {report['next_command']}")
+    print("=" * 60)
+
+
+def run_setup(args) -> dict:
+    if getattr(args, "check", False) and getattr(args, "write", False):
+        raise SystemExit("Use either --check or --write, not both.")
+    if getattr(args, "json", False) and getattr(args, "write", False):
+        raise SystemExit("setup --json is read-only; omit --write or use --check.")
+
+    checks: list[dict] = []
+    base_url = args.base_url
+    model = validate_codex_model_id(args.model)
+    provider_prefix, _provider_model = split_provider_model(model)
+    google_route = provider_prefix is None
+
+    try:
+        render_codex_config_snippet(
+            model=model,
+            provider_id=args.provider,
+            provider_name=args.provider_name,
+            base_url=base_url,
+        )
+        definition = native_model_definition(model)
+        model_detail = f"{model}"
+        if definition:
+            model_detail += f" ({definition.display_name})"
+        _setup_check(checks, "target_config", "pass", f"validated Codex provider config for {model_detail}")
+    except (OSError, RuntimeError, ValueError) as exc:
+        _setup_check(checks, "target_config", "fail", redact_secret_text(str(exc)))
+        report = {
+            "ok": False,
+            "mode": "check" if args.check or not args.write else "write",
+            "checks": checks,
+            "next_command": "codex-antigravity setup --check",
+        }
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            _print_setup_report(report)
+        raise SystemExit(1)
+
+    cid, csec = resolve_oauth_credentials()
+    if google_route:
+        if cid and csec:
+            _setup_check(checks, "google_oauth_credentials", "pass", "configured")
+        else:
+            _setup_check(
+                checks,
+                "google_oauth_credentials",
+                "fail",
+                "missing ANTIGRAVITY_CLIENT_ID/ANTIGRAVITY_CLIENT_SECRET or ~/.codex/antigravity-credentials.json",
+            )
+            if args.write:
+                report = {
+                    "ok": False,
+                    "mode": "write",
+                    "checks": checks,
+                    "next_command": "create Google OAuth desktop credentials, then run codex-antigravity setup --write",
+                }
+                if args.json:
+                    print(json.dumps(report, indent=2))
+                else:
+                    _print_setup_report(report)
+                raise SystemExit("Google OAuth client credentials are not configured; Codex config was not modified.")
+    else:
+        _setup_check(checks, "google_oauth_credentials", "skip", f"{model} routes to BYOK")
+
+    skill_dir = Path(os.path.expanduser(args.skill_dir))
+    skill_path = skill_dir / BUNDLED_CODEX_SKILL_NAME
+    try:
+        bundled_skill_root()
+        if skill_path.is_dir() and codex_skill_matches_bundled(skill_path):
+            skill_status = "installed"
+        elif skill_path.is_dir():
+            skill_status = "present-but-different"
+        else:
+            skill_status = "missing"
+        _setup_check(checks, "anti_skill", "pass" if skill_status == "installed" else "warn", skill_status, path=str(skill_path))
+    except RuntimeError as exc:
+        _setup_check(checks, "anti_skill", "fail", redact_secret_text(str(exc)))
+
+    if args.check or not args.write:
+        readiness = codex_ready_report(
+            config=args.config,
+            provider_id=args.provider,
+            expected_base_url=base_url,
+            gateway_timeout=args.gateway_timeout,
+            gateway_token_env=args.gateway_token_env,
+        )
+        checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
+        ok = all(check["status"] != "fail" for check in checks)
+        report = {
+            "ok": ok,
+            "mode": "check",
+            "model": model,
+            "base_url": base_url,
+            "checks": checks,
+            "next_command": "codex-antigravity setup --write --accounts 1 --install-skill --start"
+            if not ok
+            else "codex",
+        }
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            _print_setup_report(report)
+        return report
+
+    if google_route:
+        run_login(argparse.Namespace(count=args.accounts, select_account=True))
+        _setup_check(checks, "google_login", "pass", f"completed {args.accounts} OAuth login flow(s)")
+
+    run_configure_codex(
+        argparse.Namespace(
+            write=True,
+            config=args.config,
+            model=model,
+            provider=args.provider,
+            provider_name=args.provider_name,
+            base_url=base_url,
+        )
+    )
+    _setup_check(checks, "codex_config_write", "pass", f"updated {Path(os.path.expanduser(args.config))}")
+
+    if args.install_skill:
+        run_install_skill(
+            argparse.Namespace(
+                skill_dir=args.skill_dir,
+                force=args.force,
+                dry_run=False,
+                verify=args.verify_skill,
+            )
+        )
+        _setup_check(checks, "anti_skill_install", "pass", f"installed bundled Anti skill under {skill_dir}")
+    else:
+        _setup_check(checks, "anti_skill_install", "skip", "pass --install-skill to install the optional $anti helper")
+
+    if args.start:
+        try:
+            start_gateway_background(
+                argparse.Namespace(
+                    host=args.host,
+                    port=args.port,
+                    allow_remote=args.allow_remote,
+                )
+            )
+            _setup_check(checks, "gateway_start", "pass", f"started background gateway on {args.host}:{args.port}")
+        except SystemExit as exc:
+            _setup_check(checks, "gateway_start", "fail", redact_secret_text(str(exc)))
+            report = {
+                "ok": False,
+                "mode": "write",
+                "model": model,
+                "base_url": base_url,
+                "checks": checks,
+                "next_command": f"codex-antigravity start --background --port {args.port}",
+            }
+            if args.json:
+                print(json.dumps(report, indent=2))
+            else:
+                _print_setup_report(report)
+            raise
+    else:
+        _setup_check(checks, "gateway_start", "skip", "pass --start to start the gateway in the background")
+
+    try:
+        gateway_ids = gateway_model_ids(base_url, timeout=args.gateway_timeout, token_env=args.gateway_token_env)
+        catalog_status = "pass" if model in gateway_ids else "fail"
+        detail = f"/v1/models advertises {model}" if catalog_status == "pass" else f"/v1/models does not advertise {model}"
+        _setup_check(checks, "gateway_models", catalog_status, detail, model_count=len(gateway_ids))
+    except RuntimeError as exc:
+        _setup_check(checks, "gateway_models", "fail", redact_secret_text(str(exc)))
+
+    readiness = codex_ready_report(
+        config=args.config,
+        provider_id=args.provider,
+        expected_base_url=base_url,
+        gateway_timeout=args.gateway_timeout,
+        gateway_token_env=args.gateway_token_env,
+    )
+    checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
+    ok = all(check["status"] != "fail" for check in checks)
+    report = {
+        "ok": ok,
+        "mode": "write",
+        "model": model,
+        "base_url": base_url,
+        "checks": checks,
+        "next_command": readiness["next_command"] if not ok else "codex",
+    }
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        _print_setup_report(report)
+    if not ok:
+        raise SystemExit(f"Setup completed with readiness failures. Next command: {report['next_command']}")
+    return report
+
 def run_doctor(
     *,
     byok_only: bool = False,
@@ -1184,22 +1813,27 @@ def run_doctor(
     if byok_only:
         print("[INFO] Authenticated Accounts: skipped (--byok-only)")
     else:
-        data = load_accounts()
-        accounts = data.get("accounts", [])
-        if accounts:
-            print(f"[PASS] Authenticated Accounts: {len(accounts)} configured")
-            for acc in accounts:
-                email = acc.get("email")
-                expires_at = normalize_epoch_seconds(acc.get("expiresAt", 0))
-                status = "ACTIVE" if expires_at > time.time() else "EXPIRED (will auto-refresh)"
-                print(f"       - {email} ({status})")
-            print("       Rotation:")
-            for line in account_rotation_lines(data)[1:]:
-                print(f"       {line.strip()}")
-        else:
+        try:
+            data = load_accounts()
+        except Exception as e:
             healthy = False
-            print("[WARN] Authenticated Accounts: 0 accounts found.")
-            print("       Run `codex-antigravity login` to add an account.")
+            print(f"[FAIL] Authenticated Accounts: could not load account store ({redact_secret_text(str(e))})")
+        else:
+            accounts = data.get("accounts", [])
+            if accounts:
+                print(f"[PASS] Authenticated Accounts: {len(accounts)} configured")
+                for acc in accounts:
+                    email = acc.get("email")
+                    expires_at = normalize_epoch_seconds(acc.get("expiresAt", 0))
+                    status = "ACTIVE" if expires_at > time.time() else "EXPIRED (will auto-refresh)"
+                    print(f"       - {email} ({status})")
+                print("       Rotation:")
+                for line in account_rotation_lines(data)[1:]:
+                    print(f"       {line.strip()}")
+            else:
+                healthy = False
+                print("[WARN] Authenticated Accounts: 0 accounts found.")
+                print("       Run `codex-antigravity login` to add an account.")
 
     # Check BYOK providers
     try:
@@ -1235,8 +1869,9 @@ def run_doctor(
                         f"'{selected_provider_id}', but its key status is {selected_status}."
                     )
                 elif selected_provider_model not in [str(m.get("id") if isinstance(m, dict) else m) for m in providers[selected_provider_id].get("models", [])]:
+                    healthy = False
                     print(
-                        f"[WARN] Selected BYOK model: {codex_config_model} is routed to '{selected_provider_id}', "
+                        f"[FAIL] Selected BYOK model: {codex_config_model} is routed to '{selected_provider_id}', "
                         "but the exact model is not listed in that provider's model catalog."
                     )
         else:
@@ -1246,7 +1881,11 @@ def run_doctor(
             else:
                 print("[INFO] BYOK Providers: none configured.")
     except Exception as e:
-        print(f"[WARN] BYOK Providers: could not load provider config ({redact_secret_text(str(e))})")
+        if byok_only:
+            healthy = False
+            print(f"[FAIL] BYOK Providers: could not load provider config ({redact_secret_text(str(e))})")
+        else:
+            print(f"[WARN] BYOK Providers: could not load provider config ({redact_secret_text(str(e))})")
         
     # Check Codex config
     if codex_config.is_file():
@@ -1283,6 +1922,38 @@ def main():
     login_parser = subparsers.add_parser("login", help="Authenticate Google Antigravity account(s) into the rotation pool")
     login_parser.add_argument("--count", type=positive_int, default=1, help="Number of browser login flows to run")
     login_parser.add_argument("--select-account", action="store_true", help="Force Google's account chooser during login")
+
+    setup_parser = subparsers.add_parser(
+        "setup",
+        help="Primary guided setup for using Antigravity Claude from Codex",
+    )
+    setup_parser.add_argument("--check", action="store_true", help="Run read-only setup and Codex readiness checks")
+    setup_parser.add_argument("--json", action="store_true", help="Print setup/readiness status as JSON")
+    setup_parser.add_argument("--write", action="store_true", help="Run login and write Codex configuration")
+    setup_parser.add_argument("--accounts", type=positive_int, default=1, help="Number of Google login flows when --write is used")
+    setup_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Default Codex model to select")
+    setup_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id")
+    setup_parser.add_argument("--provider-name", default=DEFAULT_CODEX_PROVIDER_NAME, help="Provider display name")
+    setup_parser.add_argument("--base-url", default=DEFAULT_CODEX_BASE_URL, help="Gateway base URL ending in /v1")
+    setup_parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path")
+    setup_parser.add_argument("--install-skill", action="store_true", help="Install or refresh the optional bundled $anti skill")
+    setup_parser.add_argument("--skill-dir", default=DEFAULT_CODEX_SKILLS_DIR, help="Directory containing Codex skills")
+    setup_parser.add_argument("--force", action="store_true", help="Back up and replace an existing anti skill when installing")
+    setup_parser.add_argument("--verify-skill", action="store_true", help="Run installed Anti skill tests after install")
+    setup_parser.add_argument("--start", action="store_true", help="Start the gateway in the background after writing config")
+    setup_parser.add_argument("--port", type=int, default=51122, help="Gateway server port when --start is used")
+    setup_parser.add_argument("--host", default="127.0.0.1", help="Gateway server host when --start is used")
+    setup_parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow non-loopback gateway clients when starting with a strong ANTIGRAVITY_GATEWAY_TOKEN",
+    )
+    setup_parser.add_argument("--gateway-timeout", type=float, default=2.0, help="Gateway model-catalog timeout")
+    setup_parser.add_argument(
+        "--gateway-token-env",
+        default="ANTIGRAVITY_GATEWAY_TOKEN",
+        help="Environment variable holding the gateway bearer token for remote gateways",
+    )
 
     setup_google_parser = subparsers.add_parser(
         "setup-google",
@@ -1322,6 +1993,14 @@ def main():
     doctor_parser.add_argument("--gateway-base-url", default=DEFAULT_CODEX_BASE_URL, help="Expected Codex gateway base URL")
     doctor_parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path to verify")
     doctor_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id to verify")
+    doctor_parser.add_argument("--codex-ready", action="store_true", help="Run native Codex model-picker readiness diagnostics")
+    doctor_parser.add_argument("--json", action="store_true", help="Print doctor status as JSON when used with --codex-ready")
+    doctor_parser.add_argument("--gateway-timeout", type=float, default=2.0, help="Gateway model-catalog timeout")
+    doctor_parser.add_argument(
+        "--gateway-token-env",
+        default="ANTIGRAVITY_GATEWAY_TOKEN",
+        help="Environment variable holding the gateway bearer token for remote gateways",
+    )
     
     # accounts
     subparsers.add_parser("accounts", help="List all configured accounts")
@@ -1377,17 +2056,30 @@ def main():
         action="store_true",
         help="Allow non-loopback clients when ANTIGRAVITY_GATEWAY_TOKEN is set to at least 32 visible ASCII characters",
     )
+    start_parser.add_argument("--background", action="store_true", help="Start the gateway as a background process with pid/log files")
+
+    stop_parser = subparsers.add_parser("stop", help="Stop a background gateway started by codex-antigravity")
+    stop_parser.add_argument("--port", type=int, default=51122, help="Gateway server port (default: 51122)")
+
+    status_parser = subparsers.add_parser("status", help="Show background gateway pid/log status")
+    status_parser.add_argument("--port", type=int, default=51122, help="Gateway server port (default: 51122)")
+    status_parser.add_argument("--json", action="store_true", help="Print status as JSON")
     
     args = parser.parse_args()
     
     if args.command == "login":
         run_login(args)
+    elif args.command == "setup":
+        run_setup(args)
     elif args.command == "setup-google":
         run_setup_google(args)
     elif args.command == "setup-v2":
         run_setup_v2(args)
     elif args.command == "doctor":
-        if not run_doctor(
+        if args.codex_ready:
+            if not run_codex_ready_doctor(args):
+                sys.exit(1)
+        elif not run_doctor(
             byok_only=args.byok_only,
             expected_base_url=args.gateway_base_url,
             config=args.config,
@@ -1459,7 +2151,7 @@ def main():
                     headers=headers or None,
                 )
             except (RuntimeError, ValueError) as e:
-                raise SystemExit(str(e)) from e
+                raise SystemExit(redact_secret_text(str(e))) from e
             print(f"[+] Configured BYOK provider {provider['id']} at {provider.get('baseUrl')}")
             if provider.get("models"):
                 key_status = provider_key_status(provider, configured_label="key OK")
@@ -1481,10 +2173,17 @@ def main():
             else:
                 print(f"[*] No stored BYOK provider named {args.provider}")
     elif args.command == "start":
-        import uvicorn
-        require_safe_gateway_host(args.host, args.allow_remote)
-        print(f"[*] Starting local Responses API compatible gateway server on {args.host}:{args.port}...")
-        uvicorn.run("codex_antigravity_auth.server:app", host=args.host, port=args.port, log_level="info")
+        if args.background:
+            start_gateway_background(args)
+        else:
+            import uvicorn
+            require_safe_gateway_host(args.host, args.allow_remote)
+            print(f"[*] Starting local Responses API compatible gateway server on {args.host}:{args.port}...")
+            uvicorn.run("codex_antigravity_auth.server:app", host=args.host, port=args.port, log_level="info")
+    elif args.command == "stop":
+        stop_gateway(args)
+    elif args.command == "status":
+        run_gateway_status(args)
 
 if __name__ == "__main__":
     main()

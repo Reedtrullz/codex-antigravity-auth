@@ -128,7 +128,10 @@ class TestServerStreaming(unittest.TestCase):
                     )
 
         self.assertEqual(response.status_code, 429)
-        self.assertIn("quota exhausted", response.json()["detail"])
+        detail = response.json()["detail"]
+        self.assertIn("quota exhausted", detail["message"])
+        self.assertEqual(detail["diagnostics"]["selected_account_family"], "gemini")
+        self.assertIn("rotation_attempted", detail["diagnostics"])
         mock_mark_failure.assert_called_once()
 
     def test_google_streaming_invalid_json_chunk_fails_instead_of_completing(self):
