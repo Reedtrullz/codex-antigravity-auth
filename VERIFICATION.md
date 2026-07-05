@@ -72,7 +72,7 @@ codex-antigravity start
 ```bash
 codex-antigravity doctor        # diagnostics
 codex-antigravity doctor --byok-only
-python3 -m pytest -q             # current local suite, 242 tests plus 128 subtests
+python3 -m pytest -q             # current full local suite
 curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
 ```
 
@@ -104,7 +104,7 @@ curl -s -X POST http://localhost:51122/v1/responses \
 If you want to smoke `deepseek:deepseek-v4-flash` instead, include `--model deepseek-v4-flash` in the DeepSeek `provider set` command so it appears in `/v1/models`.
 
 The latest credentialed smokes were run on 2026-07-03 against PR #1 head `e6a81ac` before squash merge `191daa4`. DeepSeek used a transient `DEEPSEEK_API_KEY` environment variable only, did not persist the key, exposed `deepseek:deepseek-v4-flash` in `/v1/models`, and returned exact sentinels for both non-streaming and streaming `/v1/responses`.
-OpenRouter was also smoke-tested with a transient `OPENROUTER_API_KEY` environment variable only: `/v1/models` exposed `openrouter:openrouter/auto`, non-streaming and streaming `/v1/responses` returned exact sentinels for `openrouter:openrouter/auto`, and manual explicit routing returned an exact non-streaming sentinel for `openrouter:deepseek/deepseek-chat`. This uncommitted local review patch has local package/unit proof but has not rerun credentialed live smokes.
+OpenRouter was also smoke-tested with a transient `OPENROUTER_API_KEY` environment variable only: `/v1/models` exposed `openrouter:openrouter/auto`, non-streaming and streaming `/v1/responses` returned exact sentinels for `openrouter:openrouter/auto`, and manual explicit routing returned an exact non-streaming sentinel for `openrouter:deepseek/deepseek-chat`. The Anti V2 workflow release has local package/unit proof and CI proof recorded in `STATUS.md`, but has not rerun credentialed live Google or BYOK generation smokes.
 
 ## Switching Between ChatGPT and Antigravity
 - **Use ChatGPT**: Remove `model_provider` line from config.toml

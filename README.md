@@ -54,7 +54,41 @@ Install the optional Codex `$anti` sidecar skill that ships with this repo:
 codex-antigravity install-skill
 ```
 
-This copies the bundled skill into `~/.codex/skills/anti` so Codex can use Antigravity Opus/Sonnet as a sidecar reviewer, consult lane, and deep work planner from chat prompts like `$anti review this diff with opus`. If you already have a local `anti` skill, the command refuses to overwrite it unless you pass `--force`; forced installs back up the existing skill first.
+This copies the bundled skill into `~/.codex/skills/anti` so Codex can use Antigravity Opus/Sonnet as a sidecar reviewer, consult lane, deep work planner, and bounded multi-model panel from chat prompts like `$anti review this diff with opus`. If you already have a local `anti` skill, the command refuses to overwrite it unless you pass `--force`; forced installs back up the existing skill under a sibling `skills-backups` directory so backups are not indexed as live skills.
+
+To verify the V2 helper workflow surface without changing Codex config, run:
+
+```bash
+codex-antigravity setup-v2
+codex-antigravity install-skill --verify
+# If setup-v2 warns that an existing anti skill is stale or locally modified:
+codex-antigravity install-skill --force --verify
+```
+
+`setup-v2 --write` installs or refreshes the bundled skill, but it does not write `~/.codex/config.toml`; use `setup-google` or `configure-codex --write` when you explicitly want Codex itself pointed at the gateway.
+If an existing `anti` skill differs from the bundled copy, pass `--force` with `install-skill` or `setup-v2 --write` to back it up and replace it before verifying. BYOK provider identity/key checks are skipped by default; add `--check-byok` when you want setup-v2 to inspect provider readiness and confirm configured provider models are advertised by the running gateway.
+
+The skill also ships a helper-level panel mode inspired by MoA/Fusion workflows. Codex remains the acting agent; the helper fans out to gateway-advertised models, asks a judge model to synthesize consensus, contradictions, blind spots, and next actions, then returns advisory output for Codex to verify:
+
+```bash
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode plan --scope working-tree --prompt "Plan this PR"
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --model sonnet --model openrouter:deepseek/deepseek-chat --judge opus --prompt "Compare these approaches"
+```
+
+Panel consensus is not proof and should not patch code directly. BYOK panel models such as `openrouter:...` only work when the running gateway advertises them in `/v1/models`, which requires usable provider keys or a key-optional local provider setup.
+
+V2 named workflow presets wrap the same advisory engine for common Codex work:
+
+```bash
+python3 ~/.codex/skills/anti/scripts/anti.py workflow review-ready --scope staged
+python3 ~/.codex/skills/anti/scripts/anti.py workflow plan-deep --scope working-tree --prompt "Plan this PR" --progress
+python3 ~/.codex/skills/anti/scripts/anti.py workflow ship-gate --scope diff --base origin/main --json
+python3 ~/.codex/skills/anti/scripts/anti.py workflow provider-compare --model sonnet --model openrouter:deepseek/deepseek-chat --prompt "Compare these approaches"
+python3 ~/.codex/skills/anti/scripts/anti.py runs list
+```
+
+Workflow runs save sanitized summaries under `~/.codex/anti-runs` by default; primitive `consult`, `plan`, `review`, and `panel` commands default to not writing a ledger unless `--save-output summary` or `--save-output full` is passed. `--fallback-model sonnet --fallback-policy on-retryable` and `--progress` are available for long-running model calls that may otherwise fail silently or hit transient backend rotation errors.
 
 Before running `codex-antigravity login`, create a Google OAuth desktop client. The local callback listener uses:
 

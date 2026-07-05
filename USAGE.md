@@ -17,7 +17,42 @@ codex-antigravity doctor
 
 `configure-codex` validates the Codex model id, provider id, provider name, and gateway base URL before writing. `--write` uses private atomic writes, preserves a symlinked Codex config path by updating its real target, and creates a private timestamped backup before changing an existing Codex config.
 
-`install-skill` installs the bundled Codex `$anti` sidecar skill into `~/.codex/skills/anti`. Use it when you want chat prompts such as `$anti review this diff with opus`, `$anti plan --scope staged`, or `$anti smoke` to route through the repo-shipped helper. Existing local `anti` skills are left untouched unless `--force` is passed, and forced installs create a timestamped backup.
+`install-skill` installs the bundled Codex `$anti` sidecar skill into `~/.codex/skills/anti`. Use it when you want chat prompts such as `$anti review this diff with opus`, `$anti plan --scope staged`, `$anti panel --mode review --scope staged`, or `$anti smoke` to route through the repo-shipped helper. Existing local `anti` skills are left untouched unless `--force` is passed, and forced installs create a timestamped backup under a sibling `skills-backups` directory so backups do not show up as extra personal skills.
+
+For a no-config-mutation V2 readiness check, run:
+
+```bash
+codex-antigravity setup-v2
+codex-antigravity install-skill --verify
+# If setup-v2 warns that the installed anti skill differs from this package:
+codex-antigravity install-skill --force --verify
+```
+
+Use `setup-v2 --write` only when you want it to install or refresh the bundled skill. It does not write `~/.codex/config.toml`; use `setup-google` or `configure-codex --write` for that. When checking a remote gateway, export the bearer token and pass `--gateway-token-env` (defaults to `ANTIGRAVITY_GATEWAY_TOKEN`) so the `/v1/models` probe can authenticate.
+If the existing `anti` skill is locally modified or stale, add `--force` before verification to back it up under `skills-backups` and replace it. BYOK provider checks are opt-in; add `--check-byok` to inspect provider readiness and compare configured provider models with the gateway's `/v1/models` catalog.
+
+For bounded multi-model advice, use the helper-level panel mode. It does not replace Codex's native acting model loop; it returns advisory synthesis for Codex to verify:
+
+```bash
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope diff --base origin/main --role correctness --role security --role tests
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode plan --scope working-tree --prompt "Plan this PR"
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --model sonnet --model openrouter:deepseek/deepseek-chat --judge opus --prompt "Compare these approaches"
+```
+
+Panel mode validates all requested models against `/v1/models` before generation. BYOK models only appear there when the gateway process has usable provider credentials or a key-optional local provider setup. Treat panel consensus as a prioritization hint, not proof; verify actionable findings locally before editing.
+
+V2 workflow presets provide safer defaults for recurring work:
+
+```bash
+python3 ~/.codex/skills/anti/scripts/anti.py workflow review-ready --scope staged
+python3 ~/.codex/skills/anti/scripts/anti.py workflow plan-deep --scope working-tree --prompt "Plan this PR" --progress
+python3 ~/.codex/skills/anti/scripts/anti.py workflow ship-gate --scope diff --base origin/main --json
+python3 ~/.codex/skills/anti/scripts/anti.py workflow provider-compare --model sonnet --model openrouter:deepseek/deepseek-chat --prompt "Compare these approaches"
+python3 ~/.codex/skills/anti/scripts/anti.py runs list
+```
+
+Workflow presets save sanitized summaries under `~/.codex/anti-runs` by default. Primitive commands default to `--save-output never`; opt into `summary` or redacted `full` records when useful. Use `--fallback-model sonnet --fallback-policy on-retryable` for long Opus calls that should degrade after retryable backend failures, and `--progress` to print model/chunk progress to stderr.
 
 For the easiest Google Antigravity OAuth setup, use the guided command:
 

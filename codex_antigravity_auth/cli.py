@@ -6,10 +6,13 @@ import math
 import re
 import shlex
 import socketserver
+import subprocess
 import webbrowser
 import time
 import json
 import tempfile
+import urllib.error
+import urllib.request
 from importlib.resources import files
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -162,6 +165,10 @@ def _copy_resource_tree(source, target: Path) -> None:
             os.chmod(destination, mode)
 
 
+def _skill_backup_root(skill_dir: Path) -> Path:
+    return skill_dir.with_name(f"{skill_dir.name}-backups")
+
+
 def install_codex_skill(
     skill_dir: Path,
     *,
@@ -184,15 +191,15 @@ def install_codex_skill(
                 f"Codex skill already exists at {destination}. "
                 "Use --force to back it up and replace it with the bundled skill."
             )
-        backup_base = destination.with_name(
-            f"{destination.name}.backup-{time.strftime('%Y%m%d%H%M%S')}"
-        )
+        backup_root = _skill_backup_root(skill_dir.expanduser())
+        backup_base = backup_root / f"{destination.name}.backup-{time.strftime('%Y%m%d%H%M%S')}"
         backup_path = backup_base
         suffix = 2
         while backup_path.exists():
             backup_path = backup_base.with_name(f"{backup_base.name}-{suffix}")
             suffix += 1
         if not dry_run:
+            backup_root.mkdir(parents=True, exist_ok=True)
             destination.rename(backup_path)
             _copy_resource_tree(skill_root, destination)
         return "replaced", destination, backup_path
@@ -201,6 +208,50 @@ def install_codex_skill(
         destination.parent.mkdir(parents=True, exist_ok=True)
         _copy_resource_tree(skill_root, destination)
     return "installed", destination, None
+
+
+def codex_skill_short_description(skill_path: Path) -> str | None:
+    agent_path = skill_path / "agents" / "openai.yaml"
+    if not agent_path.is_file():
+        return None
+    for line in agent_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("short_description:"):
+            return stripped.split(":", 1)[1].strip().strip('"').strip("'")
+    return None
+
+
+def codex_skill_matches_bundled(skill_path: Path) -> bool:
+    if not skill_path.is_dir():
+        return False
+    return _path_tree_manifest(skill_path) == _resource_tree_manifest(bundled_skill_root())
+
+
+def verify_codex_skill(skill_path: Path) -> bool:
+    required = [
+        skill_path / "SKILL.md",
+        skill_path / "agents" / "openai.yaml",
+        skill_path / "scripts" / "anti.py",
+        skill_path / "tests" / "test_anti.py",
+    ]
+    missing = [path for path in required if not path.is_file()]
+    if missing:
+        for path in missing:
+            print(f"[FAIL] Missing skill file: {path}")
+        return False
+    proc = subprocess.run(
+        [sys.executable, "-m", "unittest", "discover", "-s", str(skill_path / "tests")],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if proc.returncode != 0:
+        if proc.stdout:
+            print(proc.stdout.rstrip())
+        print("[FAIL] Installed Anti skill tests failed")
+        return False
+    print("[PASS] Installed Anti skill tests passed")
+    return True
 
 
 def run_install_skill(args) -> None:
@@ -222,7 +273,164 @@ def run_install_skill(args) -> None:
         print(f"[+] {prefix}Installed Codex Anti skill: {destination}")
         if backup_path:
             print(f"[+] {prefix}Previous skill backup: {backup_path}")
+    description = codex_skill_short_description(destination)
+    if description:
+        print(f"    Skill chip: Anti — {description}")
     print("    Invoke it in Codex with: $anti review this diff with opus")
+    if getattr(args, "verify", False) and not args.dry_run:
+        if not verify_codex_skill(destination):
+            raise SystemExit(1)
+
+
+def gateway_model_ids(
+    base_url: str,
+    *,
+    timeout: float = 2.0,
+    token_env: str = "ANTIGRAVITY_GATEWAY_TOKEN",
+) -> set[str]:
+    url = base_url.rstrip("/") + "/models"
+    headers = {"Accept": "application/json"}
+    token = os.environ.get(token_env, "").strip() if token_env else ""
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        hint = ""
+        if exc.code in (401, 403) and not token:
+            hint = f" (remote gateways require a bearer token; export {token_env})"
+        raise RuntimeError(f"{url} returned HTTP {exc.code}{hint}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"{url} is not reachable ({exc})") from exc
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"{url} returned non-JSON data") from exc
+    entries = payload.get("data")
+    if not isinstance(entries, list):
+        entries = payload.get("models")
+    ids = {
+        entry.get("id")
+        for entry in entries or []
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+    if not ids:
+        raise RuntimeError(f"{url} returned no model ids")
+    return ids
+
+
+def run_setup_v2(args) -> None:
+    print("=" * 60)
+    print("             ANTI V2 WORKFLOW SETUP CHECK           ")
+    print("=" * 60)
+    skill_dir = Path(os.path.expanduser(args.skill_dir))
+    destination = skill_dir / BUNDLED_CODEX_SKILL_NAME
+
+    try:
+        bundled_skill_root()
+        print("[PASS] Bundled Anti skill: present")
+    except RuntimeError as exc:
+        print(f"[FAIL] Bundled Anti skill: {exc}")
+        raise SystemExit(1) from exc
+
+    if args.write:
+        install_args = argparse.Namespace(
+            skill_dir=args.skill_dir,
+            force=args.force,
+            dry_run=False,
+            verify=args.verify_skill,
+        )
+        run_install_skill(install_args)
+    elif destination.is_dir():
+        description = codex_skill_short_description(destination)
+        if codex_skill_matches_bundled(destination):
+            print(f"[PASS] Installed Anti skill: {destination}")
+        else:
+            print(f"[WARN] Installed Anti skill differs from bundled V2 skill: {destination}")
+            print("       Run `codex-antigravity setup-v2 --write --force` to back it up and refresh it.")
+        if description:
+            print(f"       Skill chip: Anti — {description}")
+    else:
+        print(f"[WARN] Installed Anti skill: missing at {destination}")
+        print("       Run `codex-antigravity setup-v2 --write` or `codex-antigravity install-skill`.")
+
+    gateway_ids = None
+    try:
+        ids = gateway_model_ids(
+            args.base_url,
+            timeout=args.timeout,
+            token_env=getattr(args, "gateway_token_env", "ANTIGRAVITY_GATEWAY_TOKEN"),
+        )
+        gateway_ids = ids
+        print(f"[PASS] Gateway /v1/models: {len(ids)} model(s)")
+        for model in ("claude-opus-4-6", "claude-3.5-sonnet"):
+            if model in ids:
+                print(f"       - [PASS] {model}")
+            else:
+                print(f"       - [WARN] {model} not advertised")
+    except RuntimeError as exc:
+        print(f"[WARN] Gateway /v1/models: {redact_secret_text(str(exc))}")
+        print("       Start the gateway with `codex-antigravity start` when you want live workflows.")
+
+    providers = {}
+    if args.check_byok:
+        try:
+            providers = all_provider_configs()
+            stored_providers = load_provider_config().get("providers", {})
+            stored_provider_ids = set(stored_providers) if isinstance(stored_providers, dict) else set()
+        except Exception as exc:
+            print(f"[WARN] BYOK provider visibility: could not load provider config ({redact_secret_text(str(exc))})")
+            providers = {}
+            stored_provider_ids = set()
+        if providers:
+            print(f"[PASS] BYOK provider visibility: {len(providers)} configured/env/local provider(s)")
+            if gateway_ids is None:
+                print("[WARN] BYOK gateway advertisement: unverified because /v1/models was not reachable")
+            for provider_id, provider in providers.items():
+                status = provider_key_status(provider, configured_label=provider_configured_label(provider_id, provider, stored_provider_ids))
+                models = provider.get("models", [])
+                print(f"       - {provider_id}: {status}, {len(models)} model(s)")
+                if gateway_ids is not None and models:
+                    missing = []
+                    for model_entry in models:
+                        provider_model = model_entry.get("id") if isinstance(model_entry, dict) else str(model_entry)
+                        if provider_model and f"{provider_id}:{provider_model}" not in gateway_ids:
+                            missing.append(f"{provider_id}:{provider_model}")
+                    if missing:
+                        sample = ", ".join(missing[:5])
+                        suffix = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+                        print(f"         [WARN] not advertised by gateway: {sample}{suffix}")
+        else:
+            print("[WARN] BYOK readiness requested but no providers are visible")
+    else:
+        print("[INFO] BYOK provider checks skipped; pass --check-byok to inspect provider readiness")
+
+    if args.check_google:
+        cid, csec = resolve_oauth_credentials()
+        if cid and csec:
+            print("[PASS] Google OAuth credentials: configured")
+        else:
+            print("[WARN] Google OAuth credentials: missing")
+        accounts = load_accounts().get("accounts", [])
+        print(f"[INFO] Google account rotation pool: {len(accounts)} account(s)")
+
+    if args.check_byok and providers:
+        unusable = [
+            provider_id
+            for provider_id, provider in providers.items()
+            if provider_key_status(provider, configured_label="key OK") != "key OK"
+        ]
+        if unusable:
+            print("[WARN] BYOK providers not usable: " + ", ".join(unusable))
+        elif gateway_ids is None:
+            print("[INFO] BYOK local readiness: all visible providers have usable keys or local keyless access")
+            print("       Gateway model-picker visibility remains unverified until /v1/models is reachable.")
+        else:
+            print("[PASS] BYOK readiness: all visible providers have usable keys or local keyless access")
+
+    print("=" * 60)
 
 
 def account_rotation_lines(data: dict | None = None) -> list[str]:
@@ -1089,6 +1297,24 @@ def main():
     setup_google_parser.add_argument("--provider-name", default=DEFAULT_CODEX_PROVIDER_NAME, help="Provider display name")
     setup_google_parser.add_argument("--base-url", default=None, help="Gateway base URL; defaults to --port")
     setup_google_parser.add_argument("--port", type=int, default=51122, help="Gateway server port to show in next-step output")
+
+    setup_v2_parser = subparsers.add_parser(
+        "setup-v2",
+        help="Check Anti V2 workflow readiness and optionally install the bundled skill",
+    )
+    setup_v2_parser.add_argument("--skill-dir", default=DEFAULT_CODEX_SKILLS_DIR, help="Directory containing Codex skills")
+    setup_v2_parser.add_argument("--base-url", default=DEFAULT_CODEX_BASE_URL, help="Gateway base URL ending in /v1")
+    setup_v2_parser.add_argument("--timeout", type=float, default=2.0, help="Gateway model-catalog timeout")
+    setup_v2_parser.add_argument(
+        "--gateway-token-env",
+        default="ANTIGRAVITY_GATEWAY_TOKEN",
+        help="Environment variable holding the gateway bearer token for remote gateways",
+    )
+    setup_v2_parser.add_argument("--write", action="store_true", help="Install/update the bundled Anti skill")
+    setup_v2_parser.add_argument("--force", action="store_true", help="Back up and replace an existing anti skill when --write is used")
+    setup_v2_parser.add_argument("--verify-skill", action="store_true", help="Run installed Anti skill tests when --write is used")
+    setup_v2_parser.add_argument("--check-google", action="store_true", help="Also inspect Google OAuth/account readiness")
+    setup_v2_parser.add_argument("--check-byok", action="store_true", help="Also inspect BYOK provider key readiness")
     
     # doctor
     doctor_parser = subparsers.add_parser("doctor", help="Check status, health, configurations, and diagnosis")
@@ -1122,6 +1348,7 @@ def main():
     )
     install_skill_parser.add_argument("--force", action="store_true", help="Back up and replace an existing anti skill")
     install_skill_parser.add_argument("--dry-run", action="store_true", help="Show what would be installed without writing")
+    install_skill_parser.add_argument("--verify", action="store_true", help="Run installed Anti skill tests after install")
 
     provider_parser = subparsers.add_parser("provider", help="Manage BYOK OpenAI-compatible providers")
     provider_sub = provider_parser.add_subparsers(dest="provider_command", required=True)
@@ -1157,6 +1384,8 @@ def main():
         run_login(args)
     elif args.command == "setup-google":
         run_setup_google(args)
+    elif args.command == "setup-v2":
+        run_setup_v2(args)
     elif args.command == "doctor":
         if not run_doctor(
             byok_only=args.byok_only,

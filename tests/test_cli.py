@@ -12,6 +12,7 @@ from codex_antigravity_auth.oauth import authorize_antigravity
 from codex_antigravity_auth.cli import (
     account_rotation_lines,
     configure_codex_write_command,
+    gateway_model_ids,
     gateway_start_command,
     install_codex_skill,
     inspect_codex_gateway_config,
@@ -26,6 +27,7 @@ from codex_antigravity_auth.cli import (
     run_install_skill,
     run_login,
     run_local_oauth_flow,
+    run_setup_v2,
     run_setup_google,
     upsert_google_account,
     validate_codex_model_id,
@@ -822,6 +824,9 @@ class TestInstallSkill(unittest.TestCase):
             self.assertEqual(action, "replaced")
             self.assertEqual(destination, existing)
             self.assertIsNotNone(backup_path)
+            self.assertEqual(backup_path.parent, skill_dir.with_name(f"{skill_dir.name}-backups"))
+            self.assertFalse(backup_path.parent.is_relative_to(skill_dir))
+            self.assertEqual(list(skill_dir.glob("anti.backup-*")), [])
             self.assertEqual((backup_path / "SKILL.md").read_text(encoding="utf-8"), "local edit\n")
             self.assertIn("$anti", (destination / "SKILL.md").read_text(encoding="utf-8"))
 
@@ -850,13 +855,24 @@ class TestInstallSkill(unittest.TestCase):
 
     def test_run_install_skill_prints_install_location(self):
         with TemporaryDirectory() as tmp:
-            args = Namespace(skill_dir=tmp, force=False, dry_run=False)
+            args = Namespace(skill_dir=tmp, force=False, dry_run=False, verify=False)
             with patch("builtins.print") as mock_print:
                 run_install_skill(args)
 
             printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
             self.assertIn("Installed Codex Anti skill", printed_text)
+            self.assertIn("Skill chip: Anti", printed_text)
             self.assertIn("$anti review this diff with opus", printed_text)
+
+    def test_run_install_skill_verify_runs_installed_skill_tests(self):
+        with TemporaryDirectory() as tmp:
+            args = Namespace(skill_dir=tmp, force=False, dry_run=False, verify=True)
+            with patch("codex_antigravity_auth.cli.verify_codex_skill", return_value=True) as verify:
+                with patch("builtins.print"):
+                    run_install_skill(args)
+
+            verify.assert_called_once()
+            self.assertTrue((Path(tmp) / "anti" / "SKILL.md").is_file())
 
     def test_main_install_skill_command_uses_temp_skill_dir(self):
         with TemporaryDirectory() as tmp:
@@ -866,6 +882,139 @@ class TestInstallSkill(unittest.TestCase):
                     main()
 
             self.assertTrue((Path(tmp) / "anti" / "SKILL.md").is_file())
+
+    def test_setup_v2_preflight_does_not_write_without_write_flag(self):
+        with TemporaryDirectory() as tmp:
+            args = Namespace(
+                skill_dir=tmp,
+                base_url="http://127.0.0.1:51122/v1",
+                timeout=0.01,
+                write=False,
+                force=False,
+                verify_skill=False,
+                check_google=False,
+                check_byok=False,
+            )
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6", "claude-3.5-sonnet"}):
+                with patch("codex_antigravity_auth.cli.all_provider_configs") as providers:
+                    with patch("builtins.print") as mock_print:
+                        run_setup_v2(args)
+
+            self.assertFalse((Path(tmp) / "anti").exists())
+            providers.assert_not_called()
+            printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+            self.assertIn("Bundled Anti skill", printed_text)
+            self.assertIn("Gateway /v1/models", printed_text)
+            self.assertIn("BYOK provider checks skipped", printed_text)
+
+    def test_setup_v2_warns_when_installed_skill_differs_from_bundled(self):
+        with TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp)
+            installed = skill_dir / "anti"
+            installed.mkdir()
+            (installed / "SKILL.md").write_text("stale local skill\n", encoding="utf-8")
+            args = Namespace(
+                skill_dir=tmp,
+                base_url="http://127.0.0.1:51122/v1",
+                timeout=0.01,
+                write=False,
+                force=False,
+                verify_skill=False,
+                check_google=False,
+                check_byok=False,
+            )
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6", "claude-3.5-sonnet"}):
+                with patch("builtins.print") as mock_print:
+                    run_setup_v2(args)
+
+            printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+            self.assertIn("differs from bundled V2 skill", printed_text)
+            self.assertIn("--write --force", printed_text)
+
+    def test_setup_v2_check_byok_reports_gateway_model_mismatch(self):
+        provider = {
+            "displayName": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com",
+            "apiKey": "secret",
+            "models": ["deepseek-chat"],
+        }
+        with TemporaryDirectory() as tmp:
+            args = Namespace(
+                skill_dir=tmp,
+                base_url="http://127.0.0.1:51122/v1",
+                timeout=0.01,
+                write=False,
+                force=False,
+                verify_skill=False,
+                check_google=False,
+                check_byok=True,
+            )
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6", "claude-3.5-sonnet"}):
+                with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"deepseek": provider}):
+                    with patch("codex_antigravity_auth.cli.load_provider_config", return_value={"providers": {"deepseek": provider}}):
+                        with patch("builtins.print") as mock_print:
+                            run_setup_v2(args)
+
+            printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+            self.assertIn("deepseek:deepseek-chat", printed_text)
+            self.assertIn("not advertised by gateway", printed_text)
+
+    def test_setup_v2_check_byok_reports_provider_load_failure_without_secret(self):
+        with TemporaryDirectory() as tmp:
+            args = Namespace(
+                skill_dir=tmp,
+                base_url="http://127.0.0.1:51122/v1",
+                timeout=0.01,
+                write=False,
+                force=False,
+                verify_skill=False,
+                check_google=False,
+                check_byok=True,
+            )
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6", "claude-3.5-sonnet"}):
+                with patch("codex_antigravity_auth.cli.all_provider_configs", side_effect=RuntimeError("api_key=sk-testsecret1234567890")):
+                    with patch("builtins.print") as mock_print:
+                        run_setup_v2(args)
+
+            printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+            self.assertIn("could not load provider config", printed_text)
+            self.assertNotIn("sk-testsecret1234567890", printed_text)
+
+    def test_gateway_model_ids_sends_bearer_token_from_env(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["auth"] = req.get_header("Authorization")
+            response = MagicMock()
+            response.read.return_value = b'{"data": [{"id": "claude-opus-4-6"}]}'
+            response.__enter__ = lambda self_: response
+            response.__exit__ = lambda self_, *exc: False
+            return response
+
+        with patch.dict(os.environ, {"TEST_GATEWAY_TOKEN": "unit-test-token-value"}):
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                ids = gateway_model_ids("https://gateway.example/v1", token_env="TEST_GATEWAY_TOKEN")
+
+        self.assertEqual(ids, {"claude-opus-4-6"})
+        self.assertEqual(captured["auth"], "Bearer unit-test-token-value")
+
+    def test_gateway_model_ids_omits_auth_header_when_env_missing(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["auth"] = req.get_header("Authorization")
+            response = MagicMock()
+            response.read.return_value = b'{"data": [{"id": "claude-opus-4-6"}]}'
+            response.__enter__ = lambda self_: response
+            response.__exit__ = lambda self_, *exc: False
+            return response
+
+        env = {key: value for key, value in os.environ.items() if key != "TEST_GATEWAY_TOKEN"}
+        with patch.dict(os.environ, env, clear=True):
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                gateway_model_ids("https://gateway.example/v1", token_env="TEST_GATEWAY_TOKEN")
+
+        self.assertIsNone(captured["auth"])
 
 
 class TestProviderCli(unittest.TestCase):

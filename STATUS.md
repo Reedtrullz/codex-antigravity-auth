@@ -1,10 +1,11 @@
-# Current Integration Status — 5 July 2026
+# Current Integration Status — 6 July 2026
 
 ## Build & Test Health
-- **local pytest**: 242/242 passing, plus 128 subtests, with `python3 -m pytest -q` ✅
+- **local pytest**: full local suite passing with `python3 -m pytest -q` (`289` tests plus `128` subtests) ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **wheel install smoke**: built wheel/sdist from a scratch copy, ran `twine check`, confirmed project URLs/metadata and MIT license inclusion in built artifacts, installed the wheel into a clean venv, ran `pip check`, verified console script help, `doctor --help`, and provider preset listing ✅
+- **PR #4 CI**: head `b309c1f` passed duplicate GitHub CI runs `28757022193` and `28757023173` across `package`, Python `3.10`, `3.11`, and `3.12` ✅
 - **live backend smoke**: credentialed live Google OAuth/runtime smoke passed on 2026-07-03 for `claude-3.5-sonnet`; live BYOK smokes passed through transient env vars only for `deepseek:deepseek-v4-flash` and OpenRouter on PR #1 head `e6a81ac` before squash merge `191daa4`. OpenRouter evidence covered `/v1/models` exposure for `openrouter:openrouter/auto`, exact non-streaming and streaming sentinels for `openrouter:openrouter/auto`, and exact non-streaming sentinel routing for `openrouter:deepseek/deepseek-chat` ✅
 - **install command**: `uv tool install .` for normal use, `uv tool install --editable .` for development
 - **doctor/connectivity**: redacted `codex-antigravity doctor` passed after live Google OAuth smoke
@@ -82,18 +83,24 @@
 | Finite Retry-After / Google RetryInfo cooldown hints | ✅ |
 | Fail-closed malformed-store write/update guardrails | ✅ |
 | Malformed OAuth `expires_in` fallback handling | ✅ |
+| Bundled `$anti` skill installer with external backup directory and verification mode | ✅ |
+| `setup-v2` readiness checks for sidecar, installed skill, gateway model visibility, and optional BYOK readiness | ✅ |
+| `$anti panel` / MoA / Fusion advisory multi-model review and planning helper | ✅ |
+| `$anti workflow` presets for review readiness, deep planning, ship gates, and provider comparison | ✅ |
+| Sanitized `$anti` run ledger with list/show/clean and dry-run pruning | ✅ |
+| `$anti` fallback/progress controls for long model calls and retryable backend drift | ✅ |
 
 ## Known Limitations
 - Live Google Antigravity, DeepSeek V4 Flash BYOK, and OpenRouter BYOK smokes have passed with configured credentials/API keys; xAI, Kimi/Moonshot, Ollama cloud, and arbitrary custom BYOK providers still need their own live-key smoke.
 - `previous_response_id` is rejected by design in this stateless gateway; replay the full conversation, including tool calls and outputs, in `input`.
 - `/v1/responses/compact` is not implemented.
-- CI includes unit/compile checks and a release-artifact smoke job. PR #3 head `500e22d` passed push and pull-request CI before merge/release.
+- CI includes unit/compile checks and a release-artifact smoke job. PR #4 head `b309c1f` passed pull-request CI before merge/release.
 - Live backend availability is covered only by the credentialed smoke runs noted above.
 
 ## Release State
-- Current package metadata: `1.0.1`
-- Previous tagged GitHub release: [v1.0.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.0.0)
-- `v1.0.1` is the release target for the `$anti` helper hardening patch.
+- Current package metadata: `1.1.0`
+- Previous tagged GitHub release: [v1.0.1](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.0.1)
+- `v1.1.0` is the release target for the Anti V2 workflows and panel release.
 
 ## Next Priorities
 1. Add `/v1/responses/compact` support
