@@ -1,5 +1,6 @@
 import unittest
 import time
+from unittest.mock import patch
 from codex_antigravity_auth.accounts import AccountManager
 from codex_antigravity_auth.transform import resolve_backend_model
 from codex_antigravity_auth.schema import clean_json_schema
@@ -48,18 +49,19 @@ class TestTransformationEdgeCases(unittest.TestCase):
     def test_account_rotation_consecutive_failure_backoff(self):
         manager = AccountManager()
         email = "fail-acc@gmail.com"
-        
-        # Mark failure once
-        manager.mark_failure(email, "Simulated network failure")
-        cd1 = manager._cooldowns[email]
-        duration1 = cd1 - time.time()
-        self.assertTrue(110 <= duration1 <= 130, f"Expected ~120s cooldown, got {duration1}")
-        
-        # Mark failure twice
-        manager.mark_failure(email, "Simulated network failure")
-        cd2 = manager._cooldowns[email]
-        duration2 = cd2 - time.time()
-        self.assertTrue(230 <= duration2 <= 250, f"Expected ~240s cooldown, got {duration2}")
+
+        with patch.object(manager, "_save_state_to_storage"):
+            # Mark failure once
+            manager.mark_failure(email, "Simulated network failure")
+            cd1 = manager._cooldowns[email]
+            duration1 = cd1 - time.time()
+            self.assertTrue(110 <= duration1 <= 130, f"Expected ~120s cooldown, got {duration1}")
+
+            # Mark failure twice
+            manager.mark_failure(email, "Simulated network failure")
+            cd2 = manager._cooldowns[email]
+            duration2 = cd2 - time.time()
+            self.assertTrue(230 <= duration2 <= 250, f"Expected ~240s cooldown, got {duration2}")
 
 if __name__ == "__main__":
     unittest.main()

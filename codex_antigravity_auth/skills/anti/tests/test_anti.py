@@ -880,23 +880,35 @@ class AntiHelperTests(unittest.TestCase):
                     output_text="ok",
                 )
 
-    def test_sanitize_json_keeps_numeric_and_boolean_leaves_under_secret_keys(self) -> None:
+    def test_sanitize_json_redacts_numeric_secret_values_but_keeps_http_code(self) -> None:
         anti = load_anti()
         sanitized = anti.sanitize_json(
             {
                 "code": 429,
+                "oauth_code": 123456,
                 "key": True,
+                "api_key": 123456,
+                "client_secret": 987654,
                 "access": 1.5,
                 "token": "SECRETTOKENVALUE1234567890",
                 "detail": {"code": "SECRETOAUTHCODE1234567890"},
+                "prompt_text": '{"token":123456,"code":789012,"api_key":345678}',
+                "error": "{'client_secret': 987654}",
             }
         )
 
         self.assertEqual(sanitized["code"], 429)
+        self.assertEqual(sanitized["oauth_code"], "<redacted>")
         self.assertEqual(sanitized["key"], True)
-        self.assertEqual(sanitized["access"], 1.5)
+        self.assertEqual(sanitized["api_key"], "<redacted>")
+        self.assertEqual(sanitized["client_secret"], "<redacted>")
+        self.assertEqual(sanitized["access"], "<redacted>")
         self.assertEqual(sanitized["token"], "<redacted>")
         self.assertEqual(sanitized["detail"]["code"], "<redacted>")
+        self.assertNotIn("123456", sanitized["prompt_text"])
+        self.assertNotIn("789012", sanitized["prompt_text"])
+        self.assertNotIn("345678", sanitized["prompt_text"])
+        self.assertNotIn("987654", sanitized["error"])
 
     def test_runs_show_rejects_path_like_ids(self) -> None:
         anti = load_anti()

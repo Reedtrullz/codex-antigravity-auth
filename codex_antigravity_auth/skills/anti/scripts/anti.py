@@ -91,7 +91,7 @@ EXACT_SECRET_KEYS = {
 SECRET_KEY_REGEX = (
     r"access_token|accessToken|refresh_token|refreshToken|id_token|idToken|client_secret|clientSecret|"
     r"code_verifier|codeVerifier|session_token|sessionToken|oauth_code|oauthCode|authorization|refresh|"
-    r"access|code|api_key|apiKey|apikey|api_token|apiToken|x-api-key|x-goog-api-key|cookie|set-cookie|"
+    r"access|token|secret|code|api_key|apiKey|apikey|api_token|apiToken|x-api-key|x-goog-api-key|cookie|set-cookie|"
     r"set_cookie|setCookie|password|key"
 )
 TOKEN_REDACTION_PATTERNS = [
@@ -102,7 +102,9 @@ TOKEN_REDACTION_PATTERNS = [
 BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE)
 URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s]+)@")
 JSON_SECRET_RE = re.compile(rf'(?i)("(?:{SECRET_KEY_REGEX})"\s*:\s*")[^"]*(")')
+JSON_SECRET_NUMBER_RE = re.compile(rf'(?i)("(?:{SECRET_KEY_REGEX})"\s*:\s*)-?\d+(?:\.\d+)?')
 PYTHON_REPR_SECRET_RE = re.compile(rf"(?i)('(?:{SECRET_KEY_REGEX})'\s*:\s*')[^']*(')")
+PYTHON_REPR_SECRET_NUMBER_RE = re.compile(rf"(?i)('(?:{SECRET_KEY_REGEX})'\s*:\s*)-?\d+(?:\.\d+)?")
 FORM_SECRET_RE = re.compile(rf"(?i)\b({SECRET_KEY_REGEX})=([^&\s]+)")
 UNQUOTED_SECRET_RE = re.compile(rf"(?i)\b({SECRET_KEY_REGEX})\s*[:=]\s*([^\s,;}}]+)")
 HEADER_SECRET_RE = re.compile(
@@ -243,15 +245,23 @@ def redact_sensitive_text(text: str) -> str:
     redacted = BEARER_RE.sub("Bearer " + REDACTION_MARKER, redacted)
     redacted = HEADER_SECRET_RE.sub(lambda match: match.group(1) + match.group(2) + REDACTION_MARKER, redacted)
     redacted = JSON_SECRET_RE.sub(lambda match: match.group(1) + REDACTION_MARKER + match.group(2), redacted)
+    redacted = JSON_SECRET_NUMBER_RE.sub(lambda match: match.group(1) + '"' + REDACTION_MARKER + '"', redacted)
     redacted = PYTHON_REPR_SECRET_RE.sub(lambda match: match.group(1) + REDACTION_MARKER + match.group(2), redacted)
+    redacted = PYTHON_REPR_SECRET_NUMBER_RE.sub(lambda match: match.group(1) + "'" + REDACTION_MARKER + "'", redacted)
     redacted = FORM_SECRET_RE.sub(lambda match: f"{match.group(1)}={REDACTION_MARKER}", redacted)
     redacted = UNQUOTED_SECRET_RE.sub(lambda match: f"{match.group(1)}={REDACTION_MARKER}", redacted)
     return redacted
 
 
-def value_can_hold_secret(item: Any) -> bool:
-    # Numeric and boolean leaves (HTTP codes, counts, flags) cannot carry credential material.
-    return not (item is None or item == "" or isinstance(item, (bool, int, float)))
+def secret_value_should_redact(key: Any, item: Any) -> bool:
+    if item is None or item == "":
+        return False
+    if isinstance(item, bool):
+        return False
+    normalized = str(key).replace("-", "_").lower()
+    if normalized == "code" and isinstance(item, int) and 100 <= item <= 599:
+        return False
+    return True
 
 
 def fallback_sanitize_json(value: Any) -> Any:
@@ -260,7 +270,7 @@ def fallback_sanitize_json(value: Any) -> Any:
         for key, item in value.items():
             result[str(key)] = (
                 REDACTION_MARKER
-                if key_looks_secret(key) and value_can_hold_secret(item)
+                if key_looks_secret(key) and secret_value_should_redact(key, item)
                 else fallback_sanitize_json(item)
             )
         return result
