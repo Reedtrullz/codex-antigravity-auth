@@ -158,6 +158,18 @@ def finite_retry_after_seconds(value: object) -> float | None:
     return max(0.0, seconds)
 
 
+def normalize_epoch_seconds(value: object) -> float:
+    try:
+        seconds = float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(seconds):
+        return 0
+    if seconds > 10_000_000_000:
+        seconds = seconds / 1000
+    return seconds
+
+
 def retry_after_seconds_from_response(res: httpx.Response) -> float | None:
     retry_after = res.headers.get("retry-after")
     if retry_after:
@@ -247,11 +259,8 @@ def google_rotation_diagnostics(
         if not isinstance(account, dict):
             continue
         email = account.get("email")
-        try:
-            cooldown_end = float(cooldowns.get(email, 0) or 0)
-        except (TypeError, ValueError):
-            cooldown_end = 0
-        if math.isfinite(cooldown_end) and cooldown_end > now:
+        cooldown_end = normalize_epoch_seconds(cooldowns.get(email, 0))
+        if cooldown_end > now:
             cooldown_count += 1
     return {
         "selected_account_family": family,

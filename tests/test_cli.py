@@ -345,7 +345,7 @@ wire_api = "responses"
     def test_normalize_epoch_seconds_accepts_seconds_and_milliseconds(self):
         self.assertEqual(normalize_epoch_seconds(1_700_000_000), 1_700_000_000)
         self.assertEqual(normalize_epoch_seconds(1_700_000_000_000), 1_700_000_000)
-        self.assertEqual(normalize_epoch_seconds(10_000_000_001), 10_000_000_001)
+        self.assertAlmostEqual(normalize_epoch_seconds(10_000_000_001), 10_000_000.001)
 
 
 class TestCliStartSafety(unittest.TestCase):
@@ -1222,6 +1222,47 @@ class TestV3NativeSetup(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertEqual(events, ["login", "config", "skill", "start", "gateway", "doctor"])
 
+    def test_setup_derives_base_url_from_custom_port(self):
+        with TemporaryDirectory() as tmp:
+            args = self.setup_args(check=True, base_url=None, port=6000, config=str(Path(tmp) / "config.toml"))
+            with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+                with patch(
+                    "codex_antigravity_auth.cli.codex_ready_report",
+                    return_value={"ok": True, "checks": [], "next_command": "codex"},
+                ) as readiness:
+                    with patch("builtins.print"):
+                        report = run_setup(args)
+
+        self.assertEqual(report["base_url"], "http://localhost:6000/v1")
+        self.assertEqual(readiness.call_args.kwargs["expected_base_url"], "http://localhost:6000/v1")
+
+    def test_setup_rejects_start_port_base_url_mismatch_before_config_write(self):
+        args = self.setup_args(write=True, start=True, port=6000, base_url="http://localhost:51122/v1")
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials") as creds:
+            with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                with patch("builtins.print") as mock_print:
+                    with self.assertRaises(SystemExit):
+                        run_setup(args)
+
+        creds.assert_not_called()
+        configure.assert_not_called()
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("--port 6000", printed_text)
+        self.assertIn("--base-url points at port 51122", printed_text)
+
+    def test_setup_invalid_model_reports_without_oauth_or_config_write(self):
+        args = self.setup_args(write=True, model="bad model")
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials") as creds:
+            with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                with patch("builtins.print") as mock_print:
+                    with self.assertRaises(SystemExit):
+                        run_setup(args)
+
+        creds.assert_not_called()
+        configure.assert_not_called()
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("Codex model id must not contain whitespace", printed_text)
+
     def test_setup_write_preflights_oauth_before_config_write(self):
         args = self.setup_args(write=True)
         with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=(None, None)):
@@ -1233,6 +1274,45 @@ class TestV3NativeSetup(unittest.TestCase):
 
         login.assert_not_called()
         configure.assert_not_called()
+
+    def test_setup_write_preflights_byok_provider_before_config_write(self):
+        args = self.setup_args(write=True, model="deepseek:deepseek-chat")
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=(None, None)):
+            with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={}):
+                with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                    with patch("codex_antigravity_auth.cli.run_login") as login:
+                        with patch("builtins.print") as mock_print:
+                            with self.assertRaisesRegex(SystemExit, "BYOK provider is not ready"):
+                                run_setup(args)
+
+        login.assert_not_called()
+        configure.assert_not_called()
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("BYOK provider 'deepseek' is not configured", printed_text)
+        self.assertIn("codex-antigravity provider set deepseek", printed_text)
+
+    def test_setup_write_allows_ready_byok_provider_before_config_write(self):
+        provider = {
+            "id": "deepseek",
+            "displayName": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com",
+            "apiKey": "secret",
+            "models": ["deepseek-chat"],
+        }
+        args = self.setup_args(write=True, model="deepseek:deepseek-chat")
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=(None, None)):
+            with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"deepseek": provider}):
+                with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                    with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"deepseek:deepseek-chat"}):
+                        with patch(
+                            "codex_antigravity_auth.cli.codex_ready_report",
+                            return_value={"ok": True, "checks": [], "next_command": "codex"},
+                        ):
+                            with patch("builtins.print"):
+                                report = run_setup(args)
+
+        self.assertTrue(report["ok"])
+        configure.assert_called_once()
 
     def test_setup_write_start_failure_reports_next_command(self):
         args = self.setup_args(write=True, start=True)
@@ -1248,6 +1328,71 @@ class TestV3NativeSetup(unittest.TestCase):
         gateway.assert_not_called()
         printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
         self.assertIn("codex-antigravity start --background --port 51122", printed_text)
+
+    def test_setup_write_start_waits_for_gateway_models(self):
+        provider_models = iter([RuntimeError("booting"), {"claude-3.5-sonnet", "claude-opus-4-6"}])
+
+        def fake_models(*args, **kwargs):
+            result = next(provider_models)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        args = self.setup_args(write=True, start=True)
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+            with patch("codex_antigravity_auth.cli.run_login"):
+                with patch("codex_antigravity_auth.cli.run_configure_codex"):
+                    with patch("codex_antigravity_auth.cli.start_gateway_background"):
+                        with patch("codex_antigravity_auth.cli.gateway_model_ids", side_effect=fake_models) as models:
+                            with patch("codex_antigravity_auth.cli.time.sleep"):
+                                with patch(
+                                    "codex_antigravity_auth.cli.codex_ready_report",
+                                    return_value={"ok": True, "checks": [], "next_command": "codex"},
+                                ):
+                                    with patch("builtins.print") as mock_print:
+                                        report = run_setup(args)
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(models.call_count, 2)
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("/v1/models is reachable", printed_text)
+
+    def test_setup_write_start_reports_gateway_wait_failure(self):
+        args = self.setup_args(write=True, start=True)
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+            with patch("codex_antigravity_auth.cli.run_login"):
+                with patch("codex_antigravity_auth.cli.run_configure_codex"):
+                    with patch("codex_antigravity_auth.cli.start_gateway_background"):
+                        with patch("codex_antigravity_auth.cli.wait_for_gateway_model_ids", side_effect=RuntimeError("still booting")):
+                            with patch("builtins.print") as mock_print:
+                                with self.assertRaisesRegex(SystemExit, "Gateway did not become ready"):
+                                    run_setup(args)
+
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("still booting", printed_text)
+        self.assertIn("codex-antigravity status --port 51122", printed_text)
+
+    def test_setup_check_reports_ignored_action_flags(self):
+        with TemporaryDirectory() as tmp:
+            args = self.setup_args(
+                check=True,
+                install_skill=True,
+                start=True,
+                config=str(Path(tmp) / "config.toml"),
+                skill_dir=tmp,
+            )
+            with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+                with patch(
+                    "codex_antigravity_auth.cli.codex_ready_report",
+                    return_value={"ok": True, "checks": [], "next_command": "codex"},
+                ):
+                    with patch("builtins.print") as mock_print:
+                        report = run_setup(args)
+
+        self.assertTrue(report["ok"])
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("--install-skill is only applied when --write is used", printed_text)
+        self.assertIn("--start is only applied when --write is used", printed_text)
 
     def test_setup_json_is_read_only(self):
         with self.assertRaisesRegex(SystemExit, "read-only"):

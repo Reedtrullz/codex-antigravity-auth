@@ -20,7 +20,7 @@ codex-antigravity setup --json
 codex-antigravity status --json
 ```
 
-The setup command validates the selected model/provider/base URL, preflights Google OAuth credentials before any config write, runs login, writes Codex config, optionally installs the `$anti` helper, optionally starts the gateway in the background, probes `/v1/models`, and ends with Codex readiness diagnostics. By default, V3 chooses `claude-3.5-sonnet` so fresh installs get Claude Sonnet in Codex's model picker.
+The setup command validates the selected model/provider/base URL, preflights Google OAuth or BYOK provider readiness before any config write, runs login when needed, writes Codex config, optionally installs the `$anti` helper, optionally starts the gateway in the background, waits for `/v1/models`, and ends with Codex readiness diagnostics. By default, V3 chooses `claude-3.5-sonnet` so fresh installs get Claude Sonnet in Codex's model picker. When `--base-url` is omitted, setup derives `http://localhost:<port>/v1` from `--port`; if both are supplied with `--start`, their ports must match.
 
 `configure-codex` validates the Codex model id, provider id, provider name, and gateway base URL before writing. `--write` uses private atomic writes, preserves a symlinked Codex config path by updating its real target, and creates a private timestamped backup before changing an existing Codex config.
 
@@ -108,7 +108,7 @@ Claude-first setup aliases are accepted anywhere the CLI accepts a Codex model i
 When multiple Google accounts are registered, the gateway automatically rotates through them:
 - **Rate-Limiting Cooldowns**: If a request returns `429 RESOURCE_EXHAUSTED` (such as Anthropic/Claude limiters), the account is marked on an account-level cooldown backoff strategy with exponential delay. Cooldowns persist across restarts so the gateway does not immediately retry a recently limited account.
 - **Sticky Active Selection**: The `AccountManager` keeps independent active-account slots for Gemini and Claude families to preserve conversational continuity before rotating on connection timeouts/failures.
-- **Claude Diagnostics**: Google request failures include sanitized family-level diagnostics such as selected family, cooldown count, retry-after source, rotation attempt status, and whether all Claude accounts are cooling down. Account identifiers are reserved for authenticated account-list commands.
+- **Claude Diagnostics**: Google request failures include sanitized family-level diagnostics such as selected family, cooldown count, retry-after source, rotation attempt status, and whether all Claude accounts are cooling down. Non-streaming Google failure responses use a structured `detail` object with `message` and `diagnostics`; clients should handle both this shape and older string details. Account identifiers are reserved for authenticated account-list commands.
 
 ---
 
