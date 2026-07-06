@@ -4,10 +4,10 @@ This guide describes real-world examples, advanced configurations, and diagnosti
 
 ## 0. Quick Codex Setup
 
-Install the command from a checkout, then run the primary Claude-in-Codex setup:
+Install the command from PyPI, then run the primary Claude-in-Codex setup:
 
 ```bash
-uv tool install .
+uv tool install codex-antigravity-auth
 codex-antigravity setup --write --accounts 1 --model claude-3.5-sonnet --install-skill --start
 codex-antigravity doctor --codex-ready
 ```

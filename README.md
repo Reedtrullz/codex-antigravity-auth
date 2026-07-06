@@ -10,6 +10,12 @@ Create a clean, reliable local gateway server that makes Google Antigravity Clau
 
 ## Installation
 
+From PyPI:
+
+```bash
+uv tool install codex-antigravity-auth
+```
+
 From GitHub:
 
 ```bash

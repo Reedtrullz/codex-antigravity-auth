@@ -1,15 +1,15 @@
 # Current Integration Status — 6 July 2026
 
 ## Build & Test Health
-- **local pytest**: full local suite passing with `python3 -m pytest -q` (`370` tests plus `134` subtests) ✅
+- **local pytest**: full local suite passing with `python3 -m pytest -q` (`381` tests plus `138` subtests) ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **wheel install smoke**: ran `python3 -m build`, `python3 -m twine check dist/*`, installed the wheel into a clean venv, ran `pip check`, verified console script help plus `service status --json`, `models list --json`, `logs --tail 1 --json`, scratch `setup --check`, and packaged `install-skill --verify` ✅
-- **CI matrix**: PR CI now includes Ubuntu Python 3.10/3.11/3.12 plus a Windows Python 3.12 test leg ✅
-- **PR #8 CI**: head `3265240` passed duplicate GitHub CI runs `28768862063` and `28768878878` across `package`, Python `3.10`, `3.11`, and `3.12` ✅
-- **live backend smoke**: credentialed live Google OAuth/runtime smoke passed on 2026-07-03 for `claude-3.5-sonnet`; live BYOK smokes passed through transient env vars for `deepseek:deepseek-v4-flash` and OpenRouter. Latest OpenRouter evidence covered direct `/api/v1/auth/key` success, `/v1/models` exposure for `openrouter:openrouter/free`, and exact non-streaming sentinel `anti-openrouter-byok-ok` through `/v1/responses` with the gateway stopped afterward ✅
-- **install command**: `uv tool install .` for normal use, `uv tool install --editable .` for development
-- **doctor/connectivity**: redacted `codex-antigravity doctor` passed after live Google OAuth smoke
+- **CI matrix**: PR CI includes Ubuntu Python 3.10/3.11/3.12 plus a Windows Python 3.12 test leg ✅
+- **PR #9 CI**: head `982281c` passed duplicate GitHub CI runs `28772749846` and `28772751411` across `package`, Ubuntu Python `3.10`/`3.11`/`3.12`, and Windows Python `3.12` ✅
+- **live backend smoke**: credentialed live Google OAuth/runtime smoke passed on 2026-07-03 for `claude-3.5-sonnet`; live BYOK smokes passed through transient env vars for `deepseek:deepseek-v4-flash` and OpenRouter. Latest release-prep Google smoke on 2026-07-06 used a scratch Codex config, the live gateway on `127.0.0.1:51122`, and `doctor --codex-ready --live --live-model claude-3.5-sonnet`; it passed model catalog, routing, Claude account availability, and real non-streaming generation with preview `ready`. Latest OpenRouter evidence covered direct `/api/v1/auth/key` success, `/v1/models` exposure for `openrouter:openrouter/free`, and exact non-streaming sentinel `anti-openrouter-byok-ok` through `/v1/responses` with the gateway stopped afterward ✅
+- **install command**: `uv tool install codex-antigravity-auth` for normal use, `uv tool install --editable .` for development from a checkout
+- **doctor/connectivity**: redacted scratch-config `codex-antigravity doctor --codex-ready --live` passed after release-prep live Google OAuth smoke
 
 ## Core Features
 | Feature | Status |
@@ -117,16 +117,15 @@
 - `doctor --live` and `setup --check --live` are explicit opt-in checks because they spend a real Google provider request.
 - `previous_response_id` is rejected by design in this stateless gateway; replay the full conversation, including tool calls and outputs, in `input`.
 - `/v1/responses/compact` is not implemented.
-- CI includes unit/compile checks and a release-artifact smoke job. PR #8 head `3265240` passed pull-request CI before merge.
+- CI includes unit/compile checks, a release-artifact smoke job, and Windows Python 3.12 coverage. PR #9 head `982281c` passed pull-request CI before merge.
 - Live backend availability is covered only by the credentialed smoke runs noted above.
 
 ## Release State
-- Current package metadata: `1.4.0`
+- Current package metadata: `1.5.0`
 - Previous tagged GitHub release: [v1.4.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.4.0)
-- The current PR branch contains the planned v1.5.0 implementation for live install smoke, OAuth credential onboarding, 1Password hardening, concurrent account spreading, package-version drift diagnostics, account remove/reset, request-log summaries, Windows CI coverage, and targeted setup-repair hints. Release metadata/tagging are intentionally left for maintainer release prep.
+- The current PR branch contains the planned v1.5.0 implementation for live install smoke, OAuth credential onboarding, 1Password hardening, concurrent account spreading, package-version drift diagnostics, account remove/reset, request-log summaries, Windows CI coverage, targeted setup-repair hints, and the post-review account-rotation accounting fix. Release metadata has been prepared for v1.5.0; tagging/publishing happens only after final release checks.
 
 ## Next Priorities
 1. Add `/v1/responses/compact` support
 2. Expand live backend smoke coverage beyond DeepSeek/OpenRouter to additional BYOK providers
-3. Run a final credentialed `doctor --codex-ready --live` smoke before the v1.5.0 release
-4. Add a documented credentialed smoke-test profile for 1Password-backed BYOK providers without persisting raw API keys
+3. Add a documented credentialed smoke-test profile for 1Password-backed BYOK providers without persisting raw API keys
