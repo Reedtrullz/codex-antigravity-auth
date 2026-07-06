@@ -33,7 +33,9 @@ from .transform import (
     valid_function_name,
 )
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform, is_loopback_host, validate_gateway_token_strength
+from .models import canonical_model_id, native_model_catalog, native_model_family
 from .redaction import redact_secret_text
+from .storage import load_accounts
 
 app = FastAPI(title="Codex Antigravity Gateway")
 account_manager = AccountManager()
@@ -139,13 +141,7 @@ async def require_remote_gateway_token(request: Request, call_next):
     )
 
 # ── Model catalog for native Codex Desktop picker ──
-AVAILABLE_MODELS = [
-    {"id": "gemini-3.5-flash-high", "display_name": "Gemini 3.5 Flash (Agent High)", "context_window": 1000000},
-    {"id": "gemini-3.5-flash-medium", "display_name": "Gemini 3.5 Flash (General)", "context_window": 1000000},
-    {"id": "gemini-3.1-pro-high",    "display_name": "Gemini 3.1 Pro (Reasoning)", "context_window": 1000000},
-    {"id": "claude-3.5-sonnet",      "display_name": "Claude Sonnet 4.6 (Google)",  "context_window": 200000},
-    {"id": "claude-opus-4-6",        "display_name": "Claude Opus 4.6 (Google)",   "context_window": 200000},
-]
+AVAILABLE_MODELS = native_model_catalog()
 
 
 def safe_error_detail(value: object) -> str:
@@ -160,6 +156,18 @@ def finite_retry_after_seconds(value: object) -> float | None:
     if not math.isfinite(seconds):
         return None
     return max(0.0, seconds)
+
+
+def normalize_epoch_seconds(value: object) -> float:
+    try:
+        seconds = float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(seconds):
+        return 0
+    if seconds > 10_000_000_000:
+        seconds = seconds / 1000
+    return seconds
 
 
 def retry_after_seconds_from_response(res: httpx.Response) -> float | None:
@@ -210,6 +218,81 @@ def retry_after_seconds_from_response(res: httpx.Response) -> float | None:
     return None
 
 
+def retry_after_source_from_response(res: httpx.Response) -> str | None:
+    if res.headers.get("retry-after"):
+        return "retry-after-header"
+    try:
+        payload = res.json()
+    except Exception:
+        return None
+    details = []
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("details"), list):
+            details.extend(error["details"])
+        if isinstance(payload.get("details"), list):
+            details.extend(payload["details"])
+    for detail in details:
+        if isinstance(detail, dict) and "retryDelay" in detail:
+            return "payload-retry-delay"
+    return None
+
+
+def google_rotation_diagnostics(
+    model: str,
+    *,
+    retry_after_seconds: float | None = None,
+    retry_after_source: str | None = None,
+    rotation_attempted: bool = False,
+) -> dict:
+    family = native_model_family(model)
+    try:
+        data = load_accounts()
+    except Exception:
+        data = {}
+    accounts = data.get("accounts", []) if isinstance(data, dict) else []
+    state = data.get("accountState", {}) if isinstance(data.get("accountState"), dict) else {}
+    cooldowns = state.get("cooldowns", {}) if isinstance(state.get("cooldowns"), dict) else {}
+    now = time.time()
+    cooldown_count = 0
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        email = account.get("email")
+        cooldown_end = normalize_epoch_seconds(cooldowns.get(email, 0))
+        if cooldown_end > now:
+            cooldown_count += 1
+    return {
+        "selected_account_family": family,
+        "account_count": len(accounts),
+        "cooldown_count": cooldown_count,
+        "retry_after_seconds": retry_after_seconds,
+        "retry_after_source": retry_after_source,
+        "rotation_attempted": rotation_attempted,
+        "all_accounts_cooling_down": bool(accounts) and cooldown_count >= len(accounts),
+        "all_claude_accounts_cooling_down": bool(accounts) and family == "claude" and cooldown_count >= len(accounts),
+    }
+
+
+def google_failure_detail(
+    model: str,
+    message: str,
+    *,
+    retry_after_seconds: float | None = None,
+    retry_after_source: str | None = None,
+    rotation_attempted: bool = False,
+) -> dict:
+    return {
+        "message": safe_error_detail(message),
+        "diagnostics": google_rotation_diagnostics(
+            model,
+            retry_after_seconds=retry_after_seconds,
+            retry_after_source=retry_after_source,
+            rotation_attempted=rotation_attempted,
+        ),
+    }
+
+
 def provider_has_usable_key(provider: dict) -> bool:
     try:
         return bool(validate_provider_api_key(resolve_api_key(provider)))
@@ -217,7 +300,16 @@ def provider_has_usable_key(provider: dict) -> bool:
         return False
 
 
-def codex_model_metadata(model_id: str, display_name: str, context_window: int, owned_by: str, created: int) -> dict:
+def codex_model_metadata(
+    model_id: str,
+    display_name: str,
+    context_window: int,
+    owned_by: str,
+    created: int,
+    *,
+    default_reasoning_level: str = "high",
+    supports_parallel_tool_calls: bool = True,
+) -> dict:
     reasoning_levels = [
         {"effort": "low", "description": "Fast responses with lighter reasoning"},
         {"effort": "medium", "description": "Balances speed and reasoning depth"},
@@ -232,7 +324,7 @@ def codex_model_metadata(model_id: str, display_name: str, context_window: int, 
         "owned_by": owned_by,
         "display_name": display_name,
         "description": f"{display_name} via the local Codex Antigravity gateway.",
-        "supports_parallel_tool_calls": True,
+        "supports_parallel_tool_calls": supports_parallel_tool_calls,
         "context_window": context_window,
         "max_context_window": context_window,
         "auto_compact_token_limit": None,
@@ -240,7 +332,7 @@ def codex_model_metadata(model_id: str, display_name: str, context_window: int, 
         "default_reasoning_summary": "none",
         "supports_reasoning_summaries": False,
         "supported_reasoning_levels": reasoning_levels,
-        "default_reasoning_level": "high",
+        "default_reasoning_level": default_reasoning_level,
         "support_verbosity": False,
         "default_verbosity": "medium",
         "truncation_policy": {"mode": "tokens", "limit": 10000},
@@ -293,6 +385,8 @@ async def list_models():
             m["context_window"],
             "google-antigravity",
             int(time.time()),
+            default_reasoning_level=m.get("default_reasoning_level", "high"),
+            supports_parallel_tool_calls=bool(m.get("supports_parallel_tool_calls", True)),
         )
         for m in AVAILABLE_MODELS
     ] + byok_models
@@ -504,6 +598,8 @@ def response_model_id(codex_req: dict) -> str:
         raise HTTPException(status_code=400, detail="model must be non-empty")
     if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in model):
         raise HTTPException(status_code=400, detail="model must not contain whitespace or control characters")
+    if ":" not in model:
+        return canonical_model_id(model)
     return model
 
 
@@ -653,7 +749,10 @@ async def create_response(request: Request):
     if not account:
         raise HTTPException(
             status_code=500,
-            detail="No Google accounts available. Run `codex-antigravity login` to connect an account."
+            detail=google_failure_detail(
+                model,
+                "No Google accounts available. Run `codex-antigravity login` to connect an account.",
+            ),
         )
         
     def build_google_request(selected_account: dict) -> tuple[dict, dict]:
@@ -687,38 +786,90 @@ async def create_response(request: Request):
     # Handle standard non-streaming response path
     if not stream:
         response_account = account
+        rotation_attempted = False
         res = await request_backend(response_account)
         if not res:
             # Retry with rotated account on connection failures
             new_account = account_manager.select_active_account(model)
+            rotation_attempted = True
             if new_account:
                 response_account = new_account
                 res = await request_backend(response_account)
                 
         if not res:
-            raise HTTPException(status_code=502, detail="Failed to communicate with Antigravity backend after rotation")
+            raise HTTPException(
+                status_code=502,
+                detail=google_failure_detail(
+                    model,
+                    "Failed to communicate with Antigravity backend after rotation",
+                    rotation_attempted=rotation_attempted,
+                ),
+            )
 
         if res.status_code in (401, 403, 429):
+            retry_after_seconds = retry_after_seconds_from_response(res)
+            retry_after_source = retry_after_source_from_response(res)
             reason = "Rate limited / Quota exceeded" if res.status_code == 429 else f"Auth failure {res.status_code}: {safe_error_detail(res.text)}"
-            account_manager.mark_failure(response_account["email"], reason, retry_after_seconds_from_response(res))
+            account_manager.mark_failure(response_account["email"], reason, retry_after_seconds)
             new_account = account_manager.select_active_account(model)
+            rotation_attempted = True
             if new_account:
                 response_account = new_account
                 res = await request_backend(response_account)
             if not res:
-                raise HTTPException(status_code=502, detail="Failed to communicate with Antigravity backend after rotation")
+                raise HTTPException(
+                    status_code=502,
+                    detail=google_failure_detail(
+                        model,
+                        "Failed to communicate with Antigravity backend after rotation",
+                        retry_after_seconds=retry_after_seconds,
+                        retry_after_source=retry_after_source,
+                        rotation_attempted=rotation_attempted,
+                    ),
+                )
             
         if res.status_code in (401, 403):
             # Token might be invalidated or verification required
+            retry_after_seconds = retry_after_seconds_from_response(res)
+            retry_after_source = retry_after_source_from_response(res)
             account_manager.mark_failure(response_account["email"], f"Auth failure {res.status_code}: {safe_error_detail(res.text)}")
-            raise HTTPException(status_code=res.status_code, detail=f"Google Authentication failure: {safe_error_detail(res.text)}")
+            raise HTTPException(
+                status_code=res.status_code,
+                detail=google_failure_detail(
+                    model,
+                    f"Google Authentication failure: {safe_error_detail(res.text)}",
+                    retry_after_seconds=retry_after_seconds,
+                    retry_after_source=retry_after_source,
+                    rotation_attempted=rotation_attempted,
+                ),
+            )
             
         if res.status_code == 429:
-            account_manager.mark_failure(response_account["email"], "Rate limited / Quota exceeded", retry_after_seconds_from_response(res))
-            raise HTTPException(status_code=429, detail="Antigravity account rate limit reached. Auto-switching to next account.")
+            retry_after_seconds = retry_after_seconds_from_response(res)
+            retry_after_source = retry_after_source_from_response(res)
+            account_manager.mark_failure(response_account["email"], "Rate limited / Quota exceeded", retry_after_seconds)
+            raise HTTPException(
+                status_code=429,
+                detail=google_failure_detail(
+                    model,
+                    "Antigravity account rate limit reached. Auto-switching to next account.",
+                    retry_after_seconds=retry_after_seconds,
+                    retry_after_source=retry_after_source,
+                    rotation_attempted=rotation_attempted,
+                ),
+            )
             
         if res.status_code != 200:
-            raise HTTPException(status_code=res.status_code, detail=f"Google Antigravity API error: {safe_error_detail(res.text)}")
+            raise HTTPException(
+                status_code=res.status_code,
+                detail=google_failure_detail(
+                    model,
+                    f"Google Antigravity API error: {safe_error_detail(res.text)}",
+                    retry_after_seconds=retry_after_seconds_from_response(res),
+                    retry_after_source=retry_after_source_from_response(res),
+                    rotation_attempted=rotation_attempted,
+                ),
+            )
             
         try:
             gemini_resp = res.json()
@@ -732,7 +883,11 @@ async def create_response(request: Request):
                     account_manager.mark_failure(response_account["email"], f"Backend payload error {code}: {safe_error_detail(message)}")
                 raise HTTPException(
                     status_code=status_code_from_backend_error(code, message),
-                    detail=f"Google Antigravity API error: {safe_error_detail(message)}",
+                    detail=google_failure_detail(
+                        model,
+                        f"Google Antigravity API error: {safe_error_detail(message)}",
+                        rotation_attempted=rotation_attempted,
+                    ),
                 )
             codex_resp = transform_response(gemini_resp, model)
             return codex_resp

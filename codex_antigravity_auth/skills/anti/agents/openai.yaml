@@ -1,4 +1,4 @@
 interface:
   display_name: "Anti"
-  short_description: "Antigravity workflows, reviews, plans, and $anti panel"
-  default_prompt: "Use $anti workflow, $anti panel, $anti moa, or $anti fusion for Antigravity reviews, deep work plans, provider comparisons, and bounded multi-model panels."
+  short_description: "Optional Antigravity reviews, plans, and $anti panel"
+  default_prompt: "Use $anti workflow, $anti panel, $anti moa, or $anti fusion for optional Antigravity reviews, deep work plans, provider comparisons, and bounded multi-model panels after Claude is available in Codex."

@@ -1,11 +1,13 @@
 ---
 name: anti
-description: Use Antigravity Claude Opus/Sonnet as a sidecar reviewer, consult lane, deep autonomous work planner, $anti workflow preset, or $anti panel MoA/Fusion workflow from Codex. Trigger when the user writes $anti, @anti, $anti workflow, $anti workflow review-ready, $anti workflow plan-deep, $anti panel, $anti moa, $anti fusion, asks for Antigravity, Opus, Sonnet, a sidecar review, second-opinion model review, multi-model panel, MoA, Fusion, deep work plan, long autonomous session plan, implementation plan, gateway smoke checks, Google Antigravity setup, Codex Antigravity configuration, or codex-antigravity doctor/start workflows.
+description: Use the optional Anti helper after Antigravity Claude Opus/Sonnet is available in Codex: sidecar review, consult lane, deep autonomous work plan, $anti workflow preset, or $anti panel MoA/Fusion workflow. Trigger when the user writes $anti, @anti, $anti workflow, $anti workflow review-ready, $anti workflow plan-deep, $anti panel, $anti moa, $anti fusion, asks for Antigravity, Opus, Sonnet, a sidecar review, second-opinion model review, multi-model panel, MoA, Fusion, deep work plan, long autonomous session plan, implementation plan, gateway smoke checks, Google Antigravity setup, Codex Antigravity configuration, or codex-antigravity doctor/start workflows.
 ---
 
 # Anti
 
 Use this skill to ask the local `codex-antigravity-auth` gateway for an external Antigravity review, consult, deep work plan, named workflow preset, or bounded multi-model panel while native Codex remains the primary agent.
+
+V3's primary product is native Claude in Codex through `codex-antigravity setup`; `$anti` is an optional helper for review and planning after the gateway and Codex model picker are already working.
 
 ## Core Rule
 
@@ -61,13 +63,16 @@ python3 ~/.codex/skills/anti/scripts/anti.py start --port 51122
 python3 ~/.codex/skills/anti/scripts/anti.py setup-google --accounts 2
 python3 ~/.codex/skills/anti/scripts/anti.py configure-codex --model opus
 python3 ~/.codex/skills/anti/scripts/anti.py doctor
+codex-antigravity setup --check
+codex-antigravity setup --write --accounts 1 --model sonnet --install-skill --start
+codex-antigravity doctor --codex-ready
 python3 -m unittest discover -s ~/.codex/skills/anti/tests
 ```
 
 ## Workflow
 
 1. Infer whether the user wants `consult`, `plan`, `review`, `workflow`, `runs`, `panel`/`moa`/`fusion`, `smoke`, `start`, `setup-google`, `configure-codex`, or `doctor`.
-2. Run `smoke` first when gateway/account readiness is uncertain. Default `smoke` is sidecar readiness; use `smoke --mode full` only when the user asked to make Antigravity the active Codex backend.
+2. Run `smoke` first when helper readiness is uncertain. Use `codex-antigravity setup --check` or `codex-antigravity doctor --codex-ready` when the user asks whether Claude is native-ready in Codex. Default `smoke` is sidecar readiness; use `smoke --mode full` only when the user asked to make Antigravity the active Codex backend.
 3. For deep autonomous work planning, use `plan --model opus`. Add `--scope working-tree`, `--scope staged`, or `--file` when the plan should account for current repo state.
 4. For multi-model review or planning, use `panel --mode review` or `panel --mode plan`. Use `--role` for lenses such as correctness, security, tests, protocol, or UX. Use BYOK `provider:model` ids only when `/v1/models` advertises them.
 5. For common V2 flows, prefer named workflow presets: `workflow review-ready` before commit/PR review, `workflow plan-deep` for long autonomous planning, `workflow ship-gate` for merge readiness, and `workflow provider-compare` for BYOK/provider lane comparisons.
@@ -95,12 +100,12 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 
 - Do not include secrets, OAuth material, provider keys, key files, `.env` files, encrypted account/provider stores, or credential JSON in review prompts.
 - The helper excludes common secret/cached/binary paths by default. If it reports exclusions, mention that scope caveat.
-- Do not run `setup-google` or `configure-codex` unless the user explicitly asks for setup/configuration.
+- Do not run `setup`, `setup-google`, or `configure-codex` unless the user explicitly asks for setup/configuration.
 - Prefer `--api-key-env` workflows in the underlying `codex-antigravity` CLI; do not put provider keys into chat, shell history, notes, or prompt files.
 - If the gateway is remote, use `--gateway-token-env` rather than passing bearer tokens in argv.
 - Do not use panel mode as an always-on background swarm. Keep model counts, roles, tokens, retries, and scope bounded.
 - Run ledgers are sanitized, but avoid `--save-output full` for prompts that may contain credentials, OAuth material, `.env` content, or private account/provider stores.
-- V2 workflows remain advisory. They do not create true Codex subagents, gateway virtual `panel:*` models, automatic code edits, recursive swarms, or background always-on model calls.
+- V2/V3 helper workflows remain advisory. They do not create true Codex subagents, gateway virtual `panel:*` models, automatic code edits, recursive swarms, or background always-on model calls.
 
 ## Output Shape
 

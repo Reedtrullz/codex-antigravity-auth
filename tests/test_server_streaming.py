@@ -2,10 +2,22 @@ import json
 import unittest
 import httpx
 from unittest.mock import patch, MagicMock
-from codex_antigravity_auth.server import app, stream_error_from_payload
+from codex_antigravity_auth.server import app, google_rotation_diagnostics, stream_error_from_payload
 from fastapi.testclient import TestClient
 
 class TestServerStreaming(unittest.TestCase):
+    def test_google_rotation_diagnostics_normalizes_millisecond_cooldowns(self):
+        data = {
+            "accounts": [{"email": "test@example.com"}],
+            "accountState": {"cooldowns": {"test@example.com": 1_700_000_000_000}},
+        }
+        with patch("codex_antigravity_auth.server.load_accounts", return_value=data):
+            with patch("codex_antigravity_auth.server.time.time", return_value=1_700_000_001):
+                diagnostics = google_rotation_diagnostics("claude-3.5-sonnet")
+
+        self.assertEqual(diagnostics["cooldown_count"], 0)
+        self.assertFalse(diagnostics["all_accounts_cooling_down"])
+
     def test_sse_generator_translation_output(self):
         with TestClient(app) as test_client:
             fake_account = {
@@ -128,7 +140,10 @@ class TestServerStreaming(unittest.TestCase):
                     )
 
         self.assertEqual(response.status_code, 429)
-        self.assertIn("quota exhausted", response.json()["detail"])
+        detail = response.json()["detail"]
+        self.assertIn("quota exhausted", detail["message"])
+        self.assertEqual(detail["diagnostics"]["selected_account_family"], "gemini")
+        self.assertIn("rotation_attempted", detail["diagnostics"])
         mock_mark_failure.assert_called_once()
 
     def test_google_streaming_invalid_json_chunk_fails_instead_of_completing(self):

@@ -1,19 +1,26 @@
 import unittest
 import os
+import signal
 import stat
 import sys
+import threading
 from argparse import Namespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch, MagicMock
-from codex_antigravity_auth.oauth import authorize_antigravity
+from codex_antigravity_auth.oauth import authorize_antigravity, encode_state
 from codex_antigravity_auth.cli import (
+    OAuthCallbackHandler,
+    OAuthServer,
     account_rotation_lines,
     configure_codex_write_command,
+    codex_ready_report,
     gateway_model_ids,
     gateway_start_command,
+    gateway_status_info,
     install_codex_skill,
     inspect_codex_gateway_config,
     main,
@@ -24,23 +31,28 @@ from codex_antigravity_auth.cli import (
     require_safe_gateway_host,
     run_configure_codex,
     run_doctor,
+    run_gateway_status,
     run_install_skill,
     run_login,
     run_local_oauth_flow,
+    run_setup,
     run_setup_v2,
     run_setup_google,
+    start_gateway_background,
+    stop_gateway,
     upsert_google_account,
     validate_codex_model_id,
     validate_codex_provider_name,
     write_codex_config,
 )
+from codex_antigravity_auth.models import canonical_model_id, resolve_backend_model
 
 
 def write_ready_codex_config(
     path: Path,
     *,
     base_url: str = "http://localhost:51122/v1",
-    model: str = "gemini-3.5-flash-high",
+    model: str = "claude-3.5-sonnet",
     provider_id: str = "antigravity",
     provider_name: str = "Google Antigravity",
 ) -> None:
@@ -234,6 +246,60 @@ wire_api = "responses"
         self.assertIn("Selected BYOK model", printed_text)
         self.assertIn("deepseek", printed_text)
 
+    def test_run_doctor_byok_only_fails_when_selected_model_is_not_listed(self):
+        provider = {
+            "displayName": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com",
+            "apiKey": "secret",
+            "models": ["deepseek-chat"],
+        }
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path, model="deepseek:deepseek-reasoner")
+            with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"deepseek": provider}):
+                with patch("builtins.print") as mock_print:
+                    self.assertFalse(run_doctor(byok_only=True, config=str(config_path)))
+
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("[FAIL] Selected BYOK model", printed_text)
+        self.assertIn("exact model is not listed", printed_text)
+
+    def test_run_doctor_byok_only_fails_when_provider_store_cannot_load(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path, model="deepseek:deepseek-chat")
+            with patch(
+                "codex_antigravity_auth.cli.all_provider_configs",
+                side_effect=RuntimeError("api_key=sk-testsecret1234567890"),
+            ):
+                with patch("builtins.print") as mock_print:
+                    self.assertFalse(run_doctor(byok_only=True, config=str(config_path)))
+
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("[FAIL] BYOK Providers: could not load provider config", printed_text)
+        self.assertNotIn("sk-testsecret1234567890", printed_text)
+
+    @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
+    @patch("codex_antigravity_auth.cli.load_accounts")
+    @patch("urllib.request.urlopen")
+    def test_run_doctor_reports_account_store_load_failure(self, mock_urlopen, mock_load, mock_creds):
+        mock_creds.return_value = ("client_id_val", "client_secret_val")
+        mock_load.side_effect = RuntimeError("access_token=ya29.secret")
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path)
+            with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={}):
+                with patch("builtins.print") as mock_print:
+                    self.assertFalse(run_doctor(config=str(config_path)))
+
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("[FAIL] Authenticated Accounts: could not load account store", printed_text)
+        self.assertNotIn("ya29.secret", printed_text)
+
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
     @patch("urllib.request.urlopen")
@@ -272,9 +338,14 @@ wire_api = "responses"
         self.assertIn("ANTIGRAVITY_STORAGE_KEY configured", printed_text)
 
     def test_normalize_epoch_seconds_treats_non_finite_values_as_expired(self):
-        for value in (float("nan"), float("inf"), "-inf"):
+        for value in (float("nan"), float("inf"), float("-inf")):
             with self.subTest(value=repr(value)):
                 self.assertEqual(normalize_epoch_seconds(value), 0)
+
+    def test_normalize_epoch_seconds_accepts_seconds_and_milliseconds(self):
+        self.assertEqual(normalize_epoch_seconds(1_700_000_000), 1_700_000_000)
+        self.assertEqual(normalize_epoch_seconds(1_700_000_000_000), 1_700_000_000)
+        self.assertAlmostEqual(normalize_epoch_seconds(10_000_000_001), 10_000_000.001)
 
 
 class TestCliStartSafety(unittest.TestCase):
@@ -528,16 +599,57 @@ class TestGoogleAccountSetup(unittest.TestCase):
                     with self.assertRaisesRegex(SystemExit, "port 51121"):
                         run_local_oauth_flow()
 
+    def test_oauth_callback_rejects_state_mismatch_before_storing_code(self):
+        server = OAuthServer(("127.0.0.1", 0), OAuthCallbackHandler)
+        server.timeout = 2
+        server.expected_state_id = "good-state"
+        host, port = server.server_address
+
+        def request_once(path: str):
+            thread = threading.Thread(target=server.handle_request)
+            thread.start()
+            try:
+                return urllib.request.urlopen(f"http://{host}:{port}{path}", timeout=2)
+            finally:
+                thread.join(timeout=2)
+
+        try:
+            bad_state = encode_state({"id": "bad-state"})
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                request_once(f"/oauth-callback?code=evil-code&state={bad_state}")
+            self.assertEqual(raised.exception.code, 400)
+            self.assertIsNone(server.auth_code)
+            self.assertIsNone(server.auth_state)
+
+            good_state = encode_state({"id": "good-state"})
+            with request_once(f"/oauth-callback?code=good-code&state={good_state}") as response:
+                self.assertEqual(response.status, 200)
+            self.assertEqual(server.auth_code, "good-code")
+            self.assertEqual(server.auth_state, good_state)
+        finally:
+            server.server_close()
+
 
 class TestConfigureCodex(unittest.TestCase):
     def test_render_codex_config_snippet_contains_gateway_provider(self):
         snippet = render_codex_config_snippet()
 
-        self.assertIn('model = "gemini-3.5-flash-high"', snippet)
+        self.assertIn('model = "claude-3.5-sonnet"', snippet)
         self.assertIn('model_provider = "antigravity"', snippet)
         self.assertIn("[model_providers.antigravity]", snippet)
         self.assertIn('base_url = "http://localhost:51122/v1"', snippet)
         self.assertIn('wire_api = "responses"', snippet)
+
+    def test_claude_aliases_resolve_for_native_codex_setup(self):
+        self.assertEqual(validate_codex_model_id("sonnet"), "claude-3.5-sonnet")
+        self.assertEqual(validate_codex_model_id("claude-sonnet"), "claude-3.5-sonnet")
+        self.assertEqual(validate_codex_model_id("opus"), "claude-opus-4-6")
+        self.assertEqual(validate_codex_model_id("claude-opus"), "claude-opus-4-6")
+        self.assertEqual(canonical_model_id("openai-responses/sonnet"), "claude-3.5-sonnet")
+        self.assertEqual(resolve_backend_model("sonnet"), "claude-sonnet-4-6")
+        self.assertEqual(resolve_backend_model("opus"), "claude-opus-4-6-thinking")
+        self.assertEqual(resolve_backend_model("gemini-3.5-flash-low"), "gemini-3.5-flash-low")
+        self.assertEqual(resolve_backend_model("gemini-3.1-pro"), "gemini-3.1-pro-low")
 
     def test_configure_codex_write_command_preserves_custom_options(self):
         command = configure_codex_write_command(
@@ -682,7 +794,7 @@ class TestConfigureCodex(unittest.TestCase):
         self.assertIn("# user settings", merged)
         self.assertIn("[profiles.work]", merged)
         self.assertIn('approval_policy = "never"', merged)
-        self.assertIn('model = "gemini-3.5-flash-high"', merged)
+        self.assertIn('model = "claude-3.5-sonnet"', merged)
         self.assertIn('model_provider = "antigravity"', merged)
         self.assertIn("[model_providers.antigravity] # managed gateway", merged)
         self.assertIn('name = "Google Antigravity"', merged)
@@ -1017,6 +1129,478 @@ class TestInstallSkill(unittest.TestCase):
         self.assertIsNone(captured["auth"])
 
 
+class TestV3NativeSetup(unittest.TestCase):
+    def setup_args(self, **overrides):
+        args = Namespace(
+            check=False,
+            json=False,
+            write=False,
+            accounts=1,
+            model="claude-3.5-sonnet",
+            provider="antigravity",
+            provider_name="Google Antigravity",
+            base_url="http://localhost:51122/v1",
+            config="~/.codex/config.toml",
+            install_skill=False,
+            skill_dir="~/.codex/skills",
+            force=False,
+            verify_skill=False,
+            start=False,
+            port=51122,
+            host="127.0.0.1",
+            allow_remote=False,
+            gateway_timeout=0.01,
+            gateway_token_env="ANTIGRAVITY_GATEWAY_TOKEN",
+        )
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    def test_setup_check_does_not_mutate_state(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            args = self.setup_args(check=True, config=str(config_path), skill_dir=tmp)
+            with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+                with patch("codex_antigravity_auth.cli.run_login") as login:
+                    with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                        with patch("codex_antigravity_auth.cli.run_install_skill") as install:
+                            with patch("codex_antigravity_auth.cli.start_gateway_background") as start:
+                                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                                    with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": []}):
+                                        with patch("builtins.print"):
+                                            report = run_setup(args)
+
+            self.assertFalse(report["ok"])
+            self.assertFalse(config_path.exists())
+            login.assert_not_called()
+            configure.assert_not_called()
+            install.assert_not_called()
+            start.assert_not_called()
+
+    def test_plain_setup_reports_read_only_mode(self):
+        with TemporaryDirectory() as tmp:
+            args = self.setup_args(config=str(Path(tmp) / "config.toml"), skill_dir=tmp)
+            with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                    with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": []}):
+                        with patch("builtins.print") as mock_print:
+                            report = run_setup(args)
+
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertEqual(report["mode"], "check")
+        self.assertIn("read-only", printed_text)
+        self.assertIn("pass --write", printed_text)
+
+    def test_setup_write_runs_login_config_skill_start_and_readiness_in_order(self):
+        events = []
+
+        def record(name):
+            def _inner(*args, **kwargs):
+                events.append(name)
+                if name == "doctor":
+                    return {
+                        "ok": True,
+                        "checks": [{"name": "codex_config", "status": "pass", "detail": "ready"}],
+                        "next_command": "codex",
+                    }
+                if name == "gateway":
+                    return {"claude-3.5-sonnet", "claude-opus-4-6"}
+                return None
+            return _inner
+
+        args = self.setup_args(write=True, install_skill=True, start=True, config="/tmp/codex.toml")
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+            with patch("codex_antigravity_auth.cli.run_login", side_effect=record("login")):
+                with patch("codex_antigravity_auth.cli.run_configure_codex", side_effect=record("config")):
+                    with patch("codex_antigravity_auth.cli.run_install_skill", side_effect=record("skill")):
+                        with patch("codex_antigravity_auth.cli.start_gateway_background", side_effect=record("start")):
+                            with patch("codex_antigravity_auth.cli.gateway_model_ids", side_effect=record("gateway")):
+                                with patch("codex_antigravity_auth.cli.codex_ready_report", side_effect=record("doctor")):
+                                    with patch("builtins.print"):
+                                        report = run_setup(args)
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(events, ["login", "config", "skill", "start", "gateway", "doctor"])
+
+    def test_setup_derives_base_url_from_custom_port(self):
+        with TemporaryDirectory() as tmp:
+            args = self.setup_args(check=True, base_url=None, port=6000, config=str(Path(tmp) / "config.toml"))
+            with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+                with patch(
+                    "codex_antigravity_auth.cli.codex_ready_report",
+                    return_value={"ok": True, "checks": [], "next_command": "codex"},
+                ) as readiness:
+                    with patch("builtins.print"):
+                        report = run_setup(args)
+
+        self.assertEqual(report["base_url"], "http://localhost:6000/v1")
+        self.assertEqual(readiness.call_args.kwargs["expected_base_url"], "http://localhost:6000/v1")
+
+    def test_setup_rejects_start_port_base_url_mismatch_before_config_write(self):
+        args = self.setup_args(write=True, start=True, port=6000, base_url="http://localhost:51122/v1")
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials") as creds:
+            with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                with patch("builtins.print") as mock_print:
+                    with self.assertRaises(SystemExit):
+                        run_setup(args)
+
+        creds.assert_not_called()
+        configure.assert_not_called()
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("--port 6000", printed_text)
+        self.assertIn("--base-url points at port 51122", printed_text)
+
+    def test_setup_invalid_model_reports_without_oauth_or_config_write(self):
+        args = self.setup_args(write=True, model="bad model")
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials") as creds:
+            with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                with patch("builtins.print") as mock_print:
+                    with self.assertRaises(SystemExit):
+                        run_setup(args)
+
+        creds.assert_not_called()
+        configure.assert_not_called()
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("Codex model id must not contain whitespace", printed_text)
+
+    def test_setup_write_preflights_oauth_before_config_write(self):
+        args = self.setup_args(write=True)
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=(None, None)):
+            with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                with patch("codex_antigravity_auth.cli.run_login") as login:
+                    with patch("builtins.print"):
+                        with self.assertRaisesRegex(SystemExit, "OAuth client credentials"):
+                            run_setup(args)
+
+        login.assert_not_called()
+        configure.assert_not_called()
+
+    def test_setup_write_preflights_byok_provider_before_config_write(self):
+        args = self.setup_args(write=True, model="deepseek:deepseek-chat")
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=(None, None)):
+            with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={}):
+                with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                    with patch("codex_antigravity_auth.cli.run_login") as login:
+                        with patch("builtins.print") as mock_print:
+                            with self.assertRaisesRegex(SystemExit, "BYOK provider is not ready"):
+                                run_setup(args)
+
+        login.assert_not_called()
+        configure.assert_not_called()
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("BYOK provider 'deepseek' is not configured", printed_text)
+        self.assertIn("codex-antigravity provider set deepseek", printed_text)
+
+    def test_setup_write_allows_ready_byok_provider_before_config_write(self):
+        provider = {
+            "id": "deepseek",
+            "displayName": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com",
+            "apiKey": "secret",
+            "models": ["deepseek-chat"],
+        }
+        args = self.setup_args(write=True, model="deepseek:deepseek-chat")
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=(None, None)):
+            with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"deepseek": provider}):
+                with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                    with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"deepseek:deepseek-chat"}):
+                        with patch(
+                            "codex_antigravity_auth.cli.codex_ready_report",
+                            return_value={"ok": True, "checks": [], "next_command": "codex"},
+                        ):
+                            with patch("builtins.print"):
+                                report = run_setup(args)
+
+        self.assertTrue(report["ok"])
+        configure.assert_called_once()
+
+    def test_setup_write_start_failure_reports_next_command(self):
+        args = self.setup_args(write=True, start=True)
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+            with patch("codex_antigravity_auth.cli.run_login"):
+                with patch("codex_antigravity_auth.cli.run_configure_codex"):
+                    with patch("codex_antigravity_auth.cli.start_gateway_background", side_effect=SystemExit("boom")):
+                        with patch("codex_antigravity_auth.cli.gateway_model_ids") as gateway:
+                            with patch("builtins.print") as mock_print:
+                                with self.assertRaisesRegex(SystemExit, "boom"):
+                                    run_setup(args)
+
+        gateway.assert_not_called()
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("codex-antigravity start --background --port 51122", printed_text)
+
+    def test_setup_write_start_waits_for_gateway_models(self):
+        provider_models = iter([RuntimeError("booting"), {"claude-3.5-sonnet", "claude-opus-4-6"}])
+
+        def fake_models(*args, **kwargs):
+            result = next(provider_models)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        args = self.setup_args(write=True, start=True)
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+            with patch("codex_antigravity_auth.cli.run_login"):
+                with patch("codex_antigravity_auth.cli.run_configure_codex"):
+                    with patch("codex_antigravity_auth.cli.start_gateway_background"):
+                        with patch("codex_antigravity_auth.cli.gateway_model_ids", side_effect=fake_models) as models:
+                            with patch("codex_antigravity_auth.cli.time.sleep"):
+                                with patch(
+                                    "codex_antigravity_auth.cli.codex_ready_report",
+                                    return_value={"ok": True, "checks": [], "next_command": "codex"},
+                                ):
+                                    with patch("builtins.print") as mock_print:
+                                        report = run_setup(args)
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(models.call_count, 2)
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("/v1/models is reachable", printed_text)
+
+    def test_setup_write_start_reports_gateway_wait_failure(self):
+        args = self.setup_args(write=True, start=True)
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+            with patch("codex_antigravity_auth.cli.run_login"):
+                with patch("codex_antigravity_auth.cli.run_configure_codex"):
+                    with patch("codex_antigravity_auth.cli.start_gateway_background"):
+                        with patch("codex_antigravity_auth.cli.wait_for_gateway_model_ids", side_effect=RuntimeError("still booting")):
+                            with patch("builtins.print") as mock_print:
+                                with self.assertRaisesRegex(SystemExit, "Gateway did not become ready"):
+                                    run_setup(args)
+
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("still booting", printed_text)
+        self.assertIn("codex-antigravity status --port 51122", printed_text)
+
+    def test_setup_check_reports_ignored_action_flags(self):
+        with TemporaryDirectory() as tmp:
+            args = self.setup_args(
+                check=True,
+                install_skill=True,
+                start=True,
+                config=str(Path(tmp) / "config.toml"),
+                skill_dir=tmp,
+            )
+            with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+                with patch(
+                    "codex_antigravity_auth.cli.codex_ready_report",
+                    return_value={"ok": True, "checks": [], "next_command": "codex"},
+                ):
+                    with patch("builtins.print") as mock_print:
+                        report = run_setup(args)
+
+        self.assertTrue(report["ok"])
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("--install-skill is only applied when --write is used", printed_text)
+        self.assertIn("--start is only applied when --write is used", printed_text)
+
+    def test_setup_json_is_read_only(self):
+        with self.assertRaisesRegex(SystemExit, "read-only"):
+            run_setup(self.setup_args(write=True, json=True))
+
+    def test_codex_ready_report_passes_with_selected_claude_model(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path, model="sonnet")
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet", "claude-opus-4-6"}):
+                with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": [{"email": "a@example.com"}]}):
+                    report = codex_ready_report(
+                        config=str(config_path),
+                        provider_id="antigravity",
+                        expected_base_url="http://localhost:51122/v1",
+                    )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["canonical_model"], "claude-3.5-sonnet")
+        self.assertEqual(report["route"], "google")
+
+    def test_codex_ready_report_fails_when_selected_model_missing_from_gateway(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path, model="opus")
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": [{"email": "a@example.com"}]}):
+                    report = codex_ready_report(
+                        config=str(config_path),
+                        provider_id="antigravity",
+                        expected_base_url="http://localhost:51122/v1",
+                    )
+
+        self.assertFalse(report["ok"])
+        failed = [check["name"] for check in report["checks"] if check["status"] == "fail"]
+        self.assertIn("model_catalog", failed)
+        self.assertIn("doctor --codex-ready", report["next_command"])
+
+    def test_codex_ready_report_handles_account_load_failure(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path, model="sonnet")
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                with patch("codex_antigravity_auth.cli.load_accounts", side_effect=RuntimeError("account-store boom")):
+                    report = codex_ready_report(
+                        config=str(config_path),
+                        provider_id="antigravity",
+                        expected_base_url="http://localhost:51122/v1",
+                    )
+
+        self.assertFalse(report["ok"])
+        rotation = next(check for check in report["checks"] if check["name"] == "google_rotation")
+        self.assertEqual(rotation["status"], "fail")
+        self.assertIn("Could not load Google account rotation state", rotation["detail"])
+        self.assertIn("setup-google", report["next_command"])
+
+    def test_codex_ready_report_handles_byok_provider_load_failure(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path, model="deepseek:deepseek-chat")
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"deepseek:deepseek-chat"}):
+                with patch("codex_antigravity_auth.cli.all_provider_configs", side_effect=RuntimeError("providers boom")):
+                    report = codex_ready_report(
+                        config=str(config_path),
+                        provider_id="antigravity",
+                        expected_base_url="http://localhost:51122/v1",
+                    )
+
+        self.assertFalse(report["ok"])
+        route_checks = [check for check in report["checks"] if check["name"] == "model_route"]
+        self.assertEqual(len(route_checks), 1)
+        self.assertEqual(route_checks[0]["status"], "fail")
+        self.assertIn("Could not load BYOK provider configuration", route_checks[0]["detail"])
+
+    def test_gateway_status_reports_stale_pid(self):
+        with TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
+            pid_file.write_text("999999\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.process_is_running", return_value=False):
+                    info = gateway_status_info(51122)
+
+        self.assertEqual(info["status"], "stale")
+        self.assertFalse(info["running"])
+
+    def test_gateway_status_reports_foreign_pid(self):
+        with TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
+            pid_file.write_text("12345\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.process_is_running", return_value=True):
+                    with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=False):
+                        info = gateway_status_info(51122)
+
+        self.assertEqual(info["status"], "foreign")
+        self.assertFalse(info["running"])
+        self.assertTrue(info["process_running"])
+        self.assertFalse(info["process_matches"])
+
+    def test_stop_gateway_removes_stale_pid_without_killing_unrelated_process(self):
+        with TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
+            pid_file.write_text("999999\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.process_is_running", return_value=False):
+                    with patch("codex_antigravity_auth.cli.os.kill") as kill:
+                        with patch("builtins.print"):
+                            info = stop_gateway(Namespace(port=51122))
+
+                        self.assertEqual(info["status"], "stopped")
+                        self.assertFalse(pid_file.exists())
+                        kill.assert_not_called()
+
+    def test_stop_gateway_refuses_foreign_pid(self):
+        with TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
+            pid_file.write_text("12345\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.process_is_running", return_value=True):
+                    with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=False):
+                        with patch("codex_antigravity_auth.cli.os.kill") as kill:
+                            with self.assertRaisesRegex(SystemExit, "Refusing"):
+                                stop_gateway(Namespace(port=51122))
+                            self.assertTrue(pid_file.exists())
+                            kill.assert_not_called()
+
+    def test_stop_gateway_handles_pid_exiting_before_sigterm(self):
+        with TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
+            pid_file.write_text("12345\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.process_is_running", return_value=True):
+                    with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=True):
+                        with patch("codex_antigravity_auth.cli.os.kill", side_effect=ProcessLookupError):
+                            with patch("builtins.print"):
+                                info = stop_gateway(Namespace(port=51122))
+                            self.assertEqual(info["status"], "stopped")
+                            self.assertFalse(pid_file.exists())
+
+    def test_stop_gateway_preserves_pid_file_on_permission_error(self):
+        with TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
+            pid_file.write_text("12345\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.process_is_running", return_value=True):
+                    with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=True):
+                        with patch("codex_antigravity_auth.cli.os.kill", side_effect=PermissionError):
+                            with self.assertRaisesRegex(SystemExit, "permission"):
+                                stop_gateway(Namespace(port=51122))
+                            self.assertTrue(pid_file.exists())
+
+    def test_stop_gateway_sends_sigterm_for_running_pid(self):
+        with TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
+            pid_file.write_text("12345\n", encoding="utf-8")
+            states = iter([True, False, False])
+
+            def fake_running(pid):
+                return next(states)
+
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.process_is_running", side_effect=fake_running):
+                    with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=True):
+                        with patch("codex_antigravity_auth.cli.os.kill") as kill:
+                            with patch("builtins.print"):
+                                info = stop_gateway(Namespace(port=51122))
+
+        self.assertEqual(info["status"], "stopped")
+        self.assertFalse(pid_file.exists())
+        kill.assert_called_once_with(12345, signal.SIGTERM)
+
+    def test_start_background_refuses_foreign_pid_file(self):
+        with TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
+            pid_file.write_text("12345\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.process_is_running", return_value=True):
+                    with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=False):
+                        with patch("codex_antigravity_auth.cli.subprocess.Popen") as popen:
+                            with self.assertRaisesRegex(SystemExit, "Refusing"):
+                                start_gateway_background(Namespace(host="127.0.0.1", port=51122, allow_remote=False))
+                            self.assertTrue(pid_file.exists())
+                            popen.assert_not_called()
+
+    def test_start_background_writes_pid_and_log_paths(self):
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.poll.return_value = None
+        with TemporaryDirectory() as tmp:
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
+                    with patch("codex_antigravity_auth.cli.process_is_running", return_value=True):
+                        with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=True):
+                            with patch("codex_antigravity_auth.cli.time.sleep"):
+                                with patch("builtins.print"):
+                                    info = start_gateway_background(
+                                        Namespace(host="127.0.0.1", port=51122, allow_remote=False)
+                                    )
+
+            pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
+            log_file = Path(tmp) / "antigravity-gateway-51122.log"
+            self.assertEqual(pid_file.read_text(encoding="utf-8"), "12345\n")
+            self.assertEqual(stat.S_IMODE(log_file.stat().st_mode), 0o600)
+            self.assertEqual(info["pid_file"], str(pid_file))
+            self.assertEqual(info["log_file"], str(log_file))
+            popen.assert_called_once()
+
+
 class TestProviderCli(unittest.TestCase):
     def test_provider_key_status_validates_keys_without_rendering_secrets(self):
         self.assertEqual(provider_key_status({"apiKey": " secret "}, configured_label="configured"), "configured")
@@ -1239,6 +1823,28 @@ class TestProviderCli(unittest.TestCase):
             with patch("codex_antigravity_auth.cli.set_provider_config", side_effect=RuntimeError("provider store locked")):
                 with self.assertRaisesRegex(SystemExit, "provider store locked"):
                     main()
+
+    def test_provider_set_redacts_secret_from_storage_failure(self):
+        argv = [
+            "codex-antigravity",
+            "provider",
+            "set",
+            "deepseek",
+            "--api-key",
+            "sk-testsecret1234567890",
+            "--model",
+            "deepseek-chat",
+        ]
+        with patch.object(sys, "argv", argv):
+            with patch(
+                "codex_antigravity_auth.cli.set_provider_config",
+                side_effect=RuntimeError("failed to write api_key=sk-testsecret1234567890"),
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    main()
+
+        self.assertNotIn("sk-testsecret1234567890", str(raised.exception))
+        self.assertIn("[REDACTED]", str(raised.exception))
 
     def test_provider_remove_reports_storage_failure_without_traceback(self):
         argv = [
