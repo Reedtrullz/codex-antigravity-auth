@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -153,6 +154,125 @@ def iter_request_records(*, tail: int | None = None) -> Iterable[dict[str, Any]]
             continue
         records.append(_redact_json(parsed if isinstance(parsed, dict) else {"value": parsed}))
     return records
+
+
+def _parse_since_seconds(value: str | None) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"", "all"}:
+        return None
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([smhd]?)", text)
+    if not match:
+        raise ValueError("since must be a duration like 24h, 30m, 7d, or 'all'")
+    amount = float(match.group(1))
+    unit = match.group(2) or "s"
+    multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return amount * multiplier
+
+
+def _timestamp_epoch(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def _percentile(values: list[int], percentile: float) -> int | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, int((percentile / 100.0) * len(ordered) + 0.999999) - 1))
+    return ordered[index]
+
+
+def request_log_summary(*, since: str | None = "24h", now: float | None = None) -> dict[str, Any]:
+    window_seconds = _parse_since_seconds(since)
+    now_value = time.time() if now is None else float(now)
+    cutoff = None if window_seconds is None else now_value - window_seconds
+    records = list(iter_request_records())
+    groups: dict[str, dict[str, Any]] = {}
+    malformed_records = 0
+    excluded_by_time = 0
+
+    for record in records:
+        if record.get("status") == "malformed":
+            malformed_records += 1
+            continue
+        timestamp = _timestamp_epoch(record.get("timestamp"))
+        if cutoff is not None and timestamp is not None and timestamp < cutoff:
+            excluded_by_time += 1
+            continue
+        route = str(record.get("route") or "unknown")
+        family = str(record.get("family") or record.get("provider") or "unknown")
+        key = f"{route}/{family}"
+        group = groups.setdefault(
+            key,
+            {
+                "route": route,
+                "family": family,
+                "request_count": 0,
+                "success_count": 0,
+                "failure_count": 0,
+                "rate_limit_count": 0,
+                "rotation_attempted_count": 0,
+                "_latencies": [],
+                "_errors": {},
+            },
+        )
+        group["request_count"] += 1
+        if record.get("status") == "success":
+            group["success_count"] += 1
+        else:
+            group["failure_count"] += 1
+        try:
+            latency_ms = int(float(record.get("latency_ms")))
+            if latency_ms >= 0:
+                group["_latencies"].append(latency_ms)
+        except (TypeError, ValueError):
+            pass
+        try:
+            if int(record.get("http_status")) == 429:
+                group["rate_limit_count"] += 1
+        except (TypeError, ValueError):
+            pass
+        if bool(record.get("rotation_attempted")):
+            group["rotation_attempted_count"] += 1
+        error_class = record.get("error_class")
+        if isinstance(error_class, str) and error_class:
+            errors = group["_errors"]
+            errors[error_class] = int(errors.get(error_class, 0)) + 1
+
+    rendered_groups: dict[str, dict[str, Any]] = {}
+    for key, group in sorted(groups.items()):
+        request_count = int(group["request_count"])
+        success_count = int(group["success_count"])
+        latencies = group.pop("_latencies")
+        errors = group.pop("_errors")
+        rendered = {
+            **group,
+            "success_rate": round(success_count / request_count, 4) if request_count else 0.0,
+            "p50_latency_ms": _percentile(latencies, 50),
+            "p95_latency_ms": _percentile(latencies, 95),
+            "top_error_classes": [
+                {"error_class": error_class, "count": count}
+                for error_class, count in sorted(errors.items(), key=lambda item: (-item[1], item[0]))[:3]
+            ],
+        }
+        rendered_groups[key] = rendered
+
+    return {
+        "path": str(request_log_path()),
+        "since": since if since is not None else "all",
+        "window_seconds": window_seconds,
+        "total_records": len(records),
+        "included_records": sum(group["request_count"] for group in rendered_groups.values()),
+        "excluded_by_time": excluded_by_time,
+        "malformed_records": malformed_records,
+        "groups": rendered_groups,
+    }
 
 
 def clean_request_logs() -> list[str]:

@@ -31,9 +31,11 @@ from codex_antigravity_auth.cli import (
     normalize_epoch_seconds,
     provider_key_status,
     process_is_running,
+    remove_google_account,
     render_codex_config_snippet,
     require_safe_gateway_host,
     run_configure_codex,
+    reset_google_account_state,
     run_doctor,
     run_gateway_status,
     run_install_skill,
@@ -52,7 +54,7 @@ from codex_antigravity_auth.cli import (
 )
 from codex_antigravity_auth.constants import save_oauth_credentials
 from codex_antigravity_auth.models import canonical_model_id, native_model_catalog, resolve_backend_model
-from codex_antigravity_auth.observability import iter_request_records, write_request_record
+from codex_antigravity_auth.observability import iter_request_records, request_log_summary, write_request_record
 from codex_antigravity_auth.service import install_service, render_linux_systemd_unit, render_macos_launch_agent, service_command, service_status
 
 
@@ -1542,6 +1544,7 @@ class TestV3NativeSetup(unittest.TestCase):
                         config=str(config_path),
                         provider_id="antigravity",
                         expected_base_url="http://localhost:51122/v1",
+                        include_version_check=False,
                     )
 
         self.assertTrue(report["ok"])
@@ -2157,6 +2160,10 @@ class TestVNextPolishCli(unittest.TestCase):
         command_cases = [
             (["codex-antigravity", "service", "status", "--json"], "run_service_command"),
             (["codex-antigravity", "logs", "--tail", "1", "--json"], "run_logs_command"),
+            (["codex-antigravity", "logs", "summary", "--json"], "run_logs_command"),
+            (["codex-antigravity", "accounts", "list"], "run_accounts_command"),
+            (["codex-antigravity", "accounts", "remove", "a@example.com", "--yes"], "run_accounts_command"),
+            (["codex-antigravity", "accounts", "reset", "a@example.com"], "run_accounts_command"),
             (["codex-antigravity", "models", "list", "--json"], "run_models_command"),
         ]
         for argv, handler_name in command_cases:
@@ -2205,6 +2212,36 @@ class TestVNextPolishCli(unittest.TestCase):
         mock_login.assert_not_called()
         mock_install.assert_not_called()
         mock_start.assert_not_called()
+
+    def test_codex_ready_report_suggests_repair_for_existing_config_drift(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('model = "claude-3.5-sonnet"\n', encoding="utf-8")
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": [{"email": "a@example.com"}]}):
+                    report = codex_ready_report(
+                        config=str(config_path),
+                        provider_id="antigravity",
+                        expected_base_url="http://localhost:51122/v1",
+                    )
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["checks"][0]["name"], "codex_config")
+        self.assertEqual(report["next_command"], "codex-antigravity setup --repair")
+
+    def test_codex_ready_report_suggests_write_when_config_missing(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "missing.toml"
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                report = codex_ready_report(
+                    config=str(config_path),
+                    provider_id="antigravity",
+                    expected_base_url="http://localhost:51122/v1",
+                    include_version_check=False,
+                )
+
+        self.assertFalse(report["ok"])
+        self.assertIn("setup --write", report["next_command"])
 
     def test_setup_repair_and_write_are_mutually_exclusive(self):
         args = Namespace(
@@ -2408,6 +2445,148 @@ class TestVNextPolishCli(unittest.TestCase):
         self.assertNotIn("also secret", serialized)
         self.assertNotIn("sk-testsecret1234567890", serialized)
         self.assertIn("[REDACTED]", serialized)
+
+    def test_request_log_summary_aggregates_latency_errors_and_malformed_lines(self):
+        now = 1_700_000_000.0
+
+        def timestamp(age_seconds: int) -> str:
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - age_seconds))
+
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "antigravity-requests.jsonl"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": timestamp(60),
+                                "request_id": "req_1",
+                                "route": "google",
+                                "family": "claude",
+                                "status": "success",
+                                "latency_ms": 100,
+                                "http_status": 200,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": timestamp(120),
+                                "request_id": "req_2",
+                                "route": "google",
+                                "family": "claude",
+                                "status": "failed",
+                                "latency_ms": 900,
+                                "http_status": 429,
+                                "rotation_attempted": True,
+                                "error_class": "rate_limited",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": timestamp(30),
+                                "request_id": "req_3",
+                                "route": "byok",
+                                "provider": "openrouter",
+                                "status": "failed",
+                                "latency_ms": 300,
+                                "http_status": 500,
+                                "error_class": "provider_error",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": timestamp(200000),
+                                "request_id": "old",
+                                "route": "google",
+                                "family": "claude",
+                                "status": "success",
+                                "latency_ms": 1,
+                                "http_status": 200,
+                            }
+                        ),
+                        "{not-json",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch("codex_antigravity_auth.observability.get_codex_home", return_value=Path(tmp)):
+                summary = request_log_summary(since="24h", now=now)
+
+        google = summary["groups"]["google/claude"]
+        self.assertEqual(summary["included_records"], 3)
+        self.assertEqual(summary["excluded_by_time"], 1)
+        self.assertEqual(summary["malformed_records"], 1)
+        self.assertEqual(google["request_count"], 2)
+        self.assertEqual(google["success_count"], 1)
+        self.assertEqual(google["rate_limit_count"], 1)
+        self.assertEqual(google["rotation_attempted_count"], 1)
+        self.assertEqual(google["p50_latency_ms"], 100)
+        self.assertEqual(google["p95_latency_ms"], 900)
+        self.assertEqual(google["top_error_classes"], [{"error_class": "rate_limited", "count": 1}])
+
+    def test_logs_summary_human_output_handles_empty_log(self):
+        with TemporaryDirectory() as tmp:
+            with patch("codex_antigravity_auth.observability.get_codex_home", return_value=Path(tmp)):
+                with patch("builtins.print") as mock_print:
+                    main_argv = ["codex-antigravity", "logs", "summary", "--since", "all"]
+                    with patch.object(sys, "argv", main_argv):
+                        main()
+
+        printed = "\n".join(call.args[0] for call in mock_print.call_args_list if call.args)
+        self.assertIn("No request log entries matched", printed)
+
+    def test_remove_google_account_prunes_state_and_repairs_active_indices(self):
+        data = {
+            "accounts": [
+                {"email": "a@example.com"},
+                {"email": "b@example.com"},
+                {"email": "c@example.com"},
+            ],
+            "activeIndex": 2,
+            "activeIndexByFamily": {"claude": 1, "gemini": 2},
+            "accountState": {
+                "failures": {"b@example.com": 2, "c@example.com": 1},
+                "cooldowns": {"b@example.com": 999, "c@example.com": 888},
+                "counters": {"b@example.com": {"claude": {"total_requests": 2}}},
+            },
+        }
+
+        with patch("codex_antigravity_auth.cli.update_accounts", side_effect=lambda mutator: mutator(data)):
+            result = remove_google_account("b@example.com")
+
+        self.assertEqual(result["account_count"], 2)
+        self.assertEqual([account["email"] for account in data["accounts"]], ["a@example.com", "c@example.com"])
+        self.assertEqual(data["activeIndex"], 1)
+        self.assertEqual(data["activeIndexByFamily"], {"claude": 1, "gemini": 1})
+        self.assertNotIn("b@example.com", data["accountState"]["failures"])
+        self.assertNotIn("b@example.com", data["accountState"]["cooldowns"])
+        self.assertNotIn("b@example.com", data["accountState"]["counters"])
+
+    def test_reset_google_account_state_clears_persisted_cooldown_and_failures(self):
+        data = {
+            "accounts": [{"email": "a@example.com"}],
+            "accountState": {
+                "failures": {"a@example.com": 2},
+                "cooldowns": {"a@example.com": 999},
+                "counters": {"a@example.com": {"claude": {"total_requests": 2}}},
+            },
+        }
+
+        with patch("codex_antigravity_auth.cli.update_accounts", side_effect=lambda mutator: mutator(data)):
+            result = reset_google_account_state("a@example.com")
+
+        self.assertEqual(result["cleared"], {"failures": 1, "cooldowns": 1})
+        self.assertEqual(data["accountState"]["failures"], {})
+        self.assertEqual(data["accountState"]["cooldowns"], {})
+        self.assertIn("a@example.com", data["accountState"]["counters"])
+
+    def test_accounts_remove_requires_yes_when_non_interactive(self):
+        argv = ["codex-antigravity", "accounts", "remove", "a@example.com"]
+        with patch.object(sys, "argv", argv):
+            with patch("sys.stdin.isatty", return_value=False):
+                with self.assertRaisesRegex(SystemExit, "--yes"):
+                    main()
 
     def test_model_overlay_catalog_and_collision_rules(self):
         with TemporaryDirectory() as tmp:

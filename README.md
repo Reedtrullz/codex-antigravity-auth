@@ -174,7 +174,11 @@ codex-antigravity setup-google --accounts 2
 ```bash
 codex-antigravity login --count 2
 codex-antigravity accounts
+codex-antigravity accounts reset you@example.com
+codex-antigravity accounts remove old@example.com --yes
 ```
+
+`accounts reset <email>` clears persisted cooldown/failure state without touching saved tokens or usage counters; use `accounts reset --all --yes` for the whole rotation pool. `accounts remove <email> --yes` removes a revoked or dead account from the encrypted store and repairs active rotation indexes.
 
 Start the local gateway:
 
@@ -191,10 +195,13 @@ For Google Antigravity routes, concurrent Codex requests are spread across avail
 
 ```bash
 codex-antigravity logs --tail 20
+codex-antigravity logs summary --since 24h
 codex-antigravity logs --follow
 codex-antigravity logs clean
 curl http://127.0.0.1:51122/health
 ```
+
+`logs summary` aggregates the sanitized request log by route/family with request counts, success rate, p50/p95 latency, 429 counts, rotation attempts, and top error classes. It never reads prompts, request bodies, OAuth material, provider keys, account emails, or encrypted stores.
 
 The loopback-only `/health` endpoint reports process health, native model count, BYOK route visibility, anonymous account cooldown summaries, and the request-log path.
 

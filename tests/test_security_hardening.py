@@ -102,7 +102,10 @@ class TestCredentialResolution(unittest.TestCase):
             )
             os.chmod(target_path, 0o644)
             symlink_path = Path(tmp) / "antigravity-credentials.json"
-            symlink_path.symlink_to(target_path)
+            try:
+                symlink_path.symlink_to(target_path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
 
             with patch("codex_antigravity_auth.constants.CREDENTIALS_FILE", str(symlink_path)):
                 with patch.dict("os.environ", {}, clear=True):

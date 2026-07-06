@@ -5,6 +5,7 @@
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **wheel install smoke**: ran `python3 -m build`, `python3 -m twine check dist/*`, installed the wheel into a clean venv, ran `pip check`, verified console script help plus `service status --json`, `models list --json`, `logs --tail 1 --json`, scratch `setup --check`, and packaged `install-skill --verify` ✅
+- **CI matrix**: PR CI now includes Ubuntu Python 3.10/3.11/3.12 plus a Windows Python 3.12 test leg ✅
 - **PR #8 CI**: head `3265240` passed duplicate GitHub CI runs `28768862063` and `28768878878` across `package`, Python `3.10`, `3.11`, and `3.12` ✅
 - **live backend smoke**: credentialed live Google OAuth/runtime smoke passed on 2026-07-03 for `claude-3.5-sonnet`; live BYOK smokes passed through transient env vars for `deepseek:deepseek-v4-flash` and OpenRouter. Latest OpenRouter evidence covered direct `/api/v1/auth/key` success, `/v1/models` exposure for `openrouter:openrouter/free`, and exact non-streaming sentinel `anti-openrouter-byok-ok` through `/v1/responses` with the gateway stopped afterward ✅
 - **install command**: `uv tool install .` for normal use, `uv tool install --editable .` for development
@@ -107,6 +108,9 @@
 | 1Password CLI presence enforced before gateway/service wrapping | ✅ |
 | Process-local in-flight Google account spreading for concurrent Codex requests | ✅ |
 | Cached PyPI package-version drift warning in doctor/readiness diagnostics | ✅ |
+| Account CLI remove/reset for encrypted Google rotation store | ✅ |
+| `logs summary` request-log aggregation by route/family | ✅ |
+| `doctor --codex-ready` suggests `setup --repair` for existing config drift | ✅ |
 
 ## Known Limitations
 - Live Google Antigravity, DeepSeek V4 Flash BYOK, and OpenRouter BYOK smokes have passed with configured credentials/API keys; xAI, Kimi/Moonshot, Ollama cloud, and arbitrary custom BYOK providers still need their own live-key smoke.
@@ -119,7 +123,7 @@
 ## Release State
 - Current package metadata: `1.4.0`
 - Previous tagged GitHub release: [v1.4.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.4.0)
-- The current dirty worktree contains the planned v1.5.0 implementation for live install smoke, OAuth credential onboarding, 1Password hardening, concurrent account spreading, and package-version drift diagnostics. Release metadata/tagging are intentionally left for maintainer release prep.
+- The current PR branch contains the planned v1.5.0 implementation for live install smoke, OAuth credential onboarding, 1Password hardening, concurrent account spreading, package-version drift diagnostics, account remove/reset, request-log summaries, Windows CI coverage, and targeted setup-repair hints. Release metadata/tagging are intentionally left for maintainer release prep.
 
 ## Next Priorities
 1. Add `/v1/responses/compact` support

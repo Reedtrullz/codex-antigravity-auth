@@ -45,12 +45,13 @@ Gateway request diagnostics are local and sanitized:
 
 ```bash
 codex-antigravity logs --tail 50
+codex-antigravity logs summary --since 24h
 codex-antigravity logs --follow
 codex-antigravity logs clean
 curl http://127.0.0.1:51122/health
 ```
 
-The request JSONL log is capped and rotated at `10 MiB`. It records request ids, model route/provider/family, stream mode, status, latency, retry/rotation hints, HTTP status, usage totals, and redacted errors. It does not store raw prompts, request bodies, provider keys, OAuth tokens, account emails, or encrypted stores.
+The request JSONL log is capped and rotated at `10 MiB`. It records request ids, model route/provider/family, stream mode, status, latency, retry/rotation hints, HTTP status, usage totals, and redacted errors. It does not store raw prompts, request bodies, provider keys, OAuth tokens, account emails, or encrypted stores. `logs summary` aggregates those sanitized records by route/family with request counts, success rate, p50/p95 latency, 429 counts, rotation attempts, and top error classes.
 
 Google account selection is sticky for sequential requests but load-aware for concurrent ones: request handlers acquire an account, prefer the lowest process-local in-flight count among non-cooling accounts, and release it when non-streaming responses finish or streaming responses end/disconnect.
 
@@ -113,7 +114,7 @@ codex-antigravity setup-google --accounts 2
 codex-antigravity start
 ```
 
-This first verifies that Google OAuth client credentials are configured, then runs the browser OAuth login before writing Codex config so a login startup failure does not leave Codex pointed at an unusable gateway setup. It forces Google's account chooser when adding multiple accounts, stores every successful login in the encrypted rotation pool, clears stale cooldown state on re-authentication, prints the active Gemini/Claude rotation status, writes the Codex provider block, and runs `doctor` against the same config path. To add more accounts later, run `codex-antigravity login --count 2`; to inspect rotation state, run `codex-antigravity accounts`.
+This first verifies that Google OAuth client credentials are configured, then runs the browser OAuth login before writing Codex config so a login startup failure does not leave Codex pointed at an unusable gateway setup. It forces Google's account chooser when adding multiple accounts, stores every successful login in the encrypted rotation pool, clears stale cooldown state on re-authentication, prints the active Gemini/Claude rotation status, writes the Codex provider block, and runs `doctor` against the same config path. To add more accounts later, run `codex-antigravity login --count 2`; to inspect rotation state, run `codex-antigravity accounts`. Use `codex-antigravity accounts reset <email>` to clear persisted cooldown/failure state, `accounts reset --all --yes` for the whole pool, and `accounts remove <email> --yes` to remove a revoked account without hand-editing encrypted storage.
 
 For BYOK-only use, replace `codex-antigravity login` with a provider setup command such as:
 

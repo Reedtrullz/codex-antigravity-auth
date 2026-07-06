@@ -48,7 +48,7 @@ from .models import (
     validate_model_id,
     validate_overlay_model,
 )
-from .observability import clean_request_logs, iter_request_records, request_log_info
+from .observability import clean_request_logs, iter_request_records, request_log_info, request_log_summary
 from .onepassword import onepassword_runtime_description, wrap_with_onepassword
 from .oauth import (
     OAUTH_HTTP_TIMEOUT_SECONDS,
@@ -58,7 +58,7 @@ from .oauth import (
     token_expires_in_seconds,
 )
 from .service import install_service, service_status, uninstall_service
-from .storage import load_accounts, save_accounts
+from .storage import load_accounts, save_accounts, update_accounts
 from .constants import (
     get_codex_home,
     is_loopback_host,
@@ -853,6 +853,35 @@ def run_logs_command(args) -> None:
         else:
             print(f"[+] Removed {len(removed)} request log file(s).")
         return
+    if getattr(args, "logs_action", None) == "summary":
+        try:
+            summary = request_log_summary(since=getattr(args, "since", "24h"))
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        if getattr(args, "json", False):
+            print(json.dumps(summary, indent=2))
+            return
+        if not summary["groups"]:
+            print(f"[*] No request log entries matched the {summary['since']} window at {summary['path']}")
+        else:
+            print(f"[*] Request log summary ({summary['since']})")
+            for group in summary["groups"].values():
+                success_pct = group["success_rate"] * 100
+                p50 = group["p50_latency_ms"] if group["p50_latency_ms"] is not None else "n/a"
+                p95 = group["p95_latency_ms"] if group["p95_latency_ms"] is not None else "n/a"
+                print(
+                    f"- {group['route']}/{group['family']}: {group['request_count']} request(s), "
+                    f"{success_pct:.1f}% success, p50={p50}ms, p95={p95}ms, "
+                    f"429s={group['rate_limit_count']}, rotations={group['rotation_attempted_count']}"
+                )
+                if group["top_error_classes"]:
+                    errors = ", ".join(
+                        f"{item['error_class']} ({item['count']})" for item in group["top_error_classes"]
+                    )
+                    print(f"  errors: {errors}")
+        if summary["malformed_records"]:
+            print(f"[WARN] Ignored {summary['malformed_records']} malformed request-log entry/entries.")
+        return
     tail = getattr(args, "tail", None)
     if getattr(args, "json", False):
         print(json.dumps(list(iter_request_records(tail=tail)), indent=2))
@@ -886,6 +915,68 @@ def run_logs_command(args) -> None:
                     last_size = handle.tell()
         except KeyboardInterrupt:
             return
+
+
+def _confirm_account_mutation(prompt: str, *, yes: bool, non_interactive_error: str) -> bool:
+    if yes:
+        return True
+    if not sys.stdin.isatty():
+        raise SystemExit(non_interactive_error)
+    answer = input(f"{prompt} [y/N] ").strip().lower()
+    return answer in {"y", "yes"}
+
+
+def run_accounts_command(args) -> None:
+    action = getattr(args, "accounts_action", None) or "list"
+    if action == "list":
+        data = load_accounts()
+        accounts = data.get("accounts", [])
+        if not accounts:
+            print("[*] No configured accounts found. Run `codex-antigravity login` first.")
+            return
+        print("[*] Configured Google Accounts:")
+        print_account_rotation_summary(data)
+        return
+
+    if action == "remove":
+        email = getattr(args, "email", "")
+        if not _confirm_account_mutation(
+            f"Remove Google account {email} from the encrypted rotation store?",
+            yes=getattr(args, "yes", False),
+            non_interactive_error="accounts remove requires --yes in non-interactive shells",
+        ):
+            print("[*] Account removal cancelled.")
+            return
+        try:
+            result = remove_google_account(email)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"[+] Removed Google account {result['email']}; {result['account_count']} account(s) remain.")
+        return
+
+    if action == "reset":
+        email = getattr(args, "email", None)
+        all_accounts = bool(getattr(args, "all_accounts", False))
+        if all_accounts and not _confirm_account_mutation(
+            "Reset cooldown and failure state for all Google accounts?",
+            yes=getattr(args, "yes", False),
+            non_interactive_error="accounts reset --all requires --yes in non-interactive shells",
+        ):
+            print("[*] Account reset cancelled.")
+            return
+        try:
+            result = reset_google_account_state(email, all_accounts=all_accounts)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        cleared = result["cleared"]
+        target = "all Google accounts" if all_accounts else ", ".join(result["emails"])
+        print(
+            f"[+] Reset cooldown/failure state for {target}: "
+            f"{cleared['cooldowns']} cooldown(s), {cleared['failures']} failure count(s) cleared."
+        )
+        return
+
+    raise SystemExit(f"Unsupported accounts action: {action}")
 
 
 def run_models_command(args) -> None:
@@ -1318,7 +1409,9 @@ def codex_ready_report(
     next_command = "codex"
     if failed:
         first = failed[0]["name"]
-        if first in {"codex_config", "selected_model"}:
+        if first == "codex_config" and config_path.exists():
+            next_command = "codex-antigravity setup --repair"
+        elif first in {"codex_config", "selected_model"}:
             next_command = f"codex-antigravity setup --write --accounts 1 --model {DEFAULT_CODEX_MODEL}"
         elif first == "gateway_models":
             next_command = f"codex-antigravity start --background --port {gateway_port}"
@@ -1561,6 +1654,101 @@ def upsert_google_account(data: dict, account_entry: dict) -> dict:
                 bucket.pop(email, None)
 
     return {"email": email, "created": existing_idx is None, "account_count": len(accounts)}
+
+
+def _active_index_after_removal(value, removed_index: int, account_count: int) -> int:
+    if account_count <= 0:
+        return 0
+    if not isinstance(value, int) or isinstance(value, bool):
+        return 0
+    if value > removed_index:
+        value -= 1
+    elif value == removed_index:
+        value = min(removed_index, account_count - 1)
+    if value < 0 or value >= account_count:
+        return 0
+    return value
+
+
+def remove_google_account(email: str) -> dict:
+    target_email = str(email or "").strip()
+    if not target_email:
+        raise ValueError("Google account email is required")
+    result: dict = {}
+
+    def mutate(data: dict) -> bool:
+        accounts = data.get("accounts", [])
+        if not isinstance(accounts, list):
+            accounts = []
+        removed_index = None
+        for idx, account in enumerate(accounts):
+            if isinstance(account, dict) and account.get("email") == target_email:
+                removed_index = idx
+                break
+        if removed_index is None:
+            raise ValueError(f"No configured Google account found for {target_email}")
+
+        removed = accounts.pop(removed_index)
+        data["accounts"] = accounts
+        remaining = len(accounts)
+        data["activeIndex"] = _active_index_after_removal(data.get("activeIndex"), removed_index, remaining)
+        family_map = data.get("activeIndexByFamily")
+        if not isinstance(family_map, dict):
+            family_map = {}
+        data["activeIndexByFamily"] = {
+            family: _active_index_after_removal(family_map.get(family, 0), removed_index, remaining)
+            for family in ("claude", "gemini")
+        }
+        state = data.get("accountState")
+        if isinstance(state, dict):
+            for bucket_name in ("failures", "cooldowns", "counters"):
+                bucket = state.get(bucket_name)
+                if isinstance(bucket, dict):
+                    bucket.pop(target_email, None)
+        result.update({"email": removed.get("email", target_email), "account_count": remaining})
+        return True
+
+    update_accounts(mutate)
+    return result
+
+
+def reset_google_account_state(email: str | None = None, *, all_accounts: bool = False) -> dict:
+    target_email = str(email or "").strip()
+    if all_accounts and target_email:
+        raise ValueError("Pass either an email or --all, not both")
+    if not all_accounts and not target_email:
+        raise ValueError("Google account email is required unless --all is passed")
+    result: dict = {"emails": [], "cleared": {"failures": 0, "cooldowns": 0}}
+
+    def mutate(data: dict) -> bool:
+        accounts = data.get("accounts", [])
+        account_emails = [
+            str(account.get("email"))
+            for account in accounts
+            if isinstance(account, dict) and account.get("email")
+        ]
+        targets = set(account_emails if all_accounts else [target_email])
+        if not all_accounts and target_email not in targets.intersection(account_emails):
+            raise ValueError(f"No configured Google account found for {target_email}")
+        state = data.setdefault("accountState", {})
+        if not isinstance(state, dict):
+            state = {}
+            data["accountState"] = state
+        dirty = False
+        for bucket_name in ("failures", "cooldowns"):
+            bucket = state.get(bucket_name)
+            if not isinstance(bucket, dict):
+                continue
+            for account_email in list(targets):
+                if account_email in bucket:
+                    bucket.pop(account_email, None)
+                    result["cleared"][bucket_name] += 1
+                    dirty = True
+        result["emails"] = sorted(targets)
+        return dirty
+
+    update_accounts(mutate)
+    return result
 
 
 def require_safe_gateway_host(host: str, allow_remote: bool) -> None:
@@ -2931,7 +3119,16 @@ def main():
     )
     
     # accounts
-    subparsers.add_parser("accounts", help="List all configured accounts")
+    accounts_parser = subparsers.add_parser("accounts", help="List or manage configured Google accounts")
+    accounts_sub = accounts_parser.add_subparsers(dest="accounts_action")
+    accounts_sub.add_parser("list", help="List configured Google accounts")
+    accounts_remove = accounts_sub.add_parser("remove", help="Remove a Google account from the encrypted rotation store")
+    accounts_remove.add_argument("email", help="Google account email to remove")
+    accounts_remove.add_argument("--yes", action="store_true", help="Confirm removal without prompting")
+    accounts_reset = accounts_sub.add_parser("reset", help="Clear cooldown and failure state for one or all Google accounts")
+    accounts_reset.add_argument("email", nargs="?", help="Google account email to reset")
+    accounts_reset.add_argument("--all", action="store_true", dest="all_accounts", help="Reset all Google accounts")
+    accounts_reset.add_argument("--yes", action="store_true", help="Confirm reset-all without prompting")
 
     configure_parser = subparsers.add_parser(
         "configure-codex",
@@ -2978,11 +3175,12 @@ def main():
     service_status_parser.add_argument("--port", type=int, default=51122, help="Gateway server port")
     service_status_parser.add_argument("--json", action="store_true", help="Print service status as JSON")
 
-    logs_parser = subparsers.add_parser("logs", help="Show or clean sanitized gateway request logs")
-    logs_parser.add_argument("logs_action", nargs="?", choices=["show", "clean"], default="show", help="Log action")
+    logs_parser = subparsers.add_parser("logs", help="Show, summarize, or clean sanitized gateway request logs")
+    logs_parser.add_argument("logs_action", nargs="?", choices=["show", "clean", "summary"], default="show", help="Log action")
     logs_parser.add_argument("--tail", type=int, default=50, help="Number of recent entries to show")
     logs_parser.add_argument("--follow", action="store_true", help="Follow new request log entries")
     logs_parser.add_argument("--json", action="store_true", help="Print entries as JSON")
+    logs_parser.add_argument("--since", default="24h", help="Summary window for `logs summary` (for example 30m, 24h, 7d, all)")
 
     models_parser = subparsers.add_parser("models", help="List and manage local model catalog overlays")
     models_sub = models_parser.add_subparsers(dest="models_command", required=True)
@@ -3077,13 +3275,7 @@ def main():
         ):
             sys.exit(1)
     elif args.command == "accounts":
-        data = load_accounts()
-        accounts = data.get("accounts", [])
-        if not accounts:
-            print("[*] No configured accounts found. Run `codex-antigravity login` first.")
-            return
-        print("[*] Configured Google Accounts:")
-        print_account_rotation_summary(data)
+        run_accounts_command(args)
     elif args.command == "configure-codex":
         run_configure_codex(args)
     elif args.command == "install-skill":
