@@ -47,6 +47,7 @@ from .models import (
     validate_overlay_model,
 )
 from .observability import clean_request_logs, iter_request_records, request_log_info
+from .onepassword import onepassword_runtime_description, wrap_with_onepassword
 from .oauth import (
     OAUTH_HTTP_TIMEOUT_SECONDS,
     authorize_antigravity,
@@ -573,7 +574,12 @@ def run_service_command(args) -> dict:
     try:
         if args.service_command == "install":
             require_safe_gateway_host(args.host, allow_remote=False)
-            info = install_service(args.port, args.host)
+            info = install_service(
+                args.port,
+                args.host,
+                op_env_file=getattr(args, "op_env_file", None),
+                op_environment=getattr(args, "op_environment", None),
+            )
             action = "installed"
         elif args.service_command == "uninstall":
             info = uninstall_service(args.port)
@@ -583,7 +589,7 @@ def run_service_command(args) -> dict:
             action = "status"
         else:
             raise SystemExit("service requires install, uninstall, or status")
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         raise SystemExit(redact_secret_text(str(exc))) from exc
     gateway = gateway_status_info(args.port)
     result = {"service": info, "gateway": gateway}
@@ -597,6 +603,16 @@ def run_service_command(args) -> dict:
             )
         else:
             print(f"[+] Gateway service {action} for port {args.port}")
+            if action == "installed":
+                try:
+                    onepassword_description = onepassword_runtime_description(
+                        op_env_file=getattr(args, "op_env_file", None),
+                        op_environment=getattr(args, "op_environment", None),
+                    )
+                except ValueError as exc:
+                    raise SystemExit(redact_secret_text(str(exc))) from exc
+                if onepassword_description:
+                    print(f"    Secrets: {onepassword_description}")
         if info.get("path"):
             print(f"    Service file: {info['path']}")
         if info.get("task_name"):
@@ -767,6 +783,18 @@ def start_gateway_background(args) -> dict:
         "--log-level",
         "info",
     ]
+    try:
+        onepassword_description = onepassword_runtime_description(
+            op_env_file=getattr(args, "op_env_file", None),
+            op_environment=getattr(args, "op_environment", None),
+        )
+        cmd = wrap_with_onepassword(
+            cmd,
+            op_env_file=getattr(args, "op_env_file", None),
+            op_environment=getattr(args, "op_environment", None),
+        )
+    except ValueError as exc:
+        raise SystemExit(redact_secret_text(str(exc))) from exc
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
     if hasattr(os, "O_NOFOLLOW"):
@@ -782,19 +810,27 @@ def start_gateway_background(args) -> dict:
         os.close(log_fd)
         raise
     with log_file:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            raise SystemExit(
+                "Could not start gateway through 1Password because `op` was not found. "
+                "Install 1Password CLI or start without --op-env-file/--op-environment."
+            ) from exc
     time.sleep(0.25)
     if proc.poll() is not None:
         raise SystemExit(f"Gateway exited during startup with code {proc.returncode}. See log: {log_path}")
     _write_private_text(pid_path, f"{proc.pid}\n")
     info = gateway_status_info(args.port)
     print(f"[+] Gateway started in background on {args.host}:{args.port} (pid {proc.pid})")
+    if onepassword_description:
+        print(f"    Secrets: {onepassword_description}")
     print(f"    Log: {log_path}")
     return info
 
@@ -1883,6 +1919,17 @@ def _setup_check(
     checks.append({"name": name, "status": status, "detail": detail, **extra})
 
 
+def setup_service_followup_command(args) -> str:
+    parts = ["codex-antigravity", "service", "install", "--port", str(args.port), "--host", str(args.host)]
+    op_env_file = getattr(args, "op_env_file", None)
+    op_environment = getattr(args, "op_environment", None)
+    if op_env_file:
+        parts.extend(["--op-env-file", str(op_env_file)])
+    if op_environment:
+        parts.extend(["--op-environment", str(op_environment)])
+    return " ".join(shlex.quote(part) for part in parts)
+
+
 def _print_setup_report(report: dict) -> None:
     print("=" * 60)
     print("              CODEX ANTIGRAVITY SETUP              ")
@@ -2136,6 +2183,8 @@ def run_setup(args) -> dict:
                     host=args.host,
                     port=args.port,
                     allow_remote=args.allow_remote,
+                    op_env_file=getattr(args, "op_env_file", None),
+                    op_environment=getattr(args, "op_environment", None),
                 )
             )
             gateway_ids = wait_for_gateway_model_ids(
@@ -2148,7 +2197,7 @@ def run_setup(args) -> dict:
                 checks,
                 "gateway_service_followup",
                 "warn",
-                f"For reboot persistence, run: codex-antigravity service install --port {args.port} --host {args.host}",
+                f"For reboot persistence, run: {setup_service_followup_command(args)}",
             )
         except RuntimeError as exc:
             _setup_check(checks, "gateway_start", "fail", redact_secret_text(str(exc)))
@@ -2423,6 +2472,14 @@ def main():
     setup_parser.add_argument("--port", type=int, default=51122, help="Gateway server port when --start is used")
     setup_parser.add_argument("--host", default="127.0.0.1", help="Gateway server host when --start is used")
     setup_parser.add_argument(
+        "--op-env-file",
+        help="Run a --start gateway through `op run --env-file PATH -- ...` so BYOK env keys come from 1Password",
+    )
+    setup_parser.add_argument(
+        "--op-environment",
+        help="Run a --start gateway through `op run --environment ID -- ...` for 1Password Environments beta",
+    )
+    setup_parser.add_argument(
         "--allow-remote",
         action="store_true",
         help="Allow non-loopback gateway clients when starting with a strong ANTIGRAVITY_GATEWAY_TOKEN",
@@ -2513,6 +2570,14 @@ def main():
     service_install = service_sub.add_parser("install", help="Install and start a per-user gateway service")
     service_install.add_argument("--port", type=int, default=51122, help="Gateway server port")
     service_install.add_argument("--host", default="127.0.0.1", help="Gateway server host")
+    service_install.add_argument(
+        "--op-env-file",
+        help="Wrap the service command with `op run --env-file PATH -- ...` for BYOK provider keys",
+    )
+    service_install.add_argument(
+        "--op-environment",
+        help="Wrap the service command with `op run --environment ID -- ...` for 1Password Environments beta",
+    )
     service_install.add_argument("--json", action="store_true", help="Print service status as JSON")
     service_uninstall = service_sub.add_parser("uninstall", help="Uninstall the per-user gateway service")
     service_uninstall.add_argument("--port", type=int, default=51122, help="Gateway server port")
@@ -2578,6 +2643,14 @@ def main():
         help="Allow non-loopback clients when ANTIGRAVITY_GATEWAY_TOKEN is set to at least 32 visible ASCII characters",
     )
     start_parser.add_argument("--background", action="store_true", help="Start the gateway as a background process with pid/log files")
+    start_parser.add_argument(
+        "--op-env-file",
+        help="With --background, run the gateway through `op run --env-file PATH -- ...` for BYOK provider keys",
+    )
+    start_parser.add_argument(
+        "--op-environment",
+        help="With --background, run the gateway through `op run --environment ID -- ...` for 1Password Environments beta",
+    )
 
     stop_parser = subparsers.add_parser("stop", help="Stop a background gateway started by codex-antigravity")
     stop_parser.add_argument("--port", type=int, default=51122, help="Gateway server port (default: 51122)")
@@ -2703,6 +2776,8 @@ def main():
         if args.background:
             start_gateway_background(args)
         else:
+            if getattr(args, "op_env_file", None) or getattr(args, "op_environment", None):
+                raise SystemExit("1Password gateway options require `codex-antigravity start --background`.")
             import uvicorn
             require_safe_gateway_host(args.host, args.allow_remote)
             print(f"[*] Starting local Responses API compatible gateway server on {args.host}:{args.port}...")

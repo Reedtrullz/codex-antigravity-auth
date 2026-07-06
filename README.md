@@ -236,6 +236,27 @@ When `provider set` is given `--api-key-env`, models are configured but remain h
 Provider ids reserve model-name separators and may only contain letters, numbers, underscores, and hyphens; model ids themselves may still contain `/` or `:`, but not whitespace or control characters. Unknown `provider:model` prefixes are rejected as BYOK routing errors before any Google account selection.
 Custom provider and Codex gateway base URLs must be absolute `http` or `https` URLs without embedded credentials, whitespace/control characters, query strings, fragments, invalid ports, or malformed bracketed hosts. Plain `http` base URLs are accepted only for loopback/local hosts; remote BYOK providers and remote gateway URLs must use `https`. Non-preset custom BYOK providers must provide a base URL before models are exposed. Stored/env BYOK API keys and extra BYOK provider header values must be printable ASCII without control characters; model-picker display names must not contain control characters. Provider API-key env var names must contain only letters, numbers, and underscores and must not start with a number. Extra headers may not override gateway-managed auth, content, host, or transport headers. Invalid BYOK provider URLs, API keys, env vars, model ids, display names, and headers are rejected before config writes; invalid BYOK provider URLs, timeouts, headers, API keys, and missing API keys are also rejected before streaming starts so Codex gets a normal HTTP error instead of a partial SSE response. Key-optional BYOK providers are only treated as keyless on loopback/local base URLs; remote custom or cloud URLs need a usable stored or env API key before they appear in Codex's picker or route requests. Function/tool names and forced `tool_choice` function names must contain only letters, numbers, underscores, and hyphens, and be 1-64 characters; malformed names are rejected or dropped before routing. Non-streaming Google failure responses use a structured `detail` object with `message` and sanitized `diagnostics`; clients should handle both this shape and older string details. BYOK streams surface provider error frames as failed Responses API streams instead of successful empty completions, ignore never-named tool-call deltas, and wait for complete valid streamed function names instead of emitting empty, partial, or malformed function names. BYOK structured tool outputs are serialized to JSON text before being sent as Chat Completions tool messages.
 
+For 1Password-backed BYOK keys, keep `provider set --api-key-env` and let 1Password populate that env var for the gateway process. With today's stable 1Password CLI, create a local env file containing secret references such as:
+
+```dotenv
+OPENROUTER_API_KEY=op://Private/OpenRouter/sk
+DEEPSEEK_API_KEY=op://Private/DeepSeek/api_key
+```
+
+Then start the gateway through `op run` without revealing the key:
+
+```bash
+codex-antigravity start --background --op-env-file ~/.codex/antigravity.env
+codex-antigravity service install --port 51122 --host 127.0.0.1 --op-env-file ~/.codex/antigravity.env
+```
+
+1Password Environments beta can be used the same way once your local `op` supports `op run --environment`:
+
+```bash
+codex-antigravity start --background --op-environment <environment-id>
+codex-antigravity service install --port 51122 --host 127.0.0.1 --op-environment <environment-id>
+```
+
 The `configure-codex --write` helper writes this equivalent TOML into `~/.codex/config.toml` after validation:
 
 ```toml
