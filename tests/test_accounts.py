@@ -79,8 +79,6 @@ class TestAccounts(unittest.TestCase):
                     "primary@gmail.com",
                     "Rate limited / Quota exceeded",
                     retry_after_seconds=60,
-                    model="claude-3.5-sonnet",
-                    status_code=429,
                 )
                 manager.record_request(
                     "primary@gmail.com",

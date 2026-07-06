@@ -441,7 +441,7 @@ def process_is_running(pid: int) -> bool:
         if proc.returncode != 0:
             return False
         output = proc.stdout.strip()
-        return bool(output and "no tasks" not in output.lower() and str(int(pid)) in output)
+        return bool(output and "no tasks" not in output.lower())
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
