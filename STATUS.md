@@ -94,13 +94,13 @@
 - Live Google Antigravity, DeepSeek V4 Flash BYOK, and OpenRouter BYOK smokes have passed with configured credentials/API keys; xAI, Kimi/Moonshot, Ollama cloud, and arbitrary custom BYOK providers still need their own live-key smoke.
 - `previous_response_id` is rejected by design in this stateless gateway; replay the full conversation, including tool calls and outputs, in `input`.
 - `/v1/responses/compact` is not implemented.
-- CI includes unit/compile checks and a release-artifact smoke job. PR #4 head `b309c1f` passed pull-request CI before merge/release.
+- CI includes unit/compile checks and a release-artifact smoke job. PR #5 head `d9e7f04` passed pull-request CI before merge/release.
 - Live backend availability is covered only by the credentialed smoke runs noted above.
 
 ## Release State
-- Current package metadata: `1.1.0`
-- Previous tagged GitHub release: [v1.0.1](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.0.1)
-- `v1.1.0` is the release target for the Anti V2 workflows and panel release.
+- Current package metadata: `1.2.0`
+- Previous tagged GitHub release: [v1.1.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.1.0)
+- `v1.2.0` is the release target for the V3 native Claude-in-Codex setup polish release.
 
 ## Next Priorities
 1. Add `/v1/responses/compact` support
