@@ -22,6 +22,7 @@ from codex_antigravity_auth.cli import (
     codex_ready_report,
     gateway_generate_probe,
     gateway_model_ids,
+    gateway_process_command,
     gateway_start_command,
     gateway_status_info,
     install_codex_skill,
@@ -56,6 +57,11 @@ from codex_antigravity_auth.constants import save_oauth_credentials
 from codex_antigravity_auth.models import canonical_model_id, native_model_catalog, resolve_backend_model
 from codex_antigravity_auth.observability import iter_request_records, request_log_summary, write_request_record
 from codex_antigravity_auth.service import install_service, render_linux_systemd_unit, render_macos_launch_agent, service_command, service_status
+
+
+def assert_mode_if_posix(testcase: unittest.TestCase, path: Path, expected: int) -> None:
+    if os.name != "nt":
+        testcase.assertEqual(stat.S_IMODE(path.stat().st_mode), expected)
 
 
 def write_ready_codex_config(
@@ -829,9 +835,9 @@ class TestConfigureCodex(unittest.TestCase):
             self.assertTrue(changed)
             self.assertIsNotNone(backup_path)
             self.assertEqual(backup_path.read_text(encoding="utf-8"), 'model = "gpt-5"\n')
-            self.assertEqual(stat.S_IMODE(backup_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, backup_path, 0o600)
             self.assertIn('model_provider = "antigravity"', config_path.read_text(encoding="utf-8"))
-            self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, config_path, 0o600)
 
             changed_again, backup_again = write_codex_config(config_path)
 
@@ -847,7 +853,7 @@ class TestConfigureCodex(unittest.TestCase):
             self.assertTrue(changed)
             self.assertIsNone(backup_path)
             self.assertIn('model_provider = "antigravity"', config_path.read_text(encoding="utf-8"))
-            self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, config_path, 0o600)
 
     def test_write_codex_config_does_not_overwrite_same_second_backup(self):
         with TemporaryDirectory() as tmp:
@@ -865,8 +871,8 @@ class TestConfigureCodex(unittest.TestCase):
             self.assertEqual(second_backup.name, "config.toml.bak-20260702140000-2")
             self.assertEqual(first_backup.read_text(encoding="utf-8"), 'model = "gpt-5"\n')
             self.assertIn('model = "gemini-3.5-flash-high"', second_backup.read_text(encoding="utf-8"))
-            self.assertEqual(stat.S_IMODE(first_backup.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(second_backup.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, first_backup, 0o600)
+            assert_mode_if_posix(self, second_backup, 0o600)
 
     def test_write_codex_config_keeps_original_when_replace_fails(self):
         with TemporaryDirectory() as tmp:
@@ -887,12 +893,13 @@ class TestConfigureCodex(unittest.TestCase):
                     write_codex_config(config_path)
 
             self.assertEqual(config_path.read_text(encoding="utf-8"), 'model = "gpt-5"\n')
-            self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o644)
-            self.assertEqual(observed_config_temp_modes, [0o600])
+            assert_mode_if_posix(self, config_path, 0o644)
+            if os.name != "nt":
+                self.assertEqual(observed_config_temp_modes, [0o600])
             backups = list(Path(tmp).glob("config.toml.bak-*"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_text(encoding="utf-8"), 'model = "gpt-5"\n')
-            self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
+            assert_mode_if_posix(self, backups[0], 0o600)
             self.assertEqual(list(Path(tmp).glob(".config.toml.*.tmp")), [])
 
     def test_write_codex_config_preserves_symlinked_config_path(self):
@@ -912,11 +919,11 @@ class TestConfigureCodex(unittest.TestCase):
             self.assertTrue(config_path.is_symlink())
             self.assertEqual(config_path.resolve(), target_path.resolve())
             self.assertIn('model_provider = "antigravity"', target_path.read_text(encoding="utf-8"))
-            self.assertEqual(stat.S_IMODE(target_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, target_path, 0o600)
             self.assertIsNotNone(backup_path)
             self.assertEqual(backup_path.parent.resolve(), target_path.parent.resolve())
             self.assertEqual(backup_path.read_text(encoding="utf-8"), 'model = "gpt-5"\n')
-            self.assertEqual(stat.S_IMODE(backup_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, backup_path, 0o600)
 
 
 class TestInstallSkill(unittest.TestCase):
@@ -930,7 +937,7 @@ class TestInstallSkill(unittest.TestCase):
             self.assertTrue((destination / "agents" / "openai.yaml").is_file())
             self.assertTrue((destination / "scripts" / "anti.py").is_file())
             self.assertTrue((destination / "tests" / "test_anti.py").is_file())
-            self.assertEqual(stat.S_IMODE((destination / "scripts" / "anti.py").stat().st_mode), 0o755)
+            assert_mode_if_posix(self, destination / "scripts" / "anti.py", 0o755)
             self.assertIn("$anti", (destination / "SKILL.md").read_text(encoding="utf-8"))
 
             action_again, destination_again, backup_again = install_codex_skill(Path(tmp))
@@ -1381,7 +1388,7 @@ class TestV3NativeSetup(unittest.TestCase):
             self.assertTrue(report["ok"])
             login.assert_called_once()
             configure.assert_called_once()
-            self.assertEqual(stat.S_IMODE(credentials_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, credentials_path, 0o600)
             saved = json.loads(credentials_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["client_id"], "client.apps.googleusercontent.com")
             self.assertEqual(saved["client_secret"], "client-secret")
@@ -1744,6 +1751,7 @@ class TestV3NativeSetup(unittest.TestCase):
                             self.assertTrue(pid_file.exists())
                             kill.assert_not_called()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX signal stop behavior")
     def test_stop_gateway_handles_pid_exiting_before_sigterm(self):
         with TemporaryDirectory() as tmp:
             pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
@@ -1757,6 +1765,7 @@ class TestV3NativeSetup(unittest.TestCase):
                             self.assertEqual(info["status"], "stopped")
                             self.assertFalse(pid_file.exists())
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX signal stop behavior")
     def test_stop_gateway_preserves_pid_file_on_permission_error(self):
         with TemporaryDirectory() as tmp:
             pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
@@ -1769,6 +1778,7 @@ class TestV3NativeSetup(unittest.TestCase):
                                 stop_gateway(Namespace(port=51122))
                             self.assertTrue(pid_file.exists())
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX signal stop behavior")
     def test_stop_gateway_sends_sigterm_for_running_pid(self):
         with TemporaryDirectory() as tmp:
             pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
@@ -1820,7 +1830,7 @@ class TestV3NativeSetup(unittest.TestCase):
             pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
             log_file = Path(tmp) / "antigravity-gateway-51122.log"
             self.assertEqual(pid_file.read_text(encoding="utf-8"), "12345\n")
-            self.assertEqual(stat.S_IMODE(log_file.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, log_file, 0o600)
             self.assertEqual(info["pid_file"], str(pid_file))
             self.assertEqual(info["log_file"], str(log_file))
             popen.assert_called_once()
@@ -2332,7 +2342,7 @@ class TestVNextPolishCli(unittest.TestCase):
                         result = version_check_result(timeout=0.01)
 
             cache_path = Path(tmp) / "antigravity-version-check.json"
-            self.assertEqual(stat.S_IMODE(cache_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, cache_path, 0o600)
 
         self.assertEqual(result["status"], "warn")
         self.assertEqual(result["installed"], "1.4.0")
@@ -2389,6 +2399,61 @@ class TestVNextPolishCli(unittest.TestCase):
         mock_run.assert_called_once()
         self.assertEqual(mock_run.call_args.args[0][0], "tasklist")
         mock_kill.assert_not_called()
+
+    def test_gateway_process_command_uses_windows_process_probe(self):
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = "CommandLine=python -m uvicorn codex_antigravity_auth.server:app\n"
+
+        with patch("codex_antigravity_auth.cli.sys.platform", "win32"):
+            with patch("codex_antigravity_auth.cli.subprocess.run", return_value=proc) as mock_run:
+                command = gateway_process_command(1234)
+
+        self.assertIn("codex_antigravity_auth.server:app", command)
+        self.assertEqual(mock_run.call_args.args[0][0], "wmic")
+
+    def test_stop_gateway_uses_taskkill_on_windows(self):
+        with TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
+            pid_file.write_text("12345\n", encoding="utf-8")
+            running_info = {
+                "port": 51122,
+                "status": "running",
+                "running": True,
+                "pid": 12345,
+                "pid_file": str(pid_file),
+                "log_file": str(Path(tmp) / "antigravity-gateway-51122.log"),
+                "process_running": True,
+                "process_matches": True,
+            }
+            stopped_info = {**running_info, "status": "stopped", "running": False, "pid": None}
+            proc = MagicMock()
+            proc.returncode = 0
+            with patch("codex_antigravity_auth.cli.sys.platform", "win32"):
+                with patch("codex_antigravity_auth.cli.gateway_status_info", side_effect=[running_info, stopped_info]):
+                    with patch("codex_antigravity_auth.cli.subprocess.run", return_value=proc) as mock_run:
+                        with patch("codex_antigravity_auth.cli.process_is_running", side_effect=[False, False]):
+                            with patch("builtins.print"):
+                                info = stop_gateway(Namespace(port=51122))
+
+        self.assertEqual(info["status"], "stopped")
+        self.assertFalse(pid_file.exists())
+        self.assertEqual(mock_run.call_args.args[0][:3], ["taskkill", "/PID", "12345"])
+
+    def test_service_install_uses_windows_scheduled_task_command(self):
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = ""
+        with patch("codex_antigravity_auth.service._run", return_value=proc) as mock_run:
+            status = install_service(51122, "127.0.0.1", platform_name="windows")
+
+        self.assertEqual(status["platform"], "windows")
+        create_call = mock_run.call_args_list[0].args[0]
+        self.assertEqual(create_call[:2], ["schtasks", "/Create"])
+        self.assertIn("/TR", create_call)
+        task_command = create_call[create_call.index("/TR") + 1]
+        self.assertIn('"start"', task_command)
+        self.assertIn('"--port"', task_command)
 
     def test_stop_hints_when_durable_service_is_installed(self):
         with TemporaryDirectory() as tmp:

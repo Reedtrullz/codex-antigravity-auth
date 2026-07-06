@@ -1119,7 +1119,10 @@ def start_gateway_background(args) -> dict:
     except OSError as exc:
         raise SystemExit(f"Could not open gateway log file {log_path}: {redact_secret_text(str(exc))}") from exc
     try:
-        os.fchmod(log_fd, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(log_fd, 0o600)
+        else:
+            os.chmod(log_path, 0o600)
         log_file = os.fdopen(log_fd, "ab")
     except Exception:
         os.close(log_fd)

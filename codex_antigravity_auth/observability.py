@@ -126,7 +126,10 @@ def write_request_record(record: dict[str, Any], *, max_bytes: int = REQUEST_LOG
         fd = os.open(path, flags, 0o600)
         try:
             os.write(fd, payload.encode("utf-8"))
-            os.fchmod(fd, 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            else:
+                os.chmod(path, 0o600)
         finally:
             os.close(fd)
     except Exception:
