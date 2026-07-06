@@ -1,6 +1,7 @@
 import sys
 import os
 import argparse
+import getpass
 import http.server
 import math
 import re
@@ -14,9 +15,10 @@ import json
 import tempfile
 import urllib.error
 import urllib.request
+from importlib import metadata as importlib_metadata
 from importlib.resources import files
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from .byok import (
     PROVIDER_PRESETS,
     all_provider_configs,
@@ -57,7 +59,13 @@ from .oauth import (
 )
 from .service import install_service, service_status, uninstall_service
 from .storage import load_accounts, save_accounts
-from .constants import get_codex_home, is_loopback_host, resolve_oauth_credentials, validate_gateway_token_strength
+from .constants import (
+    get_codex_home,
+    is_loopback_host,
+    resolve_oauth_credentials,
+    save_oauth_credentials,
+    validate_gateway_token_strength,
+)
 from .redaction import redact_secret_text
 
 DEFAULT_CODEX_PROVIDER_ID = "antigravity"
@@ -71,6 +79,9 @@ GATEWAY_PID_TEMPLATE = "antigravity-gateway-{port}.pid"
 GATEWAY_LOG_TEMPLATE = "antigravity-gateway-{port}.log"
 GATEWAY_READY_TIMEOUT_SECONDS = 10.0
 GATEWAY_READY_RETRY_INTERVAL_SECONDS = 0.25
+VERSION_CACHE_FILE = "antigravity-version-check.json"
+VERSION_CHECK_MAX_AGE_SECONDS = 86_400
+PYPI_PROJECT_JSON_URL = "https://pypi.org/pypi/codex-antigravity-auth/json"
 
 
 class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
@@ -364,6 +375,219 @@ def gateway_model_ids(
     if not ids:
         raise RuntimeError(f"{url} returned no model ids")
     return ids
+
+
+def _responses_output_preview(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    direct = payload.get("output_text")
+    if isinstance(direct, str):
+        return direct.strip()
+    fragments: list[str] = []
+    output = payload.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    text = part.get("text") or part.get("output_text")
+                    if isinstance(text, str):
+                        fragments.append(text)
+            text = item.get("text")
+            if isinstance(text, str):
+                fragments.append(text)
+    return "".join(fragments).strip()
+
+
+def gateway_generate_probe(
+    base_url: str,
+    model: str,
+    *,
+    timeout: float,
+    token_env: str,
+    max_output_tokens: int = 16,
+) -> dict:
+    url = base_url.rstrip("/") + "/responses"
+    body = {
+        "model": model,
+        "input": "Reply with the single word: ready",
+        "max_output_tokens": max_output_tokens,
+        "stream": False,
+    }
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    token = os.environ.get(token_env, "").strip() if token_env else ""
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    started = time.monotonic()
+    result = {
+        "ok": False,
+        "model": model,
+        "latency_ms": 0,
+        "output_preview": "",
+        "http_status": None,
+        "error": None,
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            raw = response.read()
+            result["http_status"] = getattr(response, "status", 200)
+    except urllib.error.HTTPError as exc:
+        result["latency_ms"] = int((time.monotonic() - started) * 1000)
+        result["http_status"] = exc.code
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = str(exc)
+        hint = ""
+        if exc.code in (401, 403) and not token:
+            hint = f" (remote gateways require a bearer token; export {token_env})"
+        result["error"] = redact_secret_text(f"HTTP {exc.code}: {detail}{hint}")[:500]
+        return result
+    except Exception as exc:
+        result["latency_ms"] = int((time.monotonic() - started) * 1000)
+        result["error"] = redact_secret_text(str(exc))[:500]
+        return result
+    result["latency_ms"] = int((time.monotonic() - started) * 1000)
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        result["error"] = f"Gateway returned non-JSON data: {redact_secret_text(str(exc))}"
+        return result
+    preview = redact_secret_text(_responses_output_preview(payload)).replace("\n", " ").strip()
+    result["output_preview"] = preview[:80]
+    result["ok"] = 200 <= int(result["http_status"] or 0) < 300
+    if not result["ok"] and not result["error"]:
+        result["error"] = redact_secret_text(str(payload))[:500]
+    return result
+
+
+def _installed_package_version() -> str | None:
+    try:
+        return importlib_metadata.version("codex-antigravity-auth")
+    except importlib_metadata.PackageNotFoundError:
+        try:
+            from . import __version__  # type: ignore
+
+            return str(__version__)
+        except Exception:
+            return None
+
+
+def _version_tuple(version: str | None) -> tuple[int, ...]:
+    if not version:
+        return ()
+    parts: list[int] = []
+    for part in re.split(r"[.\-+]", version):
+        if part.isdigit():
+            parts.append(int(part))
+        else:
+            break
+    return tuple(parts)
+
+
+def _version_cache_path() -> Path:
+    return get_codex_home() / VERSION_CACHE_FILE
+
+
+def _read_version_cache(now: float) -> dict | None:
+    path = _version_cache_path()
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    checked_at = data.get("checked_at")
+    latest = data.get("latest")
+    if not isinstance(checked_at, (int, float)) or not isinstance(latest, str):
+        return None
+    if now - float(checked_at) > VERSION_CHECK_MAX_AGE_SECONDS:
+        return None
+    return data
+
+
+def _write_version_cache(latest: str) -> None:
+    payload = json.dumps({"checked_at": time.time(), "latest": latest}, indent=2, sort_keys=True) + "\n"
+    _write_private_text(_version_cache_path(), payload)
+
+
+def latest_pypi_version(timeout: float = 2.0) -> str | None:
+    req = urllib.request.Request(PYPI_PROJECT_JSON_URL, headers={"Accept": "application/json"}, method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    info = payload.get("info") if isinstance(payload, dict) else None
+    latest = info.get("version") if isinstance(info, dict) else None
+    return latest if isinstance(latest, str) and latest else None
+
+
+def version_check_result(*, timeout: float = 2.0) -> dict:
+    installed = _installed_package_version()
+    result = {
+        "status": "skip",
+        "installed": installed,
+        "latest": None,
+        "detail": "version check skipped",
+    }
+    if os.environ.get("CODEX_ANTIGRAVITY_NO_UPDATE_CHECK") == "1":
+        result["detail"] = "version check disabled by CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1"
+        return result
+    now = time.time()
+    cache = _read_version_cache(now)
+    latest = cache.get("latest") if cache else None
+    if latest is None:
+        try:
+            latest = latest_pypi_version(timeout=timeout)
+            if latest:
+                _write_version_cache(latest)
+        except Exception:
+            result["detail"] = "version check unavailable"
+            return result
+    result["latest"] = latest
+    if not installed or not latest:
+        result["detail"] = "version check unavailable"
+        return result
+    installed_tuple = _version_tuple(installed)
+    latest_tuple = _version_tuple(latest)
+    if not installed_tuple or not latest_tuple:
+        result["detail"] = "version check unavailable"
+        return result
+    if latest_tuple > installed_tuple:
+        result["status"] = "warn"
+        result["detail"] = (
+            f"Update available: {installed} -> {latest} "
+            "(pip install -U codex-antigravity-auth, or uv tool upgrade codex-antigravity-auth)"
+        )
+    else:
+        result["status"] = "pass"
+        result["detail"] = f"codex-antigravity-auth {installed} is current"
+    return result
+
+
+def _validate_google_live_model(model: str) -> tuple[str | None, str | None]:
+    try:
+        canonical = validate_codex_model_id(model)
+    except ValueError as exc:
+        return None, f"live model is invalid: {exc}"
+    provider_prefix, _provider_model = split_provider_model(canonical)
+    if provider_prefix is not None:
+        return None, "live generation smoke currently supports Google Antigravity models only"
+    return canonical, None
 
 
 def gateway_base_url_for_port(port: int) -> str:
@@ -934,6 +1158,10 @@ def codex_ready_report(
     expected_base_url: str,
     gateway_timeout: float = 2.0,
     gateway_token_env: str = "ANTIGRAVITY_GATEWAY_TOKEN",
+    live: bool = False,
+    live_model: str | None = None,
+    live_timeout: float = 30.0,
+    include_version_check: bool = True,
 ) -> dict:
     checks: list[dict] = []
 
@@ -1050,6 +1278,41 @@ def codex_ready_report(
             else:
                 add("google_rotation", "fail", f"No Google accounts configured for {family}", **rotation)
 
+    if live:
+        probe_model = live_model or selected_for_catalog or DEFAULT_CODEX_MODEL
+        probe_model, live_model_error = _validate_google_live_model(probe_model)
+        if live_model_error:
+            add("live_generation", "fail", live_model_error, probe={"ok": False, "model": live_model or selected_for_catalog or DEFAULT_CODEX_MODEL})
+        else:
+            probe = gateway_generate_probe(
+                expected_base_url,
+                probe_model,
+                timeout=live_timeout,
+                token_env=gateway_token_env,
+            )
+            output_preview = str(probe.get("output_preview") or "")
+            status = "pass" if probe.get("ok") and output_preview else "fail"
+            if status == "pass":
+                detail = (
+                    f"{probe_model} generated a response in {probe.get('latency_ms')}ms "
+                    f"(preview: {output_preview})"
+                )
+            else:
+                detail = f"{probe_model} live generation failed: {probe.get('error') or 'unknown error'}"
+                if probe.get("ok") and not output_preview:
+                    detail = f"{probe_model} live generation returned an empty output"
+            add("live_generation", status, detail, probe=probe)
+
+    if include_version_check:
+        version = version_check_result()
+        add(
+            "version_check",
+            version["status"],
+            version["detail"],
+            installed=version.get("installed"),
+            latest=version.get("latest"),
+        )
+
     failed = [check for check in checks if check["status"] == "fail"]
     ok = not failed
     next_command = "codex"
@@ -1086,6 +1349,9 @@ def run_codex_ready_doctor(args) -> bool:
         expected_base_url=args.gateway_base_url,
         gateway_timeout=getattr(args, "gateway_timeout", 2.0),
         gateway_token_env=getattr(args, "gateway_token_env", "ANTIGRAVITY_GATEWAY_TOKEN"),
+        live=getattr(args, "live", False),
+        live_model=getattr(args, "live_model", None),
+        live_timeout=getattr(args, "live_timeout", 30.0),
     )
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2))
@@ -1981,6 +2247,74 @@ def setup_byok_preflight(provider_prefix: str, provider_model: str) -> tuple[str
     return "pass", f"{provider_prefix}:{provider_model} routes to configured BYOK provider", provider
 
 
+def validate_oauth_credentials_with_google(
+    client_id: str,
+    client_secret: str,
+    *,
+    timeout: float = 5.0,
+) -> tuple[str, str]:
+    payload = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": "invalid-refresh-token-for-codex-antigravity-validation",
+        "grant_type": "refresh_token",
+    }
+    req = urllib.request.Request(
+        "https://oauth2.googleapis.com/token",
+        data=urlencode(payload).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout):
+            return "warn", "Google token endpoint accepted an invalid refresh token unexpectedly; continuing"
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        if "invalid_grant" in body:
+            return "pass", "Google token endpoint accepted the OAuth client credentials"
+        if "invalid_client" in body:
+            return "fail", "Google token endpoint rejected the OAuth client credentials"
+        return "warn", f"Google token endpoint returned HTTP {exc.code}; continuing without credential validation"
+    except Exception as exc:
+        return "warn", f"Could not validate OAuth credentials with Google; continuing ({redact_secret_text(str(exc))})"
+
+
+def maybe_prompt_and_save_oauth_credentials(args, checks: list[dict]) -> tuple[str | None, str | None]:
+    if getattr(args, "no_input", False):
+        return None, None
+    stdin = getattr(sys, "stdin", None)
+    if not stdin or not stdin.isatty():
+        return None, None
+    print("[*] Google OAuth desktop-client credentials are missing.")
+    print("    Create an OAuth desktop client in Google Cloud Console, then paste its values here.")
+    print("    Local redirect URI: http://localhost:51121/oauth-callback")
+    try:
+        client_id = input("Google OAuth client id: ").strip()
+        client_secret = getpass.getpass("Google OAuth client secret: ").strip()
+        if not client_id.endswith(".apps.googleusercontent.com"):
+            _setup_check(
+                checks,
+                "google_oauth_client_id_shape",
+                "warn",
+                "client id does not end with .apps.googleusercontent.com",
+            )
+        status, detail = validate_oauth_credentials_with_google(client_id, client_secret)
+        _setup_check(checks, "google_oauth_credentials_validation", status, detail)
+        if status == "fail":
+            return None, None
+        path = save_oauth_credentials(client_id, client_secret)
+    except (EOFError, KeyboardInterrupt):
+        raise SystemExit("OAuth credential entry was cancelled; Codex config was not modified.")
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SystemExit(f"Could not save OAuth credentials: {redact_secret_text(str(exc))}") from exc
+    _setup_check(checks, "google_oauth_credentials_saved", "pass", f"saved private credentials file at {path}")
+    return client_id, client_secret
+
+
 def run_setup(args) -> dict:
     if getattr(args, "check", False) and getattr(args, "write", False):
         raise SystemExit("Use either --check or --write, not both.")
@@ -2050,6 +2384,9 @@ def run_setup(args) -> dict:
             expected_base_url=base_url,
             gateway_timeout=args.gateway_timeout,
             gateway_token_env=args.gateway_token_env,
+            live=getattr(args, "live", False),
+            live_model=getattr(args, "live_model", None),
+            live_timeout=getattr(args, "live_timeout", 30.0),
         )
         checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
         ok = all(check["status"] != "fail" for check in checks)
@@ -2068,6 +2405,10 @@ def run_setup(args) -> dict:
 
     if google_route:
         cid, csec = resolve_oauth_credentials()
+        if args.write and (not cid or not csec):
+            prompted_cid, prompted_csec = maybe_prompt_and_save_oauth_credentials(args, checks)
+            cid = cid or prompted_cid
+            csec = csec or prompted_csec
         if cid and csec:
             _setup_check(checks, "google_oauth_credentials", "pass", "configured")
         else:
@@ -2075,14 +2416,14 @@ def run_setup(args) -> dict:
                 checks,
                 "google_oauth_credentials",
                 "fail",
-                "missing ANTIGRAVITY_CLIENT_ID/ANTIGRAVITY_CLIENT_SECRET or ~/.codex/antigravity-credentials.json",
+                "missing ANTIGRAVITY_CLIENT_ID/ANTIGRAVITY_CLIENT_SECRET or ~/.codex/antigravity-credentials.json; run `codex-antigravity setup --write` to add them interactively",
             )
             if args.write:
                 report = {
                     "ok": False,
                     "mode": "write",
                     "checks": checks,
-                    "next_command": "create Google OAuth desktop credentials, then run codex-antigravity setup --write",
+                    "next_command": "codex-antigravity setup --write --accounts 1",
                 }
                 _print_setup_report(report)
                 raise SystemExit("Google OAuth client credentials are not configured; Codex config was not modified.")
@@ -2127,6 +2468,9 @@ def run_setup(args) -> dict:
             expected_base_url=base_url,
             gateway_timeout=args.gateway_timeout,
             gateway_token_env=args.gateway_token_env,
+            live=getattr(args, "live", False),
+            live_model=getattr(args, "live_model", None),
+            live_timeout=getattr(args, "live_timeout", 30.0),
         )
         checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
         ok = all(check["status"] != "fail" for check in checks)
@@ -2241,6 +2585,9 @@ def run_setup(args) -> dict:
         expected_base_url=base_url,
         gateway_timeout=args.gateway_timeout,
         gateway_token_env=args.gateway_token_env,
+        live=getattr(args, "live", False),
+        live_model=getattr(args, "live_model", None),
+        live_timeout=getattr(args, "live_timeout", 30.0),
     )
     checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
     ok = all(check["status"] != "fail" for check in checks)
@@ -2263,6 +2610,10 @@ def run_doctor(
     expected_base_url: str = DEFAULT_CODEX_BASE_URL,
     config: str = "~/.codex/config.toml",
     provider_id: str = DEFAULT_CODEX_PROVIDER_ID,
+    live: bool = False,
+    live_model: str | None = None,
+    live_timeout: float = 30.0,
+    gateway_token_env: str = "ANTIGRAVITY_GATEWAY_TOKEN",
 ) -> bool:
     print("=" * 60)
     print("           GOOGLE ANTIGRAVITY AUTH DOCTOR           ")
@@ -2437,6 +2788,40 @@ def run_doctor(
         healthy = False
         print(f"[FAIL] Codex config.toml: Not found ({codex_config}).")
         print("       Run `codex-antigravity configure-codex --write` to install the gateway provider block.")
+
+    if live:
+        probe_model = live_model or codex_config_model or DEFAULT_CODEX_MODEL
+        probe_model, live_model_error = _validate_google_live_model(probe_model)
+        if live_model_error:
+            healthy = False
+            print(f"[FAIL] Live Generation Smoke: {live_model_error}")
+        else:
+            probe = gateway_generate_probe(
+                expected_base_url,
+                probe_model,
+                timeout=live_timeout,
+                token_env=gateway_token_env,
+            )
+            output_preview = str(probe.get("output_preview") or "")
+            if probe.get("ok") and output_preview:
+                print(
+                    f"[PASS] Live Generation Smoke: {probe_model} responded in "
+                    f"{probe.get('latency_ms')}ms ({output_preview})"
+                )
+            else:
+                healthy = False
+                reason = probe.get("error") or "unknown error"
+                if probe.get("ok") and not output_preview:
+                    reason = "empty output"
+                print(f"[FAIL] Live Generation Smoke: {probe_model} failed ({reason})")
+
+    version = version_check_result()
+    if version["status"] == "warn":
+        print(f"[WARN] Package Version: {version['detail']}")
+    elif version["status"] == "pass":
+        print(f"[PASS] Package Version: {version['detail']}")
+    else:
+        print(f"[INFO] Package Version: {version['detail']}")
         
     print("=" * 60)
     return healthy
@@ -2458,6 +2843,7 @@ def main():
     setup_parser.add_argument("--json", action="store_true", help="Print setup/readiness status as JSON")
     setup_parser.add_argument("--write", action="store_true", help="Run login and write Codex configuration")
     setup_parser.add_argument("--repair", action="store_true", help="Repair Codex provider config without OAuth login, skill install, or gateway start")
+    setup_parser.add_argument("--no-input", action="store_true", help="Fail instead of prompting when OAuth credentials are missing")
     setup_parser.add_argument("--accounts", type=positive_int, default=1, help="Number of Google login flows when --write is used")
     setup_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Default Codex model to select")
     setup_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id")
@@ -2485,6 +2871,9 @@ def main():
         help="Allow non-loopback gateway clients when starting with a strong ANTIGRAVITY_GATEWAY_TOKEN",
     )
     setup_parser.add_argument("--gateway-timeout", type=float, default=2.0, help="Gateway model-catalog timeout")
+    setup_parser.add_argument("--live", action="store_true", help="Run an explicit Google /v1/responses live generation smoke")
+    setup_parser.add_argument("--live-model", help="Google model to use for --live; defaults to the selected setup model")
+    setup_parser.add_argument("--live-timeout", type=float, default=30.0, help="Live generation smoke timeout")
     setup_parser.add_argument(
         "--gateway-token-env",
         default="ANTIGRAVITY_GATEWAY_TOKEN",
@@ -2532,6 +2921,9 @@ def main():
     doctor_parser.add_argument("--codex-ready", action="store_true", help="Run native Codex model-picker readiness diagnostics")
     doctor_parser.add_argument("--json", action="store_true", help="Print doctor status as JSON when used with --codex-ready")
     doctor_parser.add_argument("--gateway-timeout", type=float, default=2.0, help="Gateway model-catalog timeout")
+    doctor_parser.add_argument("--live", action="store_true", help="Run an explicit Google /v1/responses live generation smoke")
+    doctor_parser.add_argument("--live-model", help="Google model to use for --live; defaults to the selected Codex model")
+    doctor_parser.add_argument("--live-timeout", type=float, default=30.0, help="Live generation smoke timeout")
     doctor_parser.add_argument(
         "--gateway-token-env",
         default="ANTIGRAVITY_GATEWAY_TOKEN",
@@ -2678,6 +3070,10 @@ def main():
             expected_base_url=args.gateway_base_url,
             config=args.config,
             provider_id=args.provider,
+            live=getattr(args, "live", False),
+            live_model=getattr(args, "live_model", None),
+            live_timeout=getattr(args, "live_timeout", 30.0),
+            gateway_token_env=getattr(args, "gateway_token_env", "ANTIGRAVITY_GATEWAY_TOKEN"),
         ):
             sys.exit(1)
     elif args.command == "accounts":

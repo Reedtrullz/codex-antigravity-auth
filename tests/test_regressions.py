@@ -448,7 +448,7 @@ class TestRegressionFixes(unittest.TestCase):
                 )
 
         with patch(
-            "codex_antigravity_auth.server.account_manager.select_active_account",
+            "codex_antigravity_auth.server.account_manager.acquire_account",
             side_effect=[first_account, second_account],
         ):
             with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
@@ -534,7 +534,7 @@ class TestRegressionFixes(unittest.TestCase):
                     },
                 )
 
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account", return_value=fake_account):
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
@@ -953,7 +953,7 @@ class TestRegressionFixes(unittest.TestCase):
         client = TestClient(app)
         with (
             patch("codex_antigravity_auth.server.all_provider_configs") as mock_providers,
-            patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select_account,
+            patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_select_account,
         ):
             for model, instructions in (
                 ("gemini-3.5-flash-high", {"leaked": "system prompt"}),
@@ -1092,7 +1092,7 @@ class TestRegressionFixes(unittest.TestCase):
     def test_responses_endpoint_rejects_unknown_colon_provider_before_google_routing(self):
         client = TestClient(app)
         with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
-            with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+            with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_select:
                 response = client.post(
                     "/v1/responses",
                     json={"model": "acme:model", "input": "hello"},
@@ -1102,7 +1102,7 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertIn("BYOK provider 'acme' is not configured", response.json()["detail"])
         mock_select.assert_not_called()
 
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_select:
             invalid_response = client.post(
                 "/v1/responses",
                 json={"model": "bad.provider:model", "input": "hello"},
@@ -1112,7 +1112,7 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertIn("BYOK provider id", invalid_response.json()["detail"])
         mock_select.assert_not_called()
 
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_select:
             empty_response = client.post(
                 "/v1/responses",
                 json={"model": ":model", "input": "hello"},
@@ -1246,7 +1246,7 @@ class TestRegressionFixes(unittest.TestCase):
             async def __aexit__(self, exc_type, exc_val, exc_tb):
                 pass
 
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account", return_value=fake_account):
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
                 response = TestClient(app).post(
                     "/v1/responses",
@@ -1326,7 +1326,7 @@ class TestRegressionFixes(unittest.TestCase):
             async def __aexit__(self, exc_type, exc_val, exc_tb):
                 pass
 
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account", return_value=fake_account):
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
                 response = TestClient(app).post(
                     "/v1/responses",

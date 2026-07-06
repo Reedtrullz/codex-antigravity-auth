@@ -1,7 +1,7 @@
 # Current Integration Status — 6 July 2026
 
 ## Build & Test Health
-- **local pytest**: full local suite passing with `python3 -m pytest -q` (`350` tests plus `134` subtests) ✅
+- **local pytest**: full local suite passing with `python3 -m pytest -q` (`370` tests plus `134` subtests) ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **wheel install smoke**: ran `python3 -m build`, `python3 -m twine check dist/*`, installed the wheel into a clean venv, ran `pip check`, verified console script help plus `service status --json`, `models list --json`, `logs --tail 1 --json`, scratch `setup --check`, and packaged `install-skill --verify` ✅
@@ -102,9 +102,15 @@
 | `setup --repair` Codex config reconciliation without OAuth/skill/gateway mutation | ✅ |
 | Persisted per-account usage/failure/429 counters by model family | ✅ |
 | Claude reasoning-effort audit in `models doctor` | ✅ |
+| `doctor --live` and `setup --check --live` real Google `/v1/responses` smoke probes | ✅ |
+| Interactive OAuth client credential onboarding in primary `setup --write` | ✅ |
+| 1Password CLI presence enforced before gateway/service wrapping | ✅ |
+| Process-local in-flight Google account spreading for concurrent Codex requests | ✅ |
+| Cached PyPI package-version drift warning in doctor/readiness diagnostics | ✅ |
 
 ## Known Limitations
 - Live Google Antigravity, DeepSeek V4 Flash BYOK, and OpenRouter BYOK smokes have passed with configured credentials/API keys; xAI, Kimi/Moonshot, Ollama cloud, and arbitrary custom BYOK providers still need their own live-key smoke.
+- `doctor --live` and `setup --check --live` are explicit opt-in checks because they spend a real Google provider request.
 - `previous_response_id` is rejected by design in this stateless gateway; replay the full conversation, including tool calls and outputs, in `input`.
 - `/v1/responses/compact` is not implemented.
 - CI includes unit/compile checks and a release-artifact smoke job. PR #8 head `3265240` passed pull-request CI before merge.
@@ -112,11 +118,11 @@
 
 ## Release State
 - Current package metadata: `1.4.0`
-- Previous tagged GitHub release: [v1.3.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.3.0)
-- `v1.4.0` is the release target for 1Password-backed BYOK gateway runtime support.
+- Previous tagged GitHub release: [v1.4.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.4.0)
+- The current dirty worktree contains the planned v1.5.0 implementation for live install smoke, OAuth credential onboarding, 1Password hardening, concurrent account spreading, and package-version drift diagnostics. Release metadata/tagging are intentionally left for maintainer release prep.
 
 ## Next Priorities
 1. Add `/v1/responses/compact` support
 2. Expand live backend smoke coverage beyond DeepSeek/OpenRouter to additional BYOK providers
-3. Add a credentialed smoke-test profile for Google and configured BYOK providers
+3. Run a final credentialed `doctor --codex-ready --live` smoke before the v1.5.0 release
 4. Add a documented credentialed smoke-test profile for 1Password-backed BYOK providers without persisting raw API keys

@@ -162,6 +162,14 @@ async def select_active_account_for_request(model: str) -> dict | None:
     return await run_in_threadpool(account_manager.select_active_account, model)
 
 
+async def acquire_active_account_for_request(model: str) -> dict | None:
+    return await run_in_threadpool(account_manager.acquire_account, model)
+
+
+async def release_account_for_request(email: str | None) -> None:
+    await run_in_threadpool(account_manager.release_account, email)
+
+
 async def mark_account_failure(
     email: str,
     reason: str,
@@ -1034,7 +1042,7 @@ async def create_response(request: Request):
     
     # 1. Select account automatically from pool
     family = native_model_family(model)
-    account = await select_active_account_for_request(model)
+    account = await acquire_active_account_for_request(model)
     if not account:
         await log_request(
             "failed",
@@ -1090,59 +1098,16 @@ async def create_response(request: Request):
     if not stream:
         response_account = account
         rotation_attempted = False
-        res = await request_backend(response_account)
-        if not res:
-            # Retry with rotated account on connection failures
-            new_account = await select_active_account_for_request(model)
-            rotation_attempted = True
-            if new_account:
-                response_account = new_account
-                res = await request_backend(response_account)
-                
-        if not res:
-            await record_account_request(
-                response_account.get("email", ""),
-                model,
-                status="failure",
-                status_code=502,
-                error_class="connection_error",
-            )
-            await log_request(
-                "failed",
-                model=model,
-                route="google",
-                family=family,
-                stream=False,
-                http_status=502,
-                rotation_attempted=rotation_attempted,
-                error_class="connection_error",
-                error="Failed to communicate with Antigravity backend after rotation",
-            )
-            raise HTTPException(
-                status_code=502,
-                detail=google_failure_detail(
-                    model,
-                    "Failed to communicate with Antigravity backend after rotation",
-                    rotation_attempted=rotation_attempted,
-                ),
-            )
+        try:
+            res = await request_backend(response_account)
+            if not res:
+                await release_account_for_request(response_account.get("email"))
+                new_account = await acquire_active_account_for_request(model)
+                rotation_attempted = True
+                if new_account:
+                    response_account = new_account
+                    res = await request_backend(response_account)
 
-        if res.status_code in (401, 403, 429):
-            retry_after_seconds = retry_after_seconds_from_response(res)
-            retry_after_source = retry_after_source_from_response(res)
-            reason = "Rate limited / Quota exceeded" if res.status_code == 429 else f"Auth failure {res.status_code}: {safe_error_detail(res.text)}"
-            await mark_account_failure(
-                response_account["email"],
-                reason,
-                retry_after_seconds,
-                model=model,
-                status_code=res.status_code,
-            )
-            new_account = await select_active_account_for_request(model)
-            rotation_attempted = True
-            if new_account:
-                response_account = new_account
-                res = await request_backend(response_account)
             if not res:
                 await record_account_request(
                     response_account.get("email", ""),
@@ -1158,7 +1123,6 @@ async def create_response(request: Request):
                     family=family,
                     stream=False,
                     http_status=502,
-                    retry_after_source=retry_after_source,
                     rotation_attempted=rotation_attempted,
                     error_class="connection_error",
                     error="Failed to communicate with Antigravity backend after rotation",
@@ -1168,144 +1132,74 @@ async def create_response(request: Request):
                     detail=google_failure_detail(
                         model,
                         "Failed to communicate with Antigravity backend after rotation",
-                        retry_after_seconds=retry_after_seconds,
-                        retry_after_source=retry_after_source,
                         rotation_attempted=rotation_attempted,
                     ),
                 )
-            
-        if res.status_code in (401, 403):
-            # Token might be invalidated or verification required
-            retry_after_seconds = retry_after_seconds_from_response(res)
-            retry_after_source = retry_after_source_from_response(res)
-            await mark_account_failure(
-                response_account["email"],
-                f"Auth failure {res.status_code}: {safe_error_detail(res.text)}",
-                retry_after_seconds,
-                model=model,
-                status_code=res.status_code,
-            )
-            await record_account_request(
-                response_account.get("email", ""),
-                model,
-                status="failure",
-                status_code=res.status_code,
-                error_class="auth_failure",
-            )
-            await log_request(
-                "failed",
-                model=model,
-                route="google",
-                family=family,
-                stream=False,
-                http_status=res.status_code,
-                retry_after_source=retry_after_source,
-                rotation_attempted=rotation_attempted,
-                error_class="auth_failure",
-                error=res.text,
-            )
-            raise HTTPException(
-                status_code=res.status_code,
-                detail=google_failure_detail(
-                    model,
-                    f"Google Authentication failure: {safe_error_detail(res.text)}",
-                    retry_after_seconds=retry_after_seconds,
-                    retry_after_source=retry_after_source,
-                    rotation_attempted=rotation_attempted,
-                ),
-            )
-            
-        if res.status_code == 429:
-            retry_after_seconds = retry_after_seconds_from_response(res)
-            retry_after_source = retry_after_source_from_response(res)
-            await mark_account_failure(
-                response_account["email"],
-                "Rate limited / Quota exceeded",
-                retry_after_seconds,
-                model=model,
-                status_code=429,
-            )
-            await record_account_request(
-                response_account.get("email", ""),
-                model,
-                status="failure",
-                status_code=429,
-                error_class="rate_limited",
-            )
-            await log_request(
-                "failed",
-                model=model,
-                route="google",
-                family=family,
-                stream=False,
-                http_status=429,
-                retry_after_source=retry_after_source,
-                rotation_attempted=rotation_attempted,
-                error_class="rate_limited",
-                error="Antigravity account rate limit reached",
-            )
-            raise HTTPException(
-                status_code=429,
-                detail=google_failure_detail(
-                    model,
-                    "Antigravity account rate limit reached. Auto-switching to next account.",
-                    retry_after_seconds=retry_after_seconds,
-                    retry_after_source=retry_after_source,
-                    rotation_attempted=rotation_attempted,
-                ),
-            )
-            
-        if res.status_code != 200:
-            await record_account_request(
-                response_account.get("email", ""),
-                model,
-                status="failure",
-                status_code=res.status_code,
-                error_class="backend_http_error",
-            )
-            await log_request(
-                "failed",
-                model=model,
-                route="google",
-                family=family,
-                stream=False,
-                http_status=res.status_code,
-                retry_after_source=retry_after_source_from_response(res),
-                rotation_attempted=rotation_attempted,
-                error_class="backend_http_error",
-                error=res.text,
-            )
-            raise HTTPException(
-                status_code=res.status_code,
-                detail=google_failure_detail(
-                    model,
-                    f"Google Antigravity API error: {safe_error_detail(res.text)}",
-                    retry_after_seconds=retry_after_seconds_from_response(res),
-                    retry_after_source=retry_after_source_from_response(res),
-                    rotation_attempted=rotation_attempted,
-                ),
-            )
-            
-        try:
-            gemini_resp = res.json()
-            # If the response is wrapped as a list (stream chunk structure)
-            if isinstance(gemini_resp, list) and gemini_resp:
-                gemini_resp = gemini_resp[0]
-            backend_error = backend_error_from_payload(gemini_resp)
-            if backend_error:
-                code, message = backend_error
-                if google_stream_error_is_account_scoped(code, message):
-                    await mark_account_failure(
-                        response_account["email"],
-                        f"Backend payload error {code}: {safe_error_detail(message)}",
-                        model=model,
+
+            if res.status_code in (401, 403, 429):
+                retry_after_seconds = retry_after_seconds_from_response(res)
+                retry_after_source = retry_after_source_from_response(res)
+                reason = "Rate limited / Quota exceeded" if res.status_code == 429 else f"Auth failure {res.status_code}: {safe_error_detail(res.text)}"
+                await mark_account_failure(
+                    response_account["email"],
+                    reason,
+                    retry_after_seconds,
+                    model=model,
+                    status_code=res.status_code,
+                )
+                await release_account_for_request(response_account.get("email"))
+                new_account = await acquire_active_account_for_request(model)
+                rotation_attempted = True
+                if new_account:
+                    response_account = new_account
+                    res = await request_backend(response_account)
+                if not res:
+                    await record_account_request(
+                        response_account.get("email", ""),
+                        model,
+                        status="failure",
+                        status_code=502,
+                        error_class="connection_error",
                     )
+                    await log_request(
+                        "failed",
+                        model=model,
+                        route="google",
+                        family=family,
+                        stream=False,
+                        http_status=502,
+                        retry_after_source=retry_after_source,
+                        rotation_attempted=rotation_attempted,
+                        error_class="connection_error",
+                        error="Failed to communicate with Antigravity backend after rotation",
+                    )
+                    raise HTTPException(
+                        status_code=502,
+                        detail=google_failure_detail(
+                            model,
+                            "Failed to communicate with Antigravity backend after rotation",
+                            retry_after_seconds=retry_after_seconds,
+                            retry_after_source=retry_after_source,
+                            rotation_attempted=rotation_attempted,
+                        ),
+                    )
+
+            if res.status_code in (401, 403):
+                retry_after_seconds = retry_after_seconds_from_response(res)
+                retry_after_source = retry_after_source_from_response(res)
+                await mark_account_failure(
+                    response_account["email"],
+                    f"Auth failure {res.status_code}: {safe_error_detail(res.text)}",
+                    retry_after_seconds,
+                    model=model,
+                    status_code=res.status_code,
+                )
                 await record_account_request(
                     response_account.get("email", ""),
                     model,
                     status="failure",
-                    status_code=status_code_from_backend_error(code, message),
-                    error_class=code,
+                    status_code=res.status_code,
+                    error_class="auth_failure",
                 )
                 await log_request(
                     "failed",
@@ -1313,62 +1207,180 @@ async def create_response(request: Request):
                     route="google",
                     family=family,
                     stream=False,
-                    http_status=status_code_from_backend_error(code, message),
+                    http_status=res.status_code,
+                    retry_after_source=retry_after_source,
                     rotation_attempted=rotation_attempted,
-                    error_class=code,
-                    error=message,
+                    error_class="auth_failure",
+                    error=res.text,
                 )
                 raise HTTPException(
-                    status_code=status_code_from_backend_error(code, message),
+                    status_code=res.status_code,
                     detail=google_failure_detail(
                         model,
-                        f"Google Antigravity API error: {safe_error_detail(message)}",
+                        f"Google Authentication failure: {safe_error_detail(res.text)}",
+                        retry_after_seconds=retry_after_seconds,
+                        retry_after_source=retry_after_source,
                         rotation_attempted=rotation_attempted,
                     ),
                 )
-            codex_resp = transform_response(gemini_resp, model)
-            await record_account_request(
-                response_account.get("email", ""),
-                model,
-                status="success",
-                status_code=200,
-                usage=codex_resp.get("usage") if isinstance(codex_resp, dict) else None,
-            )
-            await log_request(
-                "success",
-                model=model,
-                route="google",
-                family=family,
-                stream=False,
-                http_status=200,
-                rotation_attempted=rotation_attempted,
-                usage=codex_resp.get("usage") if isinstance(codex_resp, dict) else None,
-            )
-            return codex_resp
-        except HTTPException:
-            raise
-        except Exception as e:
-            await record_account_request(
-                response_account.get("email", ""),
-                model,
-                status="failure",
-                status_code=500,
-                error_class="translation_error",
-            )
-            await log_request(
-                "failed",
-                model=model,
-                route="google",
-                family=family,
-                stream=False,
-                http_status=500,
-                rotation_attempted=rotation_attempted,
-                error_class="translation_error",
-                error=e,
-            )
-            raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
+
+            if res.status_code == 429:
+                retry_after_seconds = retry_after_seconds_from_response(res)
+                retry_after_source = retry_after_source_from_response(res)
+                await mark_account_failure(
+                    response_account["email"],
+                    "Rate limited / Quota exceeded",
+                    retry_after_seconds,
+                    model=model,
+                    status_code=429,
+                )
+                await record_account_request(
+                    response_account.get("email", ""),
+                    model,
+                    status="failure",
+                    status_code=429,
+                    error_class="rate_limited",
+                )
+                await log_request(
+                    "failed",
+                    model=model,
+                    route="google",
+                    family=family,
+                    stream=False,
+                    http_status=429,
+                    retry_after_source=retry_after_source,
+                    rotation_attempted=rotation_attempted,
+                    error_class="rate_limited",
+                    error="Antigravity account rate limit reached",
+                )
+                raise HTTPException(
+                    status_code=429,
+                    detail=google_failure_detail(
+                        model,
+                        "Antigravity account rate limit reached. Auto-switching to next account.",
+                        retry_after_seconds=retry_after_seconds,
+                        retry_after_source=retry_after_source,
+                        rotation_attempted=rotation_attempted,
+                    ),
+                )
+
+            if res.status_code != 200:
+                await record_account_request(
+                    response_account.get("email", ""),
+                    model,
+                    status="failure",
+                    status_code=res.status_code,
+                    error_class="backend_http_error",
+                )
+                await log_request(
+                    "failed",
+                    model=model,
+                    route="google",
+                    family=family,
+                    stream=False,
+                    http_status=res.status_code,
+                    retry_after_source=retry_after_source_from_response(res),
+                    rotation_attempted=rotation_attempted,
+                    error_class="backend_http_error",
+                    error=res.text,
+                )
+                raise HTTPException(
+                    status_code=res.status_code,
+                    detail=google_failure_detail(
+                        model,
+                        f"Google Antigravity API error: {safe_error_detail(res.text)}",
+                        retry_after_seconds=retry_after_seconds_from_response(res),
+                        retry_after_source=retry_after_source_from_response(res),
+                        rotation_attempted=rotation_attempted,
+                    ),
+                )
+
+            try:
+                gemini_resp = res.json()
+                if isinstance(gemini_resp, list) and gemini_resp:
+                    gemini_resp = gemini_resp[0]
+                backend_error = backend_error_from_payload(gemini_resp)
+                if backend_error:
+                    code, message = backend_error
+                    if google_stream_error_is_account_scoped(code, message):
+                        await mark_account_failure(
+                            response_account["email"],
+                            f"Backend payload error {code}: {safe_error_detail(message)}",
+                            model=model,
+                        )
+                    await record_account_request(
+                        response_account.get("email", ""),
+                        model,
+                        status="failure",
+                        status_code=status_code_from_backend_error(code, message),
+                        error_class=code,
+                    )
+                    await log_request(
+                        "failed",
+                        model=model,
+                        route="google",
+                        family=family,
+                        stream=False,
+                        http_status=status_code_from_backend_error(code, message),
+                        rotation_attempted=rotation_attempted,
+                        error_class=code,
+                        error=message,
+                    )
+                    raise HTTPException(
+                        status_code=status_code_from_backend_error(code, message),
+                        detail=google_failure_detail(
+                            model,
+                            f"Google Antigravity API error: {safe_error_detail(message)}",
+                            rotation_attempted=rotation_attempted,
+                        ),
+                    )
+                codex_resp = transform_response(gemini_resp, model)
+                await record_account_request(
+                    response_account.get("email", ""),
+                    model,
+                    status="success",
+                    status_code=200,
+                    usage=codex_resp.get("usage") if isinstance(codex_resp, dict) else None,
+                )
+                await log_request(
+                    "success",
+                    model=model,
+                    route="google",
+                    family=family,
+                    stream=False,
+                    http_status=200,
+                    rotation_attempted=rotation_attempted,
+                    usage=codex_resp.get("usage") if isinstance(codex_resp, dict) else None,
+                )
+                return codex_resp
+            except HTTPException:
+                raise
+            except Exception as e:
+                await record_account_request(
+                    response_account.get("email", ""),
+                    model,
+                    status="failure",
+                    status_code=500,
+                    error_class="translation_error",
+                )
+                await log_request(
+                    "failed",
+                    model=model,
+                    route="google",
+                    family=family,
+                    stream=False,
+                    http_status=500,
+                    rotation_attempted=rotation_attempted,
+                    error_class="translation_error",
+                    error=e,
+                )
+                raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
+        finally:
+            await release_account_for_request(response_account.get("email"))
 
     # Handle standard SSE streaming response path
+    stream_attempts = [account]
+
     async def sse_generator() -> AsyncGenerator[str, None]:
         import uuid
         response_id = f"resp_{uuid.uuid4().hex[:12]}"
@@ -1523,7 +1535,7 @@ async def create_response(request: Request):
                         indexed_output_items.append((output_index, dict(item)))
 
         completed = False
-        attempts = [account]
+        attempts = stream_attempts
         attempt_num = 0
         while attempt_num < len(attempts):
             stream_retry_requested = False
@@ -1594,7 +1606,8 @@ async def create_response(request: Request):
             if completed:
                 break
             if stream_retry_requested and attempt_num == 0:
-                rotated = await select_active_account_for_request(model)
+                await release_account_for_request(stream_account.get("email"))
+                rotated = await acquire_active_account_for_request(model)
                 if rotated and rotated.get("email") != stream_account.get("email"):
                     usage = None
                     last_error = None
@@ -1603,7 +1616,8 @@ async def create_response(request: Request):
                     attempt_num += 1
                     continue
             elif attempt_num == 0:
-                rotated = await select_active_account_for_request(model)
+                await release_account_for_request(stream_account.get("email"))
+                rotated = await acquire_active_account_for_request(model)
                 if rotated and rotated.get("email") != stream_account.get("email"):
                     attempts.append(rotated)
                     attempt_num += 1
@@ -1681,7 +1695,15 @@ async def create_response(request: Request):
         yield stream_event({'type': 'response.completed', 'response': done_response})
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(sse_generator(), media_type="text/event-stream")
+    async def managed_sse_generator() -> AsyncGenerator[str, None]:
+        try:
+            async for chunk in sse_generator():
+                yield chunk
+        finally:
+            for used_account in stream_attempts:
+                await release_account_for_request(used_account.get("email"))
+
+    return StreamingResponse(managed_sse_generator(), media_type="text/event-stream")
 
 
 async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str) -> dict:

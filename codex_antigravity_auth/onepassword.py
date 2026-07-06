@@ -36,7 +36,11 @@ def onepassword_command_prefix(
         raise ValueError("Use only one of --op-env-file or --op-environment")
     if not env_file and not environment:
         return []
-    op = shutil.which("op") or "op"
+    op = shutil.which("op")
+    if not op:
+        raise ValueError(
+            "1Password CLI (op) was not found on PATH; install it or omit --op-env-file/--op-environment"
+        )
     if env_file:
         return [op, "run", "--env-file", env_file, "--"]
     return [op, "run", "--environment", environment or "", "--"]

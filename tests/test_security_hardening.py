@@ -171,7 +171,7 @@ class TestProviderStorage(unittest.TestCase):
 
 class TestGatewayRemoteAccess(unittest.TestCase):
     def test_loopback_responses_reject_browser_plain_text_posts(self):
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_select:
             response = TestClient(app).post(
                 "/v1/responses",
                 content='{"model":"gemini-3.5-flash-high","input":"hello"}',
@@ -183,7 +183,7 @@ class TestGatewayRemoteAccess(unittest.TestCase):
         mock_select.assert_not_called()
 
     def test_loopback_responses_reject_cross_site_browser_origin(self):
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_select:
             response = TestClient(app).post(
                 "/v1/responses",
                 json={"model": "gemini-3.5-flash-high", "input": "hello"},
@@ -195,7 +195,7 @@ class TestGatewayRemoteAccess(unittest.TestCase):
         mock_select.assert_not_called()
 
     def test_loopback_responses_reject_dns_rebinding_host(self):
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_select:
             response = TestClient(app).post(
                 "/v1/responses",
                 json={"model": "gemini-3.5-flash-high", "input": "hello"},
@@ -207,7 +207,7 @@ class TestGatewayRemoteAccess(unittest.TestCase):
         mock_select.assert_not_called()
 
     def test_loopback_responses_reject_testserver_host_from_real_loopback_client(self):
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_select:
             response = TestClient(app, client=("127.0.0.1", 50000)).post(
                 "/v1/responses",
                 json={"model": "gemini-3.5-flash-high", "input": "hello"},
