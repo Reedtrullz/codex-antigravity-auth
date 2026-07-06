@@ -859,6 +859,7 @@ def run_service_command(args) -> dict:
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(redact_secret_text(str(exc))) from exc
     gateway = gateway_status_info(args.port)
+    add_gateway_reachability(gateway)
     result = {"service": info, "gateway": gateway}
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2))
@@ -884,7 +885,13 @@ def run_service_command(args) -> dict:
             print(f"    Service file: {info['path']}")
         if info.get("task_name"):
             print(f"    Task name: {info['task_name']}")
-        print(f"    Gateway process: {gateway['status']}")
+        if gateway.get("reachable"):
+            print(
+                "    Gateway process: "
+                f"reachable ({gateway.get('reachable_model_count', 0)} model(s) at {gateway.get('reachable_base_url')})"
+            )
+        else:
+            print(f"    Gateway process: {gateway['status']}")
     return result
 
 
