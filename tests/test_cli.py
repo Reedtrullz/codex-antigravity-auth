@@ -1,4 +1,5 @@
 import unittest
+import json
 import os
 import signal
 import stat
@@ -45,7 +46,9 @@ from codex_antigravity_auth.cli import (
     validate_codex_provider_name,
     write_codex_config,
 )
-from codex_antigravity_auth.models import canonical_model_id, resolve_backend_model
+from codex_antigravity_auth.models import canonical_model_id, native_model_catalog, resolve_backend_model
+from codex_antigravity_auth.observability import iter_request_records, write_request_record
+from codex_antigravity_auth.service import render_linux_systemd_unit, render_macos_launch_agent, service_status
 
 
 def write_ready_codex_config(
@@ -1857,6 +1860,192 @@ class TestProviderCli(unittest.TestCase):
             with patch("codex_antigravity_auth.cli.remove_provider_config", side_effect=RuntimeError("provider store locked")):
                 with self.assertRaisesRegex(SystemExit, "provider store locked"):
                     main()
+
+
+class TestVNextPolishCli(unittest.TestCase):
+    def test_new_command_parsers_dispatch(self):
+        command_cases = [
+            (["codex-antigravity", "service", "status", "--json"], "run_service_command"),
+            (["codex-antigravity", "logs", "--tail", "1", "--json"], "run_logs_command"),
+            (["codex-antigravity", "models", "list", "--json"], "run_models_command"),
+        ]
+        for argv, handler_name in command_cases:
+            with self.subTest(argv=argv):
+                with patch.object(sys, "argv", argv):
+                    with patch(f"codex_antigravity_auth.cli.{handler_name}") as mock_handler:
+                        main()
+                mock_handler.assert_called_once()
+
+    def test_setup_repair_writes_only_codex_config(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            args = Namespace(
+                check=False,
+                json=False,
+                write=False,
+                repair=True,
+                accounts=1,
+                model="sonnet",
+                provider="antigravity",
+                provider_name="Google Antigravity",
+                base_url=None,
+                config=str(config_path),
+                install_skill=True,
+                skill_dir=str(Path(tmp) / "skills"),
+                force=False,
+                verify_skill=False,
+                start=True,
+                port=51122,
+                host="127.0.0.1",
+                allow_remote=False,
+                gateway_timeout=0.01,
+                gateway_token_env="ANTIGRAVITY_GATEWAY_TOKEN",
+            )
+            with patch("codex_antigravity_auth.cli.run_configure_codex") as mock_configure:
+                with patch("codex_antigravity_auth.cli.codex_ready_report", return_value={"ok": True, "checks": [], "next_command": "codex"}):
+                    with patch("codex_antigravity_auth.cli.run_login") as mock_login:
+                        with patch("codex_antigravity_auth.cli.run_install_skill") as mock_install:
+                            with patch("codex_antigravity_auth.cli.start_gateway_background") as mock_start:
+                                with patch("builtins.print"):
+                                    report = run_setup(args)
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["mode"], "repair")
+        mock_configure.assert_called_once()
+        mock_login.assert_not_called()
+        mock_install.assert_not_called()
+        mock_start.assert_not_called()
+
+    def test_service_manifests_render_user_gateway_commands(self):
+        macos_plist = render_macos_launch_agent(51122, "127.0.0.1")
+        linux_unit = render_linux_systemd_unit(51122, "127.0.0.1")
+
+        self.assertIn("com.codex-antigravity.gateway.51122", macos_plist)
+        self.assertIn("<key>KeepAlive</key>", macos_plist)
+        self.assertIn("codex_antigravity_auth.cli", macos_plist)
+        self.assertIn("Restart=on-failure", linux_unit)
+        self.assertIn("codex_antigravity_auth.cli", linux_unit)
+
+    def test_service_status_uses_platform_specific_probe(self):
+        with patch("codex_antigravity_auth.service._run") as mock_run:
+            mock_run.return_value.returncode = 1
+            status = service_status(51122, platform_name="windows")
+
+        self.assertEqual(status["platform"], "windows")
+        self.assertFalse(status["installed"])
+        self.assertEqual(status["task_name"], "CodexAntigravityGateway51122")
+        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_args.args[0][0], "schtasks")
+
+    def test_request_log_redacts_and_omits_prompt_body(self):
+        with TemporaryDirectory() as tmp:
+            with patch("codex_antigravity_auth.observability.get_codex_home", return_value=Path(tmp)):
+                write_request_record(
+                    {
+                        "request_id": "req_test",
+                        "model": "claude-3.5-sonnet",
+                        "route": "google",
+                        "status": "failed",
+                        "prompt": "do not persist",
+                        "body": {"input": "also secret"},
+                        "error": "provider key sk-testsecret1234567890 failed",
+                    },
+                    max_bytes=1024,
+                )
+                records = list(iter_request_records(tail=10))
+
+        serialized = json.dumps(records)
+        self.assertIn("req_test", serialized)
+        self.assertNotIn("do not persist", serialized)
+        self.assertNotIn("also secret", serialized)
+        self.assertNotIn("sk-testsecret1234567890", serialized)
+        self.assertIn("[REDACTED]", serialized)
+
+    def test_model_overlay_catalog_and_collision_rules(self):
+        with TemporaryDirectory() as tmp:
+            overlay_path = Path(tmp) / "antigravity-models.toml"
+            with patch("codex_antigravity_auth.models.MODEL_OVERLAY_FILE", str(overlay_path)):
+                argv = [
+                    "codex-antigravity",
+                    "models",
+                    "add",
+                    "claude-extra",
+                    "--backend-id",
+                    "claude-sonnet-4-6",
+                    "--display-name",
+                    "Claude Extra",
+                    "--family",
+                    "claude",
+                    "--context-window",
+                    "200000",
+                    "--alias",
+                    "cextra",
+                ]
+                with patch.object(sys, "argv", argv):
+                    with patch("builtins.print"):
+                        main()
+
+                by_id = {model["id"]: model for model in native_model_catalog()}
+                self.assertEqual(by_id["claude-extra"]["backend_id"], "claude-sonnet-4-6")
+                self.assertIn("cextra", by_id["claude-extra"]["aliases"])
+
+                collision_argv = [
+                    "codex-antigravity",
+                    "models",
+                    "add",
+                    "claude-3.5-sonnet",
+                    "--backend-id",
+                    "claude-sonnet-4-6",
+                    "--family",
+                    "claude",
+                    "--context-window",
+                    "200000",
+                ]
+                with patch.object(sys, "argv", collision_argv):
+                    with self.assertRaisesRegex(SystemExit, "built-in model"):
+                        main()
+
+                force_argv = collision_argv + ["--display-name", "Forced Sonnet", "--force"]
+                with patch.object(sys, "argv", force_argv):
+                    with patch("builtins.print"):
+                        main()
+                forced = {model["id"]: model for model in native_model_catalog()}["claude-3.5-sonnet"]
+                self.assertEqual(forced["display_name"], "Forced Sonnet")
+
+    def test_models_list_reports_malformed_overlay_cleanly(self):
+        with TemporaryDirectory() as tmp:
+            overlay_path = Path(tmp) / "antigravity-models.toml"
+            overlay_path.write_text("not valid before table\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.models.MODEL_OVERLAY_FILE", str(overlay_path)):
+                with patch.object(sys, "argv", ["codex-antigravity", "models", "list"]):
+                    with self.assertRaisesRegex(SystemExit, "Unexpected content"):
+                        main()
+
+    def test_model_overlay_refuses_symlinked_file(self):
+        with TemporaryDirectory() as tmp:
+            target_path = Path(tmp) / "target.toml"
+            target_path.write_text("", encoding="utf-8")
+            overlay_path = Path(tmp) / "antigravity-models.toml"
+            try:
+                overlay_path.symlink_to(target_path)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is not available")
+            with patch("codex_antigravity_auth.models.MODEL_OVERLAY_FILE", str(overlay_path)):
+                argv = [
+                    "codex-antigravity",
+                    "models",
+                    "add",
+                    "claude-extra",
+                    "--backend-id",
+                    "claude-sonnet-4-6",
+                    "--family",
+                    "claude",
+                    "--context-window",
+                    "200000",
+                ]
+                with patch.object(sys, "argv", argv):
+                    with self.assertRaisesRegex(SystemExit, "symlinked model overlay"):
+                        main()
 
 if __name__ == "__main__":
     unittest.main()

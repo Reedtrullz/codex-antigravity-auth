@@ -6,11 +6,13 @@ import time
 import httpx
 import email.utils
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from typing import AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from .accounts import AccountManager
 from .byok import (
     all_provider_configs,
@@ -34,11 +36,20 @@ from .transform import (
 )
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform, is_loopback_host, validate_gateway_token_strength
 from .models import canonical_model_id, native_model_catalog, native_model_family
+from .observability import request_log_info, write_request_record
 from .redaction import redact_secret_text
 from .storage import load_accounts
 
-app = FastAPI(title="Codex Antigravity Gateway")
+
+@asynccontextmanager
+async def gateway_lifespan(_app: FastAPI):
+    await refresh_accounts_ahead_if_due(force=True)
+    yield
+
+
+app = FastAPI(title="Codex Antigravity Gateway", lifespan=gateway_lifespan)
 account_manager = AccountManager()
+_last_refresh_ahead_at = 0.0
 STREAM_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 MUTATING_JSON_PATHS = {"/v1/responses"}
 TEST_CLIENT_HOSTS = {"testserver"}
@@ -140,12 +151,112 @@ async def require_remote_gateway_token(request: Request, call_next):
         content={"detail": "Remote access requires ANTIGRAVITY_ALLOW_REMOTE=1 and a valid bearer token."},
     )
 
-# ── Model catalog for native Codex Desktop picker ──
-AVAILABLE_MODELS = native_model_catalog()
-
-
 def safe_error_detail(value: object) -> str:
     return redact_secret_text(str(value))
+
+
+async def select_active_account_for_request(model: str) -> dict | None:
+    return await run_in_threadpool(account_manager.select_active_account, model)
+
+
+async def mark_account_failure(
+    email: str,
+    reason: str,
+    retry_after_seconds: float | None = None,
+    *,
+    model: str | None = None,
+    status_code: int | None = None,
+) -> None:
+    await run_in_threadpool(
+        account_manager.mark_failure,
+        email,
+        reason,
+        retry_after_seconds,
+        model=model,
+        status_code=status_code,
+    )
+
+
+async def record_account_request(
+    email: str,
+    model: str,
+    *,
+    status: str,
+    status_code: int | None = None,
+    error_class: str | None = None,
+    usage: dict | None = None,
+) -> None:
+    await run_in_threadpool(
+        account_manager.record_request,
+        email,
+        model,
+        status=status,
+        status_code=status_code,
+        error_class=error_class,
+        usage=usage,
+    )
+
+
+async def refresh_accounts_ahead_if_due(*, force: bool = False) -> None:
+    global _last_refresh_ahead_at
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    now = time.monotonic()
+    if not force and now - _last_refresh_ahead_at < 60:
+        return
+    _last_refresh_ahead_at = now
+    try:
+        await run_in_threadpool(account_manager.refresh_expiring_accounts, 300)
+    except Exception:
+        return
+
+
+def account_health_summary() -> dict:
+    try:
+        data = load_accounts()
+    except Exception:
+        return {"configured_accounts": 0, "cooldowns": {}, "counters": {}, "load_error": "account store unavailable"}
+    accounts = data.get("accounts", []) if isinstance(data, dict) else []
+    state = data.get("accountState", {}) if isinstance(data.get("accountState"), dict) else {}
+    cooldowns = state.get("cooldowns", {}) if isinstance(state.get("cooldowns"), dict) else {}
+    counters = state.get("counters", {}) if isinstance(state.get("counters"), dict) else {}
+    now = time.time()
+    cooldown_summary: dict[str, dict[str, int]] = {
+        "claude": {"cooling_down": 0, "available": 0},
+        "gemini": {"cooling_down": 0, "available": 0},
+    }
+    counter_summary: dict[str, dict[str, int]] = {
+        "claude": {"total_requests": 0, "failures": 0, "rate_limits": 0},
+        "gemini": {"total_requests": 0, "failures": 0, "rate_limits": 0},
+    }
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        email = str(account.get("email") or "")
+        cooldown_end = normalize_epoch_seconds(cooldowns.get(email, 0))
+        for family in ("claude", "gemini"):
+            if cooldown_end > now:
+                cooldown_summary[family]["cooling_down"] += 1
+            else:
+                cooldown_summary[family]["available"] += 1
+        family_counters = counters.get(email, {}) if isinstance(counters, dict) else {}
+        if not isinstance(family_counters, dict):
+            continue
+        for family, raw_counter in family_counters.items():
+            if family not in counter_summary or not isinstance(raw_counter, dict):
+                continue
+            for key in ("total_requests", "failures", "rate_limits"):
+                value = raw_counter.get(key, 0)
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError):
+                    parsed = 0
+                counter_summary[family][key] += max(0, parsed)
+    return {
+        "configured_accounts": len(accounts),
+        "cooldowns": cooldown_summary,
+        "counters": counter_summary,
+    }
 
 
 def finite_retry_after_seconds(value: object) -> float | None:
@@ -388,12 +499,46 @@ async def list_models():
             default_reasoning_level=m.get("default_reasoning_level", "high"),
             supports_parallel_tool_calls=bool(m.get("supports_parallel_tool_calls", True)),
         )
-        for m in AVAILABLE_MODELS
+        for m in native_model_catalog()
     ] + byok_models
     return {
         "object": "list",
         "data": models,
         "models": models,
+    }
+
+
+@app.get("/health")
+async def health(request: Request):
+    client_host = request.client.host if request.client else None
+    if not request_uses_loopback_host(request, client_host):
+        raise HTTPException(status_code=403, detail="Health checks are loopback-only.")
+    providers = []
+    try:
+        provider_configs = all_provider_configs()
+    except Exception:
+        provider_configs = {}
+    for provider_id, provider in provider_configs.items():
+        models = provider.get("models", [])
+        providers.append(
+            {
+                "id": provider_id,
+                "kind": provider.get("kind"),
+                "usable": provider_has_usable_key(provider),
+                "model_count": len(models) if isinstance(models, list) else 0,
+            }
+        )
+    catalog = native_model_catalog()
+    return {
+        "ok": True,
+        "model_count": len(catalog),
+        "advertised_native_models": [model["id"] for model in catalog],
+        "configured_route_families": {
+            "google": bool(catalog),
+            "byok": providers,
+        },
+        "accounts": account_health_summary(),
+        "request_log": request_log_info(),
     }
 
 def safe_header_string(value: object) -> str | None:
@@ -716,13 +861,51 @@ def prepare_openai_compatible_request(
 
 @app.post("/v1/responses")
 async def create_response(request: Request):
+    request_id = f"req_{secrets.token_hex(8)}"
+    request_started = time.monotonic()
+
+    async def log_request(
+        status: str,
+        *,
+        model: str = "",
+        route: str = "unknown",
+        provider: str | None = None,
+        family: str | None = None,
+        stream: bool = False,
+        http_status: int | None = None,
+        retry_after_source: str | None = None,
+        rotation_attempted: bool = False,
+        usage: dict | None = None,
+        error_class: str | None = None,
+        error: object | None = None,
+    ) -> None:
+        record = {
+            "request_id": request_id,
+            "model": model,
+            "route": route,
+            "provider": provider,
+            "family": family,
+            "stream": stream,
+            "status": status,
+            "latency_ms": int((time.monotonic() - request_started) * 1000),
+            "http_status": http_status,
+            "retry_after_source": retry_after_source,
+            "rotation_attempted": rotation_attempted,
+            "usage": usage,
+            "error_class": error_class,
+            "error": safe_error_detail(error) if error is not None else None,
+        }
+        await run_in_threadpool(write_request_record, record)
+
     try:
         codex_req = await request.json()
     except Exception:
+        await log_request("failed", http_status=400, error_class="invalid_json", error="Invalid JSON body")
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     codex_req = validate_response_request_body(codex_req)
 
     reject_unsupported_previous_response(codex_req)
+    await refresh_accounts_ahead_if_due()
         
     model = response_model_id(codex_req)
     codex_req["model"] = model
@@ -733,20 +916,75 @@ async def create_response(request: Request):
         providers = all_provider_configs()
         provider = providers.get(provider_id)
         if not provider:
+            await log_request(
+                "failed",
+                model=model,
+                route="byok",
+                provider=provider_id,
+                stream=stream,
+                http_status=404,
+                error_class="provider_not_configured",
+                error=f"BYOK provider '{provider_id}' is not configured",
+            )
             raise HTTPException(status_code=404, detail=f"BYOK provider '{provider_id}' is not configured")
         if provider.get("kind") != "openai_chat":
+            await log_request(
+                "failed",
+                model=model,
+                route="byok",
+                provider=provider_id,
+                stream=stream,
+                http_status=500,
+                error_class="unsupported_provider_kind",
+                error=f"Unsupported BYOK provider kind: {provider.get('kind')}",
+            )
             raise HTTPException(status_code=500, detail=f"Unsupported BYOK provider kind: {provider.get('kind')}")
         if stream:
             payload, url, headers, timeout = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=True)
+            await log_request("stream_started", model=model, route="byok", provider=provider_id, stream=True)
             return StreamingResponse(
                 openai_compatible_sse_generator(payload, url, headers, timeout, provider, model),
                 media_type="text/event-stream",
             )
-        return await create_openai_compatible_response(codex_req, provider, provider_model, model)
+        try:
+            response = await create_openai_compatible_response(codex_req, provider, provider_model, model)
+        except HTTPException as exc:
+            await log_request(
+                "failed",
+                model=model,
+                route="byok",
+                provider=provider_id,
+                stream=False,
+                http_status=exc.status_code,
+                error_class="byok_error",
+                error=exc.detail,
+            )
+            raise
+        await log_request(
+            "success",
+            model=model,
+            route="byok",
+            provider=provider_id,
+            stream=False,
+            http_status=200,
+            usage=response.get("usage") if isinstance(response, dict) else None,
+        )
+        return response
     
     # 1. Select account automatically from pool
-    account = account_manager.select_active_account(model)
+    family = native_model_family(model)
+    account = await select_active_account_for_request(model)
     if not account:
+        await log_request(
+            "failed",
+            model=model,
+            route="google",
+            family=family,
+            stream=stream,
+            http_status=500,
+            error_class="no_google_accounts",
+            error="No Google accounts available",
+        )
         raise HTTPException(
             status_code=500,
             detail=google_failure_detail(
@@ -780,7 +1018,11 @@ async def create_response(request: Request):
                     res = await client.post(backend_url, json=antigravity_req, headers=headers)
                     return res
             except Exception as e:
-                account_manager.mark_failure(selected_account["email"], f"Connection error: {safe_error_detail(e)}")
+                await mark_account_failure(
+                    selected_account["email"],
+                    f"Connection error: {safe_error_detail(e)}",
+                    model=model,
+                )
                 return None
 
     # Handle standard non-streaming response path
@@ -790,13 +1032,31 @@ async def create_response(request: Request):
         res = await request_backend(response_account)
         if not res:
             # Retry with rotated account on connection failures
-            new_account = account_manager.select_active_account(model)
+            new_account = await select_active_account_for_request(model)
             rotation_attempted = True
             if new_account:
                 response_account = new_account
                 res = await request_backend(response_account)
                 
         if not res:
+            await record_account_request(
+                response_account.get("email", ""),
+                model,
+                status="failure",
+                status_code=502,
+                error_class="connection_error",
+            )
+            await log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=502,
+                rotation_attempted=rotation_attempted,
+                error_class="connection_error",
+                error="Failed to communicate with Antigravity backend after rotation",
+            )
             raise HTTPException(
                 status_code=502,
                 detail=google_failure_detail(
@@ -810,13 +1070,38 @@ async def create_response(request: Request):
             retry_after_seconds = retry_after_seconds_from_response(res)
             retry_after_source = retry_after_source_from_response(res)
             reason = "Rate limited / Quota exceeded" if res.status_code == 429 else f"Auth failure {res.status_code}: {safe_error_detail(res.text)}"
-            account_manager.mark_failure(response_account["email"], reason, retry_after_seconds)
-            new_account = account_manager.select_active_account(model)
+            await mark_account_failure(
+                response_account["email"],
+                reason,
+                retry_after_seconds,
+                model=model,
+                status_code=res.status_code,
+            )
+            new_account = await select_active_account_for_request(model)
             rotation_attempted = True
             if new_account:
                 response_account = new_account
                 res = await request_backend(response_account)
             if not res:
+                await record_account_request(
+                    response_account.get("email", ""),
+                    model,
+                    status="failure",
+                    status_code=502,
+                    error_class="connection_error",
+                )
+                await log_request(
+                    "failed",
+                    model=model,
+                    route="google",
+                    family=family,
+                    stream=False,
+                    http_status=502,
+                    retry_after_source=retry_after_source,
+                    rotation_attempted=rotation_attempted,
+                    error_class="connection_error",
+                    error="Failed to communicate with Antigravity backend after rotation",
+                )
                 raise HTTPException(
                     status_code=502,
                     detail=google_failure_detail(
@@ -832,7 +1117,25 @@ async def create_response(request: Request):
             # Token might be invalidated or verification required
             retry_after_seconds = retry_after_seconds_from_response(res)
             retry_after_source = retry_after_source_from_response(res)
-            account_manager.mark_failure(response_account["email"], f"Auth failure {res.status_code}: {safe_error_detail(res.text)}")
+            await mark_account_failure(
+                response_account["email"],
+                f"Auth failure {res.status_code}: {safe_error_detail(res.text)}",
+                retry_after_seconds,
+                model=model,
+                status_code=res.status_code,
+            )
+            await log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=res.status_code,
+                retry_after_source=retry_after_source,
+                rotation_attempted=rotation_attempted,
+                error_class="auth_failure",
+                error=res.text,
+            )
             raise HTTPException(
                 status_code=res.status_code,
                 detail=google_failure_detail(
@@ -847,7 +1150,25 @@ async def create_response(request: Request):
         if res.status_code == 429:
             retry_after_seconds = retry_after_seconds_from_response(res)
             retry_after_source = retry_after_source_from_response(res)
-            account_manager.mark_failure(response_account["email"], "Rate limited / Quota exceeded", retry_after_seconds)
+            await mark_account_failure(
+                response_account["email"],
+                "Rate limited / Quota exceeded",
+                retry_after_seconds,
+                model=model,
+                status_code=429,
+            )
+            await log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=429,
+                retry_after_source=retry_after_source,
+                rotation_attempted=rotation_attempted,
+                error_class="rate_limited",
+                error="Antigravity account rate limit reached",
+            )
             raise HTTPException(
                 status_code=429,
                 detail=google_failure_detail(
@@ -860,6 +1181,25 @@ async def create_response(request: Request):
             )
             
         if res.status_code != 200:
+            await record_account_request(
+                response_account.get("email", ""),
+                model,
+                status="failure",
+                status_code=res.status_code,
+                error_class="backend_http_error",
+            )
+            await log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=res.status_code,
+                retry_after_source=retry_after_source_from_response(res),
+                rotation_attempted=rotation_attempted,
+                error_class="backend_http_error",
+                error=res.text,
+            )
             raise HTTPException(
                 status_code=res.status_code,
                 detail=google_failure_detail(
@@ -880,7 +1220,22 @@ async def create_response(request: Request):
             if backend_error:
                 code, message = backend_error
                 if google_stream_error_is_account_scoped(code, message):
-                    account_manager.mark_failure(response_account["email"], f"Backend payload error {code}: {safe_error_detail(message)}")
+                    await mark_account_failure(
+                        response_account["email"],
+                        f"Backend payload error {code}: {safe_error_detail(message)}",
+                        model=model,
+                    )
+                await log_request(
+                    "failed",
+                    model=model,
+                    route="google",
+                    family=family,
+                    stream=False,
+                    http_status=status_code_from_backend_error(code, message),
+                    rotation_attempted=rotation_attempted,
+                    error_class=code,
+                    error=message,
+                )
                 raise HTTPException(
                     status_code=status_code_from_backend_error(code, message),
                     detail=google_failure_detail(
@@ -890,10 +1245,45 @@ async def create_response(request: Request):
                     ),
                 )
             codex_resp = transform_response(gemini_resp, model)
+            await record_account_request(
+                response_account.get("email", ""),
+                model,
+                status="success",
+                status_code=200,
+                usage=codex_resp.get("usage") if isinstance(codex_resp, dict) else None,
+            )
+            await log_request(
+                "success",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=200,
+                rotation_attempted=rotation_attempted,
+                usage=codex_resp.get("usage") if isinstance(codex_resp, dict) else None,
+            )
             return codex_resp
         except HTTPException:
             raise
         except Exception as e:
+            await record_account_request(
+                response_account.get("email", ""),
+                model,
+                status="failure",
+                status_code=500,
+                error_class="translation_error",
+            )
+            await log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=500,
+                rotation_attempted=rotation_attempted,
+                error_class="translation_error",
+                error=e,
+            )
             raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
 
     # Handle standard SSE streaming response path
@@ -971,9 +1361,10 @@ async def create_response(request: Request):
                 last_error_code = code
                 last_error = f"Google Antigravity stream returned {code}: {message}"
                 if google_stream_error_is_account_scoped(code, message):
-                    account_manager.mark_failure(
+                    await mark_account_failure(
                         stream_account["email"],
                         f"Streaming backend error {code}: {safe_error_detail(message)}",
+                        model=model,
                     )
                     if not backend_output_started:
                         stream_retry_requested = True
@@ -1063,10 +1454,12 @@ async def create_response(request: Request):
                             if res.status_code in (401, 403, 429):
                                 body_bytes = await res.aread()
                                 body_text = body_bytes.decode("utf-8", errors="ignore")
-                                account_manager.mark_failure(
+                                await mark_account_failure(
                                     stream_account["email"],
                                     f"Streaming HTTP {res.status_code}: {safe_error_detail(body_text)}",
                                     retry_after_seconds_from_response(res),
+                                    model=model,
+                                    status_code=res.status_code,
                                 )
                             last_error_code = "backend_error"
                             last_error = f"Google Antigravity returned HTTP {res.status_code}"
@@ -1088,16 +1481,38 @@ async def create_response(request: Request):
                             if not stream_failed and not stream_retry_requested:
                                 completed = True
             except Exception as e:
-                account_manager.mark_failure(stream_account["email"], f"Streaming connection error: {safe_error_detail(e)}")
+                await mark_account_failure(
+                    stream_account["email"],
+                    f"Streaming connection error: {safe_error_detail(e)}",
+                    model=model,
+                )
                 last_error_code = "connection_error"
                 last_error = safe_error_detail(e)
 
             if stream_failed:
+                await record_account_request(
+                    stream_account.get("email", ""),
+                    model,
+                    status="failure",
+                    status_code=None,
+                    error_class=last_error_code,
+                )
+                await log_request(
+                    "failed",
+                    model=model,
+                    route="google",
+                    family=family,
+                    stream=True,
+                    error_class=last_error_code,
+                    error=last_error or "Google Antigravity stream failed",
+                    rotation_attempted=len(attempts) > 1,
+                    usage=usage,
+                )
                 return
             if completed:
                 break
             if stream_retry_requested and attempt_num == 0:
-                rotated = account_manager.select_active_account(model)
+                rotated = await select_active_account_for_request(model)
                 if rotated and rotated.get("email") != stream_account.get("email"):
                     usage = None
                     last_error = None
@@ -1106,7 +1521,7 @@ async def create_response(request: Request):
                     attempt_num += 1
                     continue
             elif attempt_num == 0:
-                rotated = account_manager.select_active_account(model)
+                rotated = await select_active_account_for_request(model)
                 if rotated and rotated.get("email") != stream_account.get("email"):
                     attempts.append(rotated)
                     attempt_num += 1
@@ -1114,6 +1529,25 @@ async def create_response(request: Request):
             break
 
         if not completed:
+            final_account = attempts[min(attempt_num, len(attempts) - 1)]
+            await record_account_request(
+                final_account.get("email", ""),
+                model,
+                status="failure",
+                status_code=None,
+                error_class=last_error_code,
+            )
+            await log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=True,
+                error_class=last_error_code,
+                error=last_error or "Google Antigravity stream failed",
+                rotation_attempted=len(attempts) > 1,
+                usage=usage,
+            )
             async for event in fail_stream(last_error_code, last_error or "Google Antigravity stream failed"):
                 yield event
             return
@@ -1144,6 +1578,24 @@ async def create_response(request: Request):
         }
         if usage:
             done_response["usage"] = usage
+        final_account = attempts[min(attempt_num, len(attempts) - 1)]
+        await record_account_request(
+            final_account.get("email", ""),
+            model,
+            status="success",
+            status_code=200,
+            usage=usage,
+        )
+        await log_request(
+            "success",
+            model=model,
+            route="google",
+            family=family,
+            stream=True,
+            http_status=200,
+            rotation_attempted=len(attempts) > 1,
+            usage=usage,
+        )
         yield stream_event({'type': 'response.completed', 'response': done_response})
         yield "data: [DONE]\n\n"
 

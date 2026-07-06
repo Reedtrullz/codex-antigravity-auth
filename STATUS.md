@@ -1,10 +1,10 @@
 # Current Integration Status — 6 July 2026
 
 ## Build & Test Health
-- **local pytest**: full local suite passing with `python3 -m pytest -q` (`289` tests plus `128` subtests) ✅
+- **local pytest**: full local suite passing with `python3 -m pytest -q` (`338` tests plus `131` subtests) ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
-- **wheel install smoke**: built wheel/sdist from a scratch copy, ran `twine check`, confirmed project URLs/metadata and MIT license inclusion in built artifacts, installed the wheel into a clean venv, ran `pip check`, verified console script help, `doctor --help`, and provider preset listing ✅
+- **wheel install smoke**: ran `python3 -m build`, `python3 -m twine check dist/*`, installed the wheel into a clean venv, ran `pip check`, verified console script help plus `service status --json`, `models list --json`, `logs --tail 1 --json`, scratch `setup --check`, and packaged `install-skill --verify` ✅
 - **PR #4 CI**: head `b309c1f` passed duplicate GitHub CI runs `28757022193` and `28757023173` across `package`, Python `3.10`, `3.11`, and `3.12` ✅
 - **live backend smoke**: credentialed live Google OAuth/runtime smoke passed on 2026-07-03 for `claude-3.5-sonnet`; live BYOK smokes passed through transient env vars only for `deepseek:deepseek-v4-flash` and OpenRouter on PR #1 head `e6a81ac` before squash merge `191daa4`. OpenRouter evidence covered `/v1/models` exposure for `openrouter:openrouter/auto`, exact non-streaming and streaming sentinels for `openrouter:openrouter/auto`, and exact non-streaming sentinel routing for `openrouter:deepseek/deepseek-chat` ✅
 - **install command**: `uv tool install .` for normal use, `uv tool install --editable .` for development
@@ -89,6 +89,16 @@
 | `$anti workflow` presets for review readiness, deep planning, ship gates, and provider comparison | ✅ |
 | Sanitized `$anti` run ledger with list/show/clean and dry-run pruning | ✅ |
 | `$anti` fallback/progress controls for long model calls and retryable backend drift | ✅ |
+| PyPI Trusted Publishing workflow for `v*` tags | ✅ |
+| Cross-platform per-user gateway service install/status/uninstall | ✅ |
+| Nonblocking Google account selection through Starlette threadpool | ✅ |
+| Refresh-ahead helper for accounts expiring within 5 minutes | ✅ |
+| Sanitized capped request JSONL log with CLI tail/follow/clean | ✅ |
+| Loopback-only `/health` endpoint with anonymous cooldown/request diagnostics | ✅ |
+| Local model catalog overlays via `~/.codex/antigravity-models.toml` | ✅ |
+| `setup --repair` Codex config reconciliation without OAuth/skill/gateway mutation | ✅ |
+| Persisted per-account usage/failure/429 counters by model family | ✅ |
+| Claude reasoning-effort audit in `models doctor` | ✅ |
 
 ## Known Limitations
 - Live Google Antigravity, DeepSeek V4 Flash BYOK, and OpenRouter BYOK smokes have passed with configured credentials/API keys; xAI, Kimi/Moonshot, Ollama cloud, and arbitrary custom BYOK providers still need their own live-key smoke.
@@ -98,11 +108,12 @@
 - Live backend availability is covered only by the credentialed smoke runs noted above.
 
 ## Release State
-- Current package metadata: `1.2.0`
-- Previous tagged GitHub release: [v1.1.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.1.0)
-- `v1.2.0` is the release target for the V3 native Claude-in-Codex setup polish release.
+- Current package metadata: `1.3.0`
+- Previous tagged GitHub release: [v1.2.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.2.0)
+- `v1.3.0` is the release target for the Fable follow-up hardening/adoption release.
 
 ## Next Priorities
 1. Add `/v1/responses/compact` support
 2. Expand live backend smoke coverage beyond DeepSeek/OpenRouter to additional BYOK providers
 3. Add a credentialed smoke-test profile for Google and configured BYOK providers
+4. Configure the PyPI Trusted Publisher for `codex-antigravity-auth` before pushing the first `v1.3.0` publish tag

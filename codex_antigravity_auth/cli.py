@@ -32,12 +32,20 @@ from .byok import (
     validate_provider_api_key,
     validate_provider_id,
 )
+from .accounts import AccountManager
 from .models import (
     DEFAULT_CODEX_MODEL_ID,
+    add_model_overlay,
     canonical_model_id,
+    load_model_overlays,
     native_model_definition,
     native_model_family,
+    native_model_catalog,
+    remove_model_overlay,
+    validate_model_id,
+    validate_overlay_model,
 )
+from .observability import clean_request_logs, iter_request_records, request_log_info
 from .oauth import (
     OAUTH_HTTP_TIMEOUT_SECONDS,
     authorize_antigravity,
@@ -45,6 +53,7 @@ from .oauth import (
     exchange_antigravity,
     token_expires_in_seconds,
 )
+from .service import install_service, service_status, uninstall_service
 from .storage import load_accounts, save_accounts
 from .constants import get_codex_home, is_loopback_host, resolve_oauth_credentials, validate_gateway_token_strength
 from .redaction import redact_secret_text
@@ -428,6 +437,34 @@ def process_is_running(pid: int) -> bool:
 
 
 def gateway_process_command(pid: int) -> str | None:
+    if sys.platform == "win32":
+        commands = [
+            ["wmic", "process", "where", f"ProcessId={int(pid)}", "get", "CommandLine", "/value"],
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"(Get-CimInstance Win32_Process -Filter \"ProcessId={int(pid)}\").CommandLine",
+            ],
+        ]
+        for command in commands:
+            try:
+                proc = subprocess.run(
+                    command,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=2.0,
+                    check=False,
+                )
+            except Exception:
+                continue
+            if proc.returncode == 0:
+                output = proc.stdout.strip()
+                if output.startswith("CommandLine="):
+                    output = output.split("=", 1)[1].strip()
+                return output
+        return None
     try:
         proc = subprocess.run(
             ["ps", "-p", str(pid), "-o", "command="],
@@ -491,7 +528,16 @@ def gateway_status_info(port: int) -> dict:
 
 
 def run_gateway_status(args) -> dict:
+    refresh_summary = None
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        try:
+            refresh_summary = AccountManager().refresh_expiring_accounts(window_seconds=300)
+        except Exception:
+            refresh_summary = {"checked": 0, "refreshed": 0, "failed": 0, "error": "refresh-ahead unavailable"}
     info = gateway_status_info(args.port)
+    info["service"] = service_status(args.port)
+    info["request_log"] = request_log_info()
+    info["refresh_ahead"] = refresh_summary
     if getattr(args, "json", False):
         print(json.dumps(info, indent=2))
     else:
@@ -500,7 +546,178 @@ def run_gateway_status(args) -> dict:
             print(f"  pid: {info['pid']}")
         print(f"  pid_file: {info['pid_file']}")
         print(f"  log_file: {info['log_file']}")
+        service_info = info["service"]
+        print(
+            "  service: "
+            f"{'installed' if service_info.get('installed') else 'not installed'}"
+            f", {'active' if service_info.get('active') else 'inactive'}"
+        )
+        service_path = service_info.get("path") or service_info.get("task_name")
+        if service_path:
+            print(f"  service_ref: {service_path}")
+        print(f"  request_log: {info['request_log']['path']}")
+        if refresh_summary:
+            print(
+                "  refresh_ahead: "
+                f"checked={refresh_summary.get('checked', 0)}, "
+                f"refreshed={refresh_summary.get('refreshed', 0)}, "
+                f"failed={refresh_summary.get('failed', 0)}"
+            )
     return info
+
+
+def run_service_command(args) -> dict:
+    try:
+        if args.service_command == "install":
+            require_safe_gateway_host(args.host, allow_remote=False)
+            info = install_service(args.port, args.host)
+            action = "installed"
+        elif args.service_command == "uninstall":
+            info = uninstall_service(args.port)
+            action = "uninstalled"
+        elif args.service_command == "status":
+            info = service_status(args.port)
+            action = "status"
+        else:
+            raise SystemExit("service requires install, uninstall, or status")
+    except RuntimeError as exc:
+        raise SystemExit(redact_secret_text(str(exc))) from exc
+    gateway = gateway_status_info(args.port)
+    result = {"service": info, "gateway": gateway}
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2))
+    else:
+        if action == "status":
+            print(
+                f"Service status: {'installed' if info.get('installed') else 'not installed'}, "
+                f"{'active' if info.get('active') else 'inactive'}"
+            )
+        else:
+            print(f"[+] Gateway service {action} for port {args.port}")
+        if info.get("path"):
+            print(f"    Service file: {info['path']}")
+        if info.get("task_name"):
+            print(f"    Task name: {info['task_name']}")
+        print(f"    Gateway process: {gateway['status']}")
+    return result
+
+
+def run_logs_command(args) -> None:
+    if getattr(args, "logs_action", None) == "clean":
+        removed = clean_request_logs()
+        if getattr(args, "json", False):
+            print(json.dumps({"removed": removed}, indent=2))
+        else:
+            print(f"[+] Removed {len(removed)} request log file(s).")
+        return
+    tail = getattr(args, "tail", None)
+    if getattr(args, "json", False):
+        print(json.dumps(list(iter_request_records(tail=tail)), indent=2))
+        return
+    path = Path(request_log_info()["path"])
+    records = list(iter_request_records(tail=tail))
+    if not records:
+        print(f"[*] No request log entries found at {path}")
+    for record in records:
+        print(json.dumps(record, sort_keys=True))
+    if getattr(args, "follow", False):
+        last_size = path.stat().st_size if path.exists() else 0
+        try:
+            while True:
+                time.sleep(1.0)
+                if not path.exists():
+                    continue
+                size = path.stat().st_size
+                if size < last_size:
+                    last_size = 0
+                if size == last_size:
+                    continue
+                with path.open("r", encoding="utf-8") as handle:
+                    handle.seek(last_size)
+                    for line in handle:
+                        try:
+                            parsed = json.loads(line)
+                        except json.JSONDecodeError:
+                            parsed = {"status": "malformed", "error": "malformed JSONL request-log entry"}
+                        print(json.dumps(parsed, sort_keys=True), flush=True)
+                    last_size = handle.tell()
+        except KeyboardInterrupt:
+            return
+
+
+def run_models_command(args) -> None:
+    if args.models_command == "list":
+        try:
+            overlays = load_model_overlays()
+            catalog = native_model_catalog()
+        except ValueError as exc:
+            raise SystemExit(redact_secret_text(str(exc))) from exc
+        if getattr(args, "json", False):
+            print(json.dumps({"models": catalog, "overlays": [model.id for model in overlays]}, indent=2))
+            return
+        for model in catalog:
+            aliases = ", ".join(model.get("aliases", []))
+            suffix = f" aliases: {aliases}" if aliases else ""
+            print(f"- {model['id']}: {model['display_name']} -> {model['backend_id']} [{model['family']}]{suffix}")
+        return
+    if args.models_command == "add":
+        try:
+            model = validate_overlay_model(
+                {
+                    "id": validate_model_id(args.id),
+                    "backend_id": args.backend_id,
+                    "display_name": args.display_name or args.id,
+                    "context_window": args.context_window,
+                    "family": args.family,
+                    "default_reasoning_level": args.default_reasoning_level,
+                    "supports_parallel_tool_calls": not args.no_parallel_tool_calls,
+                    "aliases": args.alias or [],
+                }
+            )
+            add_model_overlay(model, force=args.force)
+        except ValueError as exc:
+            raise SystemExit(redact_secret_text(str(exc))) from exc
+        print(f"[+] Added overlay model {model.id}")
+        return
+    if args.models_command == "remove":
+        try:
+            removed = remove_model_overlay(args.id)
+        except ValueError as exc:
+            raise SystemExit(redact_secret_text(str(exc))) from exc
+        print(f"[+] Removed overlay model {args.id}" if removed else f"[*] No overlay model named {args.id}")
+        return
+    if args.models_command == "doctor":
+        from .transform import thinking_budget_for_request
+
+        ok = True
+        try:
+            overlays = load_model_overlays()
+        except ValueError as exc:
+            ok = False
+            overlays = []
+            print(f"[FAIL] Model overlay: {redact_secret_text(str(exc))}")
+        else:
+            print(f"[PASS] Model overlay: {len(overlays)} local model(s)")
+        if not ok:
+            raise SystemExit(1)
+        for model in native_model_catalog():
+            definition = native_model_definition(model["id"])
+            if not definition:
+                ok = False
+                print(f"[FAIL] {model['id']}: missing runtime definition")
+            else:
+                print(
+                    f"[PASS] {model['id']}: {definition.backend_id}, "
+                    f"reasoning={definition.default_reasoning_level}, context={definition.context_window}"
+                )
+                if definition.family == "claude":
+                    budgets = {
+                        effort: thinking_budget_for_request({"model": definition.id, "reasoning": {"effort": effort}}, definition.backend_id)
+                        for effort in ("low", "medium", "high", "xhigh")
+                    }
+                    print(f"        thinking_budget: {budgets}")
+        if not ok:
+            raise SystemExit(1)
 
 
 def start_gateway_background(args) -> dict:
@@ -582,7 +799,17 @@ def stop_gateway(args) -> dict:
         print(f"[*] Removed stale gateway pid file for pid {pid}: {pid_path}")
         return gateway_status_info(args.port)
     try:
-        os.kill(int(pid), signal.SIGTERM)
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(int(pid)), "/T"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5.0,
+                check=False,
+            )
+        else:
+            os.kill(int(pid), signal.SIGTERM)
     except ProcessLookupError:
         pid_path.unlink(missing_ok=True)
         print(f"[*] Removed stale gateway pid file for pid {pid}: {pid_path}")
@@ -657,6 +884,8 @@ def codex_ready_report(
     canonical_model = ""
     gateway_ids: set[str] | None = None
     route = "unknown"
+    parsed_gateway = urlparse(expected_base_url)
+    gateway_port = parsed_gateway.port or 51122
 
     if config_error:
         add("codex_config", "fail", config_error)
@@ -674,6 +903,36 @@ def codex_ready_report(
             add("selected_model", "pass", f"Codex model resolves to {canonical_model}", model=canonical_model)
         except ValueError as exc:
             add("selected_model", "fail", str(exc), model=active_model)
+
+    try:
+        status_info = gateway_status_info(gateway_port)
+        service_info = service_status(gateway_port)
+        if status_info["running"]:
+            add("gateway_process", "pass", f"gateway process is running on port {gateway_port}", process_status=status_info["status"])
+        elif service_info.get("installed"):
+            add(
+                "gateway_process",
+                "warn",
+                f"gateway process is {status_info['status']}, but durable service is installed",
+                process_status=status_info["status"],
+                service=service_info,
+            )
+        else:
+            add(
+                "gateway_process",
+                "warn",
+                f"gateway process is {status_info['status']} and no durable service is installed",
+                process_status=status_info["status"],
+                service=service_info,
+            )
+        add(
+            "gateway_service",
+            "pass" if service_info.get("installed") else "warn",
+            "durable gateway service is installed" if service_info.get("installed") else "durable gateway service is not installed",
+            service=service_info,
+        )
+    except Exception as exc:
+        add("gateway_process", "warn", f"Could not inspect local gateway/service state: {redact_secret_text(str(exc))}")
 
     try:
         gateway_ids = gateway_model_ids(expected_base_url, timeout=gateway_timeout, token_env=gateway_token_env)
@@ -738,8 +997,7 @@ def codex_ready_report(
         if first in {"codex_config", "selected_model"}:
             next_command = f"codex-antigravity setup --write --accounts 1 --model {DEFAULT_CODEX_MODEL}"
         elif first == "gateway_models":
-            parsed = urlparse(expected_base_url)
-            next_command = f"codex-antigravity start --background --port {parsed.port or 51122}"
+            next_command = f"codex-antigravity start --background --port {gateway_port}"
         elif first == "model_catalog":
             next_command = "codex-antigravity status && codex-antigravity doctor --codex-ready"
         elif first == "google_rotation":
@@ -755,6 +1013,7 @@ def codex_ready_report(
         "canonical_model": canonical_model,
         "route": route,
         "checks": checks,
+        "request_log": request_log_info(),
         "next_command": next_command,
     }
 
@@ -900,8 +1159,16 @@ def account_rotation_lines(data: dict | None = None) -> list[str]:
     state = data.get("accountState", {}) if isinstance(data.get("accountState"), dict) else {}
     failures = state.get("failures", {}) if isinstance(state.get("failures"), dict) else {}
     cooldowns = state.get("cooldowns", {}) if isinstance(state.get("cooldowns"), dict) else {}
+    counters = state.get("counters", {}) if isinstance(state.get("counters"), dict) else {}
     now = time.time()
     lines = [f"[*] Google account rotation pool: {len(accounts)} account(s)"]
+
+    def counter_int(value) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
     for idx, acc in enumerate(accounts):
         email = acc.get("email", "(missing email)")
         markers = []
@@ -917,8 +1184,24 @@ def account_rotation_lines(data: dict | None = None) -> list[str]:
             cooldown_status = "available"
         failure_count = failures.get(email, 0)
         failure_text = f", failures={failure_count}" if failure_count else ""
+        counter_texts = []
+        family_counters = counters.get(email, {}) if isinstance(counters, dict) else {}
+        if isinstance(family_counters, dict):
+            for family in ("claude", "gemini"):
+                counter = family_counters.get(family)
+                if not isinstance(counter, dict):
+                    continue
+                total = counter_int(counter.get("total_requests", 0))
+                if not total:
+                    continue
+                counter_texts.append(
+                    f"{family}: requests={total}, failures={counter_int(counter.get('failures', 0))}, "
+                    f"429s={counter_int(counter.get('rate_limits', 0))}"
+                )
         marker_text = f" [{', '.join(markers)}]" if markers else ""
         lines.append(f"    [{idx}] {email}{marker_text} - {token_status}, {cooldown_status}{failure_text}")
+        for counter_text in counter_texts:
+            lines.append(f"        usage: {counter_text}")
     return lines
 
 
@@ -1631,6 +1914,10 @@ def run_setup(args) -> dict:
         raise SystemExit("Use either --check or --write, not both.")
     if getattr(args, "json", False) and getattr(args, "write", False):
         raise SystemExit("setup --json is read-only; omit --write or use --check.")
+    if getattr(args, "repair", False) and getattr(args, "check", False):
+        raise SystemExit("Use either --repair or --check, not both.")
+    if getattr(args, "repair", False) and getattr(args, "json", False):
+        raise SystemExit("setup --repair mutates Codex config; omit --json.")
 
     checks: list[dict] = []
     base_url = ""
@@ -1670,6 +1957,40 @@ def run_setup(args) -> dict:
         else:
             _print_setup_report(report)
         raise SystemExit(1)
+
+    if getattr(args, "repair", False):
+        run_configure_codex(
+            argparse.Namespace(
+                write=True,
+                config=args.config,
+                model=model,
+                provider=args.provider,
+                provider_name=args.provider_name,
+                base_url=base_url,
+            )
+        )
+        _setup_check(checks, "codex_config_repair", "pass", f"repaired {Path(os.path.expanduser(args.config))}")
+        readiness = codex_ready_report(
+            config=args.config,
+            provider_id=args.provider,
+            expected_base_url=base_url,
+            gateway_timeout=args.gateway_timeout,
+            gateway_token_env=args.gateway_token_env,
+        )
+        checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
+        ok = all(check["status"] != "fail" for check in checks)
+        report = {
+            "ok": ok,
+            "mode": "repair",
+            "model": model,
+            "base_url": base_url,
+            "checks": checks,
+            "next_command": readiness["next_command"] if not ok else "codex",
+        }
+        _print_setup_report(report)
+        if not ok:
+            raise SystemExit(f"Setup repair completed with readiness failures. Next command: {report['next_command']}")
+        return report
 
     if google_route:
         cid, csec = resolve_oauth_credentials()
@@ -1796,6 +2117,12 @@ def run_setup(args) -> dict:
                 token_env=args.gateway_token_env,
             )
             _setup_check(checks, "gateway_start", "pass", f"started background gateway on {args.host}:{args.port} and /v1/models is reachable")
+            _setup_check(
+                checks,
+                "gateway_service_followup",
+                "warn",
+                f"For reboot persistence, run: codex-antigravity service install --port {args.port} --host {args.host}",
+            )
         except RuntimeError as exc:
             _setup_check(checks, "gateway_start", "fail", redact_secret_text(str(exc)))
             report = {
@@ -2054,6 +2381,7 @@ def main():
     setup_parser.add_argument("--check", action="store_true", help="Run read-only setup and Codex readiness checks")
     setup_parser.add_argument("--json", action="store_true", help="Print setup/readiness status as JSON")
     setup_parser.add_argument("--write", action="store_true", help="Run login and write Codex configuration")
+    setup_parser.add_argument("--repair", action="store_true", help="Repair Codex provider config without OAuth login, skill install, or gateway start")
     setup_parser.add_argument("--accounts", type=positive_int, default=1, help="Number of Google login flows when --write is used")
     setup_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Default Codex model to select")
     setup_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id")
@@ -2153,6 +2481,48 @@ def main():
     install_skill_parser.add_argument("--dry-run", action="store_true", help="Show what would be installed without writing")
     install_skill_parser.add_argument("--verify", action="store_true", help="Run installed Anti skill tests after install")
 
+    service_parser = subparsers.add_parser("service", help="Install, uninstall, or inspect a durable user gateway service")
+    service_sub = service_parser.add_subparsers(dest="service_command", required=True)
+    service_install = service_sub.add_parser("install", help="Install and start a per-user gateway service")
+    service_install.add_argument("--port", type=int, default=51122, help="Gateway server port")
+    service_install.add_argument("--host", default="127.0.0.1", help="Gateway server host")
+    service_install.add_argument("--json", action="store_true", help="Print service status as JSON")
+    service_uninstall = service_sub.add_parser("uninstall", help="Uninstall the per-user gateway service")
+    service_uninstall.add_argument("--port", type=int, default=51122, help="Gateway server port")
+    service_uninstall.add_argument("--json", action="store_true", help="Print service status as JSON")
+    service_status_parser = service_sub.add_parser("status", help="Show gateway service status")
+    service_status_parser.add_argument("--port", type=int, default=51122, help="Gateway server port")
+    service_status_parser.add_argument("--json", action="store_true", help="Print service status as JSON")
+
+    logs_parser = subparsers.add_parser("logs", help="Show or clean sanitized gateway request logs")
+    logs_parser.add_argument("logs_action", nargs="?", choices=["show", "clean"], default="show", help="Log action")
+    logs_parser.add_argument("--tail", type=int, default=50, help="Number of recent entries to show")
+    logs_parser.add_argument("--follow", action="store_true", help="Follow new request log entries")
+    logs_parser.add_argument("--json", action="store_true", help="Print entries as JSON")
+
+    models_parser = subparsers.add_parser("models", help="List and manage local model catalog overlays")
+    models_sub = models_parser.add_subparsers(dest="models_command", required=True)
+    models_list = models_sub.add_parser("list", help="List built-in and overlay models")
+    models_list.add_argument("--json", action="store_true", help="Print model catalog as JSON")
+    models_add = models_sub.add_parser("add", help="Add a local model catalog overlay")
+    models_add.add_argument("id", help="Canonical model id to expose in /v1/models")
+    models_add.add_argument("--backend-id", required=True, help="Backend model id sent to Antigravity")
+    models_add.add_argument("--display-name", help="Model picker display name")
+    models_add.add_argument("--family", choices=["claude", "gemini"], required=True, help="Model family")
+    models_add.add_argument("--context-window", type=positive_int, required=True, help="Context window token count")
+    models_add.add_argument(
+        "--default-reasoning-level",
+        choices=["low", "medium", "high", "xhigh"],
+        default="high",
+        help="Default Codex reasoning effort",
+    )
+    models_add.add_argument("--alias", action="append", help="Alias for setup/config input; repeatable")
+    models_add.add_argument("--no-parallel-tool-calls", action="store_true", help="Advertise no parallel tool-call support")
+    models_add.add_argument("--force", action="store_true", help="Allow shadowing a built-in id in the overlay file")
+    models_remove = models_sub.add_parser("remove", help="Remove a local model catalog overlay")
+    models_remove.add_argument("id")
+    models_sub.add_parser("doctor", help="Validate model overlay and runtime definitions")
+
     provider_parser = subparsers.add_parser("provider", help="Manage BYOK OpenAI-compatible providers")
     provider_sub = provider_parser.add_subparsers(dest="provider_command", required=True)
     provider_sub.add_parser("list", help="List BYOK providers")
@@ -2222,6 +2592,12 @@ def main():
         run_configure_codex(args)
     elif args.command == "install-skill":
         run_install_skill(args)
+    elif args.command == "service":
+        run_service_command(args)
+    elif args.command == "logs":
+        run_logs_command(args)
+    elif args.command == "models":
+        run_models_command(args)
     elif args.command == "provider":
         if args.provider_command == "presets":
             print("[*] Built-in BYOK provider presets:")

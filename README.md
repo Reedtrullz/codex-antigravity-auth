@@ -60,6 +60,22 @@ codex-antigravity doctor --codex-ready --json
 codex-antigravity stop
 ```
 
+For reboot persistence, install the per-user gateway service after a successful setup:
+
+```bash
+codex-antigravity service install --port 51122 --host 127.0.0.1
+codex-antigravity service status
+codex-antigravity service uninstall
+```
+
+On macOS this writes a user LaunchAgent under `~/Library/LaunchAgents`; on Linux it writes a systemd user unit under `~/.config/systemd/user`; on Windows it creates a per-user Scheduled Task. The regular `start --background` command remains the lightweight non-persistent option.
+
+If your Codex provider block drifts, repair only the Codex config without OAuth login, skill install, or gateway mutation:
+
+```bash
+codex-antigravity setup --repair --config ~/.codex/config.toml --model claude-3.5-sonnet
+```
+
 Install the Codex provider block:
 
 ```bash
@@ -163,6 +179,36 @@ codex-antigravity start --background
 
 Background mode writes pid/log files under `~/.codex/`. The log file is append-only and created with private permissions; remove or rotate it manually if it grows too large.
 
+Request diagnostics are written to a sanitized capped JSONL file under `~/.codex/antigravity-requests.jsonl`. The log records request ids, model/route metadata, latency, status, retry/rotation hints, HTTP status, usage totals when available, and redacted error classes/messages. It never stores prompts, request bodies, OAuth material, provider keys, or account emails.
+
+```bash
+codex-antigravity logs --tail 20
+codex-antigravity logs --follow
+codex-antigravity logs clean
+curl http://127.0.0.1:51122/health
+```
+
+The loopback-only `/health` endpoint reports process health, native model count, BYOK route visibility, anonymous account cooldown summaries, and the request-log path.
+
+### Model catalog overlays
+
+Built-in Claude/Gemini model definitions remain authoritative, but you can add local model-picker entries in `~/.codex/antigravity-models.toml`:
+
+```bash
+codex-antigravity models list
+codex-antigravity models add claude-experimental \
+  --backend-id claude-sonnet-4-6 \
+  --display-name "Claude Experimental" \
+  --family claude \
+  --context-window 200000 \
+  --default-reasoning-level high \
+  --alias claude-exp
+codex-antigravity models doctor
+codex-antigravity models remove claude-experimental
+```
+
+Overlay ids must be simple printable model ids, cannot shadow built-ins unless `--force` is explicit, and only appear in Codex's picker when the gateway advertises them through `/v1/models`. Unknown direct Google model ids can still pass through, but picker visibility requires a built-in or overlay definition.
+
 ### BYOK providers
 
 Built-in presets are available for OpenRouter, DeepSeek, xAI, Kimi/Moonshot, Ollama, OpenCode-compatible local servers, and custom OpenAI-compatible APIs:
@@ -220,3 +266,9 @@ And execute full unit test coverage:
 ```bash
 python3 -m pytest
 ```
+
+## Release Automation
+
+Tagged releases are prepared for PyPI Trusted Publishing. The `.github/workflows/publish.yml` workflow runs on `v*` tags, builds sdist/wheel artifacts, checks them with Twine, uploads the artifacts between jobs, and publishes with `pypa/gh-action-pypi-publish@release/v1` using OIDC (`id-token: write`) in the `pypi` environment.
+
+Before the first PyPI publish, configure the PyPI project `codex-antigravity-auth` with a trusted publisher for this GitHub repository, workflow file `.github/workflows/publish.yml`, and environment `pypi`. No local PyPI API token is required or expected.

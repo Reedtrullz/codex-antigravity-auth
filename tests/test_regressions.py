@@ -1,4 +1,5 @@
 import json
+import asyncio
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -9,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from codex_antigravity_auth.accounts import AccountManager
 from codex_antigravity_auth.cli import run_doctor
-from codex_antigravity_auth.models import resolve_backend_model
+from codex_antigravity_auth.models import NativeModel, add_model_overlay, resolve_backend_model
 from codex_antigravity_auth.oauth import (
     OAUTH_HTTP_TIMEOUT_SECONDS,
     _pkce_verifier_store,
@@ -19,7 +20,7 @@ from codex_antigravity_auth.oauth import (
     token_expires_in_seconds,
 )
 from codex_antigravity_auth.schema import clean_json_schema
-from codex_antigravity_auth.server import app, build_headers, retry_after_seconds_from_response
+from codex_antigravity_auth.server import app, build_headers, retry_after_seconds_from_response, select_active_account_for_request
 from codex_antigravity_auth.transform import (
     safe_project_id,
     transform_chat_response,
@@ -30,6 +31,66 @@ from codex_antigravity_auth.transform import (
 
 
 class TestRegressionFixes(unittest.TestCase):
+    def test_health_endpoint_is_sanitized_and_loopback_only(self):
+        account_state = {
+            "accounts": [{"email": "sensitive@example.com"}],
+            "accountState": {
+                "cooldowns": {"sensitive@example.com": time.time() + 60},
+                "counters": {
+                    "sensitive@example.com": {
+                        "claude": {"total_requests": 3, "failures": 1, "rate_limits": 1}
+                    }
+                },
+            },
+        }
+        with patch("codex_antigravity_auth.server.load_accounts", return_value=account_state):
+            with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
+                response = TestClient(app).get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        serialized = json.dumps(payload)
+        self.assertTrue(payload["ok"])
+        self.assertIn("request_log", payload)
+        self.assertEqual(payload["accounts"]["configured_accounts"], 1)
+        self.assertNotIn("sensitive@example.com", serialized)
+
+    def test_google_account_selection_uses_threadpool(self):
+        calls = []
+
+        async def fake_threadpool(func, *args, **kwargs):
+            calls.append((func, args, kwargs))
+            return {"email": "worker@example.com"}
+
+        with patch("codex_antigravity_auth.server.run_in_threadpool", new=fake_threadpool):
+            account = asyncio.run(select_active_account_for_request("claude-3.5-sonnet"))
+
+        self.assertEqual(account["email"], "worker@example.com")
+        self.assertEqual(calls[0][1], ("claude-3.5-sonnet",))
+
+    def test_model_overlay_is_advertised_by_models_endpoint(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            overlay_path = Path(tmp) / "antigravity-models.toml"
+            with patch("codex_antigravity_auth.models.MODEL_OVERLAY_FILE", str(overlay_path)):
+                add_model_overlay(
+                    NativeModel(
+                        id="claude-overlay",
+                        backend_id="claude-sonnet-4-6",
+                        display_name="Claude Overlay",
+                        context_window=200000,
+                        family="claude",
+                    )
+                )
+                with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
+                    response = TestClient(app).get("/v1/models")
+
+        self.assertEqual(response.status_code, 200)
+        model_ids = {model["id"] for model in response.json()["data"]}
+        self.assertIn("claude-overlay", model_ids)
+
     def test_hyphenated_codex_model_slug_resolves(self):
         self.assertEqual(resolve_backend_model("gemini-3-5-flash-high"), "gemini-3-flash-agent")
         self.assertEqual(resolve_backend_model("openai-responses/gemini-3-5-flash-high"), "gemini-3-flash-agent")

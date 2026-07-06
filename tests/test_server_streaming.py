@@ -632,5 +632,84 @@ class TestServerStreaming(unittest.TestCase):
             self.assertNotIn("response.failed", response.text)
             self.assertNotIn("usage", completed[0]["response"])
 
+    def test_google_streaming_does_not_rotate_after_output_started(self):
+        with TestClient(app) as test_client:
+            first_account = {
+                "email": "first@gmail.com",
+                "accessToken": "first-access",
+                "projectId": "project-first",
+                "fingerprint": {"userAgent": "Antigravity/2.0.0", "apiClient": "google-cloud-sdk"},
+            }
+            attempts = []
+
+            class AsyncAiterText:
+                def __init__(self, chunks):
+                    self.chunks = list(chunks)
+
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    if not self.chunks:
+                        raise StopAsyncIteration
+                    return self.chunks.pop(0)
+
+            class StreamContext:
+                def __init__(self, response):
+                    self.response = response
+
+                async def __aenter__(self):
+                    return self.response
+
+                async def __aexit__(self, exc_type, exc_val, exc_tb):
+                    pass
+
+            class MockClientInstance:
+                def stream(self, method, url, json=None, headers=None):
+                    attempts.append(json["project"])
+                    response = MagicMock(spec=httpx.Response)
+                    response.status_code = 200
+                    response.aiter_text = MagicMock(return_value=AsyncAiterText([
+                        'data: {"candidates": [{"content": {"parts": [{"text": "partial"}]}}]}\n',
+                        'data: {"error": {"code": "RESOURCE_EXHAUSTED", "message": "quota exhausted"}}\n',
+                        "data: [DONE]\n",
+                    ]))
+                    return StreamContext(response)
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc_val, exc_tb):
+                    pass
+
+            class CleanAsyncClientMock:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def __aenter__(self):
+                    return MockClientInstance()
+
+                async def __aexit__(self, exc_type, exc_val, exc_tb):
+                    pass
+
+            with patch(
+                "codex_antigravity_auth.server.account_manager.select_active_account",
+                return_value=first_account,
+            ) as mock_select:
+                with patch("codex_antigravity_auth.server.account_manager.mark_failure") as mock_mark_failure:
+                    with patch("codex_antigravity_auth.server.account_manager.record_request"):
+                        with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                            response = test_client.post(
+                                "/v1/responses",
+                                json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
+                            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(attempts, ["project-first"])
+            self.assertEqual(mock_select.call_count, 1)
+            mock_mark_failure.assert_called_once()
+            self.assertIn("partial", response.text)
+            self.assertIn("response.failed", response.text)
+
 if __name__ == "__main__":
     unittest.main()
