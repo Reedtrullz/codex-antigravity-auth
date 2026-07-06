@@ -837,6 +837,16 @@ def run_gateway_status(args) -> dict:
     return info
 
 
+def reachable_gateway_status_info(port: int, *, wait: bool = False, timeout: float = 5.0) -> dict:
+    deadline = time.monotonic() + timeout
+    while True:
+        gateway = gateway_status_info(port)
+        add_gateway_reachability(gateway)
+        if not wait or gateway.get("reachable") or time.monotonic() >= deadline:
+            return gateway
+        time.sleep(0.25)
+
+
 def run_service_command(args) -> dict:
     try:
         if args.service_command == "install":
@@ -858,8 +868,10 @@ def run_service_command(args) -> dict:
             raise SystemExit("service requires install, uninstall, or status")
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(redact_secret_text(str(exc))) from exc
-    gateway = gateway_status_info(args.port)
-    add_gateway_reachability(gateway)
+    gateway = reachable_gateway_status_info(
+        args.port,
+        wait=action == "installed" and bool(info.get("installed")) and bool(info.get("active")),
+    )
     result = {"service": info, "gateway": gateway}
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2))
