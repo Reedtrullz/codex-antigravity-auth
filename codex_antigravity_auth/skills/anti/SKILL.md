@@ -15,7 +15,7 @@ Treat Antigravity output as a second opinion. Run the helper, read the result, t
 
 Literal `@anti` is a text convention in v1, not a guaranteed app-level mention chip. `$anti` is the reliable explicit skill invocation.
 
-Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to multiple gateway-advertised models and ask a judge model to synthesize their views, but Codex remains the acting agent and must verify findings before editing.
+Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to multiple gateway-advertised models and ask a judge model to synthesize their views, but Codex remains the acting agent and must verify findings before editing. Structured panel findings include a `verify` hint; run or inspect that local check before acting on the claim.
 
 ## Models
 
@@ -46,11 +46,13 @@ python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope diff --base origin/main --model sonnet --model opus --judge opus
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode plan --scope working-tree --prompt "Plan this PR"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --model sonnet --model openrouter:deepseek/deepseek-chat --judge opus --prompt "Compare these approaches"
-python3 ~/.codex/skills/anti/scripts/anti.py moa --mode review --role correctness --role security --role tests --json
+python3 ~/.codex/skills/anti/scripts/anti.py moa --mode review --role correctness --role security --role tests --output findings
 python3 ~/.codex/skills/anti/scripts/anti.py workflow review-ready --scope staged
 python3 ~/.codex/skills/anti/scripts/anti.py workflow plan-deep --scope working-tree --prompt "Plan V2" --progress
 python3 ~/.codex/skills/anti/scripts/anti.py workflow ship-gate --scope diff --base origin/main --json
 python3 ~/.codex/skills/anti/scripts/anti.py workflow provider-compare --model sonnet --model openrouter:deepseek/deepseek-chat --prompt "Compare these approaches"
+python3 ~/.codex/skills/anti/scripts/anti.py workflow security-review --scope staged --output findings
+python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "Intermittent 502s after rotation"
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope working-tree
 python3 ~/.codex/skills/anti/scripts/anti.py review --model sonnet --scope staged --file path/to/file.py
@@ -74,8 +76,8 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 1. Infer whether the user wants `consult`, `plan`, `review`, `workflow`, `runs`, `panel`/`moa`/`fusion`, `smoke`, `start`, `setup-google`, `configure-codex`, or `doctor`.
 2. Run `smoke` first when helper readiness is uncertain. Use `codex-antigravity setup --check` or `codex-antigravity doctor --codex-ready` when the user asks whether Claude is native-ready in Codex. Default `smoke` is sidecar readiness; use `smoke --mode full` only when the user asked to make Antigravity the active Codex backend.
 3. For deep autonomous work planning, use `plan --model opus`. Add `--scope working-tree`, `--scope staged`, or `--file` when the plan should account for current repo state.
-4. For multi-model review or planning, use `panel --mode review` or `panel --mode plan`. Use `--role` for lenses such as correctness, security, tests, protocol, or UX. Use BYOK `provider:model` ids only when `/v1/models` advertises them.
-5. For common V2 flows, prefer named workflow presets: `workflow review-ready` before commit/PR review, `workflow plan-deep` for long autonomous planning, `workflow ship-gate` for merge readiness, and `workflow provider-compare` for BYOK/provider lane comparisons.
+4. For multi-model review or planning, use `panel --mode review` or `panel --mode plan`. Use `--role` for lenses such as correctness, security, tests, protocol, or UX. Use `--output findings` when you want machine-readable `id`, `claim`, `severity`, `lanes`, and `verify` fields. Use BYOK `provider:model` ids only when `/v1/models` advertises them.
+5. For common helper flows, prefer named workflow presets: `workflow review-ready` before commit/PR review, `workflow plan-deep` for long autonomous planning, `workflow ship-gate` for merge readiness, `workflow security-review` for injection/secrets/authz/dependency lenses, `workflow debug-consensus` for ranked hypotheses plus discriminating tests, and `workflow provider-compare` for BYOK/provider lane comparisons.
 6. For code review, prefer `review --scope staged`, `workflow review-ready --scope staged`, or `panel --mode review --scope staged` when the user asks about commit readiness; use `review --scope working-tree` for current local changes and `review --scope diff --base origin/main` for a clean merge-candidate branch.
 7. For focused questions, use `consult --prompt` for one model or `panel --mode ask --prompt` for a bounded multi-model comparison. Write temporary prompt files outside the repo and pass `--prompt-file` when useful.
 8. Read the helper output and synthesize it with native Codex analysis. Call out disagreements, caveats, and what was or was not live-verified.
@@ -90,7 +92,8 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - Use `--files-from` with newline- or NUL-delimited file lists for large PRs. Prefer NUL-delimited lists from `git diff -z --name-only` when paths may contain spaces.
 - Path lists must be valid UTF-8. Generate them from git or another trusted local command rather than hand-editing binary path lists.
 - Use `--json` when a release workflow needs to separate helper caveats, chunk metadata, and model output.
-- Use `panel --json` when you need model-by-model success/error metadata, panel caveats, omitted files, and judge synthesis in separate fields.
+- Use `panel --json` when you need model-by-model success/error metadata, usage/latency, panel caveats, omitted files, structured findings, and judge synthesis in separate fields.
+- Broad `panel --mode review` runs summarize oversized review scopes before fan-out instead of silently truncating raw context for every lane. Treat the summary caveat as a scope limitation.
 - Use `--fallback-model sonnet --fallback-policy on-retryable` for long Opus planning/review calls when backend `502`/timeout drift would otherwise block the workflow.
 - Use `--progress` for long `workflow`, `plan`, `review`, or `panel` runs so stderr shows which model/chunk is active.
 - V2 workflow presets default to sanitized run summaries under `~/.codex/anti-runs`; use `runs list`, `runs show <id>`, and `runs clean --older-than N` (add `--dry-run` to preview deletions) to inspect or prune them. Primitive commands default to `--save-output never`; pass `--save-output summary` or `--save-output full` only when useful.
@@ -102,10 +105,11 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - The helper excludes common secret/cached/binary paths by default. If it reports exclusions, mention that scope caveat.
 - Do not run `setup`, `setup-google`, or `configure-codex` unless the user explicitly asks for setup/configuration.
 - Prefer `--api-key-env` workflows in the underlying `codex-antigravity` CLI; do not put provider keys into chat, shell history, notes, or prompt files.
+- If a panel includes BYOK `provider:model` lanes and repo/diff/file context, the helper prints a BYOK disclosure and records it in the run caveats. Treat that as an explicit reminder that code context is leaving the Google Antigravity lane for the named provider.
 - If the gateway is remote, use `--gateway-token-env` rather than passing bearer tokens in argv.
 - Do not use panel mode as an always-on background swarm. Keep model counts, roles, tokens, retries, and scope bounded.
 - Run ledgers are sanitized, but avoid `--save-output full` for prompts that may contain credentials, OAuth material, `.env` content, or private account/provider stores.
-- V2/V3 helper workflows remain advisory. They do not create true Codex subagents, gateway virtual `panel:*` models, automatic code edits, recursive swarms, or background always-on model calls.
+- Helper workflows remain advisory. They do not create true Codex subagents, gateway virtual `panel:*`, `moa:*`, or `fusion:*` picker models, automatic code edits, recursive swarms, or background always-on model calls.
 
 ## Output Shape
 

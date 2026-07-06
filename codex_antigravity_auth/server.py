@@ -54,6 +54,7 @@ _last_refresh_ahead_at = 0.0
 _refresh_ahead_task: asyncio.Task | None = None
 REFRESH_AHEAD_THROTTLE_SECONDS = 60.0
 STREAM_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+REQUEST_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 MUTATING_JSON_PATHS = {"/v1/responses"}
 TEST_CLIENT_HOSTS = {"testserver"}
 GOOGLE_ACCOUNT_SCOPED_STREAM_ERROR_TERMS = (
@@ -692,6 +693,20 @@ def validate_response_request_body(value: object) -> dict:
     reasoning = value.get("reasoning")
     if reasoning is not None and not isinstance(reasoning, dict):
         raise HTTPException(status_code=400, detail="reasoning must be an object")
+    metadata = value.get("metadata")
+    if metadata is not None:
+        if not isinstance(metadata, dict):
+            raise HTTPException(status_code=400, detail="metadata must be an object")
+        run_id = metadata.get("run_id")
+        if run_id is not None:
+            if not isinstance(run_id, str) or not REQUEST_RUN_ID_RE.fullmatch(run_id):
+                raise HTTPException(
+                    status_code=400,
+                    detail="metadata.run_id must be 1-128 characters using letters, numbers, '_', '-', '.', or ':'",
+                )
+            value["metadata"] = {"run_id": run_id}
+        else:
+            value["metadata"] = {}
     validate_response_generation_options(value)
     validate_response_tool_choice(value)
     return value
@@ -883,6 +898,7 @@ def prepare_openai_compatible_request(
 async def create_response(request: Request):
     request_id = f"req_{secrets.token_hex(8)}"
     request_started = time.monotonic()
+    request_run_id: str | None = None
 
     async def log_request(
         status: str,
@@ -901,6 +917,7 @@ async def create_response(request: Request):
     ) -> None:
         record = {
             "request_id": request_id,
+            "run_id": request_run_id,
             "model": model,
             "route": route,
             "provider": provider,
@@ -923,6 +940,9 @@ async def create_response(request: Request):
         await log_request("failed", http_status=400, error_class="invalid_json", error="Invalid JSON body")
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     codex_req = validate_response_request_body(codex_req)
+    request_metadata = codex_req.pop("metadata", None)
+    if isinstance(request_metadata, dict) and isinstance(request_metadata.get("run_id"), str):
+        request_run_id = request_metadata["run_id"]
 
     reject_unsupported_previous_response(codex_req)
     schedule_refresh_accounts_ahead()

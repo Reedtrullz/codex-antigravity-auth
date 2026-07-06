@@ -1,7 +1,7 @@
 # Current Integration Status — 6 July 2026
 
 ## Build & Test Health
-- **local pytest**: full local suite passing with `python3 -m pytest -q` (`381` tests plus `138` subtests) ✅
+- **local pytest**: full local suite passing with `python3 -m pytest -q` (`397` tests plus `138` subtests) ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **wheel install smoke**: ran `python3 -m build`, `python3 -m twine check dist/*`, installed the wheel into a clean venv, ran `pip check`, verified console script help plus `service status --json`, `models list --json`, `logs --tail 1 --json`, scratch `setup --check`, and packaged `install-skill --verify` ✅
@@ -87,8 +87,12 @@
 | Bundled `$anti` skill installer with external backup directory and verification mode | ✅ |
 | `setup-v2` readiness checks for sidecar, installed skill, gateway model visibility, and optional BYOK readiness | ✅ |
 | `$anti panel` / MoA / Fusion advisory multi-model review and planning helper | ✅ |
+| `$anti panel` verifiable findings contract with usage/latency reporting | ✅ |
+| `$anti` BYOK repo-context disclosure and large-review panel summarization | ✅ |
 | `$anti workflow` presets for review readiness, deep planning, ship gates, and provider comparison | ✅ |
+| `$anti workflow security-review` and `debug-consensus` presets | ✅ |
 | Sanitized `$anti` run ledger with list/show/clean and dry-run pruning | ✅ |
+| Anti run-id correlation into sanitized gateway request logs | ✅ |
 | `$anti` fallback/progress controls for long model calls and retryable backend drift | ✅ |
 | PyPI Trusted Publishing workflow for `v*` tags | ✅ |
 | Cross-platform per-user gateway service install/status/uninstall | ✅ |
@@ -113,16 +117,17 @@
 | `doctor --codex-ready` suggests `setup --repair` for existing config drift | ✅ |
 
 ## Known Limitations
-- Live Google Antigravity, DeepSeek V4 Flash BYOK, and OpenRouter BYOK smokes have passed with configured credentials/API keys; xAI, Kimi/Moonshot, Ollama cloud, and arbitrary custom BYOK providers still need their own live-key smoke.
+- Live Google Antigravity, DeepSeek V4 Flash BYOK, and OpenRouter BYOK smokes have passed previously with configured credentials/API keys; current BYOK live proof still depends on fresh provider keys. The 1Password OpenRouter/DeepSeek login items inspected during the MoA/Fusion PR did not contain provider API-key-shaped values, so fresh BYOK credential material is still needed for another live provider smoke.
 - `doctor --live` and `setup --check --live` are explicit opt-in checks because they spend a real Google provider request.
 - `previous_response_id` is rejected by design in this stateless gateway; replay the full conversation, including tool calls and outputs, in `input`.
 - `/v1/responses/compact` is not implemented.
 - CI includes unit/compile checks, a release-artifact smoke job, and Windows Python 3.12 coverage. PR #9 head `81f555b`, merge commit `8df3f18`, and tag `v1.5.0` all passed CI.
 - Live backend availability is covered only by the credentialed smoke runs noted above.
+- Helper-level MoA/Fusion remains advisory; virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not implemented.
 
 ## Release State
-- Current package metadata: `1.5.0`
-- Latest tagged GitHub release: [v1.5.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.5.0)
+- Current package metadata: `1.6.0` on the MoA/Fusion VNext PR branch.
+- Latest tagged GitHub release before this PR: [v1.5.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.5.0)
 - PyPI Trusted Publishing run `28773295151` published `codex-antigravity-auth==1.5.0`; post-publish `pip install codex-antigravity-auth==1.5.0` and throwaway `uv tool install codex-antigravity-auth==1.5.0` smokes passed.
 
 ## Next Priorities

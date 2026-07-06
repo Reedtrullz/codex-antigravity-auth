@@ -118,15 +118,18 @@ codex-antigravity install-skill --force --verify
 `setup-v2 --write` installs or refreshes the bundled skill, but it does not write `~/.codex/config.toml`; use primary `setup --write`, `setup-google`, or `configure-codex --write` when you explicitly want Codex itself pointed at the gateway.
 If an existing `anti` skill differs from the bundled copy, pass `--force` with `install-skill` or `setup-v2 --write` to back it up and replace it before verifying. BYOK provider identity/key checks are skipped by default; add `--check-byok` when you want setup-v2 to inspect provider readiness and confirm configured provider models are advertised by the running gateway.
 
-The skill also ships a helper-level panel mode inspired by MoA/Fusion workflows. Codex remains the acting agent; the helper fans out to gateway-advertised models, asks a judge model to synthesize consensus, contradictions, blind spots, and next actions, then returns advisory output for Codex to verify:
+The skill also ships a helper-level panel mode inspired by MoA/Fusion workflows. Codex remains the acting agent; the helper fans out to gateway-advertised models, asks a judge model to synthesize disagreements, structured findings, blind spots, and next actions, then returns advisory output for Codex to verify:
 
 ```bash
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode plan --scope working-tree --prompt "Plan this PR"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --model sonnet --model openrouter:deepseek/deepseek-chat --judge opus --prompt "Compare these approaches"
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged --output findings
 ```
 
-Panel consensus is not proof and should not patch code directly. BYOK panel models such as `openrouter:...` only work when the running gateway advertises them in `/v1/models`, which requires usable provider keys or a key-optional local provider setup.
+Panel consensus is not proof and should not patch code directly. Structured findings include `id`, `claim`, `severity`, `lanes`, and `verify`; run the `verify` hint locally before acting. Text and JSON outputs include per-lane/judge usage and latency when the gateway/provider returns it. Broad review panels summarize oversized scopes once before fan-out instead of silently truncating raw context for every lane.
+
+BYOK panel models such as `openrouter:...` only work when the running gateway advertises them in `/v1/models`, which requires usable provider keys or a key-optional local provider setup. When a BYOK lane receives repository, diff, or file context, the helper prints and records a disclosure naming the provider lanes. Virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not supported; MoA/Fusion remains a helper workflow, not gateway-side orchestration.
 
 V2 named workflow presets wrap the same advisory engine for common Codex work:
 
@@ -135,10 +138,12 @@ python3 ~/.codex/skills/anti/scripts/anti.py workflow review-ready --scope stage
 python3 ~/.codex/skills/anti/scripts/anti.py workflow plan-deep --scope working-tree --prompt "Plan this PR" --progress
 python3 ~/.codex/skills/anti/scripts/anti.py workflow ship-gate --scope diff --base origin/main --json
 python3 ~/.codex/skills/anti/scripts/anti.py workflow provider-compare --model sonnet --model openrouter:deepseek/deepseek-chat --prompt "Compare these approaches"
+python3 ~/.codex/skills/anti/scripts/anti.py workflow security-review --scope staged --output findings
+python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "Intermittent 502s after rotation"
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
 ```
 
-Workflow runs save sanitized summaries under `~/.codex/anti-runs` by default; primitive `consult`, `plan`, `review`, and `panel` commands default to not writing a ledger unless `--save-output summary` or `--save-output full` is passed. `--fallback-model sonnet --fallback-policy on-retryable` and `--progress` are available for long-running model calls that may otherwise fail silently or hit transient backend rotation errors.
+Workflow runs save sanitized summaries under `~/.codex/anti-runs` by default; primitive `consult`, `plan`, `review`, and `panel` commands default to not writing a ledger unless `--save-output summary` or `--save-output full` is passed. Saved runs include the Anti run id, which is also sent as `metadata.run_id` to the gateway and appears in sanitized request logs for correlation. Raw prompts are not logged unless you explicitly choose full-output ledgers. `--fallback-model sonnet --fallback-policy on-retryable` and `--progress` are available for long-running model calls that may otherwise fail silently or hit transient backend rotation errors.
 
 Before running `codex-antigravity login`, create a Google OAuth desktop client. The local callback listener uses:
 

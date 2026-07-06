@@ -1724,6 +1724,39 @@ class TestV3NativeSetup(unittest.TestCase):
         self.assertTrue(info["process_running"])
         self.assertFalse(info["process_matches"])
 
+    def test_run_gateway_status_reports_unmanaged_reachable_gateway(self):
+        with TemporaryDirectory() as tmp:
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                    with patch("codex_antigravity_auth.cli.service_status", return_value={"installed": False, "active": False}):
+                        with patch("codex_antigravity_auth.cli.request_log_info", return_value={"path": "requests.jsonl"}):
+                            with patch("builtins.print"):
+                                info = run_gateway_status(Namespace(port=51122, json=False))
+
+        self.assertEqual(info["status"], "unmanaged")
+        self.assertTrue(info["reachable"])
+        self.assertEqual(info["reachable_model_count"], 1)
+
+    def test_codex_ready_treats_unmanaged_reachable_gateway_as_process_ready(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path, model="claude-3.5-sonnet")
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                    with patch("codex_antigravity_auth.cli.service_status", return_value={"installed": False, "active": False}):
+                        with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": [{"email": "a@example.com"}]}):
+                            with patch("codex_antigravity_auth.cli.version_check_result", return_value={"status": "skip", "detail": "skip", "installed": None, "latest": None}):
+                                report = codex_ready_report(
+                                    config=str(config_path),
+                                    provider_id="antigravity",
+                                    expected_base_url="http://localhost:51122/v1",
+                                )
+
+        process_check = next(check for check in report["checks"] if check["name"] == "gateway_process")
+        self.assertEqual(process_check["status"], "pass")
+        self.assertTrue(process_check["reachable"])
+        self.assertIn("without a managed pid", process_check["detail"])
+
     def test_stop_gateway_removes_stale_pid_without_killing_unrelated_process(self):
         with TemporaryDirectory() as tmp:
             pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
@@ -1812,20 +1845,31 @@ class TestV3NativeSetup(unittest.TestCase):
                             self.assertTrue(pid_file.exists())
                             popen.assert_not_called()
 
+    def test_start_background_refuses_already_reachable_gateway_without_pid_file(self):
+        with TemporaryDirectory() as tmp:
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                    with patch("codex_antigravity_auth.cli.subprocess.Popen") as popen:
+                        with self.assertRaisesRegex(SystemExit, "already reachable"):
+                            start_gateway_background(Namespace(host="127.0.0.1", port=51122, allow_remote=False))
+                        popen.assert_not_called()
+
     def test_start_background_writes_pid_and_log_paths(self):
         proc = MagicMock()
         proc.pid = 12345
         proc.poll.return_value = None
         with TemporaryDirectory() as tmp:
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
-                with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
-                    with patch("codex_antigravity_auth.cli.process_is_running", return_value=True):
-                        with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=True):
-                            with patch("codex_antigravity_auth.cli.time.sleep"):
-                                with patch("builtins.print"):
-                                    info = start_gateway_background(
-                                        Namespace(host="127.0.0.1", port=51122, allow_remote=False)
-                                    )
+                with patch("codex_antigravity_auth.cli.gateway_model_ids", side_effect=RuntimeError("not ready")):
+                    with patch("codex_antigravity_auth.cli.wait_for_gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                        with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
+                            with patch("codex_antigravity_auth.cli.process_is_running", return_value=True):
+                                with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=True):
+                                    with patch("codex_antigravity_auth.cli.time.sleep"):
+                                        with patch("builtins.print"):
+                                            info = start_gateway_background(
+                                                Namespace(host="127.0.0.1", port=51122, allow_remote=False)
+                                            )
 
             pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
             log_file = Path(tmp) / "antigravity-gateway-51122.log"
@@ -1834,6 +1878,24 @@ class TestV3NativeSetup(unittest.TestCase):
             self.assertEqual(info["pid_file"], str(pid_file))
             self.assertEqual(info["log_file"], str(log_file))
             popen.assert_called_once()
+
+    def test_start_background_removes_pid_and_terminates_when_readiness_fails(self):
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.poll.return_value = None
+        with TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.gateway_model_ids", side_effect=RuntimeError("not ready")):
+                    with patch("codex_antigravity_auth.cli.wait_for_gateway_model_ids", side_effect=RuntimeError("still not ready")):
+                        with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc):
+                            with patch("codex_antigravity_auth.cli.time.sleep"):
+                                with self.assertRaisesRegex(SystemExit, "did not become ready"):
+                                    start_gateway_background(
+                                        Namespace(host="127.0.0.1", port=51122, allow_remote=False)
+                                    )
+            self.assertFalse(pid_file.exists())
+            proc.terminate.assert_called_once()
 
     def test_start_background_wraps_gateway_with_onepassword_env_file(self):
         proc = MagicMock()
@@ -1844,20 +1906,22 @@ class TestV3NativeSetup(unittest.TestCase):
             env_file.write_text("OPENROUTER_API_KEY=op://Private/OpenRouter/sk\n", encoding="utf-8")
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
                 with patch("codex_antigravity_auth.onepassword.shutil.which", return_value="/usr/local/bin/op"):
-                    with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
-                        with patch("codex_antigravity_auth.cli.process_is_running", return_value=True):
-                            with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=True):
-                                with patch("codex_antigravity_auth.cli.time.sleep"):
-                                    with patch("builtins.print"):
-                                        start_gateway_background(
-                                            Namespace(
-                                                host="127.0.0.1",
-                                                port=51122,
-                                                allow_remote=False,
-                                                op_env_file=str(env_file),
-                                                op_environment=None,
-                                            )
-                                        )
+                    with patch("codex_antigravity_auth.cli.gateway_model_ids", side_effect=RuntimeError("not ready")):
+                        with patch("codex_antigravity_auth.cli.wait_for_gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                            with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
+                                with patch("codex_antigravity_auth.cli.process_is_running", return_value=True):
+                                    with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=True):
+                                        with patch("codex_antigravity_auth.cli.time.sleep"):
+                                            with patch("builtins.print"):
+                                                start_gateway_background(
+                                                    Namespace(
+                                                        host="127.0.0.1",
+                                                        port=51122,
+                                                        allow_remote=False,
+                                                        op_env_file=str(env_file),
+                                                        op_environment=None,
+                                                    )
+                                                )
 
             cmd = popen.call_args.args[0]
             self.assertEqual(cmd[:4], ["/usr/local/bin/op", "run", "--env-file", str(env_file)])
@@ -1872,17 +1936,18 @@ class TestV3NativeSetup(unittest.TestCase):
             env_file.write_text("OPENROUTER_API_KEY=op://Private/OpenRouter/sk\n", encoding="utf-8")
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
                 with patch("codex_antigravity_auth.onepassword.shutil.which", return_value=None):
-                    with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
-                        with self.assertRaisesRegex(SystemExit, "1Password CLI"):
-                            start_gateway_background(
-                                Namespace(
-                                    host="127.0.0.1",
-                                    port=51122,
-                                    allow_remote=False,
-                                    op_env_file=str(env_file),
-                                    op_environment=None,
+                    with patch("codex_antigravity_auth.cli.gateway_model_ids", side_effect=RuntimeError("not ready")):
+                        with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
+                            with self.assertRaisesRegex(SystemExit, "1Password CLI"):
+                                start_gateway_background(
+                                    Namespace(
+                                        host="127.0.0.1",
+                                        port=51122,
+                                        allow_remote=False,
+                                        op_env_file=str(env_file),
+                                        op_environment=None,
+                                    )
                                 )
-                            )
 
             self.assertFalse((Path(tmp) / "antigravity-gateway-51122.pid").exists())
             popen.assert_not_called()
@@ -1893,17 +1958,18 @@ class TestV3NativeSetup(unittest.TestCase):
             env_file = Path(tmp) / "antigravity.env"
             env_file.write_text("OPENROUTER_API_KEY=op://Private/OpenRouter/sk\n", encoding="utf-8")
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
-                with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
-                    with self.assertRaisesRegex(SystemExit, "Use only one"):
-                        start_gateway_background(
-                            Namespace(
-                                host="127.0.0.1",
-                                port=51122,
-                                allow_remote=False,
-                                op_env_file=str(env_file),
-                                op_environment="abcdefgh",
+                with patch("codex_antigravity_auth.cli.gateway_model_ids", side_effect=RuntimeError("not ready")):
+                    with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
+                        with self.assertRaisesRegex(SystemExit, "Use only one"):
+                            start_gateway_background(
+                                Namespace(
+                                    host="127.0.0.1",
+                                    port=51122,
+                                    allow_remote=False,
+                                    op_env_file=str(env_file),
+                                    op_environment="abcdefgh",
+                                )
                             )
-                        )
             popen.assert_not_called()
 
 
@@ -2337,9 +2403,10 @@ class TestVNextPolishCli(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
-                with patch("codex_antigravity_auth.cli.importlib_metadata.version", return_value="1.4.0"):
-                    with patch("codex_antigravity_auth.cli.urllib.request.urlopen", return_value=response):
-                        result = version_check_result(timeout=0.01)
+                with patch("codex_antigravity_auth.cli._source_checkout_version", return_value=None):
+                    with patch("codex_antigravity_auth.cli.importlib_metadata.version", return_value="1.4.0"):
+                        with patch("codex_antigravity_auth.cli.urllib.request.urlopen", return_value=response):
+                            result = version_check_result(timeout=0.01)
 
             cache_path = Path(tmp) / "antigravity-version-check.json"
             assert_mode_if_posix(self, cache_path, 0o600)
@@ -2356,9 +2423,10 @@ class TestVNextPolishCli(unittest.TestCase):
                 encoding="utf-8",
             )
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
-                with patch("codex_antigravity_auth.cli.importlib_metadata.version", return_value="1.4.0"):
-                    with patch("codex_antigravity_auth.cli.urllib.request.urlopen") as urlopen:
-                        result = version_check_result(timeout=0.01)
+                with patch("codex_antigravity_auth.cli._source_checkout_version", return_value=None):
+                    with patch("codex_antigravity_auth.cli.importlib_metadata.version", return_value="1.4.0"):
+                        with patch("codex_antigravity_auth.cli.urllib.request.urlopen") as urlopen:
+                            result = version_check_result(timeout=0.01)
 
         self.assertEqual(result["status"], "pass")
         urlopen.assert_not_called()
@@ -2379,12 +2447,28 @@ class TestVNextPolishCli(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
-                with patch("codex_antigravity_auth.cli.importlib_metadata.version", return_value="1.4.0"):
-                    with patch("codex_antigravity_auth.cli.urllib.request.urlopen", return_value=response):
-                        result = version_check_result(timeout=0.01)
+                with patch("codex_antigravity_auth.cli._source_checkout_version", return_value=None):
+                    with patch("codex_antigravity_auth.cli.importlib_metadata.version", return_value="1.4.0"):
+                        with patch("codex_antigravity_auth.cli.urllib.request.urlopen", return_value=response):
+                            result = version_check_result(timeout=0.01)
 
         self.assertEqual(result["status"], "skip")
         self.assertEqual(result["detail"], "version check unavailable")
+
+    def test_version_check_prefers_source_checkout_version_over_stale_installed_dist(self):
+        with TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "antigravity-version-check.json"
+            cache_path.write_text(
+                json.dumps({"checked_at": time.time(), "latest": "1.5.0"}),
+                encoding="utf-8",
+            )
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli._source_checkout_version", return_value="1.5.0"):
+                    with patch("codex_antigravity_auth.cli.importlib_metadata.version", return_value="1.0.0"):
+                        result = version_check_result(timeout=0.01)
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["installed"], "1.5.0")
 
     def test_process_is_running_uses_tasklist_on_windows(self):
         proc = MagicMock()
@@ -2493,6 +2577,7 @@ class TestVNextPolishCli(unittest.TestCase):
                 write_request_record(
                     {
                         "request_id": "req_test",
+                        "run_id": "anti-run_123",
                         "model": "claude-3.5-sonnet",
                         "route": "google",
                         "status": "failed",
@@ -2506,6 +2591,7 @@ class TestVNextPolishCli(unittest.TestCase):
 
         serialized = json.dumps(records)
         self.assertIn("req_test", serialized)
+        self.assertIn("anti-run_123", serialized)
         self.assertNotIn("do not persist", serialized)
         self.assertNotIn("also secret", serialized)
         self.assertNotIn("sk-testsecret1234567890", serialized)

@@ -1051,6 +1051,56 @@ class TestRegressionFixes(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertIn(expected_detail, response.json()["detail"])
 
+    def test_responses_endpoint_logs_run_id_and_strips_metadata_before_byok_routing(self):
+        provider = {
+            "id": "mock",
+            "displayName": "Mock Provider",
+            "kind": "openai_chat",
+            "baseUrl": "https://example.invalid/v1",
+            "apiKey": "secret",
+            "models": ["model"],
+        }
+        captured = {}
+        records = []
+
+        async def fake_create_openai_compatible_response(codex_req, provider, provider_model, display_model):
+            captured["codex_req"] = dict(codex_req)
+            return {
+                "id": "resp_mock",
+                "object": "response",
+                "created_at": 123,
+                "model": display_model,
+                "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            }
+
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"mock": provider}):
+            with patch(
+                "codex_antigravity_auth.server.create_openai_compatible_response",
+                new=fake_create_openai_compatible_response,
+            ):
+                with patch("codex_antigravity_auth.server.write_request_record", side_effect=records.append):
+                    response = TestClient(app).post(
+                        "/v1/responses",
+                        json={"model": "mock:model", "input": "hello", "metadata": {"run_id": "anti-run_123"}},
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(records[-1]["run_id"], "anti-run_123")
+        self.assertNotIn("metadata", captured["codex_req"])
+
+    def test_responses_endpoint_rejects_invalid_run_id_before_routing(self):
+        client = TestClient(app)
+        with patch("codex_antigravity_auth.server.all_provider_configs") as mock_providers:
+            response = client.post(
+                "/v1/responses",
+                json={"model": "mock:model", "input": "hello", "metadata": {"run_id": "bad/run\nid"}},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("metadata.run_id", response.json()["detail"])
+        mock_providers.assert_not_called()
+
     def test_responses_endpoint_rejects_malformed_tool_choice_before_routing(self):
         client = TestClient(app)
         invalid_requests = [
