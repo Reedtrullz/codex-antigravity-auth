@@ -529,6 +529,11 @@ class AntiHelperTests(unittest.TestCase):
 
         self.assertEqual(workflow_args.func, anti.command_workflow)
         self.assertEqual(runs_args.func, anti.command_runs)
+        self.assertEqual(parser.parse_args(["workflow", "security-review", "--print-prompt"]).func, anti.command_workflow)
+        self.assertEqual(
+            parser.parse_args(["workflow", "debug-consensus", "--prompt", "bug", "--print-prompt"]).func,
+            anti.command_workflow,
+        )
 
     def test_workflow_presets_choose_expected_default_scopes(self) -> None:
         anti = load_anti()
@@ -629,6 +634,38 @@ class AntiHelperTests(unittest.TestCase):
         expanded_args = parser.parse_args(expansion)
         self.assertEqual(expanded_args.changed_files_range, "HEAD~3..HEAD")
 
+    def test_workflow_security_review_expands_expected_roles_and_output(self) -> None:
+        anti = load_anti()
+        parser = anti.build_parser()
+
+        expansion = anti.workflow_expansion(
+            parser.parse_args(
+                ["workflow", "security-review", "--scope", "files", "--file", "README.md", "--output", "findings"]
+            )
+        )
+
+        self.assertEqual(expansion[:5], ["panel", "--mode", "review", "--scope", "files"])
+        self.assertEqual(expansion[expansion.index("--output") + 1], "findings")
+        for role in ["injection", "secrets-handling", "authz", "dependency-surface"]:
+            self.assertIn(role, expansion)
+
+    def test_workflow_debug_consensus_is_prompt_only(self) -> None:
+        anti = load_anti()
+        parser = anti.build_parser()
+
+        expansion = anti.workflow_expansion(
+            parser.parse_args(["workflow", "debug-consensus", "--prompt", "service times out"])
+        )
+
+        self.assertEqual(expansion[:3], ["panel", "--mode", "ask"])
+        self.assertIn("ranked hypotheses", " ".join(expansion))
+        with self.assertRaises(anti.AntiError):
+            anti.workflow_expansion(
+                parser.parse_args(
+                    ["workflow", "debug-consensus", "--scope", "files", "--file", "README.md", "--prompt", "bug"]
+                )
+            )
+
     def test_failed_workflow_run_record_keeps_workflow_identity(self) -> None:
         anti = load_anti()
         with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
@@ -718,6 +755,31 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(model_used, "claude-3.5-sonnet")
         self.assertTrue(metadata["fallback_used"])
         self.assertEqual(calls, ["claude-opus-4-6", "claude-opus-4-6", "claude-3.5-sonnet"])
+
+    def test_saved_generation_sends_run_id_metadata(self) -> None:
+        anti = load_anti()
+        args = anti.build_parser().parse_args(["consult", "--prompt", "hello", "--save-output", "summary"])
+        args.run_id = "anti-run_123"
+        payloads: list[dict] = []
+
+        def fake_request_json(method, url, *, payload=None, timeout=10.0, token_env=anti.DEFAULT_TOKEN_ENV):
+            payloads.append(payload or {})
+            return 200, {"output_text": "ok", "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}}
+
+        anti.request_json = fake_request_json
+        text, model_used, metadata = anti.generate_with_fallback(
+            args,
+            model="claude-3.5-sonnet",
+            prompt="hello",
+            max_output_tokens=16,
+            purpose="consult",
+            model_ids={"claude-3.5-sonnet"},
+        )
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(model_used, "claude-3.5-sonnet")
+        self.assertEqual(payloads[0]["metadata"], {"run_id": "anti-run_123"})
+        self.assertEqual(metadata["usage"], {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3})
 
     def test_base_url_rejects_userinfo_without_echoing_secret(self) -> None:
         anti = load_anti()
@@ -1094,7 +1156,33 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(plan_rc, 0)
         self.assertEqual(ask_rc, 0)
         self.assertIn("decision-complete plan", json.loads(plan_output.getvalue())["prompt"])
-        self.assertEqual(json.loads(ask_output.getvalue())["prompt"], "Compare options")
+        ask_prompt = json.loads(ask_output.getvalue())["prompt"]
+        self.assertIn("GPT-complement lens", ask_prompt)
+        self.assertTrue(ask_prompt.endswith("Compare options"))
+
+    def test_panel_print_prompt_does_not_allocate_run_correlation_id(self) -> None:
+        anti = load_anti()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(
+                [
+                    "panel",
+                    "--mode",
+                    "ask",
+                    "--prompt",
+                    "preview only",
+                    "--save-output",
+                    "summary",
+                    "--print-prompt",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertNotIn("run_id", parsed["metadata"])
+        self.assertNotIn("request_log_correlation_id", parsed["metadata"])
 
     def test_panel_role_prompt_respects_max_prompt_chars(self) -> None:
         anti = load_anti()
@@ -1122,6 +1210,51 @@ class AntiHelperTests(unittest.TestCase):
         self.assertLessEqual(len(parsed["prompt"]), 1000)
         self.assertTrue(any("Prompt truncated" in caveat for caveat in parsed["caveats"]))
 
+    def test_panel_byok_disclosure_only_for_repo_context(self) -> None:
+        anti = load_anti()
+        repo_output = io.StringIO()
+        ask_output = io.StringIO()
+
+        with contextlib.redirect_stdout(repo_output):
+            repo_rc = anti.main(
+                [
+                    "panel",
+                    "--mode",
+                    "review",
+                    "--scope",
+                    "files",
+                    "--file",
+                    "README.md",
+                    "--model",
+                    "openrouter:deepseek/deepseek-chat",
+                    "--judge",
+                    "sonnet",
+                    "--print-prompt",
+                    "--json",
+                ]
+            )
+        with contextlib.redirect_stdout(ask_output):
+            ask_rc = anti.main(
+                [
+                    "panel",
+                    "--mode",
+                    "ask",
+                    "--prompt",
+                    "compare",
+                    "--model",
+                    "openrouter:deepseek/deepseek-chat",
+                    "--judge",
+                    "sonnet",
+                    "--print-prompt",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(repo_rc, 0, repo_output.getvalue())
+        self.assertEqual(ask_rc, 0, ask_output.getvalue())
+        self.assertTrue(any("BYOK disclosure" in caveat for caveat in json.loads(repo_output.getvalue())["caveats"]))
+        self.assertFalse(any("BYOK disclosure" in caveat for caveat in json.loads(ask_output.getvalue())["caveats"]))
+
     def test_panel_successful_two_model_run_calls_judge_once(self) -> None:
         anti = load_anti()
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
@@ -1146,6 +1279,112 @@ class AntiHelperTests(unittest.TestCase):
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["output_text"], "judge-output")
         self.assertEqual([item["status"] for item in parsed["panel_results"]], ["success", "success"])
+
+    def test_panel_usage_latency_and_findings_are_reported(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        calls: list[dict] = []
+        finding_payload = {
+            "summary": "Disagreements first.",
+            "disagreements": ["Sonnet worries about tests; Opus worries about authz."],
+            "findings": [
+                {
+                    "id": "F1",
+                    "claim": "A branch needs local verification.",
+                    "severity": "medium",
+                    "lanes": ["claude-3.5-sonnet", "claude-opus-4-6"],
+                    "verify": "Run python3 -m pytest -q.",
+                }
+            ],
+            "unverifiable": ["External provider behavior may drift."],
+            "recommended_next_actions": ["Verify before editing."],
+            "caveats": ["Panel consensus is advisory."],
+        }
+
+        def fake_post_response(**kwargs):
+            calls.append(kwargs)
+            if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
+                return anti.ResponseText(
+                    json.dumps(finding_payload),
+                    usage={"input_tokens": 5, "output_tokens": 7, "total_tokens": 12},
+                    elapsed_ms=30,
+                )
+            return anti.ResponseText(
+                f"panel-output-{kwargs['model']}",
+                usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+                elapsed_ms=10,
+            )
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json"])
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(parsed["metadata"]["findings_status"], "parsed")
+        self.assertEqual(parsed["findings"]["findings"][0]["verify"], "Run python3 -m pytest -q.")
+        self.assertEqual(parsed["metadata"]["usage_totals"], {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18})
+        self.assertEqual(parsed["panel_results"][0]["elapsed_ms"], 10)
+        self.assertEqual(parsed["metadata"]["judge_generation"]["elapsed_ms"], 30)
+        self.assertIn("## Findings", parsed["output_text"])
+        self.assertTrue(all("metadata" not in call or call["metadata"] == {} for call in calls))
+
+    def test_panel_output_findings_emits_sanitized_json_contract(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        secret = "sk-testsecret1234567890"
+
+        def fake_post_response(**kwargs):
+            if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
+                return json.dumps(
+                    {
+                        "summary": f"token {secret}",
+                        "disagreements": [],
+                        "findings": [
+                            {
+                                "id": "secret finding",
+                                "claim": f"claim with {secret}",
+                                "severity": "high",
+                                "lanes": [kwargs["model"]],
+                                "verify": f"verify {secret}",
+                            }
+                        ],
+                        "unverifiable": [],
+                        "recommended_next_actions": [],
+                        "caveats": [],
+                    }
+                )
+            return "panel-output"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(["panel", "--mode", "ask", "--prompt", "x", "--output", "findings"])
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        rendered = json.dumps(parsed)
+        self.assertIn("<redacted>", rendered)
+        self.assertNotIn(secret, rendered)
+        self.assertEqual(parsed["findings"][0]["severity"], "high")
+
+    def test_panel_malformed_findings_falls_back_to_markdown_with_caveat(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.post_response = lambda **kwargs: "judge-output" if "You are synthesizing" in kwargs["prompt"] else "lane"
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(["panel", "--mode", "ask", "--prompt", "x", "--json"])
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(parsed["metadata"]["findings_status"], "fallback")
+        self.assertEqual(parsed["output_text"], "judge-output")
+        self.assertTrue(any("structured findings" in caveat for caveat in parsed["caveats"]))
 
     def test_panel_errors_are_redacted_in_json_output(self) -> None:
         anti = load_anti()
@@ -1382,6 +1621,63 @@ class AntiHelperTests(unittest.TestCase):
         parsed = json.loads(output.getvalue())
         self.assertLessEqual(parsed["metadata"]["synthesis_prompt_chars"], 2200)
         self.assertTrue(parsed["metadata"]["synthesis_truncated_models"])
+
+    def test_panel_large_review_summarizes_before_fanout(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        panel_prompts: list[str] = []
+
+        def fake_post_response(**kwargs):
+            prompt = kwargs["prompt"]
+            if "Chunked Review Manifest" in prompt:
+                return "bounded summary"
+            if "You are synthesizing an Antigravity multi-model advisory panel" in prompt:
+                return json.dumps(
+                    {
+                        "summary": "summary",
+                        "disagreements": [],
+                        "findings": [],
+                        "unverifiable": [],
+                        "recommended_next_actions": [],
+                        "caveats": [],
+                    }
+                )
+            if "This panel review context was summarized" in prompt:
+                panel_prompts.append(prompt)
+                return "panel from summary"
+            return "chunk result"
+
+        anti.post_response = fake_post_response
+        with tempfile.TemporaryDirectory(prefix="anti-skill-test-") as tmp:
+            root = Path(tmp)
+            (root / "large.py").write_text("LARGE = '" + ("x" * 6000) + "'\n", encoding="utf-8")
+            old_cwd = Path.cwd()
+            output = io.StringIO()
+            try:
+                os.chdir(root)
+                with contextlib.redirect_stdout(output):
+                    rc = anti.main(
+                        [
+                            "panel",
+                            "--mode",
+                            "review",
+                            "--scope",
+                            "files",
+                            "--file",
+                            "large.py",
+                            "--max-prompt-chars",
+                            "1800",
+                            "--json",
+                        ]
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertTrue(panel_prompts)
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(parsed["metadata"]["panel_review_context"], "chunked-summary")
+        self.assertTrue(any("bounded chunked summary" in caveat for caveat in parsed["caveats"]))
 
 
 if __name__ == "__main__":

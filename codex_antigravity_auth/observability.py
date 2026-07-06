@@ -77,6 +77,7 @@ def sanitize_request_record(record: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "timestamp",
         "request_id",
+        "run_id",
         "model",
         "route",
         "provider",

@@ -475,7 +475,24 @@ def gateway_generate_probe(
     return result
 
 
+def _source_checkout_version() -> str | None:
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    try:
+        text = pyproject.read_text(encoding="utf-8")
+    except Exception:
+        return None
+    if 'name = "codex-antigravity-auth"' not in text:
+        return None
+    match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', text)
+    if not match:
+        return None
+    return match.group(1)
+
+
 def _installed_package_version() -> str | None:
+    source_version = _source_checkout_version()
+    if source_version:
+        return source_version
     try:
         return importlib_metadata.version("codex-antigravity-auth")
     except importlib_metadata.PackageNotFoundError:
@@ -648,6 +665,27 @@ def gateway_runtime_paths(port: int) -> tuple[Path, Path]:
     return codex_home / GATEWAY_PID_TEMPLATE.format(port=port), codex_home / GATEWAY_LOG_TEMPLATE.format(port=port)
 
 
+def local_gateway_base_url(host: str, port: int) -> str:
+    return f"http://{host}:{port}/v1"
+
+
+def add_gateway_reachability(info: dict, *, host: str = "127.0.0.1", timeout: float = 0.75) -> dict:
+    base_url = local_gateway_base_url(host, int(info["port"]))
+    try:
+        model_ids = gateway_model_ids(base_url, timeout=timeout)
+    except RuntimeError as exc:
+        info["reachable"] = False
+        info["reachable_base_url"] = base_url
+        info["reachability_error"] = redact_secret_text(str(exc))
+    else:
+        info["reachable"] = True
+        info["reachable_base_url"] = base_url
+        info["reachable_model_count"] = len(model_ids)
+        if not info.get("running") and info.get("status") in {"stopped", "stale"}:
+            info["status"] = "unmanaged"
+    return info
+
+
 def process_is_running(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -771,6 +809,7 @@ def gateway_status_info(port: int) -> dict:
 
 def run_gateway_status(args) -> dict:
     info = gateway_status_info(args.port)
+    add_gateway_reachability(info)
     info["service"] = service_status(args.port)
     info["request_log"] = request_log_info()
     if getattr(args, "json", False):
@@ -781,6 +820,10 @@ def run_gateway_status(args) -> dict:
             print(f"  pid: {info['pid']}")
         print(f"  pid_file: {info['pid_file']}")
         print(f"  log_file: {info['log_file']}")
+        if info.get("reachable"):
+            print(f"  reachable: yes ({info.get('reachable_model_count', 0)} model(s) at {info['reachable_base_url']})")
+        else:
+            print(f"  reachable: no ({info.get('reachability_error', 'not checked')})")
         service_info = info["service"]
         print(
             "  service: "
@@ -1073,6 +1116,7 @@ def run_models_command(args) -> None:
 def start_gateway_background(args) -> dict:
     require_safe_gateway_host(args.host, args.allow_remote)
     pid_path, log_path = gateway_runtime_paths(args.port)
+    base_url = local_gateway_base_url(args.host, args.port)
     current = gateway_status_info(args.port)
     if current["running"]:
         raise SystemExit(f"Gateway already running on port {args.port} (pid {current['pid']}).")
@@ -1086,6 +1130,15 @@ def start_gateway_background(args) -> dict:
         stale_pid = current.get("pid")
         pid_path.unlink(missing_ok=True)
         print(f"[*] Removed stale gateway pid file for pid {stale_pid or 'unknown'}: {pid_path}")
+    try:
+        gateway_model_ids(base_url, timeout=0.75)
+    except RuntimeError:
+        pass
+    else:
+        raise SystemExit(
+            f"Gateway is already reachable at {base_url}. "
+            "Stop the existing process before starting another background gateway."
+        )
     cmd = [
         sys.executable,
         "-m",
@@ -1145,6 +1198,18 @@ def start_gateway_background(args) -> dict:
     if proc.poll() is not None:
         raise SystemExit(f"Gateway exited during startup with code {proc.returncode}. See log: {log_path}")
     _write_private_text(pid_path, f"{proc.pid}\n")
+    try:
+        wait_for_gateway_model_ids(base_url, timeout=0.75)
+    except RuntimeError as exc:
+        pid_path.unlink(missing_ok=True)
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        raise SystemExit(
+            f"Gateway process {proc.pid} did not become ready after startup. "
+            f"See log: {log_path}. {redact_secret_text(str(exc))}"
+        ) from exc
     info = gateway_status_info(args.port)
     print(f"[+] Gateway started in background on {args.host}:{args.port} (pid {proc.pid})")
     if onepassword_description:
@@ -1289,9 +1354,23 @@ def codex_ready_report(
 
     try:
         status_info = gateway_status_info(gateway_port)
+        add_gateway_reachability(
+            status_info,
+            host=parsed_gateway.hostname or "127.0.0.1",
+            timeout=min(max(float(gateway_timeout), 0.1), 0.75),
+        )
         service_info = service_status(gateway_port)
         if status_info["running"]:
             add("gateway_process", "pass", f"gateway process is running on port {gateway_port}", process_status=status_info["status"])
+        elif status_info.get("reachable"):
+            add(
+                "gateway_process",
+                "pass",
+                f"gateway is reachable at {status_info['reachable_base_url']} without a managed pid",
+                process_status=status_info["status"],
+                reachable=True,
+                service=service_info,
+            )
         elif service_info.get("installed"):
             add(
                 "gateway_process",

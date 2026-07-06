@@ -50,6 +50,7 @@ RUNS_DIR = Path.home() / ".codex" / "anti-runs"
 RUN_OUTPUT_PREVIEW_CHARS = 1600
 FALLBACK_POLICIES = {"never", "on-retryable", "on-timeout"}
 SAVE_OUTPUT_MODES = {"never", "summary", "full"}
+PANEL_OUTPUT_MODES = {"prose", "findings"}
 
 REDACTION_MARKER = "<redacted>"
 SECRET_KEY_FRAGMENTS = (
@@ -208,6 +209,19 @@ def new_run_id() -> str:
     return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8]
 
 
+def ensure_run_id(args: argparse.Namespace) -> str | None:
+    if save_output_mode(args) == "never":
+        return None
+    run_id = getattr(args, "run_id", None)
+    if run_id:
+        if not RUN_ID_RE.fullmatch(str(run_id)):
+            raise AntiError("run id must contain only letters, numbers, '_' or '-'")
+        return str(run_id)
+    run_id = new_run_id()
+    args.run_id = run_id
+    return run_id
+
+
 def normalize_redaction_markers(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): normalize_redaction_markers(item) for key, item in value.items()}
@@ -332,8 +346,12 @@ def write_run_record(
 
     output_chars = len(output_text or "")
     prompt_chars = len(prompt_text or "")
+    record_id = getattr(args, "run_id", None) or new_run_id()
+    if not RUN_ID_RE.fullmatch(str(record_id)):
+        raise AntiError("run id must contain only letters, numbers, '_' or '-'")
+
     record: dict[str, Any] = {
-        "id": new_run_id(),
+        "id": str(record_id),
         "created_at": utc_timestamp(),
         "command": getattr(args, "command", mode),
         "workflow": getattr(args, "workflow_name", None),
@@ -531,6 +549,105 @@ def extract_response_text(payload: Any) -> str:
     return json.dumps(payload, indent=2, sort_keys=True)[:8000]
 
 
+class ResponseText(str):
+    def __new__(
+        cls,
+        text: str,
+        *,
+        usage: dict[str, int] | None = None,
+        elapsed_ms: int | None = None,
+        response_metadata: dict[str, Any] | None = None,
+    ):
+        obj = str.__new__(cls, text)
+        obj.usage = usage
+        obj.elapsed_ms = elapsed_ms
+        obj.response_metadata = response_metadata or {}
+        return obj
+
+
+def int_usage(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, float) and value >= 0 and value.is_integer():
+        return int(value)
+    return None
+
+
+def normalize_usage(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    input_tokens = int_usage(value.get("input_tokens"))
+    if input_tokens is None:
+        input_tokens = int_usage(value.get("prompt_tokens"))
+    output_tokens = int_usage(value.get("output_tokens"))
+    if output_tokens is None:
+        output_tokens = int_usage(value.get("completion_tokens"))
+    total_tokens = int_usage(value.get("total_tokens"))
+    result: dict[str, int] = {}
+    if input_tokens is not None:
+        result["input_tokens"] = input_tokens
+    if output_tokens is not None:
+        result["output_tokens"] = output_tokens
+    if total_tokens is not None:
+        result["total_tokens"] = total_tokens
+    elif input_tokens is not None and output_tokens is not None:
+        result["total_tokens"] = input_tokens + output_tokens
+    return result or None
+
+
+def extract_usage(payload: Any) -> dict[str, int] | None:
+    if isinstance(payload, dict):
+        usage = normalize_usage(payload.get("usage"))
+        if usage:
+            return usage
+        response = payload.get("response")
+        if isinstance(response, dict):
+            usage = normalize_usage(response.get("usage"))
+            if usage:
+                return usage
+    return None
+
+
+def response_call_metadata(value: Any) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    usage = normalize_usage(getattr(value, "usage", None))
+    if usage:
+        metadata["usage"] = usage
+    elapsed_ms = getattr(value, "elapsed_ms", None)
+    if isinstance(elapsed_ms, int) and elapsed_ms >= 0:
+        metadata["elapsed_ms"] = elapsed_ms
+    response_metadata = getattr(value, "response_metadata", None)
+    if isinstance(response_metadata, dict):
+        metadata.update(response_metadata)
+    return metadata
+
+
+def sum_usage(*values: Any) -> dict[str, int]:
+    totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    any_usage = False
+
+    def visit(value: Any) -> None:
+        nonlocal any_usage
+        if isinstance(value, dict):
+            usage = normalize_usage(value)
+            if usage:
+                any_usage = True
+                for key in totals:
+                    totals[key] += int(usage.get(key, 0))
+                return
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    for value in values:
+        visit(value)
+    return totals if any_usage else {}
+
+
 def post_response(
     *,
     base_url: str,
@@ -541,7 +658,8 @@ def post_response(
     token_env: str,
     retries: int = 0,
     model_ids: set[str] | None = None,
-) -> str:
+    run_id: str | None = None,
+) -> ResponseText:
     available_model_ids = model_ids
     if available_model_ids is None:
         available_model_ids = fetch_model_ids(base_url, timeout=timeout, token_env=token_env)
@@ -554,10 +672,13 @@ def post_response(
         "max_output_tokens": max_output_tokens,
         "stream": False,
     }
+    if run_id:
+        payload["metadata"] = {"run_id": run_id}
     attempts = max(0, retries) + 1
     retryable_statuses = {408, 409, 425, 429, 500, 502, 503, 504}
     last_error: str | None = None
     response_url = f"{normalize_base_url(base_url)}/responses"
+    started = time.monotonic()
     for attempt in range(1, attempts + 1):
         try:
             status, decoded = request_json(
@@ -579,7 +700,12 @@ def post_response(
             ) from exc
 
         if status == 200:
-            return extract_response_text(decoded)
+            return ResponseText(
+                extract_response_text(decoded),
+                usage=extract_usage(decoded),
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                response_metadata={"attempts": attempt},
+            )
 
         detail = decoded.get("detail") or decoded.get("error") or decoded
         last_error = f"HTTP {status}: {detail}"
@@ -613,7 +739,7 @@ def generate_with_fallback(
     failures: list[dict[str, str]] = []
     progress(args, f"{purpose}: calling {model} ({len(prompt)} prompt chars)")
     try:
-        text = post_response(
+        raw_text = post_response(
             base_url=args.base_url,
             model=model,
             prompt=prompt,
@@ -622,7 +748,10 @@ def generate_with_fallback(
             token_env=args.gateway_token_env,
             retries=args.retry,
             model_ids=model_ids,
+            run_id=getattr(args, "run_id", None),
         )
+        text = str(raw_text)
+        call_metadata = response_call_metadata(raw_text)
         progress(args, f"{purpose}: {model} completed ({len(text)} output chars)")
         return text, model, {
             "model_used": model,
@@ -631,6 +760,7 @@ def generate_with_fallback(
             "fallback_policy": fallback_policy,
             "fallback_used": False,
             "generation_failures": failures,
+            **call_metadata,
         }
     except AntiError as exc:
         error = redact_sensitive_text(str(exc))
@@ -639,7 +769,7 @@ def generate_with_fallback(
             raise
         progress(args, f"{purpose}: {model} failed; trying fallback {fallback_model}")
         try:
-            text = post_response(
+            raw_text = post_response(
                 base_url=args.base_url,
                 model=fallback_model,
                 prompt=prompt,
@@ -648,6 +778,7 @@ def generate_with_fallback(
                 token_env=args.gateway_token_env,
                 retries=args.retry,
                 model_ids=model_ids,
+                run_id=getattr(args, "run_id", None),
             )
         except AntiError as fallback_exc:
             fallback_error = redact_sensitive_text(str(fallback_exc))
@@ -656,6 +787,8 @@ def generate_with_fallback(
                 f"{purpose} failed on primary model {model} and fallback model {fallback_model}. "
                 f"Primary error: {error}. Fallback error: {fallback_error}"
             ) from fallback_exc
+        text = str(raw_text)
+        call_metadata = response_call_metadata(raw_text)
         progress(args, f"{purpose}: fallback {fallback_model} completed ({len(text)} output chars)")
         return text, fallback_model, {
             "model_used": fallback_model,
@@ -664,6 +797,7 @@ def generate_with_fallback(
             "fallback_policy": fallback_policy,
             "fallback_used": True,
             "generation_failures": failures,
+            **call_metadata,
         }
 
 
@@ -1718,6 +1852,186 @@ def panel_role_instruction(roles: list[str] | None) -> str:
     )
 
 
+def model_is_byok(model: str) -> bool:
+    provider, separator, provider_model = model.partition(":")
+    return bool(separator and provider and provider_model)
+
+
+def panel_receives_repo_context(args: argparse.Namespace) -> bool:
+    if args.mode == "review":
+        return args.scope != "none"
+    if args.mode == "plan":
+        return args.scope not in {"none", "prompt"}
+    return False
+
+
+def byok_repo_context_disclosure(panel_models: list[str], judge_model: str, args: argparse.Namespace) -> str | None:
+    if not panel_receives_repo_context(args):
+        return None
+    provider_models = [model for model in [*panel_models, judge_model] if model_is_byok(model)]
+    if not provider_models:
+        return None
+    return (
+        "BYOK disclosure: repository/diff/file context will be sent to provider lane(s): "
+        + ", ".join(provider_models)
+        + ". Only use BYOK lanes you trust for this code."
+    )
+
+
+def gpt_complement_instruction() -> str:
+    return (
+        "GPT-complement lens: prioritize observations, failure modes, ambiguity, and verification hints "
+        "that a GPT-family acting agent might plausibly miss. Do not speculate beyond the supplied context."
+    )
+
+
+def clean_string(value: Any, *, max_chars: int = 1200) -> str:
+    if value is None:
+        return ""
+    text = redact_sensitive_text(str(value)).strip()
+    if len(text) > max_chars:
+        return text[:max_chars].rstrip() + "..."
+    return text
+
+
+def clean_string_list(value: Any, *, max_items: int = 20, max_chars: int = 500) -> list[str]:
+    if isinstance(value, str):
+        items: list[Any] = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        return []
+    result: list[str] = []
+    for item in items[:max_items]:
+        text = clean_string(item, max_chars=max_chars)
+        if text:
+            result.append(text)
+    return result
+
+
+def extract_json_object(text: str) -> Any:
+    stripped = text.strip()
+    if not stripped:
+        raise ValueError("empty output")
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        return json.loads(fenced.group(1))
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(stripped[start : end + 1])
+        raise
+
+
+def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    claim = clean_string(value.get("claim"), max_chars=1600)
+    verify = clean_string(value.get("verify"), max_chars=1200)
+    if not claim or not verify:
+        return None
+    severity = clean_string(value.get("severity"), max_chars=40).lower()
+    if severity not in {"critical", "high", "medium", "low", "info"}:
+        severity = "medium"
+    finding_id = clean_string(value.get("id"), max_chars=80) or f"F{index:03d}"
+    finding_id = re.sub(r"[^A-Za-z0-9_.:-]+", "-", finding_id).strip("-._:") or f"F{index:03d}"
+    lanes = clean_string_list(value.get("lanes"), max_items=12, max_chars=120)
+    return {
+        "id": finding_id,
+        "claim": claim,
+        "severity": severity,
+        "lanes": lanes,
+        "verify": verify,
+    }
+
+
+def parse_panel_findings(text: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        parsed = extract_json_object(text)
+    except Exception as exc:
+        return None, f"Judge did not return valid structured findings JSON; falling back to prose synthesis ({exc})"
+    if not isinstance(parsed, dict):
+        return None, "Judge structured findings output was not a JSON object; falling back to prose synthesis"
+
+    raw_findings = parsed.get("findings")
+    if not isinstance(raw_findings, list):
+        return None, "Judge structured findings JSON did not contain a findings list; falling back to prose synthesis"
+    findings = [
+        normalized
+        for index, item in enumerate(raw_findings, start=1)
+        if (normalized := normalize_finding_item(item, index)) is not None
+    ]
+    contract = {
+        "summary": clean_string(parsed.get("summary"), max_chars=1600),
+        "disagreements": clean_string_list(parsed.get("disagreements"), max_items=20, max_chars=700),
+        "findings": findings,
+        "unverifiable": clean_string_list(
+            parsed.get("unverifiable") or parsed.get("unverifiable_observations"),
+            max_items=20,
+            max_chars=700,
+        ),
+        "recommended_next_actions": clean_string_list(parsed.get("recommended_next_actions"), max_items=20, max_chars=700),
+        "caveats": clean_string_list(parsed.get("caveats") or parsed.get("verification_caveats"), max_items=20, max_chars=700),
+    }
+    return sanitize_json(contract), None
+
+
+def fallback_findings_contract(text: str, caveats: list[str]) -> dict[str, Any]:
+    return sanitize_json(
+        {
+            "summary": clean_string(text, max_chars=4000),
+            "disagreements": [],
+            "findings": [],
+            "unverifiable": [],
+            "recommended_next_actions": [],
+            "caveats": caveats,
+        }
+    )
+
+
+def render_panel_findings(findings: dict[str, Any], caveats: list[str]) -> str:
+    sections: list[str] = []
+    if findings.get("summary"):
+        sections.append(str(findings["summary"]).strip())
+
+    disagreements = clean_string_list(findings.get("disagreements"), max_items=50, max_chars=1000)
+    sections.append("## Disagreements")
+    sections.append("\n".join(f"- {item}" for item in disagreements) if disagreements else "- None surfaced.")
+
+    sections.append("## Findings")
+    finding_lines: list[str] = []
+    finding_items = findings.get("findings", []) if isinstance(findings.get("findings"), list) else []
+    for item in finding_items:
+        if not isinstance(item, dict):
+            continue
+        lanes = ", ".join(clean_string_list(item.get("lanes"), max_items=20, max_chars=160)) or "unspecified"
+        finding_lines.extend(
+            [
+                f"- [{clean_string(item.get('severity'), max_chars=40) or 'medium'}] {clean_string(item.get('id'), max_chars=80)}: {clean_string(item.get('claim'), max_chars=1600)}",
+                f"  Lanes: {lanes}",
+                f"  Verify: {clean_string(item.get('verify'), max_chars=1200)}",
+            ]
+        )
+    sections.append("\n".join(finding_lines) if finding_lines else "- No structured findings surfaced.")
+
+    unverifiable = clean_string_list(findings.get("unverifiable"), max_items=50, max_chars=1000)
+    sections.append("## Unverifiable Observations")
+    sections.append("\n".join(f"- {item}" for item in unverifiable) if unverifiable else "- None surfaced.")
+
+    actions = clean_string_list(findings.get("recommended_next_actions"), max_items=50, max_chars=1000)
+    if actions:
+        sections.append("## Recommended Next Actions")
+        sections.append("\n".join(f"- {item}" for item in actions))
+
+    rendered_caveats = clean_string_list([*(findings.get("caveats") or []), *caveats], max_items=80, max_chars=1000)
+    sections.append("## Caveats")
+    sections.append("\n".join(f"- {item}" for item in rendered_caveats) if rendered_caveats else "- None.")
+    return "\n\n".join(sections).strip()
+
+
 def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[str], dict[str, Any]]:
     caveats: list[str] = []
     metadata: dict[str, Any] = {"panel_mode": args.mode, "roles": args.role or []}
@@ -1738,6 +2052,7 @@ def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[st
         metadata.update(review_metadata)
         metadata["scope"] = context["scope_line"]
         metadata["prompt_chars"] = len(prompt)
+        metadata["_review_context"] = context
     elif args.mode == "plan":
         if args.scope == "diff":
             raise AntiError("panel plan does not support --scope diff; use working-tree, staged, files, or none")
@@ -1755,6 +2070,9 @@ def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[st
         prompt = "\n\n".join([role_instruction, prompt])
         prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
         metadata["prompt_chars"] = len(prompt)
+    prompt = "\n\n".join([gpt_complement_instruction(), prompt])
+    prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+    metadata["prompt_chars"] = len(prompt)
 
     return prompt, caveats, metadata
 
@@ -1768,6 +2086,7 @@ def build_panel_synthesis_prompt(
     caveats: list[str],
     roles: list[str],
     max_chars: int,
+    output_mode: str = "prose",
 ) -> tuple[str, list[str], dict[str, Any]]:
     manifest = {
         "panel_mode": panel_mode,
@@ -1777,6 +2096,7 @@ def build_panel_synthesis_prompt(
         "failed_models": [result["model"] for result in panel_results if result["status"] != "success"],
         "source_metadata": metadata,
         "source_caveats": caveats,
+        "requested_output": output_mode,
     }
 
     def render(source: str, outputs: list[str]) -> str:
@@ -1797,8 +2117,10 @@ def build_panel_synthesis_prompt(
             [
                 "You are synthesizing an Antigravity multi-model advisory panel for a Codex coding session.",
                 "Use only the source prompt/context and panel outputs below. Do not claim local verification, tool execution, or proof that is not present.",
-                "Return Markdown with exactly these sections: Consensus, Contradictions, Unique Insights, Blind Spots, Recommended Next Actions, Verification Caveats.",
-                "Consensus is only a prioritization signal, not proof. Clearly mark claims that need native Codex/local verification.",
+                "Prioritize disagreements, contradictions, and unique insights before consensus. Consensus is only a prioritization signal, not proof.",
+                "Return one JSON object and no surrounding prose. The object must contain: summary (string), disagreements (array of strings), findings (array of objects), unverifiable (array of strings), recommended_next_actions (array of strings), and caveats (array of strings).",
+                "Each findings item must contain: id (stable short string), claim (specific claim), severity (critical|high|medium|low|info), lanes (array of model ids that support it), and verify (a concrete local check Codex should run before acting).",
+                "Put speculative or externally dependent observations in unverifiable, not findings. Do not include secrets, credentials, raw account identifiers, or provider keys.",
                 "## Panel Manifest\n```json\n" + json.dumps(manifest, indent=2, sort_keys=True) + "\n```",
                 "## Source Prompt / Context\n" + source.strip(),
                 "## Panel Results\n" + "\n\n".join(result_sections),
@@ -1893,6 +2215,10 @@ def run_panel_call(
         if model_used != model:
             result["model_used"] = model_used
         result["generation"] = generation_metadata
+        if generation_metadata.get("usage"):
+            result["usage"] = generation_metadata["usage"]
+        if generation_metadata.get("elapsed_ms") is not None:
+            result["elapsed_ms"] = generation_metadata["elapsed_ms"]
         return result
     except Exception as exc:
         return {"model": model, "status": "error", "error": redact_sensitive_text(str(exc))}
@@ -1920,6 +2246,26 @@ def sanitize_panel_results_for_display(panel_results: list[dict[str, Any]]) -> l
     return sanitized
 
 
+def format_usage(usage: Any) -> str:
+    normalized = normalize_usage(usage)
+    if not normalized:
+        return ""
+    parts = []
+    if "input_tokens" in normalized:
+        parts.append(f"in {normalized['input_tokens']}")
+    if "output_tokens" in normalized:
+        parts.append(f"out {normalized['output_tokens']}")
+    if "total_tokens" in normalized:
+        parts.append(f"total {normalized['total_tokens']}")
+    return ", ".join(parts)
+
+
+def format_latency(elapsed_ms: Any) -> str:
+    if isinstance(elapsed_ms, int) and elapsed_ms >= 0:
+        return f"{elapsed_ms} ms"
+    return ""
+
+
 def print_panel_result(
     *,
     panel_mode: str,
@@ -1931,6 +2277,8 @@ def print_panel_result(
     caveats: list[str],
     metadata: dict[str, Any],
     output_json: bool,
+    output_mode: str = "prose",
+    findings: dict[str, Any] | None = None,
 ) -> None:
     safe_gateway = redact_sensitive_text(base_url)
     panel_results = sanitize_panel_results_for_display(panel_results)
@@ -1947,6 +2295,7 @@ def print_panel_result(
                     "panel_models": panel_models,
                     "panel_results": panel_results,
                     "caveats": caveats,
+                    "findings": findings,
                     "metadata": metadata,
                     "output_text": text.strip(),
                 },
@@ -1954,6 +2303,9 @@ def print_panel_result(
                 sort_keys=True,
             )
         )
+        return
+    if output_mode == "findings":
+        print(json.dumps(findings or fallback_findings_contract(text, caveats), indent=2, sort_keys=True))
         return
 
     print(f"## Antigravity panel ({panel_mode})")
@@ -1965,17 +2317,97 @@ def print_panel_result(
     if metadata.get("status"):
         print(f"- Status: {metadata['status']}")
     for result in panel_results:
+        stats = "; ".join(
+            part
+            for part in [
+                format_latency(result.get("elapsed_ms") or result.get("generation", {}).get("elapsed_ms")),
+                format_usage(result.get("usage") or result.get("generation", {}).get("usage")),
+            ]
+            if part
+        )
+        suffix = f" ({stats})" if stats else ""
         if result["status"] == "success":
-            print(f"- {result['model']}: success")
+            print(f"- {result['model']}: success{suffix}")
         else:
             print(f"- {result['model']}: error: {result.get('error', 'unknown error')}")
     for caveat in caveats:
         print(f"- Caveat: {caveat}")
     print()
     print(text.strip())
+    totals = format_usage(metadata.get("usage_totals"))
+    judge_stats = "; ".join(
+        part
+        for part in [
+            format_latency(metadata.get("judge_generation", {}).get("elapsed_ms")),
+            format_usage(metadata.get("judge_generation", {}).get("usage")),
+        ]
+        if part
+    )
+    if totals or judge_stats:
+        print()
+        print("## Usage And Latency")
+        if totals:
+            print(f"- Token totals: {totals}")
+        if judge_stats:
+            print(f"- Judge: {judge_stats}")
+
+
+def panel_review_summary_model(panel_models: list[str]) -> str:
+    for model in panel_models:
+        if model == "claude-3.5-sonnet" or "sonnet" in model:
+            return model
+    return panel_models[0]
+
+
+def maybe_summarize_panel_review(
+    *,
+    args: argparse.Namespace,
+    prompt: str,
+    caveats: list[str],
+    metadata: dict[str, Any],
+    panel_models: list[str],
+) -> tuple[str, list[str], dict[str, Any]]:
+    context = metadata.pop("_review_context", None)
+    if args.mode != "review" or not isinstance(context, dict):
+        return prompt, caveats, metadata
+    if not should_run_chunked_review(args, metadata):
+        return prompt, caveats, metadata
+
+    raw_prompt_chars = len(prompt)
+    summary_model = panel_review_summary_model(panel_models)
+    progress(args, f"panel review: summarizing broad review context with {summary_model} before fan-out")
+    summary_text, summary_caveats, summary_metadata = run_chunked_review(
+        args=args,
+        context=context,
+        model=summary_model,
+        base_metadata=metadata,
+    )
+    prompt = "\n\n".join(
+        [
+            "This panel review context was summarized by Anti before multi-model fan-out to avoid silently truncating a large review scope.",
+            "Panel lanes must treat the summary as bounded context, not as proof of the omitted raw source.",
+            "## Bounded Review Summary\n" + summary_text.strip(),
+        ]
+    )
+    prompt = apply_prompt_limit(prompt, args.max_prompt_chars, summary_caveats)
+    metadata = {
+        **metadata,
+        "panel_review_context": "chunked-summary",
+        "panel_review_summary_model": summary_model,
+        "raw_review_prompt_chars": raw_prompt_chars,
+        "prompt_chars": len(prompt),
+        "review_summary_chars": len(summary_text),
+        "review_summary_metadata": summary_metadata,
+    }
+    summary_caveats.append(
+        "Panel review used a bounded chunked summary instead of sending the full raw review context to every lane."
+    )
+    return prompt, summary_caveats, metadata
 
 
 def command_panel(args: argparse.Namespace) -> int:
+    if args.output not in PANEL_OUTPUT_MODES:
+        raise AntiError(f"unsupported panel output mode: {args.output}")
     panel_models = resolve_panel_models(args.model)
     judge_model = resolve_model(args.judge, default=DEFAULT_PANEL_JUDGE_MODEL)
     min_successes = args.min_successes
@@ -1985,6 +2417,14 @@ def command_panel(args: argparse.Namespace) -> int:
         raise AntiError("--min-successes cannot exceed the number of panel models")
 
     prompt, caveats, metadata = assemble_panel_source_prompt(args)
+    disclosure = byok_repo_context_disclosure(panel_models, judge_model, args)
+    if disclosure:
+        caveats.append(disclosure)
+        metadata.setdefault("privacy_disclosures", []).append(disclosure)
+        if not args.print_prompt:
+            eprint(f"[anti] {redact_sensitive_text(disclosure)}")
+    if args.print_prompt:
+        metadata.pop("_review_context", None)
     metadata.update(
         {
             "panel_mode": args.mode,
@@ -2007,6 +2447,11 @@ def command_panel(args: argparse.Namespace) -> int:
                     print(f"- {caveat}")
         return 0
 
+    ensure_run_id(args)
+    if getattr(args, "run_id", None):
+        metadata["run_id"] = args.run_id
+        metadata["request_log_correlation_id"] = args.run_id
+
     required_models = [judge_model]
     if getattr(args, "fallback_model", None):
         fallback_model = resolve_model(args.fallback_model, default=args.fallback_model)
@@ -2028,6 +2473,15 @@ def command_panel(args: argparse.Namespace) -> int:
             + f"; only {len(available_panel_models)} panel model(s) available, "
             + f"below --min-successes {min_successes}. Available sample: {sample}"
         )
+
+    prompt, caveats, metadata = maybe_summarize_panel_review(
+        args=args,
+        prompt=prompt,
+        caveats=caveats,
+        metadata=metadata,
+        panel_models=available_panel_models or panel_models,
+    )
+    metadata["prompt_chars"] = len(prompt)
 
     panel_results: list[dict[str, Any]] = [
         {"model": model, "status": "error", "error": "model not advertised by /v1/models"}
@@ -2091,6 +2545,7 @@ def command_panel(args: argparse.Namespace) -> int:
         caveats=caveats,
         roles=args.role or [],
         max_chars=args.max_synthesis_chars,
+        output_mode=args.output,
     )
     caveats.extend(synthesis_caveats)
     metadata.update(synthesis_metadata)
@@ -2104,6 +2559,18 @@ def command_panel(args: argparse.Namespace) -> int:
     )
     metadata["judge_model_used"] = judge_model_used
     metadata["judge_generation"] = judge_generation
+    metadata["panel_usage_totals"] = sum_usage([result.get("generation", {}) for result in panel_results])
+    metadata["usage_totals"] = sum_usage([result.get("generation", {}) for result in panel_results], judge_generation)
+    findings, findings_caveat = parse_panel_findings(judge_text)
+    if findings_caveat:
+        caveats.append(findings_caveat)
+        metadata["findings_status"] = "fallback"
+        findings = fallback_findings_contract(judge_text, [findings_caveat])
+        display_text = judge_text
+    else:
+        metadata["findings_status"] = "parsed"
+        display_text = render_panel_findings(findings or {}, caveats)
+    metadata["findings"] = findings
     write_run_record(
         args,
         mode="panel",
@@ -2111,7 +2578,7 @@ def command_panel(args: argparse.Namespace) -> int:
         models=[*panel_models, str(judge_model_used)],
         base_url=args.base_url,
         prompt_text=prompt,
-        output_text=judge_text,
+        output_text=display_text,
         caveats=caveats,
         metadata=metadata,
     )
@@ -2121,10 +2588,12 @@ def command_panel(args: argparse.Namespace) -> int:
         judge_model=str(judge_model_used),
         panel_models=panel_models,
         panel_results=panel_results,
-        text=judge_text,
+        text=display_text,
         caveats=caveats,
         metadata=metadata,
         output_json=args.json,
+        output_mode=args.output,
+        findings=findings,
     )
     return 0
 
@@ -2134,6 +2603,7 @@ def command_consult(args: argparse.Namespace) -> int:
     prompt = read_prompt(args)
     caveats: list[str] = []
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+    ensure_run_id(args)
     text, model_used, generation_metadata = generate_with_fallback(
         args,
         model=model,
@@ -2142,6 +2612,9 @@ def command_consult(args: argparse.Namespace) -> int:
         purpose="consult",
     )
     metadata = {"prompt_chars": len(prompt), **generation_metadata}
+    if getattr(args, "run_id", None):
+        metadata["run_id"] = args.run_id
+        metadata["request_log_correlation_id"] = args.run_id
     write_run_record(
         args,
         mode="consult",
@@ -2182,6 +2655,7 @@ def command_review(args: argparse.Namespace) -> int:
             for caveat in caveats:
                 print(f"- {caveat}")
         return 0
+    ensure_run_id(args)
     if should_run_chunked_review(args, metadata):
         text, caveats, metadata = run_chunked_review(
             args=args,
@@ -2199,6 +2673,9 @@ def command_review(args: argparse.Namespace) -> int:
             purpose="review",
         )
         metadata = {**metadata, "chunked": False, **generation_metadata}
+    if getattr(args, "run_id", None):
+        metadata["run_id"] = args.run_id
+        metadata["request_log_correlation_id"] = args.run_id
     write_run_record(
         args,
         mode="review",
@@ -2238,6 +2715,7 @@ def command_plan(args: argparse.Namespace) -> int:
             for caveat in printable_caveats:
                 print(f"- {caveat}")
         return 0
+    ensure_run_id(args)
     if should_chunk_plan(args, prompt):
         if args.max_prompt_chars > 0:
             recorded_prompt = prompt[: args.max_prompt_chars]
@@ -2258,6 +2736,9 @@ def command_plan(args: argparse.Namespace) -> int:
             purpose="plan",
         )
         metadata = {"prompt_chars": len(limited_prompt), "chunked": False, **generation_metadata}
+    if getattr(args, "run_id", None):
+        metadata["run_id"] = args.run_id
+        metadata["request_log_correlation_id"] = args.run_id
     write_run_record(
         args,
         mode="plan",
@@ -2542,8 +3023,16 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             str(args.judge_output_tokens),
             "--max-synthesis-chars",
             str(args.max_synthesis_chars),
+            "--chunked",
+            args.chunked,
+            "--max-review-chunks",
+            str(args.max_review_chunks),
+            "--chunk-output-tokens",
+            str(args.chunk_output_tokens),
             "--max-parallel",
             str(args.max_parallel),
+            "--output",
+            args.output,
             *common,
         ]
         if args.min_successes is not None:
@@ -2594,8 +3083,16 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             str(args.judge_output_tokens),
             "--max-synthesis-chars",
             str(args.max_synthesis_chars),
+            "--chunked",
+            args.chunked,
+            "--max-review-chunks",
+            str(args.max_review_chunks),
+            "--chunk-output-tokens",
+            str(args.chunk_output_tokens),
             "--max-parallel",
             str(args.max_parallel),
+            "--output",
+            args.output,
             *common,
             "--prompt",
             "Assess merge readiness. Focus on concrete blockers, install/use regressions, missing tests, "
@@ -2604,6 +3101,40 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         if args.min_successes is not None:
             argv.extend(["--min-successes", str(args.min_successes)])
         for role in args.role or ["correctness", "security", "tests", "install", "release"]:
+            argv.extend(["--role", role])
+        for model in args.model or []:
+            argv.extend(["--model", model])
+    elif args.name == "security-review":
+        scope = workflow_scope(args, default="staged")
+        argv = [
+            "panel",
+            "--mode",
+            "review",
+            "--scope",
+            scope,
+            "--judge",
+            args.judge,
+            "--judge-output-tokens",
+            str(args.judge_output_tokens),
+            "--max-synthesis-chars",
+            str(args.max_synthesis_chars),
+            "--chunked",
+            args.chunked,
+            "--max-review-chunks",
+            str(args.max_review_chunks),
+            "--chunk-output-tokens",
+            str(args.chunk_output_tokens),
+            "--max-parallel",
+            str(args.max_parallel),
+            "--output",
+            args.output,
+            *common,
+            "--prompt",
+            "Run a security-focused review. Prioritize prompt-injection surfaces, secret handling, authorization and trust boundaries, dependency/config exposure, and concrete local verification steps.",
+        ]
+        if args.min_successes is not None:
+            argv.extend(["--min-successes", str(args.min_successes)])
+        for role in args.role or ["injection", "secrets-handling", "authz", "dependency-surface"]:
             argv.extend(["--role", role])
         for model in args.model or []:
             argv.extend(["--model", model])
@@ -2630,34 +3161,81 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             str(args.max_synthesis_chars),
             "--max-parallel",
             str(args.max_parallel),
+            "--output",
+            args.output,
             *common,
         ]
         if args.min_successes is not None:
             argv.extend(["--min-successes", str(args.min_successes)])
         for model in args.model or ["sonnet", "opus"]:
             argv.extend(["--model", model])
+    elif args.name == "debug-consensus":
+        if (
+            args.base
+            or args.changed_files_range
+            or args.file
+            or args.files_from
+            or workflow_scope(args, default="none") != "none"
+        ):
+            raise AntiError(
+                "workflow debug-consensus is prompt-only; omit --scope/--base/--changed-files/--file/--files-from"
+            )
+        argv = [
+            "panel",
+            "--mode",
+            "ask",
+            "--judge",
+            args.judge,
+            "--judge-output-tokens",
+            str(args.judge_output_tokens),
+            "--max-synthesis-chars",
+            str(args.max_synthesis_chars),
+            "--max-parallel",
+            str(args.max_parallel),
+            "--output",
+            args.output,
+            *common,
+            "--prompt",
+            (
+                "Produce a debug consensus: ranked hypotheses, the evidence that would distinguish them, "
+                "the cheapest discriminating tests to run first, and what would falsify the leading theory.\n\n"
+                + (args.prompt or " ".join(args.prompt_parts or []).strip())
+            ).strip(),
+        ]
+        if args.min_successes is not None:
+            argv.extend(["--min-successes", str(args.min_successes)])
+        for role in args.role or ["root-cause", "regression-risk", "discriminating-tests"]:
+            argv.extend(["--role", role])
+        for model in args.model or ["sonnet", "opus"]:
+            argv.extend(["--model", model])
     else:
         raise AntiError(f"unknown workflow: {args.name}")
 
-    if args.name in {"review-ready", "ship-gate"}:
+    if args.name in {"review-ready", "ship-gate", "security-review"}:
         append_if_present(argv, "--base", args.base)
         append_if_present(argv, "--changed-files", args.changed_files_range)
         append_each(argv, "--file", args.file)
         append_each(argv, "--files-from", args.files_from)
     elif args.name == "plan-deep":
         append_each(argv, "--file", args.file)
-    append_if_present(argv, "--prompt-file", args.prompt_file)
+    if args.name != "debug-consensus":
+        append_if_present(argv, "--prompt-file", args.prompt_file)
     prompt = args.prompt or " ".join(args.prompt_parts or []).strip()
-    if args.name in {"plan-deep", "provider-compare"} and not prompt and not args.prompt_file:
+    if args.name in {"plan-deep", "provider-compare", "debug-consensus"} and not prompt and not args.prompt_file:
         if args.name == "plan-deep":
             prompt = (
                 "Create a decision-complete autonomous implementation plan for the current Codex task. "
                 "Include phases, risks, validation commands, fallback choices, and non-claims."
             )
-        else:
+        elif args.name == "provider-compare":
             raise AntiError("provider-compare requires --prompt, --prompt-file, or positional prompt text")
-    if prompt:
+        else:
+            raise AntiError("debug-consensus requires --prompt, --prompt-file, or positional prompt text")
+    if prompt and args.name != "debug-consensus":
         argv.extend(["--prompt", prompt])
+    elif args.prompt_file and args.name == "debug-consensus":
+        append_if_present(argv, "--prompt-file", args.prompt_file)
+        return argv
     return argv
 
 
@@ -2846,9 +3424,18 @@ def build_parser() -> argparse.ArgumentParser:
     panel.add_argument("--judge-output-tokens", type=positive_int, default=4096, help="Max output tokens for judge synthesis")
     panel.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS)
     panel.add_argument("--max-synthesis-chars", type=int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
+    panel.add_argument(
+        "--chunked",
+        choices=["auto", "always", "off"],
+        default="auto",
+        help="Summarize broad review scopes before panel fan-out when needed",
+    )
+    panel.add_argument("--max-review-chunks", type=positive_int, default=8, help="Maximum chunk calls before panel fan-out")
+    panel.add_argument("--chunk-output-tokens", type=positive_int, default=2048, help="Max output tokens per review chunk")
     panel.add_argument("--min-successes", type=positive_int, help="Minimum successful panel model calls before judging")
     panel.add_argument("--max-parallel", type=positive_int, default=3, help="Maximum concurrent panel model calls")
     panel.add_argument("--retry", type=int, default=1, help="Retry transient gateway/backend failures")
+    panel.add_argument("--output", choices=sorted(PANEL_OUTPUT_MODES), default="prose", help="Render prose or findings JSON")
     panel.add_argument("--json", action="store_true", help="Emit structured JSON output")
     panel.add_argument("--print-prompt", action="store_true", help="Print assembled source prompt without contacting gateway")
     panel.add_argument("prompt_parts", nargs="*", help="Positional ask/planning prompt text")
@@ -2924,7 +3511,10 @@ def build_parser() -> argparse.ArgumentParser:
     workflow = sub.add_parser("workflow", help="Run a named V2 Anti workflow preset")
     add_gateway_args(workflow, default_timeout=120.0)
     add_generation_control_args(workflow, default_save_output="summary")
-    workflow.add_argument("name", choices=["review-ready", "plan-deep", "ship-gate", "provider-compare"])
+    workflow.add_argument(
+        "name",
+        choices=["review-ready", "plan-deep", "ship-gate", "provider-compare", "security-review", "debug-consensus"],
+    )
     workflow.add_argument("--model", action="append", help="Model alias/id for the workflow; repeatable for panels")
     workflow.add_argument("--judge", default="opus")
     workflow.add_argument("--role", action="append")
@@ -2948,8 +3538,10 @@ def build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--max-parallel", type=positive_int, default=3)
     workflow.add_argument("--retry", type=int, default=1)
     workflow.add_argument("--chunked", choices=["auto", "always", "off"], default="auto")
+    workflow.add_argument("--max-review-chunks", type=positive_int, default=8)
     workflow.add_argument("--max-plan-chunks", type=positive_int, default=6)
     workflow.add_argument("--chunk-output-tokens", type=positive_int, default=2048)
+    workflow.add_argument("--output", choices=sorted(PANEL_OUTPUT_MODES), default="prose")
     workflow.add_argument("--json", action="store_true")
     workflow.add_argument("--print-prompt", action="store_true")
     workflow.add_argument("prompt_parts", nargs="*")
