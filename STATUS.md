@@ -121,14 +121,14 @@
 - `doctor --live` and `setup --check --live` are explicit opt-in checks because they spend a real Google provider request.
 - `previous_response_id` is rejected by design in this stateless gateway; replay the full conversation, including tool calls and outputs, in `input`.
 - `/v1/responses/compact` is not implemented.
-- CI includes unit/compile checks, a release-artifact smoke job, and Windows Python 3.12 coverage. PR #9 head `81f555b`, merge commit `8df3f18`, and tag `v1.5.0` all passed CI.
+- CI includes unit/compile checks, a release-artifact smoke job, and Windows Python 3.12 coverage. PR #10 head `e686d7b`, merge commit `b7a1464`, and tag `v1.6.0` all passed CI.
 - Live backend availability is covered only by the credentialed smoke runs noted above.
 - Helper-level MoA/Fusion remains advisory; virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not implemented.
 
 ## Release State
-- Current package metadata: `1.6.0` on the MoA/Fusion VNext PR branch.
-- Latest tagged GitHub release before this PR: [v1.5.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.5.0)
-- PyPI Trusted Publishing run `28773295151` published `codex-antigravity-auth==1.5.0`; post-publish `pip install codex-antigravity-auth==1.5.0` and throwaway `uv tool install codex-antigravity-auth==1.5.0` smokes passed.
+- Current package metadata: `1.6.1` on the service status reachability hotfix branch.
+- Latest tagged GitHub release before this PR: [v1.6.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.6.0)
+- PyPI Trusted Publishing run `28825801600` published `codex-antigravity-auth==1.6.0`; post-publish `pip install codex-antigravity-auth==1.6.0` and throwaway `uv tool install codex-antigravity-auth==1.6.0` smokes passed.
 
 ## Next Priorities
 1. Add `/v1/responses/compact` support

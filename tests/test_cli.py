@@ -42,6 +42,7 @@ from codex_antigravity_auth.cli import (
     run_install_skill,
     run_login,
     run_local_oauth_flow,
+    run_service_command,
     run_setup,
     run_setup_v2,
     run_setup_google,
@@ -2559,6 +2560,45 @@ class TestVNextPolishCli(unittest.TestCase):
 
         printed = "\n".join(call.args[0] for call in mock_print.call_args_list if call.args)
         self.assertIn("service uninstall --port 51122", printed)
+
+    def test_service_status_prints_reachable_gateway_when_service_has_no_pid_file(self):
+        gateway = {
+            "port": 51122,
+            "status": "stopped",
+            "running": False,
+            "pid": None,
+            "pid_file": "/tmp/antigravity-gateway-51122.pid",
+            "log_file": "/tmp/antigravity-gateway-51122.log",
+            "process_running": False,
+            "process_matches": None,
+        }
+        service = {
+            "platform": "macos",
+            "installed": True,
+            "active": True,
+            "path": "/Users/reidar/Library/LaunchAgents/com.codex-antigravity.gateway.51122.plist",
+        }
+
+        def mark_reachable(info):
+            info.update(
+                {
+                    "status": "unmanaged",
+                    "reachable": True,
+                    "reachable_base_url": "http://127.0.0.1:51122/v1",
+                    "reachable_model_count": 7,
+                }
+            )
+
+        with patch("codex_antigravity_auth.cli.service_status", return_value=service):
+            with patch("codex_antigravity_auth.cli.gateway_status_info", return_value=gateway):
+                with patch("codex_antigravity_auth.cli.add_gateway_reachability", side_effect=mark_reachable):
+                    with patch("builtins.print") as mock_print:
+                        result = run_service_command(Namespace(service_command="status", port=51122, json=False))
+
+        self.assertTrue(result["gateway"]["reachable"])
+        printed = "\n".join(call.args[0] for call in mock_print.call_args_list if call.args)
+        self.assertIn("Service status: installed, active", printed)
+        self.assertIn("Gateway process: reachable (7 model(s) at http://127.0.0.1:51122/v1)", printed)
 
     def test_service_status_uses_platform_specific_probe(self):
         with patch("codex_antigravity_auth.service._run") as mock_run:
