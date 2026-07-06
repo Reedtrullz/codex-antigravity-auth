@@ -2,6 +2,7 @@ import json
 import asyncio
 import time
 import unittest
+import warnings
 from unittest.mock import MagicMock, patch
 import urllib.error
 
@@ -10,7 +11,14 @@ from fastapi.testclient import TestClient
 
 from codex_antigravity_auth.accounts import AccountManager
 from codex_antigravity_auth.cli import run_doctor
-from codex_antigravity_auth.models import NativeModel, add_model_overlay, resolve_backend_model
+from codex_antigravity_auth.models import (
+    NativeModel,
+    add_model_overlay,
+    canonical_model_id,
+    native_model_catalog,
+    parse_model_overlay_toml,
+    resolve_backend_model,
+)
 from codex_antigravity_auth.oauth import (
     OAUTH_HTTP_TIMEOUT_SECONDS,
     _pkce_verifier_store,
@@ -78,7 +86,7 @@ class TestRegressionFixes(unittest.TestCase):
                 add_model_overlay(
                     NativeModel(
                         id="claude-overlay",
-                        backend_id="claude-sonnet-4-6",
+                        backend_id="claude-overlay-backend",
                         display_name="Claude Overlay",
                         context_window=200000,
                         family="claude",
@@ -90,6 +98,91 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         model_ids = {model["id"] for model in response.json()["data"]}
         self.assertIn("claude-overlay", model_ids)
+
+    def test_malformed_model_overlay_fails_soft_for_runtime_catalog(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            overlay_path = Path(tmp) / "antigravity-models.toml"
+            overlay_path.write_text("not valid before table\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.models.MODEL_OVERLAY_FILE", str(overlay_path)):
+                with warnings.catch_warnings(record=True) as captured:
+                    warnings.simplefilter("always")
+                    catalog = native_model_catalog()
+                    resolved = canonical_model_id("sonnet")
+                    with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
+                        response = TestClient(app).get("/v1/models")
+
+        self.assertEqual(resolved, "claude-3.5-sonnet")
+        self.assertIn("claude-3.5-sonnet", {model["id"] for model in catalog})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("claude-3.5-sonnet", {model["id"] for model in response.json()["data"]})
+        self.assertTrue(any("Ignoring invalid Codex Antigravity model overlay" in str(item.message) for item in captured))
+
+    def test_model_overlay_toml_preserves_quoted_hash_values(self):
+        text = "\n".join(
+            [
+                "[[models]]",
+                'id = "claude-extra"',
+                'backend_id = "claude-extra-backend"',
+                'display_name = "Foo # Bar"',
+                'family = "claude"',
+                "context_window = 200000",
+                'aliases = ["foo-hash"]',
+                "",
+            ]
+        )
+
+        parsed = parse_model_overlay_toml(text)
+        self.assertEqual(parsed[0].display_name, "Foo # Bar")
+
+        with patch("codex_antigravity_auth.models.tomllib", None):
+            fallback_parsed = parse_model_overlay_toml(text)
+
+        self.assertEqual(fallback_parsed[0].display_name, "Foo # Bar")
+
+    def test_responses_endpoint_schedules_refresh_ahead_without_blocking_route(self):
+        with patch("codex_antigravity_auth.server.schedule_refresh_accounts_ahead", return_value=True) as mock_schedule:
+            with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
+                response = TestClient(app).post(
+                    "/v1/responses",
+                    json={"model": "custom:anything", "input": "hello"},
+                )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(any(not call.args and not call.kwargs for call in mock_schedule.call_args_list))
+
+    def test_byok_stream_writes_terminal_request_log_record(self):
+        provider = {
+            "id": "mock",
+            "displayName": "Mock Provider",
+            "kind": "openai_chat",
+            "baseUrl": "https://example.invalid/v1",
+            "apiKey": "secret",
+            "models": ["model"],
+        }
+        records = []
+
+        async def fake_sse_generator(*args, **kwargs):
+            yield (
+                'data: {"type":"response.completed","response":{"usage":'
+                '{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'
+            )
+            yield "data: [DONE]\n\n"
+
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"mock": provider}):
+            with patch("codex_antigravity_auth.server.openai_compatible_sse_generator", new=fake_sse_generator):
+                with patch("codex_antigravity_auth.server.write_request_record", side_effect=records.append):
+                    response = TestClient(app).post(
+                        "/v1/responses",
+                        json={"model": "mock:model", "input": "hello", "stream": True},
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("response.completed", response.text)
+        self.assertEqual([record["status"] for record in records], ["stream_started", "success"])
+        self.assertEqual(records[-1]["usage"], {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3})
 
     def test_hyphenated_codex_model_slug_resolves(self):
         self.assertEqual(resolve_backend_model("gemini-3-5-flash-high"), "gemini-3-flash-agent")

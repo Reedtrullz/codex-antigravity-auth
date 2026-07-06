@@ -72,7 +72,10 @@ def render_macos_launch_agent(port: int, host: str) -> str:
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
   <key>StandardOutPath</key>
   <string>{_xml_escape(str(stdout))}</string>
   <key>StandardErrorPath</key>

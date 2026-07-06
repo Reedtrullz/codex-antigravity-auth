@@ -5,8 +5,15 @@ import ast
 import json
 import os
 import re
+import threading
+import warnings
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
+    tomllib = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +86,11 @@ MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 MODEL_FAMILY_VALUES = {"claude", "gemini"}
 REASONING_LEVEL_VALUES = {"low", "medium", "high", "xhigh"}
 MODEL_OVERLAY_FILE = "~/.codex/antigravity-models.toml"
+_OVERLAY_CACHE_LOCK = threading.RLock()
+_OVERLAY_CACHE_KEY: tuple[str, int, int] | None = None
+_OVERLAY_CACHE_MODELS: tuple[NativeModel, ...] = ()
+_OVERLAY_CACHE_ERROR: ValueError | None = None
+_OVERLAY_CACHE_WARNED_KEY: tuple[str, int, int] | None = None
 
 
 def _slug_variants(value: str) -> set[str]:
@@ -158,6 +170,26 @@ def validate_overlay_model(data: dict[str, Any]) -> NativeModel:
     )
 
 
+def _strip_toml_comment(value: str) -> str:
+    quote = ""
+    escaped = False
+    for index, char in enumerate(value):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote == '"':
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char == "#":
+            return value[:index].rstrip()
+    return value.strip()
+
+
 def _parse_toml_scalar(value: str) -> Any:
     value = value.strip()
     if value.lower() == "true":
@@ -184,6 +216,20 @@ def _parse_toml_scalar(value: str) -> Any:
 
 
 def parse_model_overlay_toml(text: str) -> list[NativeModel]:
+    if tomllib is not None:
+        try:
+            parsed = tomllib.loads(text)
+        except Exception as exc:
+            raise ValueError(f"Invalid model overlay TOML: {exc}") from exc
+        entries = parsed.get("models", [])
+        if entries in (None, ""):
+            return []
+        if not isinstance(entries, list):
+            raise ValueError("model overlay must define [[models]] tables")
+        if not all(isinstance(entry, dict) for entry in entries):
+            raise ValueError("model overlay entries must be tables")
+        return [validate_overlay_model(entry) for entry in entries]
+
     entries: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
@@ -199,7 +245,7 @@ def parse_model_overlay_toml(text: str) -> list[NativeModel]:
         if "=" not in line:
             raise ValueError(f"Invalid model overlay line {line_number}")
         key, raw_value = line.split("=", 1)
-        current[key.strip()] = _parse_toml_scalar(raw_value.split(" #", 1)[0].strip())
+        current[key.strip()] = _parse_toml_scalar(_strip_toml_comment(raw_value))
     return [validate_overlay_model(entry) for entry in entries]
 
 
@@ -227,13 +273,74 @@ def render_model_overlay_toml(models: list[NativeModel]) -> str:
     return "\n".join(lines)
 
 
-def load_model_overlays() -> list[NativeModel]:
-    path = model_overlay_path()
-    if not path.is_file():
-        return []
+def _overlay_cache_key(path: Path) -> tuple[str, int, int]:
+    if not path.exists():
+        return (str(path), 0, 0)
     if path.is_symlink():
         raise ValueError(f"Refusing to use symlinked model overlay file: {path}")
-    return parse_model_overlay_toml(path.read_text(encoding="utf-8"))
+    if not path.is_file():
+        raise ValueError(f"Refusing to use non-file model overlay path: {path}")
+    stat_result = path.stat()
+    return (str(path), int(stat_result.st_mtime_ns), int(stat_result.st_size))
+
+
+def _warn_overlay_error_once(cache_key: tuple[str, int, int], error: ValueError) -> None:
+    global _OVERLAY_CACHE_WARNED_KEY
+    if _OVERLAY_CACHE_WARNED_KEY == cache_key:
+        return
+    _OVERLAY_CACHE_WARNED_KEY = cache_key
+    warnings.warn(
+        f"Ignoring invalid Codex Antigravity model overlay; built-in models remain available: {error}",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
+def invalidate_model_overlay_cache() -> None:
+    global _OVERLAY_CACHE_KEY, _OVERLAY_CACHE_MODELS, _OVERLAY_CACHE_ERROR, _OVERLAY_CACHE_WARNED_KEY
+    with _OVERLAY_CACHE_LOCK:
+        _OVERLAY_CACHE_KEY = None
+        _OVERLAY_CACHE_MODELS = ()
+        _OVERLAY_CACHE_ERROR = None
+        _OVERLAY_CACHE_WARNED_KEY = None
+
+
+def load_model_overlays(*, strict: bool = True) -> list[NativeModel]:
+    path = model_overlay_path()
+    with _OVERLAY_CACHE_LOCK:
+        try:
+            cache_key = _overlay_cache_key(path)
+        except ValueError as exc:
+            if strict:
+                raise
+            cache_key = (str(path), -1, -1)
+            _warn_overlay_error_once(cache_key, exc)
+            return []
+        global _OVERLAY_CACHE_KEY, _OVERLAY_CACHE_MODELS, _OVERLAY_CACHE_ERROR
+        if _OVERLAY_CACHE_KEY == cache_key:
+            if _OVERLAY_CACHE_ERROR is not None:
+                if strict:
+                    raise ValueError(str(_OVERLAY_CACHE_ERROR))
+                _warn_overlay_error_once(cache_key, _OVERLAY_CACHE_ERROR)
+                return []
+            return list(_OVERLAY_CACHE_MODELS)
+
+        error: ValueError | None = None
+        models: tuple[NativeModel, ...] = ()
+        if cache_key[1] != 0 or cache_key[2] != 0:
+            try:
+                models = tuple(parse_model_overlay_toml(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError) as exc:
+                error = ValueError(str(exc))
+        _OVERLAY_CACHE_KEY = cache_key
+        _OVERLAY_CACHE_MODELS = models
+        _OVERLAY_CACHE_ERROR = error
+        if error is not None:
+            if strict:
+                raise ValueError(str(error))
+            _warn_overlay_error_once(cache_key, error)
+            return []
+        return list(models)
 
 
 def save_model_overlays(models: list[NativeModel]) -> None:
@@ -243,26 +350,27 @@ def save_model_overlays(models: list[NativeModel]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_model_overlay_toml(models), encoding="utf-8")
     os.chmod(path, 0o600)
+    invalidate_model_overlay_cache()
 
 
-def all_native_models(*, include_overlays: bool = True) -> tuple[NativeModel, ...]:
+def all_native_models(*, include_overlays: bool = True, strict_overlays: bool = False) -> tuple[NativeModel, ...]:
     model_order = [model.id for model in NATIVE_MODELS]
     models_by_id = {model.id: model for model in NATIVE_MODELS}
     if include_overlays:
-        for model in load_model_overlays():
+        for model in load_model_overlays(strict=strict_overlays):
             if model.id not in models_by_id:
                 model_order.append(model.id)
             models_by_id[model.id] = model
     return tuple(models_by_id[model_id] for model_id in model_order)
 
 
-def _alias_map(*, include_overlays: bool = True) -> dict[str, str]:
+def _alias_map(*, include_overlays: bool = True, strict_overlays: bool = False) -> dict[str, str]:
     alias_map: dict[str, str] = {}
-    for native_model in all_native_models(include_overlays=include_overlays):
-        alias_map[native_model.id.lower()] = native_model.id
-        alias_map[native_model.backend_id.lower()] = native_model.id
+    for native_model in all_native_models(include_overlays=include_overlays, strict_overlays=strict_overlays):
+        alias_map.setdefault(native_model.id.lower(), native_model.id)
+        alias_map.setdefault(native_model.backend_id.lower(), native_model.id)
         for alias in native_model.aliases:
-            alias_map[alias.lower()] = native_model.id
+            alias_map.setdefault(alias.lower(), native_model.id)
     return alias_map
 
 
@@ -296,7 +404,7 @@ def native_model_family(model: str) -> str:
     return "claude" if "claude" in str(model).lower() else "gemini"
 
 
-def native_model_catalog() -> list[dict[str, Any]]:
+def native_model_catalog(*, strict_overlays: bool = False) -> list[dict[str, Any]]:
     return [
         {
             "id": model.id,
@@ -308,8 +416,32 @@ def native_model_catalog() -> list[dict[str, Any]]:
             "supports_parallel_tool_calls": model.supports_parallel_tool_calls,
             "aliases": list(model.aliases),
         }
-        for model in all_native_models()
+        for model in all_native_models(strict_overlays=strict_overlays)
     ]
+
+
+def model_identifier_collisions(
+    model: NativeModel,
+    existing_models: tuple[NativeModel, ...],
+    *,
+    allow_same_id_shadow: bool = False,
+) -> dict[str, str]:
+    identifiers: dict[str, str] = {}
+    for existing in existing_models:
+        if allow_same_id_shadow and existing.id.lower() == model.id.lower():
+            continue
+        for value in (existing.id, existing.backend_id, *existing.aliases):
+            identifiers.setdefault(value.lower(), existing.id)
+    collisions: dict[str, str] = {}
+    for label, value in (
+        ("id", model.id),
+        ("backend_id", model.backend_id),
+        *((f"alias:{alias}", alias) for alias in model.aliases),
+    ):
+        owner = identifiers.get(value.lower())
+        if owner:
+            collisions[label] = owner
+    return collisions
 
 
 def resolve_backend_model(model: str) -> str:
@@ -333,7 +465,15 @@ def resolve_backend_model(model: str) -> str:
 def add_model_overlay(model: NativeModel, *, force: bool = False) -> list[NativeModel]:
     if not force and model.id in NATIVE_MODEL_BY_ID:
         raise ValueError(f"{model.id} is a built-in model; pass --force to shadow it in the overlay file")
-    overlays = [existing for existing in load_model_overlays() if existing.id != model.id]
+    overlays = [existing for existing in load_model_overlays(strict=True) if existing.id != model.id]
+    collisions = model_identifier_collisions(
+        model,
+        tuple(NATIVE_MODELS) + tuple(overlays),
+        allow_same_id_shadow=force and model.id in NATIVE_MODEL_BY_ID,
+    )
+    if collisions and not force:
+        formatted = ", ".join(f"{label} -> {owner}" for label, owner in sorted(collisions.items()))
+        raise ValueError(f"model identifiers shadow existing model identifiers; pass --force to allow: {formatted}")
     overlays.append(model)
     save_model_overlays(overlays)
     return overlays
@@ -341,7 +481,7 @@ def add_model_overlay(model: NativeModel, *, force: bool = False) -> list[Native
 
 def remove_model_overlay(model_id: str) -> bool:
     canonical = validate_model_id(model_id)
-    overlays = load_model_overlays()
+    overlays = load_model_overlays(strict=True)
     kept = [model for model in overlays if model.id != canonical]
     if len(kept) == len(overlays):
         return False

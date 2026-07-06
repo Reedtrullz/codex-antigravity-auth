@@ -310,15 +310,6 @@ class AccountManager:
             if not email:
                 return
             cooldown_duration = self._record_failure(email, retry_after_seconds)
-            if model:
-                self._record_request_locked(
-                    email,
-                    model,
-                    status="failure",
-                    status_code=status_code,
-                    error_class=reason.split(":", 1)[0][:64] if reason else "failure",
-                    persist=False,
-                )
             self._save_state_to_storage()
             
             # Print warning

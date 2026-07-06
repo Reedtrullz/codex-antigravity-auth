@@ -82,6 +82,13 @@ class TestAccounts(unittest.TestCase):
                     model="claude-3.5-sonnet",
                     status_code=429,
                 )
+                manager.record_request(
+                    "primary@gmail.com",
+                    "claude-3.5-sonnet",
+                    status="failure",
+                    status_code=429,
+                    error_class="rate_limited",
+                )
 
         counter = self.accounts_data["accountState"]["counters"]["primary@gmail.com"]["claude"]
         self.assertEqual(counter["total_requests"], 2)

@@ -197,7 +197,7 @@ Built-in Claude/Gemini model definitions remain authoritative, but you can add l
 ```bash
 codex-antigravity models list
 codex-antigravity models add claude-experimental \
-  --backend-id claude-sonnet-4-6 \
+  --backend-id claude-experimental-backend \
   --display-name "Claude Experimental" \
   --family claude \
   --context-window 200000 \
@@ -207,7 +207,7 @@ codex-antigravity models doctor
 codex-antigravity models remove claude-experimental
 ```
 
-Overlay ids must be simple printable model ids, cannot shadow built-ins unless `--force` is explicit, and only appear in Codex's picker when the gateway advertises them through `/v1/models`. Unknown direct Google model ids can still pass through, but picker visibility requires a built-in or overlay definition.
+Overlay ids must be simple printable model ids, cannot shadow built-in ids, backend ids, or aliases unless `--force` is explicit, and only appear in Codex's picker when the gateway advertises them through `/v1/models`. Runtime catalog loads fail soft to built-ins if the local overlay TOML is malformed; `models list` and `models doctor` stay strict so you can find and repair the overlay. Unknown direct Google model ids can still pass through, but picker visibility requires a built-in or overlay definition.
 
 ### BYOK providers
 

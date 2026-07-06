@@ -56,7 +56,7 @@ To expose a local model definition in Codex's model picker, add an overlay entry
 ```bash
 codex-antigravity models list
 codex-antigravity models add claude-experimental \
-  --backend-id claude-sonnet-4-6 \
+  --backend-id claude-experimental-backend \
   --display-name "Claude Experimental" \
   --family claude \
   --context-window 200000 \
@@ -64,7 +64,7 @@ codex-antigravity models add claude-experimental \
 codex-antigravity models doctor
 ```
 
-Overlays are stored in `~/.codex/antigravity-models.toml`. Built-ins are still the source of truth; overlay ids cannot collide with built-ins unless `--force` is passed.
+Overlays are stored in `~/.codex/antigravity-models.toml`. Built-ins are still the source of truth; overlay ids, backend ids, and aliases cannot collide with built-ins unless `--force` is passed. Runtime requests and `/v1/models` fall back to built-ins if the overlay file is malformed; use strict `models list` or `models doctor` to repair it.
 
 `install-skill` installs the bundled Codex `$anti` helper skill into `~/.codex/skills/anti`. Use it after native Claude is working in Codex when you want chat prompts such as `$anti review this diff with opus`, `$anti plan --scope staged`, `$anti panel --mode review --scope staged`, or `$anti smoke` to route through the repo-shipped helper. Existing local `anti` skills are left untouched unless `--force` is passed, and forced installs create a timestamped backup under a sibling `skills-backups` directory so backups do not show up as extra personal skills.
 

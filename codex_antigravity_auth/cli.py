@@ -32,12 +32,13 @@ from .byok import (
     validate_provider_api_key,
     validate_provider_id,
 )
-from .accounts import AccountManager
 from .models import (
     DEFAULT_CODEX_MODEL_ID,
+    NATIVE_MODELS,
     add_model_overlay,
     canonical_model_id,
     load_model_overlays,
+    model_identifier_collisions,
     native_model_definition,
     native_model_family,
     native_model_catalog,
@@ -425,6 +426,22 @@ def gateway_runtime_paths(port: int) -> tuple[Path, Path]:
 def process_is_running(pid: int) -> bool:
     if pid <= 0:
         return False
+    if sys.platform == "win32":
+        try:
+            proc = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {int(pid)}", "/FO", "CSV", "/NH"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=2.0,
+                check=False,
+            )
+        except Exception:
+            return False
+        if proc.returncode != 0:
+            return False
+        output = proc.stdout.strip()
+        return bool(output and "no tasks" not in output.lower() and str(int(pid)) in output)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -528,16 +545,9 @@ def gateway_status_info(port: int) -> dict:
 
 
 def run_gateway_status(args) -> dict:
-    refresh_summary = None
-    if not os.environ.get("PYTEST_CURRENT_TEST"):
-        try:
-            refresh_summary = AccountManager().refresh_expiring_accounts(window_seconds=300)
-        except Exception:
-            refresh_summary = {"checked": 0, "refreshed": 0, "failed": 0, "error": "refresh-ahead unavailable"}
     info = gateway_status_info(args.port)
     info["service"] = service_status(args.port)
     info["request_log"] = request_log_info()
-    info["refresh_ahead"] = refresh_summary
     if getattr(args, "json", False):
         print(json.dumps(info, indent=2))
     else:
@@ -556,13 +566,6 @@ def run_gateway_status(args) -> dict:
         if service_path:
             print(f"  service_ref: {service_path}")
         print(f"  request_log: {info['request_log']['path']}")
-        if refresh_summary:
-            print(
-                "  refresh_ahead: "
-                f"checked={refresh_summary.get('checked', 0)}, "
-                f"refreshed={refresh_summary.get('refreshed', 0)}, "
-                f"failed={refresh_summary.get('failed', 0)}"
-            )
     return info
 
 
@@ -648,8 +651,8 @@ def run_logs_command(args) -> None:
 def run_models_command(args) -> None:
     if args.models_command == "list":
         try:
-            overlays = load_model_overlays()
-            catalog = native_model_catalog()
+            overlays = load_model_overlays(strict=True)
+            catalog = native_model_catalog(strict_overlays=True)
         except ValueError as exc:
             raise SystemExit(redact_secret_text(str(exc))) from exc
         if getattr(args, "json", False):
@@ -691,16 +694,32 @@ def run_models_command(args) -> None:
 
         ok = True
         try:
-            overlays = load_model_overlays()
+            overlays = load_model_overlays(strict=True)
         except ValueError as exc:
             ok = False
             overlays = []
             print(f"[FAIL] Model overlay: {redact_secret_text(str(exc))}")
         else:
             print(f"[PASS] Model overlay: {len(overlays)} local model(s)")
+            seen_models = list(NATIVE_MODELS)
+            for overlay in overlays:
+                collisions = model_identifier_collisions(
+                    overlay,
+                    tuple(seen_models),
+                    allow_same_id_shadow=any(existing.id == overlay.id for existing in NATIVE_MODELS),
+                )
+                if overlay.id in {model.id for model in NATIVE_MODELS}:
+                    print(f"[WARN] {overlay.id}: overlay shadows a built-in model id")
+                if collisions:
+                    ok = False
+                    formatted = ", ".join(
+                        f"{label} -> {owner}" for label, owner in sorted(collisions.items())
+                    )
+                    print(f"[FAIL] {overlay.id}: identifier shadowing detected ({formatted})")
+                seen_models.append(overlay)
         if not ok:
             raise SystemExit(1)
-        for model in native_model_catalog():
+        for model in native_model_catalog(strict_overlays=True):
             definition = native_model_definition(model["id"])
             if not definition:
                 ok = False
@@ -788,6 +807,12 @@ def stop_gateway(args) -> dict:
         if pid_path.exists():
             pid_path.unlink()
         print(f"[*] Gateway is not running on port {args.port}.")
+        service_info = service_status(args.port)
+        if service_info.get("installed"):
+            print(
+                "[*] A durable gateway service is installed. Use "
+                f"`codex-antigravity service uninstall --port {args.port}` to remove it."
+            )
         return gateway_status_info(args.port)
     if info["status"] in {"foreign", "unknown"}:
         raise SystemExit(
@@ -1916,6 +1941,8 @@ def run_setup(args) -> dict:
         raise SystemExit("setup --json is read-only; omit --write or use --check.")
     if getattr(args, "repair", False) and getattr(args, "check", False):
         raise SystemExit("Use either --repair or --check, not both.")
+    if getattr(args, "repair", False) and getattr(args, "write", False):
+        raise SystemExit("Use either --repair or --write, not both.")
     if getattr(args, "repair", False) and getattr(args, "json", False):
         raise SystemExit("setup --repair mutates Codex config; omit --json.")
 
@@ -2518,7 +2545,7 @@ def main():
     )
     models_add.add_argument("--alias", action="append", help="Alias for setup/config input; repeatable")
     models_add.add_argument("--no-parallel-tool-calls", action="store_true", help="Advertise no parallel tool-call support")
-    models_add.add_argument("--force", action="store_true", help="Allow shadowing a built-in id in the overlay file")
+    models_add.add_argument("--force", action="store_true", help="Allow intentional identifier shadowing in the overlay file")
     models_remove = models_sub.add_parser("remove", help="Remove a local model catalog overlay")
     models_remove.add_argument("id")
     models_sub.add_parser("doctor", help="Validate model overlay and runtime definitions")

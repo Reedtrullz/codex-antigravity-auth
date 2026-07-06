@@ -1,7 +1,7 @@
 # Current Integration Status — 6 July 2026
 
 ## Build & Test Health
-- **local pytest**: full local suite passing with `python3 -m pytest -q` (`338` tests plus `131` subtests) ✅
+- **local pytest**: full local suite passing with `python3 -m pytest -q` (`347` tests plus `134` subtests) ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
 - **wheel install smoke**: ran `python3 -m build`, `python3 -m twine check dist/*`, installed the wheel into a clean venv, ran `pip check`, verified console script help plus `service status --json`, `models list --json`, `logs --tail 1 --json`, scratch `setup --check`, and packaged `install-skill --verify` ✅
@@ -96,6 +96,8 @@
 | Sanitized capped request JSONL log with CLI tail/follow/clean | ✅ |
 | Loopback-only `/health` endpoint with anonymous cooldown/request diagnostics | ✅ |
 | Local model catalog overlays via `~/.codex/antigravity-models.toml` | ✅ |
+| Runtime fail-soft fallback for malformed local model overlays | ✅ |
+| Strict model-overlay identifier shadowing checks in `models add` / `models doctor` | ✅ |
 | `setup --repair` Codex config reconciliation without OAuth/skill/gateway mutation | ✅ |
 | Persisted per-account usage/failure/429 counters by model family | ✅ |
 | Claude reasoning-effort audit in `models doctor` | ✅ |

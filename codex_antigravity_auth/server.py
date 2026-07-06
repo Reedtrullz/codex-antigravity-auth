@@ -1,4 +1,5 @@
 import json
+import asyncio
 import math
 import os
 import secrets
@@ -43,13 +44,15 @@ from .storage import load_accounts
 
 @asynccontextmanager
 async def gateway_lifespan(_app: FastAPI):
-    await refresh_accounts_ahead_if_due(force=True)
+    schedule_refresh_accounts_ahead(force=True)
     yield
 
 
 app = FastAPI(title="Codex Antigravity Gateway", lifespan=gateway_lifespan)
 account_manager = AccountManager()
 _last_refresh_ahead_at = 0.0
+_refresh_ahead_task: asyncio.Task | None = None
+REFRESH_AHEAD_THROTTLE_SECONDS = 60.0
 STREAM_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 MUTATING_JSON_PATHS = {"/v1/responses"}
 TEST_CLIENT_HOSTS = {"testserver"}
@@ -197,18 +200,27 @@ async def record_account_request(
     )
 
 
-async def refresh_accounts_ahead_if_due(*, force: bool = False) -> None:
-    global _last_refresh_ahead_at
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return
+def schedule_refresh_accounts_ahead(*, force: bool = False) -> bool:
+    global _last_refresh_ahead_at, _refresh_ahead_task
     now = time.monotonic()
-    if not force and now - _last_refresh_ahead_at < 60:
-        return
+    if _refresh_ahead_task is not None and not _refresh_ahead_task.done():
+        return False
+    if not force and now - _last_refresh_ahead_at < REFRESH_AHEAD_THROTTLE_SECONDS:
+        return False
     _last_refresh_ahead_at = now
     try:
-        await run_in_threadpool(account_manager.refresh_expiring_accounts, 300)
-    except Exception:
-        return
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+
+    async def _refresh_runner() -> None:
+        try:
+            await run_in_threadpool(account_manager.refresh_expiring_accounts, 300)
+        except Exception:
+            return
+
+    _refresh_ahead_task = loop.create_task(_refresh_runner())
+    return True
 
 
 def account_health_summary() -> dict:
@@ -905,7 +917,7 @@ async def create_response(request: Request):
     codex_req = validate_response_request_body(codex_req)
 
     reject_unsupported_previous_response(codex_req)
-    await refresh_accounts_ahead_if_due()
+    schedule_refresh_accounts_ahead()
         
     model = response_model_id(codex_req)
     codex_req["model"] = model
@@ -942,8 +954,57 @@ async def create_response(request: Request):
         if stream:
             payload, url, headers, timeout = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=True)
             await log_request("stream_started", model=model, route="byok", provider=provider_id, stream=True)
+
+            async def logged_byok_stream() -> AsyncGenerator[str, None]:
+                terminal_status = "ended"
+                terminal_http_status = None
+                terminal_error_class = None
+                terminal_error = None
+                terminal_usage = None
+                try:
+                    async for chunk in openai_compatible_sse_generator(payload, url, headers, timeout, provider, model):
+                        for line in chunk.splitlines():
+                            if not line.startswith("data: ") or line == "data: [DONE]":
+                                continue
+                            try:
+                                event = json.loads(line[6:])
+                            except json.JSONDecodeError:
+                                continue
+                            event_type = event.get("type")
+                            if event_type == "response.completed":
+                                terminal_status = "success"
+                                terminal_http_status = 200
+                                response_payload = event.get("response", {})
+                                if isinstance(response_payload, dict):
+                                    terminal_usage = response_payload.get("usage")
+                            elif event_type == "response.failed":
+                                terminal_status = "failed"
+                                response_payload = event.get("response", {})
+                                error_payload = response_payload.get("error", {}) if isinstance(response_payload, dict) else {}
+                                if isinstance(error_payload, dict):
+                                    terminal_error_class = error_payload.get("code")
+                                    terminal_error = error_payload.get("message")
+                        yield chunk
+                except Exception as exc:
+                    terminal_status = "failed"
+                    terminal_error_class = "stream_exception"
+                    terminal_error = exc
+                    raise
+                finally:
+                    await log_request(
+                        terminal_status,
+                        model=model,
+                        route="byok",
+                        provider=provider_id,
+                        stream=True,
+                        http_status=terminal_http_status,
+                        usage=terminal_usage,
+                        error_class=terminal_error_class,
+                        error=terminal_error,
+                    )
+
             return StreamingResponse(
-                openai_compatible_sse_generator(payload, url, headers, timeout, provider, model),
+                logged_byok_stream(),
                 media_type="text/event-stream",
             )
         try:
@@ -1124,6 +1185,13 @@ async def create_response(request: Request):
                 model=model,
                 status_code=res.status_code,
             )
+            await record_account_request(
+                response_account.get("email", ""),
+                model,
+                status="failure",
+                status_code=res.status_code,
+                error_class="auth_failure",
+            )
             await log_request(
                 "failed",
                 model=model,
@@ -1156,6 +1224,13 @@ async def create_response(request: Request):
                 retry_after_seconds,
                 model=model,
                 status_code=429,
+            )
+            await record_account_request(
+                response_account.get("email", ""),
+                model,
+                status="failure",
+                status_code=429,
+                error_class="rate_limited",
             )
             await log_request(
                 "failed",
@@ -1225,6 +1300,13 @@ async def create_response(request: Request):
                         f"Backend payload error {code}: {safe_error_detail(message)}",
                         model=model,
                     )
+                await record_account_request(
+                    response_account.get("email", ""),
+                    model,
+                    status="failure",
+                    status_code=status_code_from_backend_error(code, message),
+                    error_class=code,
+                )
                 await log_request(
                     "failed",
                     model=model,
