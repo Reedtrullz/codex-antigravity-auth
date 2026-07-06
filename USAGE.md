@@ -24,6 +24,48 @@ The setup command validates the selected model/provider/base URL, preflights Goo
 
 `configure-codex` validates the Codex model id, provider id, provider name, and gateway base URL before writing. `--write` uses private atomic writes, preserves a symlinked Codex config path by updating its real target, and creates a private timestamped backup before changing an existing Codex config.
 
+Use `setup --repair` when Codex config has drifted and you only want to reconcile the provider block and selected model. It does not run OAuth, install the `$anti` skill, or start/stop the gateway:
+
+```bash
+codex-antigravity setup --repair --config ~/.codex/config.toml --model claude-3.5-sonnet
+```
+
+For durable startup after reboot, install the gateway as a per-user service:
+
+```bash
+codex-antigravity service install --port 51122 --host 127.0.0.1
+codex-antigravity service status --json
+codex-antigravity service uninstall --port 51122
+```
+
+The service command writes a macOS LaunchAgent, Linux systemd user unit, or Windows Scheduled Task depending on the platform. `doctor --codex-ready` and `status --json` report both the lightweight pid-file process state and the durable service state.
+
+Gateway request diagnostics are local and sanitized:
+
+```bash
+codex-antigravity logs --tail 50
+codex-antigravity logs --follow
+codex-antigravity logs clean
+curl http://127.0.0.1:51122/health
+```
+
+The request JSONL log is capped and rotated at `10 MiB`. It records request ids, model route/provider/family, stream mode, status, latency, retry/rotation hints, HTTP status, usage totals, and redacted errors. It does not store raw prompts, request bodies, provider keys, OAuth tokens, account emails, or encrypted stores.
+
+To expose a local model definition in Codex's model picker, add an overlay entry:
+
+```bash
+codex-antigravity models list
+codex-antigravity models add claude-experimental \
+  --backend-id claude-experimental-backend \
+  --display-name "Claude Experimental" \
+  --family claude \
+  --context-window 200000 \
+  --alias claude-exp
+codex-antigravity models doctor
+```
+
+Overlays are stored in `~/.codex/antigravity-models.toml`. Built-ins are still the source of truth; overlay ids, backend ids, and aliases cannot collide with built-ins unless `--force` is passed. Runtime requests and `/v1/models` fall back to built-ins if the overlay file is malformed; use strict `models list` or `models doctor` to repair it.
+
 `install-skill` installs the bundled Codex `$anti` helper skill into `~/.codex/skills/anti`. Use it after native Claude is working in Codex when you want chat prompts such as `$anti review this diff with opus`, `$anti plan --scope staged`, `$anti panel --mode review --scope staged`, or `$anti smoke` to route through the repo-shipped helper. Existing local `anti` skills are left untouched unless `--force` is passed, and forced installs create a timestamped backup under a sibling `skills-backups` directory so backups do not show up as extra personal skills.
 
 For a no-config-mutation V2 readiness check, run:
@@ -101,6 +143,8 @@ Claude-first setup aliases are accepted anywhere the CLI accepts a Codex model i
 | `claude-sonnet` | `claude-3.5-sonnet` |
 | `opus` | `claude-opus-4-6` |
 | `claude-opus` | `claude-opus-4-6` |
+
+`codex-antigravity models doctor` also prints the Claude thinking-budget mapping for `low`, `medium`, `high`, and `xhigh` so advertised reasoning metadata can be compared with runtime request transforms.
 
 ---
 
