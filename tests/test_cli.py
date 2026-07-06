@@ -49,7 +49,7 @@ from codex_antigravity_auth.cli import (
 )
 from codex_antigravity_auth.models import canonical_model_id, native_model_catalog, resolve_backend_model
 from codex_antigravity_auth.observability import iter_request_records, write_request_record
-from codex_antigravity_auth.service import render_linux_systemd_unit, render_macos_launch_agent, service_status
+from codex_antigravity_auth.service import render_linux_systemd_unit, render_macos_launch_agent, service_command, service_status
 
 
 def write_ready_codex_config(
@@ -1604,6 +1604,55 @@ class TestV3NativeSetup(unittest.TestCase):
             self.assertEqual(info["log_file"], str(log_file))
             popen.assert_called_once()
 
+    def test_start_background_wraps_gateway_with_onepassword_env_file(self):
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.poll.return_value = None
+        with TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / "antigravity.env"
+            env_file.write_text("OPENROUTER_API_KEY=op://Private/OpenRouter/sk\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.onepassword.shutil.which", return_value="/usr/local/bin/op"):
+                    with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
+                        with patch("codex_antigravity_auth.cli.process_is_running", return_value=True):
+                            with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=True):
+                                with patch("codex_antigravity_auth.cli.time.sleep"):
+                                    with patch("builtins.print"):
+                                        start_gateway_background(
+                                            Namespace(
+                                                host="127.0.0.1",
+                                                port=51122,
+                                                allow_remote=False,
+                                                op_env_file=str(env_file),
+                                                op_environment=None,
+                                            )
+                                        )
+
+            cmd = popen.call_args.args[0]
+            self.assertEqual(cmd[:4], ["/usr/local/bin/op", "run", "--env-file", str(env_file)])
+            self.assertIn("--", cmd)
+            self.assertIn("uvicorn", cmd)
+            self.assertIn("codex_antigravity_auth.server:app", cmd)
+
+    def test_start_background_rejects_conflicting_onepassword_modes(self):
+        proc = MagicMock()
+        with TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / "antigravity.env"
+            env_file.write_text("OPENROUTER_API_KEY=op://Private/OpenRouter/sk\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
+                    with self.assertRaisesRegex(SystemExit, "Use only one"):
+                        start_gateway_background(
+                            Namespace(
+                                host="127.0.0.1",
+                                port=51122,
+                                allow_remote=False,
+                                op_env_file=str(env_file),
+                                op_environment="abcdefgh",
+                            )
+                        )
+            popen.assert_not_called()
+
 
 class TestProviderCli(unittest.TestCase):
     def test_provider_key_status_validates_keys_without_rendering_secrets(self):
@@ -1955,6 +2004,18 @@ class TestVNextPolishCli(unittest.TestCase):
         self.assertIn("codex_antigravity_auth.cli", macos_plist)
         self.assertIn("Restart=on-failure", linux_unit)
         self.assertIn("codex_antigravity_auth.cli", linux_unit)
+
+    def test_service_command_can_wrap_gateway_with_onepassword_env_file(self):
+        with TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / "antigravity.env"
+            env_file.write_text("OPENROUTER_API_KEY=op://Private/OpenRouter/sk\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.onepassword.shutil.which", return_value="/usr/local/bin/op"):
+                command = service_command(51122, "127.0.0.1", op_env_file=str(env_file))
+
+        self.assertEqual(command[:4], ["/usr/local/bin/op", "run", "--env-file", str(env_file)])
+        self.assertIn("--", command)
+        self.assertIn("codex_antigravity_auth.cli", command)
+        self.assertIn("start", command)
 
     def test_process_is_running_uses_tasklist_on_windows(self):
         proc = MagicMock()

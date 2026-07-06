@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import get_codex_home
+from .onepassword import wrap_with_onepassword
 from .redaction import redact_secret_text
 
 
@@ -35,8 +36,14 @@ def service_log_paths(port: int) -> tuple[Path, Path]:
     return home / f"antigravity-service-{port}.out.log", home / f"antigravity-service-{port}.err.log"
 
 
-def service_command(port: int, host: str) -> list[str]:
-    return [
+def service_command(
+    port: int,
+    host: str,
+    *,
+    op_env_file: str | None = None,
+    op_environment: str | None = None,
+) -> list[str]:
+    command = [
         sys.executable,
         "-m",
         "codex_antigravity_auth.cli",
@@ -46,6 +53,7 @@ def service_command(port: int, host: str) -> list[str]:
         "--host",
         str(host),
     ]
+    return wrap_with_onepassword(command, op_env_file=op_env_file, op_environment=op_environment)
 
 
 def macos_launch_agent_path(port: int) -> Path:
@@ -56,9 +64,18 @@ def linux_systemd_unit_path(port: int) -> Path:
     return Path.home() / ".config" / "systemd" / "user" / f"codex-antigravity-gateway-{int(port)}.service"
 
 
-def render_macos_launch_agent(port: int, host: str) -> str:
+def render_macos_launch_agent(
+    port: int,
+    host: str,
+    *,
+    op_env_file: str | None = None,
+    op_environment: str | None = None,
+) -> str:
     stdout, stderr = service_log_paths(port)
-    args = "\n".join(f"    <string>{_xml_escape(arg)}</string>" for arg in service_command(port, host))
+    args = "\n".join(
+        f"    <string>{_xml_escape(arg)}</string>"
+        for arg in service_command(port, host, op_env_file=op_env_file, op_environment=op_environment)
+    )
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -85,9 +102,18 @@ def render_macos_launch_agent(port: int, host: str) -> str:
 """
 
 
-def render_linux_systemd_unit(port: int, host: str) -> str:
+def render_linux_systemd_unit(
+    port: int,
+    host: str,
+    *,
+    op_env_file: str | None = None,
+    op_environment: str | None = None,
+) -> str:
     stdout, stderr = service_log_paths(port)
-    command = " ".join(shlex.quote(part) for part in service_command(port, host))
+    command = " ".join(
+        shlex.quote(part)
+        for part in service_command(port, host, op_env_file=op_env_file, op_environment=op_environment)
+    )
     return f"""[Unit]
 Description=Codex Antigravity Gateway ({port})
 After=network-online.target
@@ -105,14 +131,24 @@ WantedBy=default.target
 """
 
 
-def install_service(port: int, host: str, *, platform_name: str | None = None) -> dict[str, Any]:
+def install_service(
+    port: int,
+    host: str,
+    *,
+    platform_name: str | None = None,
+    op_env_file: str | None = None,
+    op_environment: str | None = None,
+) -> dict[str, Any]:
     platform_name = platform_name or service_platform()
     if platform_name == "macos":
         path = macos_launch_agent_path(port)
         if path.is_symlink():
             raise RuntimeError(f"Refusing to overwrite symlinked service file: {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render_macos_launch_agent(port, host), encoding="utf-8")
+        path.write_text(
+            render_macos_launch_agent(port, host, op_env_file=op_env_file, op_environment=op_environment),
+            encoding="utf-8",
+        )
         os.chmod(path, 0o600)
         _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(path)], allow_failure=True)
         _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(path)], allow_failure=True)
@@ -123,13 +159,19 @@ def install_service(port: int, host: str, *, platform_name: str | None = None) -
         if path.is_symlink():
             raise RuntimeError(f"Refusing to overwrite symlinked service file: {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render_linux_systemd_unit(port, host), encoding="utf-8")
+        path.write_text(
+            render_linux_systemd_unit(port, host, op_env_file=op_env_file, op_environment=op_environment),
+            encoding="utf-8",
+        )
         os.chmod(path, 0o600)
         _run(["systemctl", "--user", "daemon-reload"], allow_failure=True)
         _run(["systemctl", "--user", "enable", "--now", path.name], allow_failure=True)
         return service_status(port, platform_name=platform_name)
     if platform_name == "windows":
-        command = " ".join(_windows_quote(part) for part in service_command(port, host))
+        command = " ".join(
+            _windows_quote(part)
+            for part in service_command(port, host, op_env_file=op_env_file, op_environment=op_environment)
+        )
         _run(
             [
                 "schtasks",
