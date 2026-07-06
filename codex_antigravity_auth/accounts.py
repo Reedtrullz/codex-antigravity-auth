@@ -206,7 +206,7 @@ class AccountManager:
                     start_index = 0
 
                 current_time = time.time()
-                candidates: list[tuple[int, int, int, dict[str, Any]]] = []
+                candidates: list[tuple[int, int, int, dict[str, Any], bool]] = []
                 for i in range(len(accounts)):
                     idx = (start_index + i) % len(accounts)
                     acc = accounts[idx]
@@ -230,13 +230,26 @@ class AccountManager:
                     if expires_at != acc.get("expiresAt", 0):
                         acc["expiresAt"] = expires_at
                         dirty = True
-                    if not acc.get("accessToken") or expires_at < current_time + 300:
+                    needs_refresh = not acc.get("accessToken") or expires_at < current_time + 300
+
+                    try:
+                        in_flight = int(self._in_flight.get(str(email), 0))
+                    except (TypeError, ValueError):
+                        in_flight = 0
+                    candidates.append((max(0, in_flight), i, idx, acc, needs_refresh))
+
+                for _in_flight, _order, idx, acc, needs_refresh in sorted(candidates, key=lambda item: (item[0], item[1])):
+                    email = acc.get("email")
+                    if not email:
+                        continue
+
+                    if needs_refresh:
                         refresh_tok = acc.get("refreshToken")
                         if refresh_tok:
                             try:
                                 refreshed = refresh_access_token(refresh_tok)
                                 acc["accessToken"] = refreshed["access_token"]
-                                acc["expiresAt"] = current_time + token_expires_in_seconds(refreshed)
+                                acc["expiresAt"] = time.time() + token_expires_in_seconds(refreshed)
                                 if refreshed.get("refresh_token"):
                                     acc["refreshToken"] = refreshed["refresh_token"]
                                 dirty = True
@@ -251,13 +264,6 @@ class AccountManager:
                             dirty = True
                             continue
 
-                    try:
-                        in_flight = int(self._in_flight.get(str(email), 0))
-                    except (TypeError, ValueError):
-                        in_flight = 0
-                    candidates.append((max(0, in_flight), i, idx, acc))
-                if candidates:
-                    _in_flight, _order, idx, acc = min(candidates, key=lambda item: (item[0], item[1]))
                     if family_map.get(family) != idx:
                         dirty = True
                     family_map[family] = idx

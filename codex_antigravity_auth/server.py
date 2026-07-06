@@ -1097,14 +1097,15 @@ async def create_response(request: Request):
     # Handle standard non-streaming response path
     if not stream:
         response_account = account
+        response_attempts = [account]
         rotation_attempted = False
         try:
             res = await request_backend(response_account)
             if not res:
-                await release_account_for_request(response_account.get("email"))
                 new_account = await acquire_active_account_for_request(model)
                 rotation_attempted = True
                 if new_account:
+                    response_attempts.append(new_account)
                     response_account = new_account
                     res = await request_backend(response_account)
 
@@ -1147,10 +1148,10 @@ async def create_response(request: Request):
                     model=model,
                     status_code=res.status_code,
                 )
-                await release_account_for_request(response_account.get("email"))
                 new_account = await acquire_active_account_for_request(model)
                 rotation_attempted = True
                 if new_account:
+                    response_attempts.append(new_account)
                     response_account = new_account
                     res = await request_backend(response_account)
                 if not res:
@@ -1376,7 +1377,8 @@ async def create_response(request: Request):
                 )
                 raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
         finally:
-            await release_account_for_request(response_account.get("email"))
+            for used_account in response_attempts:
+                await release_account_for_request(used_account.get("email"))
 
     # Handle standard SSE streaming response path
     stream_attempts = [account]
@@ -1606,7 +1608,6 @@ async def create_response(request: Request):
             if completed:
                 break
             if stream_retry_requested and attempt_num == 0:
-                await release_account_for_request(stream_account.get("email"))
                 rotated = await acquire_active_account_for_request(model)
                 if rotated and rotated.get("email") != stream_account.get("email"):
                     usage = None
@@ -1615,13 +1616,16 @@ async def create_response(request: Request):
                     attempts.append(rotated)
                     attempt_num += 1
                     continue
+                if rotated:
+                    await release_account_for_request(rotated.get("email"))
             elif attempt_num == 0:
-                await release_account_for_request(stream_account.get("email"))
                 rotated = await acquire_active_account_for_request(model)
                 if rotated and rotated.get("email") != stream_account.get("email"):
                     attempts.append(rotated)
                     attempt_num += 1
                     continue
+                if rotated:
+                    await release_account_for_request(rotated.get("email"))
             break
 
         if not completed:

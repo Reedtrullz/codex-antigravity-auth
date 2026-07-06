@@ -105,6 +105,26 @@ class TestAccounts(unittest.TestCase):
         mock_refresh.assert_called_once_with("ref_1")
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.refresh_access_token")
+    def test_acquire_refreshes_only_selected_candidate(self, mock_refresh, mock_update):
+        for account in self.accounts_data["accounts"]:
+            account["expiresAt"] = time.time() - 10
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+        mock_refresh.return_value = {
+            "access_token": "refreshed_acc_2",
+            "expires_in": 3600,
+        }
+
+        manager = AccountManager()
+        manager._in_flight["primary@gmail.com"] = 5
+        selected = manager.acquire_account("claude-3.5-sonnet")
+
+        self.assertEqual(selected["email"], "secondary@gmail.com")
+        self.assertEqual(selected["accessToken"], "refreshed_acc_2")
+        self.assertEqual(self.accounts_data["accounts"][0]["accessToken"], "acc_1")
+        mock_refresh.assert_called_once_with("ref_2")
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
     def test_request_counters_persist_with_cooldown_state(self, mock_update):
         mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
         with tempfile.TemporaryDirectory() as tmp:
