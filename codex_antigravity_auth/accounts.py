@@ -302,9 +302,6 @@ class AccountManager:
         email: str,
         reason: str,
         retry_after_seconds: float | None = None,
-        *,
-        model: str | None = None,
-        status_code: int | None = None,
     ) -> None:
         with self._lock:
             if not email:
