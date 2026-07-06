@@ -13,6 +13,11 @@ from codex_antigravity_auth.redaction import REDACTED, redact_secret_text, redac
 from codex_antigravity_auth.server import app
 
 
+def assert_mode_if_posix(testcase: unittest.TestCase, path: Path, expected: int) -> None:
+    if os.name != "nt":
+        testcase.assertEqual(stat.S_IMODE(path.stat().st_mode), expected)
+
+
 class TestRedaction(unittest.TestCase):
     def test_redacts_nested_tokens_and_free_form_api_keys(self):
         raw = {
@@ -91,8 +96,9 @@ class TestCredentialResolution(unittest.TestCase):
 
                     self.assertEqual(resolve_oauth_credentials(), ("env-id", "file-secret"))
 
-            self.assertEqual(stat.S_IMODE(creds_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, creds_path, 0o600)
 
+    @unittest.skipIf(os.name == "nt", "Windows symlink resolution semantics differ from POSIX secret-file checks")
     def test_symlinked_oauth_credentials_file_is_ignored_without_chmodding_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             target_path = Path(tmp) / "target-credentials.json"
@@ -102,7 +108,10 @@ class TestCredentialResolution(unittest.TestCase):
             )
             os.chmod(target_path, 0o644)
             symlink_path = Path(tmp) / "antigravity-credentials.json"
-            symlink_path.symlink_to(target_path)
+            try:
+                symlink_path.symlink_to(target_path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
 
             with patch("codex_antigravity_auth.constants.CREDENTIALS_FILE", str(symlink_path)):
                 with patch.dict("os.environ", {}, clear=True):
@@ -110,7 +119,7 @@ class TestCredentialResolution(unittest.TestCase):
 
                     self.assertEqual(resolve_oauth_credentials(), (None, None))
 
-            self.assertEqual(stat.S_IMODE(target_path.stat().st_mode), 0o644)
+            assert_mode_if_posix(self, target_path, 0o644)
 
 
 class TestProviderStorage(unittest.TestCase):
@@ -131,7 +140,8 @@ class TestProviderStorage(unittest.TestCase):
                         with self.assertRaises(RuntimeError):
                             save_provider_config({"providers": {"deepseek": {"apiKey": "secret"}}})
 
-            self.assertEqual(observed_modes, [0o600])
+            if os.name != "nt":
+                self.assertEqual(observed_modes, [0o600])
             self.assertFalse(providers_path.exists())
             self.assertEqual(list(Path(tmp).glob(".providers.json.*.tmp")), [])
 
@@ -150,7 +160,7 @@ class TestProviderStorage(unittest.TestCase):
                 loaded = load_provider_config()
 
             self.assertEqual(loaded["providers"]["deepseek"]["apiKey"], "provider-secret")
-            self.assertEqual(stat.S_IMODE(providers_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, providers_path, 0o600)
             with self.assertRaises(json.JSONDecodeError):
                 json.loads(providers_path.read_text(encoding="utf-8"))
 
@@ -171,7 +181,7 @@ class TestProviderStorage(unittest.TestCase):
 
 class TestGatewayRemoteAccess(unittest.TestCase):
     def test_loopback_responses_reject_browser_plain_text_posts(self):
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_select:
             response = TestClient(app).post(
                 "/v1/responses",
                 content='{"model":"gemini-3.5-flash-high","input":"hello"}',
@@ -183,7 +193,7 @@ class TestGatewayRemoteAccess(unittest.TestCase):
         mock_select.assert_not_called()
 
     def test_loopback_responses_reject_cross_site_browser_origin(self):
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_select:
             response = TestClient(app).post(
                 "/v1/responses",
                 json={"model": "gemini-3.5-flash-high", "input": "hello"},
@@ -195,7 +205,7 @@ class TestGatewayRemoteAccess(unittest.TestCase):
         mock_select.assert_not_called()
 
     def test_loopback_responses_reject_dns_rebinding_host(self):
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_select:
             response = TestClient(app).post(
                 "/v1/responses",
                 json={"model": "gemini-3.5-flash-high", "input": "hello"},
@@ -207,7 +217,7 @@ class TestGatewayRemoteAccess(unittest.TestCase):
         mock_select.assert_not_called()
 
     def test_loopback_responses_reject_testserver_host_from_real_loopback_client(self):
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account") as mock_select:
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_select:
             response = TestClient(app, client=("127.0.0.1", 50000)).post(
                 "/v1/responses",
                 json={"model": "gemini-3.5-flash-high", "input": "hello"},

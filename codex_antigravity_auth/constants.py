@@ -3,6 +3,7 @@ import json
 import sys
 import stat
 import ipaddress
+import tempfile
 from pathlib import Path
 
 # Defaults
@@ -61,6 +62,55 @@ def get_codex_home() -> Path:
 
 def _strip(value) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _validate_oauth_credential_value(value: str, *, label: str) -> str:
+    value = _strip(value)
+    if not value:
+        raise ValueError(f"{label} must not be empty")
+    if any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in value):
+        raise ValueError(f"{label} must contain only visible ASCII characters without whitespace")
+    return value
+
+
+def save_oauth_credentials(client_id: str, client_secret: str) -> Path:
+    """Persist Google OAuth desktop-client credentials with private file mode."""
+    client_id = _validate_oauth_credential_value(client_id, label="OAuth client id")
+    client_secret = _validate_oauth_credential_value(client_secret, label="OAuth client secret")
+    cred_path = Path(os.path.expanduser(CREDENTIALS_FILE))
+    if cred_path.is_symlink():
+        raise RuntimeError(f"Refusing to write OAuth credentials through symlink: {cred_path}")
+    cred_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {"client_id": client_id, "client_secret": client_secret},
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            delete=False,
+            dir=cred_path.parent,
+            prefix=f".{cred_path.name}.",
+            suffix=".tmp",
+        ) as handle:
+            temp_path = Path(handle.name)
+            os.chmod(temp_path, 0o600)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, cred_path)
+        os.chmod(cred_path, 0o600)
+    except Exception:
+        if temp_path and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+        raise
+    return cred_path
 
 
 def _load_file_credentials() -> tuple[str | None, str | None]:

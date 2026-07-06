@@ -6,6 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 from codex_antigravity_auth.storage import FALLBACK_KEY_FILE, _get_file_fallback_key, load_accounts, save_accounts, update_accounts
 
+
+def assert_mode_if_posix(testcase: unittest.TestCase, path: Path, expected: int) -> None:
+    if os.name != "nt":
+        testcase.assertEqual(oct(path.stat().st_mode & 0o777), oct(expected))
+
+
 class TestStorage(unittest.TestCase):
     def test_encrypted_accounts_storage_and_decryption(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -51,7 +57,7 @@ class TestStorage(unittest.TestCase):
                 self.assertEqual(loaded["accounts"][0]["accessToken"], "legacy_token")
 
                 # And immediately rewrite the legacy file as private encrypted storage
-                self.assertEqual(oct(tmp_path.stat().st_mode & 0o777), "0o600")
+                assert_mode_if_posix(self, tmp_path, 0o600)
                 with open(tmp_path, "rb") as f:
                     raw_content = f.read()
                 with self.assertRaises(json.JSONDecodeError):
@@ -87,7 +93,7 @@ class TestStorage(unittest.TestCase):
             with patch("codex_antigravity_auth.storage.get_codex_home", return_value=Path(tmp)):
                 self.assertEqual(_get_file_fallback_key(), "legacy-fallback-key")
 
-            self.assertEqual(oct(key_path.stat().st_mode & 0o777), "0o600")
+            assert_mode_if_posix(self, key_path, 0o600)
 
     def test_save_accounts_refuses_to_overwrite_malformed_existing_store(self):
         with tempfile.TemporaryDirectory() as tmp:

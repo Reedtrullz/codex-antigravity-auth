@@ -82,7 +82,7 @@ class TestServerStreaming(unittest.TestCase):
                 async def __aexit__(self, exc_type, exc_val, exc_tb):
                     pass
             
-            with patch("codex_antigravity_auth.server.account_manager.select_active_account", return_value=fake_account):
+            with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
                 with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
                     response = test_client.post("/v1/responses", json=codex_payload)
                 self.assertEqual(response.status_code, 200)
@@ -131,7 +131,7 @@ class TestServerStreaming(unittest.TestCase):
                     json={"error": {"status": "RESOURCE_EXHAUSTED", "message": "quota exhausted"}},
                 )
 
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account", return_value=fake_account):
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
             with patch("codex_antigravity_auth.server.account_manager.mark_failure") as mock_mark_failure:
                 with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                     response = TestClient(app).post(
@@ -145,6 +145,35 @@ class TestServerStreaming(unittest.TestCase):
         self.assertEqual(detail["diagnostics"]["selected_account_family"], "gemini")
         self.assertIn("rotation_attempted", detail["diagnostics"])
         mock_mark_failure.assert_called_once()
+
+    def test_google_non_streaming_releases_acquired_account_on_backend_failure(self):
+        fake_account = {"email": "test@gmail.com", "accessToken": "dummy_access"}
+
+        class MockClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            async def post(self, *args, **kwargs):
+                raise RuntimeError("backend down")
+
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", side_effect=[fake_account, None]):
+            with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
+                with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
+                    with patch("codex_antigravity_auth.server.account_manager.record_request"):
+                        with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                            response = TestClient(app).post(
+                                "/v1/responses",
+                                json={"model": "gemini-3.5-flash-high", "input": "hello"},
+                            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual([call.args[0] for call in release.call_args_list], ["test@gmail.com"])
 
     def test_google_streaming_invalid_json_chunk_fails_instead_of_completing(self):
         fake_account = {"email": "test@gmail.com", "accessToken": "dummy_access"}
@@ -185,7 +214,7 @@ class TestServerStreaming(unittest.TestCase):
             def stream(self, *args, **kwargs):
                 return StreamContext()
 
-        with patch("codex_antigravity_auth.server.account_manager.select_active_account", return_value=fake_account):
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
@@ -271,7 +300,7 @@ class TestServerStreaming(unittest.TestCase):
                 async def __aexit__(self, exc_type, exc_val, exc_tb):
                     pass
             
-            with patch("codex_antigravity_auth.server.account_manager.select_active_account", return_value=fake_account):
+            with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
                 with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
                     response = test_client.post("/v1/responses", json=codex_payload)
                 self.assertEqual(response.status_code, 200)
@@ -335,7 +364,7 @@ class TestServerStreaming(unittest.TestCase):
                 async def __aexit__(self, exc_type, exc_val, exc_tb):
                     pass
 
-            with patch("codex_antigravity_auth.server.account_manager.select_active_account", return_value=fake_account):
+            with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure") as mock_mark_failure:
                     with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
                         response = test_client.post(
@@ -430,15 +459,16 @@ class TestServerStreaming(unittest.TestCase):
                     pass
 
             with patch(
-                "codex_antigravity_auth.server.account_manager.select_active_account",
+                "codex_antigravity_auth.server.account_manager.acquire_account",
                 side_effect=[first_account, second_account],
             ):
-                with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
-                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
-                        response = test_client.post(
-                            "/v1/responses",
-                            json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
-                        )
+                with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
+                    with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
+                        with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                            response = test_client.post(
+                                "/v1/responses",
+                                json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
+                            )
 
             self.assertEqual(response.status_code, 200)
             self.assertIn("rotated ok", response.text)
@@ -446,6 +476,10 @@ class TestServerStreaming(unittest.TestCase):
             self.assertEqual(
                 [request["headers"]["Authorization"] for request in requests],
                 ["Bearer first-access", "Bearer second-access"],
+            )
+            self.assertEqual(
+                [call.args[0] for call in release.call_args_list],
+                ["first@gmail.com", "second@gmail.com"],
             )
 
     def test_google_streaming_account_scoped_error_rotates_before_failing(self):
@@ -520,7 +554,7 @@ class TestServerStreaming(unittest.TestCase):
                     pass
 
             with patch(
-                "codex_antigravity_auth.server.account_manager.select_active_account",
+                "codex_antigravity_auth.server.account_manager.acquire_account",
                 side_effect=[first_account, second_account],
             ):
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure") as mock_mark_failure:
@@ -610,7 +644,7 @@ class TestServerStreaming(unittest.TestCase):
                     pass
 
             with patch(
-                "codex_antigravity_auth.server.account_manager.select_active_account",
+                "codex_antigravity_auth.server.account_manager.acquire_account",
                 side_effect=[first_account, second_account],
             ):
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
@@ -693,7 +727,7 @@ class TestServerStreaming(unittest.TestCase):
                     pass
 
             with patch(
-                "codex_antigravity_auth.server.account_manager.select_active_account",
+                "codex_antigravity_auth.server.account_manager.acquire_account",
                 return_value=first_account,
             ) as mock_select:
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure") as mock_mark_failure:

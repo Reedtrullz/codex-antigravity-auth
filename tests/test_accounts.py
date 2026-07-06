@@ -28,6 +28,50 @@ class TestAccounts(unittest.TestCase):
         self.assertEqual(selected["email"], "primary@gmail.com")
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_acquire_spreads_concurrent_requests_across_accounts(self, mock_update):
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+        manager = AccountManager()
+
+        first = manager.acquire_account("claude-3.5-sonnet")
+        second = manager.acquire_account("claude-3.5-sonnet")
+
+        self.assertEqual(first["email"], "primary@gmail.com")
+        self.assertEqual(second["email"], "secondary@gmail.com")
+        self.assertEqual(manager.in_flight_count("primary@gmail.com"), 1)
+        self.assertEqual(manager.in_flight_count("secondary@gmail.com"), 1)
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_acquire_preserves_sticky_selection_after_release(self, mock_update):
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+        manager = AccountManager()
+
+        first = manager.acquire_account("claude-3.5-sonnet")
+        manager.release_account(first["email"])
+        second = manager.acquire_account("claude-3.5-sonnet")
+
+        self.assertEqual(first["email"], "primary@gmail.com")
+        self.assertEqual(second["email"], "primary@gmail.com")
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_acquire_avoids_cooling_down_accounts_even_when_less_busy(self, mock_update):
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+        manager = AccountManager()
+        manager._cooldowns["primary@gmail.com"] = time.time() + 300
+        manager._in_flight["secondary@gmail.com"] = 3
+
+        selected = manager.acquire_account("claude-3.5-sonnet")
+
+        self.assertEqual(selected["email"], "secondary@gmail.com")
+
+    def test_release_account_never_goes_negative(self):
+        manager = AccountManager()
+
+        manager.release_account("missing@gmail.com")
+        manager.release_account("missing@gmail.com")
+
+        self.assertEqual(manager.in_flight_count("missing@gmail.com"), 0)
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
     def test_account_rotation_on_failure_cooldown(self, mock_update):
         mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
         with tempfile.TemporaryDirectory() as tmp:
@@ -61,6 +105,26 @@ class TestAccounts(unittest.TestCase):
         mock_refresh.assert_called_once_with("ref_1")
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.refresh_access_token")
+    def test_acquire_refreshes_only_selected_candidate(self, mock_refresh, mock_update):
+        for account in self.accounts_data["accounts"]:
+            account["expiresAt"] = time.time() - 10
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+        mock_refresh.return_value = {
+            "access_token": "refreshed_acc_2",
+            "expires_in": 3600,
+        }
+
+        manager = AccountManager()
+        manager._in_flight["primary@gmail.com"] = 5
+        selected = manager.acquire_account("claude-3.5-sonnet")
+
+        self.assertEqual(selected["email"], "secondary@gmail.com")
+        self.assertEqual(selected["accessToken"], "refreshed_acc_2")
+        self.assertEqual(self.accounts_data["accounts"][0]["accessToken"], "acc_1")
+        mock_refresh.assert_called_once_with("ref_2")
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
     def test_request_counters_persist_with_cooldown_state(self, mock_update):
         mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
         with tempfile.TemporaryDirectory() as tmp:
@@ -79,6 +143,8 @@ class TestAccounts(unittest.TestCase):
                     "primary@gmail.com",
                     "Rate limited / Quota exceeded",
                     retry_after_seconds=60,
+                    model="claude-3.5-sonnet",
+                    status_code=429,
                 )
                 manager.record_request(
                     "primary@gmail.com",

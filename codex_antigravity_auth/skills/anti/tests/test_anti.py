@@ -761,7 +761,8 @@ class AntiHelperTests(unittest.TestCase):
             stored = records[0].read_text(encoding="utf-8")
             self.assertNotIn("sk-testsecret1234567890", stored)
             self.assertIn("<redacted>", stored)
-            self.assertEqual(records[0].stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(records[0].stat().st_mode & 0o777, 0o600)
 
     def test_run_ledger_redacts_quoted_secret_shapes(self) -> None:
         anti = load_anti()

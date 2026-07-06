@@ -10,6 +10,12 @@ Create a clean, reliable local gateway server that makes Google Antigravity Clau
 
 ## Installation
 
+From PyPI:
+
+```bash
+uv tool install codex-antigravity-auth
+```
+
 From GitHub:
 
 ```bash
@@ -36,7 +42,7 @@ uv pip install -e .
 
 ## Configuration
 
-The recommended first-run path is the primary setup command. It validates OAuth credentials, runs Google login, writes Codex config only when `--write` is present, can install the optional `$anti` helper skill, starts the gateway in the background, waits for `/v1/models`, and ends with Codex readiness diagnostics:
+The recommended first-run path is the primary setup command. It validates OAuth credentials, prompts for missing Google OAuth desktop-client credentials on an interactive TTY, runs Google login, writes Codex config only when `--write` is present, can install the optional `$anti` helper skill, starts the gateway in the background, waits for `/v1/models`, and ends with Codex readiness diagnostics:
 
 ```bash
 codex-antigravity setup --write --accounts 1 --model claude-3.5-sonnet --install-skill --start
@@ -49,13 +55,17 @@ For a read-only preflight that does not mutate OAuth, Codex config, skills, or g
 ```bash
 codex-antigravity setup --check
 codex-antigravity setup --json
+codex-antigravity setup --check --live
 ```
+
+`setup --check --live` adds an explicit non-streaming `/v1/responses` smoke using the selected Google Antigravity model. Use `--live-model` and `--live-timeout` to override the model or timeout. It is still read-only, but it does spend one real provider request.
 
 After setup, inspect native Codex readiness and gateway lifecycle with:
 
 ```bash
 codex-antigravity status
 codex-antigravity doctor --codex-ready
+codex-antigravity doctor --codex-ready --live
 codex-antigravity doctor --codex-ready --json
 codex-antigravity stop
 ```
@@ -143,7 +153,9 @@ export ANTIGRAVITY_CLIENT_ID="your-client-id.apps.googleusercontent.com"
 export ANTIGRAVITY_CLIENT_SECRET="your-client-secret"
 ```
 
-Or write them to `~/.codex/antigravity-credentials.json`. This client-credential file is plaintext but permission-repaired to `0600`; account tokens are stored separately in encrypted storage.
+Or let `codex-antigravity setup --write` prompt for them when it is run from an interactive terminal. Automation can pass `--no-input` to fail fast instead of prompting. The setup prompt writes `~/.codex/antigravity-credentials.json` through a private atomic write and rejects symlinked credential paths.
+
+You can also write the file yourself. This client-credential file is plaintext but permission-repaired to `0600`; account tokens are stored separately in encrypted storage.
 
 ```json
 {
@@ -168,7 +180,11 @@ codex-antigravity setup-google --accounts 2
 ```bash
 codex-antigravity login --count 2
 codex-antigravity accounts
+codex-antigravity accounts reset you@example.com
+codex-antigravity accounts remove old@example.com --yes
 ```
+
+`accounts reset <email>` clears persisted cooldown/failure state without touching saved tokens or usage counters; use `accounts reset --all --yes` for the whole rotation pool. `accounts remove <email> --yes` removes a revoked or dead account from the encrypted store and repairs active rotation indexes.
 
 Start the local gateway:
 
@@ -181,12 +197,17 @@ Background mode writes pid/log files under `~/.codex/`. The log file is append-o
 
 Request diagnostics are written to a sanitized capped JSONL file under `~/.codex/antigravity-requests.jsonl`. The log records request ids, model/route metadata, latency, status, retry/rotation hints, HTTP status, usage totals when available, and redacted error classes/messages. It never stores prompts, request bodies, OAuth material, provider keys, or account emails.
 
+For Google Antigravity routes, concurrent Codex requests are spread across available accounts by process-local in-flight counts while sequential traffic keeps the sticky active account. Cooled-down accounts remain excluded from selection, and in-flight counters are released when non-streaming responses finish or streaming clients disconnect.
+
 ```bash
 codex-antigravity logs --tail 20
+codex-antigravity logs summary --since 24h
 codex-antigravity logs --follow
 codex-antigravity logs clean
 curl http://127.0.0.1:51122/health
 ```
+
+`logs summary` aggregates the sanitized request log by route/family with request counts, success rate, p50/p95 latency, 429 counts, rotation attempts, and top error classes. It never reads prompts, request bodies, OAuth material, provider keys, account emails, or encrypted stores.
 
 The loopback-only `/health` endpoint reports process health, native model count, BYOK route visibility, anonymous account cooldown summaries, and the request-log path.
 
@@ -246,6 +267,7 @@ DEEPSEEK_API_KEY=op://Private/DeepSeek/api_key
 Then start the gateway through `op run` without revealing the key:
 
 ```bash
+chmod 600 ~/.codex/antigravity.env
 codex-antigravity start --background --op-env-file ~/.codex/antigravity.env
 codex-antigravity service install --port 51122 --host 127.0.0.1 --op-env-file ~/.codex/antigravity.env
 ```
@@ -256,6 +278,8 @@ codex-antigravity service install --port 51122 --host 127.0.0.1 --op-env-file ~/
 codex-antigravity start --background --op-environment <environment-id>
 codex-antigravity service install --port 51122 --host 127.0.0.1 --op-environment <environment-id>
 ```
+
+The 1Password CLI must be installed on `PATH` when these options are used. `start --background` and `service install` resolve `op` to an absolute path and fail before writing service manifests or starting a gateway if it is missing. Durable services still depend on your local 1Password unlock/session behavior after reboot; verify with `codex-antigravity service status` and `codex-antigravity doctor --codex-ready --live`.
 
 The `configure-codex --write` helper writes this equivalent TOML into `~/.codex/config.toml` after validation:
 
@@ -276,10 +300,21 @@ To run connection check diagnostics and verify token security:
 ```bash
 codex-antigravity doctor
 codex-antigravity doctor --codex-ready
+codex-antigravity doctor --live --live-model claude-3.5-sonnet
 codex-antigravity doctor --byok-only
 ```
 
-`doctor` parses the active Codex config, verifies `model_provider = "antigravity"` and the matching provider `base_url`, and exits non-zero on hard readiness failures. `doctor --codex-ready` additionally checks that the gateway is reachable, `/v1/models` advertises the selected Codex model, the model routes to Google or BYOK correctly, and the selected Google family has usable rotation state. Use `--config /path/to/config.toml` to verify a non-default Codex config.
+`doctor` parses the active Codex config, verifies `model_provider = "antigravity"` and the matching provider `base_url`, warns when PyPI has a newer package version, and exits non-zero on hard readiness failures. `doctor --codex-ready` additionally checks that the gateway is reachable, `/v1/models` advertises the selected Codex model, the model routes to Google or BYOK correctly, and the selected Google family has usable rotation state. Add `--live` when you want a real Google Antigravity `/v1/responses` generation smoke; set `CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1` to skip the once-daily package-version check. Use `--config /path/to/config.toml` to verify a non-default Codex config.
+
+Before tagging a release, run the local verification stack and one credentialed live smoke:
+
+```bash
+python3 -m pytest -q
+python3 -m compileall -q codex_antigravity_auth tests
+git diff --check
+codex-antigravity models doctor
+codex-antigravity doctor --codex-ready --live --live-model claude-3.5-sonnet
+```
 
 The gateway binds to `127.0.0.1` by default. Binding to a non-loopback host requires both `--allow-remote` and an `ANTIGRAVITY_GATEWAY_TOKEN` of at least 32 visible ASCII characters; remote callers must send `Authorization: Bearer <token>`. The built-in server still speaks plain HTTP, so use remote mode only behind a trusted tunnel, local network boundary, or TLS-terminating proxy.
 

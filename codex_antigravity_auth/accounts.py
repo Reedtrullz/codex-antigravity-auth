@@ -13,6 +13,7 @@ class AccountManager:
         self._failures = {} # email -> failure count
         self._cooldowns = {} # email -> cooldown end timestamp
         self._counters = {} # email -> family -> sanitized usage counters
+        self._in_flight = {} # email -> process-local request count
 
     def _sync_state_from_storage(self, data: dict[str, Any]) -> bool:
         state_missing = "accountState" not in data
@@ -179,7 +180,7 @@ class AccountManager:
             data = load_accounts()
             return data.get("accounts", [])
 
-    def select_active_account(self, model: str) -> dict[str, Any] | None:
+    def _select_active_account(self, model: str, *, acquire: bool) -> dict[str, Any] | None:
         with self._lock:
             selected: dict[str, Any] | None = None
 
@@ -198,13 +199,14 @@ class AccountManager:
                 family = "claude" if "claude" in model.lower() else "gemini"
                 family_map = data.setdefault("activeIndexByFamily", {"claude": 0, "gemini": 0})
 
-                # Simple rotation/selection strategy:
-                # Check accounts from the preferred active index for this family.
+                # Prefer the sticky active index when load is tied, but spread
+                # concurrent requests across accounts with fewer in-flight calls.
                 start_index = family_map.get(family, 0)
                 if not isinstance(start_index, int) or start_index < 0 or start_index >= len(accounts):
                     start_index = 0
 
                 current_time = time.time()
+                candidates: list[tuple[int, int, int, dict[str, Any], bool]] = []
                 for i in range(len(accounts)):
                     idx = (start_index + i) % len(accounts)
                     acc = accounts[idx]
@@ -228,13 +230,26 @@ class AccountManager:
                     if expires_at != acc.get("expiresAt", 0):
                         acc["expiresAt"] = expires_at
                         dirty = True
-                    if not acc.get("accessToken") or expires_at < current_time + 300:
+                    needs_refresh = not acc.get("accessToken") or expires_at < current_time + 300
+
+                    try:
+                        in_flight = int(self._in_flight.get(str(email), 0))
+                    except (TypeError, ValueError):
+                        in_flight = 0
+                    candidates.append((max(0, in_flight), i, idx, acc, needs_refresh))
+
+                for _in_flight, _order, idx, acc, needs_refresh in sorted(candidates, key=lambda item: (item[0], item[1])):
+                    email = acc.get("email")
+                    if not email:
+                        continue
+
+                    if needs_refresh:
                         refresh_tok = acc.get("refreshToken")
                         if refresh_tok:
                             try:
                                 refreshed = refresh_access_token(refresh_tok)
                                 acc["accessToken"] = refreshed["access_token"]
-                                acc["expiresAt"] = current_time + token_expires_in_seconds(refreshed)
+                                acc["expiresAt"] = time.time() + token_expires_in_seconds(refreshed)
                                 if refreshed.get("refresh_token"):
                                     acc["refreshToken"] = refreshed["refresh_token"]
                                 dirty = True
@@ -275,7 +290,44 @@ class AccountManager:
                 return dirty
 
             update_accounts(mutate)
+            if acquire and selected and selected.get("email"):
+                email = str(selected["email"])
+                try:
+                    current = int(self._in_flight.get(email, 0))
+                except (TypeError, ValueError):
+                    current = 0
+                self._in_flight[email] = max(0, current) + 1
             return selected
+
+    def select_active_account(self, model: str) -> dict[str, Any] | None:
+        return self._select_active_account(model, acquire=False)
+
+    def acquire_account(self, model: str) -> dict[str, Any] | None:
+        return self._select_active_account(model, acquire=True)
+
+    def release_account(self, email: str | None) -> None:
+        if not email:
+            return
+        with self._lock:
+            key = str(email)
+            try:
+                current = int(self._in_flight.get(key, 0))
+            except (TypeError, ValueError):
+                current = 0
+            next_value = max(0, current - 1)
+            if next_value:
+                self._in_flight[key] = next_value
+            else:
+                self._in_flight.pop(key, None)
+
+    def in_flight_count(self, email: str | None) -> int:
+        if not email:
+            return 0
+        with self._lock:
+            try:
+                return max(0, int(self._in_flight.get(str(email), 0)))
+            except (TypeError, ValueError):
+                return 0
 
     def _record_failure(self, email: str, retry_after_seconds: float | None = None) -> float:
         previous_failures = self._failures.get(email, 0)
@@ -302,6 +354,9 @@ class AccountManager:
         email: str,
         reason: str,
         retry_after_seconds: float | None = None,
+        *,
+        model: str | None = None,
+        status_code: int | None = None,
     ) -> None:
         with self._lock:
             if not email:

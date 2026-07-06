@@ -5,6 +5,7 @@ import signal
 import stat
 import sys
 import threading
+import time
 from argparse import Namespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -19,7 +20,9 @@ from codex_antigravity_auth.cli import (
     account_rotation_lines,
     configure_codex_write_command,
     codex_ready_report,
+    gateway_generate_probe,
     gateway_model_ids,
+    gateway_process_command,
     gateway_start_command,
     gateway_status_info,
     install_codex_skill,
@@ -29,9 +32,11 @@ from codex_antigravity_auth.cli import (
     normalize_epoch_seconds,
     provider_key_status,
     process_is_running,
+    remove_google_account,
     render_codex_config_snippet,
     require_safe_gateway_host,
     run_configure_codex,
+    reset_google_account_state,
     run_doctor,
     run_gateway_status,
     run_install_skill,
@@ -45,11 +50,18 @@ from codex_antigravity_auth.cli import (
     upsert_google_account,
     validate_codex_model_id,
     validate_codex_provider_name,
+    version_check_result,
     write_codex_config,
 )
+from codex_antigravity_auth.constants import save_oauth_credentials
 from codex_antigravity_auth.models import canonical_model_id, native_model_catalog, resolve_backend_model
-from codex_antigravity_auth.observability import iter_request_records, write_request_record
-from codex_antigravity_auth.service import render_linux_systemd_unit, render_macos_launch_agent, service_command, service_status
+from codex_antigravity_auth.observability import iter_request_records, request_log_summary, write_request_record
+from codex_antigravity_auth.service import install_service, render_linux_systemd_unit, render_macos_launch_agent, service_command, service_status
+
+
+def assert_mode_if_posix(testcase: unittest.TestCase, path: Path, expected: int) -> None:
+    if os.name != "nt":
+        testcase.assertEqual(stat.S_IMODE(path.stat().st_mode), expected)
 
 
 def write_ready_codex_config(
@@ -71,6 +83,13 @@ def write_ready_codex_config(
     )
 
 class TestCliDoctor(unittest.TestCase):
+    def setUp(self):
+        self._version_check_env = patch.dict(os.environ, {"CODEX_ANTIGRAVITY_NO_UPDATE_CHECK": "1"})
+        self._version_check_env.start()
+
+    def tearDown(self):
+        self._version_check_env.stop()
+
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
     @patch("urllib.request.urlopen")
@@ -816,9 +835,9 @@ class TestConfigureCodex(unittest.TestCase):
             self.assertTrue(changed)
             self.assertIsNotNone(backup_path)
             self.assertEqual(backup_path.read_text(encoding="utf-8"), 'model = "gpt-5"\n')
-            self.assertEqual(stat.S_IMODE(backup_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, backup_path, 0o600)
             self.assertIn('model_provider = "antigravity"', config_path.read_text(encoding="utf-8"))
-            self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, config_path, 0o600)
 
             changed_again, backup_again = write_codex_config(config_path)
 
@@ -834,7 +853,7 @@ class TestConfigureCodex(unittest.TestCase):
             self.assertTrue(changed)
             self.assertIsNone(backup_path)
             self.assertIn('model_provider = "antigravity"', config_path.read_text(encoding="utf-8"))
-            self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, config_path, 0o600)
 
     def test_write_codex_config_does_not_overwrite_same_second_backup(self):
         with TemporaryDirectory() as tmp:
@@ -852,8 +871,8 @@ class TestConfigureCodex(unittest.TestCase):
             self.assertEqual(second_backup.name, "config.toml.bak-20260702140000-2")
             self.assertEqual(first_backup.read_text(encoding="utf-8"), 'model = "gpt-5"\n')
             self.assertIn('model = "gemini-3.5-flash-high"', second_backup.read_text(encoding="utf-8"))
-            self.assertEqual(stat.S_IMODE(first_backup.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(second_backup.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, first_backup, 0o600)
+            assert_mode_if_posix(self, second_backup, 0o600)
 
     def test_write_codex_config_keeps_original_when_replace_fails(self):
         with TemporaryDirectory() as tmp:
@@ -874,12 +893,13 @@ class TestConfigureCodex(unittest.TestCase):
                     write_codex_config(config_path)
 
             self.assertEqual(config_path.read_text(encoding="utf-8"), 'model = "gpt-5"\n')
-            self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o644)
-            self.assertEqual(observed_config_temp_modes, [0o600])
+            assert_mode_if_posix(self, config_path, 0o644)
+            if os.name != "nt":
+                self.assertEqual(observed_config_temp_modes, [0o600])
             backups = list(Path(tmp).glob("config.toml.bak-*"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_text(encoding="utf-8"), 'model = "gpt-5"\n')
-            self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
+            assert_mode_if_posix(self, backups[0], 0o600)
             self.assertEqual(list(Path(tmp).glob(".config.toml.*.tmp")), [])
 
     def test_write_codex_config_preserves_symlinked_config_path(self):
@@ -899,11 +919,11 @@ class TestConfigureCodex(unittest.TestCase):
             self.assertTrue(config_path.is_symlink())
             self.assertEqual(config_path.resolve(), target_path.resolve())
             self.assertIn('model_provider = "antigravity"', target_path.read_text(encoding="utf-8"))
-            self.assertEqual(stat.S_IMODE(target_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, target_path, 0o600)
             self.assertIsNotNone(backup_path)
             self.assertEqual(backup_path.parent.resolve(), target_path.parent.resolve())
             self.assertEqual(backup_path.read_text(encoding="utf-8"), 'model = "gpt-5"\n')
-            self.assertEqual(stat.S_IMODE(backup_path.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, backup_path, 0o600)
 
 
 class TestInstallSkill(unittest.TestCase):
@@ -917,7 +937,7 @@ class TestInstallSkill(unittest.TestCase):
             self.assertTrue((destination / "agents" / "openai.yaml").is_file())
             self.assertTrue((destination / "scripts" / "anti.py").is_file())
             self.assertTrue((destination / "tests" / "test_anti.py").is_file())
-            self.assertEqual(stat.S_IMODE((destination / "scripts" / "anti.py").stat().st_mode), 0o755)
+            assert_mode_if_posix(self, destination / "scripts" / "anti.py", 0o755)
             self.assertIn("$anti", (destination / "SKILL.md").read_text(encoding="utf-8"))
 
             action_again, destination_again, backup_again = install_codex_skill(Path(tmp))
@@ -1132,13 +1152,71 @@ class TestInstallSkill(unittest.TestCase):
 
         self.assertIsNone(captured["auth"])
 
+    def test_gateway_generate_probe_posts_responses_request_with_bearer_token(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["timeout"] = timeout
+            captured["auth"] = req.get_header("Authorization")
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            response = MagicMock()
+            response.status = 200
+            response.read.return_value = b'{"output":[{"content":[{"type":"output_text","text":"ready"}]}]}'
+            response.__enter__ = lambda self_: response
+            response.__exit__ = lambda self_, *exc: False
+            return response
+
+        with patch.dict(os.environ, {"TEST_GATEWAY_TOKEN": "token-value"}, clear=False):
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                probe = gateway_generate_probe(
+                    "https://gateway.example/v1",
+                    "claude-3.5-sonnet",
+                    timeout=12,
+                    token_env="TEST_GATEWAY_TOKEN",
+                )
+
+        self.assertTrue(probe["ok"])
+        self.assertEqual(captured["url"], "https://gateway.example/v1/responses")
+        self.assertEqual(captured["timeout"], 12)
+        self.assertEqual(captured["auth"], "Bearer token-value")
+        self.assertEqual(captured["body"]["input"], "Reply with the single word: ready")
+        self.assertEqual(captured["body"]["max_output_tokens"], 16)
+        self.assertEqual(probe["output_preview"], "ready")
+
+    def test_gateway_generate_probe_folds_http_errors_into_result(self):
+        response = MagicMock()
+        response.read.return_value = b'{"api_key":"sk-secret-value"}'
+        error = urllib.error.HTTPError("https://gateway.example/v1/responses", 502, "Bad Gateway", {}, response)
+
+        with patch("urllib.request.urlopen", side_effect=error):
+            probe = gateway_generate_probe(
+                "https://gateway.example/v1",
+                "claude-3.5-sonnet",
+                timeout=1,
+                token_env="TEST_GATEWAY_TOKEN",
+            )
+
+        self.assertFalse(probe["ok"])
+        self.assertEqual(probe["http_status"], 502)
+        self.assertIn("HTTP 502", probe["error"])
+        self.assertNotIn("sk-secret-value", probe["error"])
+
 
 class TestV3NativeSetup(unittest.TestCase):
+    def setUp(self):
+        self._version_check_env = patch.dict(os.environ, {"CODEX_ANTIGRAVITY_NO_UPDATE_CHECK": "1"})
+        self._version_check_env.start()
+
+    def tearDown(self):
+        self._version_check_env.stop()
+
     def setup_args(self, **overrides):
         args = Namespace(
             check=False,
             json=False,
             write=False,
+            no_input=False,
             accounts=1,
             model="claude-3.5-sonnet",
             provider="antigravity",
@@ -1155,6 +1233,9 @@ class TestV3NativeSetup(unittest.TestCase):
             allow_remote=False,
             gateway_timeout=0.01,
             gateway_token_env="ANTIGRAVITY_GATEWAY_TOKEN",
+            live=False,
+            live_model=None,
+            live_timeout=30.0,
         )
         for key, value in overrides.items():
             setattr(args, key, value)
@@ -1278,6 +1359,64 @@ class TestV3NativeSetup(unittest.TestCase):
 
         login.assert_not_called()
         configure.assert_not_called()
+
+    def test_setup_write_prompts_for_missing_oauth_credentials_on_tty(self):
+        with TemporaryDirectory() as tmp:
+            credentials_path = Path(tmp) / "antigravity-credentials.json"
+            args = self.setup_args(write=True, config=str(Path(tmp) / "config.toml"))
+            stdin = MagicMock()
+            stdin.isatty.return_value = True
+            with patch("codex_antigravity_auth.constants.CREDENTIALS_FILE", str(credentials_path)):
+                with patch("codex_antigravity_auth.cli.sys.stdin", stdin):
+                    with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=(None, None)):
+                        with patch("builtins.input", return_value="client.apps.googleusercontent.com"):
+                            with patch("codex_antigravity_auth.cli.getpass.getpass", return_value="client-secret"):
+                                with patch(
+                                    "codex_antigravity_auth.cli.validate_oauth_credentials_with_google",
+                                    return_value=("pass", "valid"),
+                                ):
+                                    with patch("codex_antigravity_auth.cli.run_login") as login:
+                                        with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                                            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                                                with patch(
+                                                    "codex_antigravity_auth.cli.codex_ready_report",
+                                                    return_value={"ok": True, "checks": [], "next_command": "codex"},
+                                                ):
+                                                    with patch("builtins.print"):
+                                                        report = run_setup(args)
+
+            self.assertTrue(report["ok"])
+            login.assert_called_once()
+            configure.assert_called_once()
+            assert_mode_if_posix(self, credentials_path, 0o600)
+            saved = json.loads(credentials_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["client_id"], "client.apps.googleusercontent.com")
+            self.assertEqual(saved["client_secret"], "client-secret")
+
+    def test_setup_no_input_fails_fast_when_oauth_credentials_missing(self):
+        args = self.setup_args(write=True, no_input=True)
+        stdin = MagicMock()
+        stdin.isatty.return_value = True
+        with patch("codex_antigravity_auth.cli.sys.stdin", stdin):
+            with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=(None, None)):
+                with patch("builtins.input") as prompt:
+                    with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                        with patch("builtins.print"):
+                            with self.assertRaisesRegex(SystemExit, "OAuth client credentials"):
+                                run_setup(args)
+
+        prompt.assert_not_called()
+        configure.assert_not_called()
+
+    def test_save_oauth_credentials_refuses_symlink(self):
+        with TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target.json"
+            link = Path(tmp) / "antigravity-credentials.json"
+            target.write_text("{}", encoding="utf-8")
+            link.symlink_to(target)
+            with patch("codex_antigravity_auth.constants.CREDENTIALS_FILE", str(link)):
+                with self.assertRaisesRegex(RuntimeError, "symlink"):
+                    save_oauth_credentials("client.apps.googleusercontent.com", "client-secret")
 
     def test_setup_write_preflights_byok_provider_before_config_write(self):
         args = self.setup_args(write=True, model="deepseek:deepseek-chat")
@@ -1412,6 +1551,7 @@ class TestV3NativeSetup(unittest.TestCase):
                         config=str(config_path),
                         provider_id="antigravity",
                         expected_base_url="http://localhost:51122/v1",
+                        include_version_check=False,
                     )
 
         self.assertTrue(report["ok"])
@@ -1471,6 +1611,94 @@ class TestV3NativeSetup(unittest.TestCase):
         self.assertEqual(route_checks[0]["status"], "fail")
         self.assertIn("Could not load BYOK provider configuration", route_checks[0]["detail"])
 
+    def test_codex_ready_report_includes_live_generation_when_requested(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path, model="sonnet")
+            probe = {
+                "ok": True,
+                "model": "claude-3.5-sonnet",
+                "latency_ms": 12,
+                "output_preview": "ready",
+                "http_status": 200,
+                "error": None,
+            }
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": [{"email": "a@example.com"}]}):
+                    with patch("codex_antigravity_auth.cli.gateway_generate_probe", return_value=probe) as live_probe:
+                        with patch("codex_antigravity_auth.cli.version_check_result", return_value={"status": "skip", "detail": "skip", "installed": None, "latest": None}):
+                            report = codex_ready_report(
+                                config=str(config_path),
+                                provider_id="antigravity",
+                                expected_base_url="http://localhost:51122/v1",
+                                live=True,
+                                live_timeout=7,
+                            )
+
+        live_probe.assert_called_once_with(
+            "http://localhost:51122/v1",
+            "claude-3.5-sonnet",
+            timeout=7,
+            token_env="ANTIGRAVITY_GATEWAY_TOKEN",
+        )
+        live_check = next(check for check in report["checks"] if check["name"] == "live_generation")
+        self.assertEqual(live_check["status"], "pass")
+        self.assertEqual(live_check["probe"], probe)
+
+    def test_codex_ready_report_fails_live_generation_on_empty_output(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path, model="sonnet")
+            probe = {
+                "ok": True,
+                "model": "claude-3.5-sonnet",
+                "latency_ms": 12,
+                "output_preview": "",
+                "http_status": 200,
+                "error": None,
+            }
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": [{"email": "a@example.com"}]}):
+                    with patch("codex_antigravity_auth.cli.gateway_generate_probe", return_value=probe):
+                        with patch("codex_antigravity_auth.cli.version_check_result", return_value={"status": "skip", "detail": "skip", "installed": None, "latest": None}):
+                            report = codex_ready_report(
+                                config=str(config_path),
+                                provider_id="antigravity",
+                                expected_base_url="http://localhost:51122/v1",
+                                live=True,
+                            )
+
+        live_check = next(check for check in report["checks"] if check["name"] == "live_generation")
+        self.assertEqual(live_check["status"], "fail")
+        self.assertIn("empty output", live_check["detail"])
+
+    def test_codex_ready_report_rejects_byok_live_model_before_generation(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path, model="deepseek:deepseek-chat")
+            provider = {
+                "id": "deepseek",
+                "displayName": "DeepSeek",
+                "baseUrl": "https://api.deepseek.com",
+                "apiKey": "secret",
+                "models": ["deepseek-chat"],
+            }
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"deepseek:deepseek-chat"}):
+                with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"deepseek": provider}):
+                    with patch("codex_antigravity_auth.cli.gateway_generate_probe") as live_probe:
+                        with patch("codex_antigravity_auth.cli.version_check_result", return_value={"status": "skip", "detail": "skip", "installed": None, "latest": None}):
+                            report = codex_ready_report(
+                                config=str(config_path),
+                                provider_id="antigravity",
+                                expected_base_url="http://localhost:51122/v1",
+                                live=True,
+                            )
+
+        live_probe.assert_not_called()
+        live_check = next(check for check in report["checks"] if check["name"] == "live_generation")
+        self.assertEqual(live_check["status"], "fail")
+        self.assertIn("Google Antigravity models only", live_check["detail"])
+
     def test_gateway_status_reports_stale_pid(self):
         with TemporaryDirectory() as tmp:
             pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
@@ -1523,6 +1751,7 @@ class TestV3NativeSetup(unittest.TestCase):
                             self.assertTrue(pid_file.exists())
                             kill.assert_not_called()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX signal stop behavior")
     def test_stop_gateway_handles_pid_exiting_before_sigterm(self):
         with TemporaryDirectory() as tmp:
             pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
@@ -1536,6 +1765,7 @@ class TestV3NativeSetup(unittest.TestCase):
                             self.assertEqual(info["status"], "stopped")
                             self.assertFalse(pid_file.exists())
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX signal stop behavior")
     def test_stop_gateway_preserves_pid_file_on_permission_error(self):
         with TemporaryDirectory() as tmp:
             pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
@@ -1548,6 +1778,7 @@ class TestV3NativeSetup(unittest.TestCase):
                                 stop_gateway(Namespace(port=51122))
                             self.assertTrue(pid_file.exists())
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX signal stop behavior")
     def test_stop_gateway_sends_sigterm_for_running_pid(self):
         with TemporaryDirectory() as tmp:
             pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
@@ -1599,7 +1830,7 @@ class TestV3NativeSetup(unittest.TestCase):
             pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
             log_file = Path(tmp) / "antigravity-gateway-51122.log"
             self.assertEqual(pid_file.read_text(encoding="utf-8"), "12345\n")
-            self.assertEqual(stat.S_IMODE(log_file.stat().st_mode), 0o600)
+            assert_mode_if_posix(self, log_file, 0o600)
             self.assertEqual(info["pid_file"], str(pid_file))
             self.assertEqual(info["log_file"], str(log_file))
             popen.assert_called_once()
@@ -1633,6 +1864,28 @@ class TestV3NativeSetup(unittest.TestCase):
             self.assertIn("--", cmd)
             self.assertIn("uvicorn", cmd)
             self.assertIn("codex_antigravity_auth.server:app", cmd)
+
+    def test_start_background_rejects_onepassword_when_op_missing_before_popen(self):
+        proc = MagicMock()
+        with TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / "antigravity.env"
+            env_file.write_text("OPENROUTER_API_KEY=op://Private/OpenRouter/sk\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.onepassword.shutil.which", return_value=None):
+                    with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
+                        with self.assertRaisesRegex(SystemExit, "1Password CLI"):
+                            start_gateway_background(
+                                Namespace(
+                                    host="127.0.0.1",
+                                    port=51122,
+                                    allow_remote=False,
+                                    op_env_file=str(env_file),
+                                    op_environment=None,
+                                )
+                            )
+
+            self.assertFalse((Path(tmp) / "antigravity-gateway-51122.pid").exists())
+            popen.assert_not_called()
 
     def test_start_background_rejects_conflicting_onepassword_modes(self):
         proc = MagicMock()
@@ -1917,6 +2170,10 @@ class TestVNextPolishCli(unittest.TestCase):
         command_cases = [
             (["codex-antigravity", "service", "status", "--json"], "run_service_command"),
             (["codex-antigravity", "logs", "--tail", "1", "--json"], "run_logs_command"),
+            (["codex-antigravity", "logs", "summary", "--json"], "run_logs_command"),
+            (["codex-antigravity", "accounts", "list"], "run_accounts_command"),
+            (["codex-antigravity", "accounts", "remove", "a@example.com", "--yes"], "run_accounts_command"),
+            (["codex-antigravity", "accounts", "reset", "a@example.com"], "run_accounts_command"),
             (["codex-antigravity", "models", "list", "--json"], "run_models_command"),
         ]
         for argv, handler_name in command_cases:
@@ -1965,6 +2222,36 @@ class TestVNextPolishCli(unittest.TestCase):
         mock_login.assert_not_called()
         mock_install.assert_not_called()
         mock_start.assert_not_called()
+
+    def test_codex_ready_report_suggests_repair_for_existing_config_drift(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('model = "claude-3.5-sonnet"\n', encoding="utf-8")
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": [{"email": "a@example.com"}]}):
+                    report = codex_ready_report(
+                        config=str(config_path),
+                        provider_id="antigravity",
+                        expected_base_url="http://localhost:51122/v1",
+                    )
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["checks"][0]["name"], "codex_config")
+        self.assertEqual(report["next_command"], "codex-antigravity setup --repair")
+
+    def test_codex_ready_report_suggests_write_when_config_missing(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "missing.toml"
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                report = codex_ready_report(
+                    config=str(config_path),
+                    provider_id="antigravity",
+                    expected_base_url="http://localhost:51122/v1",
+                    include_version_check=False,
+                )
+
+        self.assertFalse(report["ok"])
+        self.assertIn("setup --write", report["next_command"])
 
     def test_setup_repair_and_write_are_mutually_exclusive(self):
         args = Namespace(
@@ -2017,6 +2304,88 @@ class TestVNextPolishCli(unittest.TestCase):
         self.assertIn("codex_antigravity_auth.cli", command)
         self.assertIn("start", command)
 
+    def test_service_command_rejects_onepassword_when_op_missing(self):
+        with TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / "antigravity.env"
+            env_file.write_text("OPENROUTER_API_KEY=op://Private/OpenRouter/sk\n", encoding="utf-8")
+            with patch("codex_antigravity_auth.onepassword.shutil.which", return_value=None):
+                with self.assertRaisesRegex(ValueError, "1Password CLI"):
+                    service_command(51122, "127.0.0.1", op_env_file=str(env_file))
+
+    def test_service_install_rejects_onepassword_without_manifest_when_op_missing(self):
+        with TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / "antigravity.env"
+            env_file.write_text("OPENROUTER_API_KEY=op://Private/OpenRouter/sk\n", encoding="utf-8")
+            manifest = Path(tmp) / "gateway.plist"
+            with patch("codex_antigravity_auth.service.macos_launch_agent_path", return_value=manifest):
+                with patch("codex_antigravity_auth.onepassword.shutil.which", return_value=None):
+                    with self.assertRaisesRegex(ValueError, "1Password CLI"):
+                        install_service(
+                            51122,
+                            "127.0.0.1",
+                            platform_name="macos",
+                            op_env_file=str(env_file),
+                        )
+
+            self.assertFalse(manifest.exists())
+
+    def test_version_check_reports_update_available_and_writes_cache(self):
+        response = MagicMock()
+        response.read.return_value = b'{"info":{"version":"9.9.9"}}'
+        response.__enter__ = lambda self_: response
+        response.__exit__ = lambda self_, *exc: False
+
+        with TemporaryDirectory() as tmp:
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.importlib_metadata.version", return_value="1.4.0"):
+                    with patch("codex_antigravity_auth.cli.urllib.request.urlopen", return_value=response):
+                        result = version_check_result(timeout=0.01)
+
+            cache_path = Path(tmp) / "antigravity-version-check.json"
+            assert_mode_if_posix(self, cache_path, 0o600)
+
+        self.assertEqual(result["status"], "warn")
+        self.assertEqual(result["installed"], "1.4.0")
+        self.assertEqual(result["latest"], "9.9.9")
+
+    def test_version_check_uses_fresh_cache_without_network(self):
+        with TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "antigravity-version-check.json"
+            cache_path.write_text(
+                json.dumps({"checked_at": time.time(), "latest": "1.4.0"}),
+                encoding="utf-8",
+            )
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.importlib_metadata.version", return_value="1.4.0"):
+                    with patch("codex_antigravity_auth.cli.urllib.request.urlopen") as urlopen:
+                        result = version_check_result(timeout=0.01)
+
+        self.assertEqual(result["status"], "pass")
+        urlopen.assert_not_called()
+
+    def test_version_check_can_be_disabled_by_env(self):
+        with patch.dict(os.environ, {"CODEX_ANTIGRAVITY_NO_UPDATE_CHECK": "1"}):
+            with patch("codex_antigravity_auth.cli.urllib.request.urlopen") as urlopen:
+                result = version_check_result(timeout=0.01)
+
+        self.assertEqual(result["status"], "skip")
+        urlopen.assert_not_called()
+
+    def test_version_check_skips_non_numeric_latest_version(self):
+        response = MagicMock()
+        response.read.return_value = b'{"info":{"version":"not-a-version"}}'
+        response.__enter__ = lambda self_: response
+        response.__exit__ = lambda self_, *exc: False
+
+        with TemporaryDirectory() as tmp:
+            with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
+                with patch("codex_antigravity_auth.cli.importlib_metadata.version", return_value="1.4.0"):
+                    with patch("codex_antigravity_auth.cli.urllib.request.urlopen", return_value=response):
+                        result = version_check_result(timeout=0.01)
+
+        self.assertEqual(result["status"], "skip")
+        self.assertEqual(result["detail"], "version check unavailable")
+
     def test_process_is_running_uses_tasklist_on_windows(self):
         proc = MagicMock()
         proc.returncode = 0
@@ -2030,6 +2399,61 @@ class TestVNextPolishCli(unittest.TestCase):
         mock_run.assert_called_once()
         self.assertEqual(mock_run.call_args.args[0][0], "tasklist")
         mock_kill.assert_not_called()
+
+    def test_gateway_process_command_uses_windows_process_probe(self):
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = "CommandLine=python -m uvicorn codex_antigravity_auth.server:app\n"
+
+        with patch("codex_antigravity_auth.cli.sys.platform", "win32"):
+            with patch("codex_antigravity_auth.cli.subprocess.run", return_value=proc) as mock_run:
+                command = gateway_process_command(1234)
+
+        self.assertIn("codex_antigravity_auth.server:app", command)
+        self.assertEqual(mock_run.call_args.args[0][0], "wmic")
+
+    def test_stop_gateway_uses_taskkill_on_windows(self):
+        with TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
+            pid_file.write_text("12345\n", encoding="utf-8")
+            running_info = {
+                "port": 51122,
+                "status": "running",
+                "running": True,
+                "pid": 12345,
+                "pid_file": str(pid_file),
+                "log_file": str(Path(tmp) / "antigravity-gateway-51122.log"),
+                "process_running": True,
+                "process_matches": True,
+            }
+            stopped_info = {**running_info, "status": "stopped", "running": False, "pid": None}
+            proc = MagicMock()
+            proc.returncode = 0
+            with patch("codex_antigravity_auth.cli.sys.platform", "win32"):
+                with patch("codex_antigravity_auth.cli.gateway_status_info", side_effect=[running_info, stopped_info]):
+                    with patch("codex_antigravity_auth.cli.subprocess.run", return_value=proc) as mock_run:
+                        with patch("codex_antigravity_auth.cli.process_is_running", side_effect=[False, False]):
+                            with patch("builtins.print"):
+                                info = stop_gateway(Namespace(port=51122))
+
+        self.assertEqual(info["status"], "stopped")
+        self.assertFalse(pid_file.exists())
+        self.assertEqual(mock_run.call_args.args[0][:3], ["taskkill", "/PID", "12345"])
+
+    def test_service_install_uses_windows_scheduled_task_command(self):
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = ""
+        with patch("codex_antigravity_auth.service._run", return_value=proc) as mock_run:
+            status = install_service(51122, "127.0.0.1", platform_name="windows")
+
+        self.assertEqual(status["platform"], "windows")
+        create_call = mock_run.call_args_list[0].args[0]
+        self.assertEqual(create_call[:2], ["schtasks", "/Create"])
+        self.assertIn("/TR", create_call)
+        task_command = create_call[create_call.index("/TR") + 1]
+        self.assertIn('"start"', task_command)
+        self.assertIn('"--port"', task_command)
 
     def test_stop_hints_when_durable_service_is_installed(self):
         with TemporaryDirectory() as tmp:
@@ -2086,6 +2510,148 @@ class TestVNextPolishCli(unittest.TestCase):
         self.assertNotIn("also secret", serialized)
         self.assertNotIn("sk-testsecret1234567890", serialized)
         self.assertIn("[REDACTED]", serialized)
+
+    def test_request_log_summary_aggregates_latency_errors_and_malformed_lines(self):
+        now = 1_700_000_000.0
+
+        def timestamp(age_seconds: int) -> str:
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - age_seconds))
+
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "antigravity-requests.jsonl"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": timestamp(60),
+                                "request_id": "req_1",
+                                "route": "google",
+                                "family": "claude",
+                                "status": "success",
+                                "latency_ms": 100,
+                                "http_status": 200,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": timestamp(120),
+                                "request_id": "req_2",
+                                "route": "google",
+                                "family": "claude",
+                                "status": "failed",
+                                "latency_ms": 900,
+                                "http_status": 429,
+                                "rotation_attempted": True,
+                                "error_class": "rate_limited",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": timestamp(30),
+                                "request_id": "req_3",
+                                "route": "byok",
+                                "provider": "openrouter",
+                                "status": "failed",
+                                "latency_ms": 300,
+                                "http_status": 500,
+                                "error_class": "provider_error",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": timestamp(200000),
+                                "request_id": "old",
+                                "route": "google",
+                                "family": "claude",
+                                "status": "success",
+                                "latency_ms": 1,
+                                "http_status": 200,
+                            }
+                        ),
+                        "{not-json",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch("codex_antigravity_auth.observability.get_codex_home", return_value=Path(tmp)):
+                summary = request_log_summary(since="24h", now=now)
+
+        google = summary["groups"]["google/claude"]
+        self.assertEqual(summary["included_records"], 3)
+        self.assertEqual(summary["excluded_by_time"], 1)
+        self.assertEqual(summary["malformed_records"], 1)
+        self.assertEqual(google["request_count"], 2)
+        self.assertEqual(google["success_count"], 1)
+        self.assertEqual(google["rate_limit_count"], 1)
+        self.assertEqual(google["rotation_attempted_count"], 1)
+        self.assertEqual(google["p50_latency_ms"], 100)
+        self.assertEqual(google["p95_latency_ms"], 900)
+        self.assertEqual(google["top_error_classes"], [{"error_class": "rate_limited", "count": 1}])
+
+    def test_logs_summary_human_output_handles_empty_log(self):
+        with TemporaryDirectory() as tmp:
+            with patch("codex_antigravity_auth.observability.get_codex_home", return_value=Path(tmp)):
+                with patch("builtins.print") as mock_print:
+                    main_argv = ["codex-antigravity", "logs", "summary", "--since", "all"]
+                    with patch.object(sys, "argv", main_argv):
+                        main()
+
+        printed = "\n".join(call.args[0] for call in mock_print.call_args_list if call.args)
+        self.assertIn("No request log entries matched", printed)
+
+    def test_remove_google_account_prunes_state_and_repairs_active_indices(self):
+        data = {
+            "accounts": [
+                {"email": "a@example.com"},
+                {"email": "b@example.com"},
+                {"email": "c@example.com"},
+            ],
+            "activeIndex": 2,
+            "activeIndexByFamily": {"claude": 1, "gemini": 2},
+            "accountState": {
+                "failures": {"b@example.com": 2, "c@example.com": 1},
+                "cooldowns": {"b@example.com": 999, "c@example.com": 888},
+                "counters": {"b@example.com": {"claude": {"total_requests": 2}}},
+            },
+        }
+
+        with patch("codex_antigravity_auth.cli.update_accounts", side_effect=lambda mutator: mutator(data)):
+            result = remove_google_account("b@example.com")
+
+        self.assertEqual(result["account_count"], 2)
+        self.assertEqual([account["email"] for account in data["accounts"]], ["a@example.com", "c@example.com"])
+        self.assertEqual(data["activeIndex"], 1)
+        self.assertEqual(data["activeIndexByFamily"], {"claude": 1, "gemini": 1})
+        self.assertNotIn("b@example.com", data["accountState"]["failures"])
+        self.assertNotIn("b@example.com", data["accountState"]["cooldowns"])
+        self.assertNotIn("b@example.com", data["accountState"]["counters"])
+
+    def test_reset_google_account_state_clears_persisted_cooldown_and_failures(self):
+        data = {
+            "accounts": [{"email": "a@example.com"}],
+            "accountState": {
+                "failures": {"a@example.com": 2},
+                "cooldowns": {"a@example.com": 999},
+                "counters": {"a@example.com": {"claude": {"total_requests": 2}}},
+            },
+        }
+
+        with patch("codex_antigravity_auth.cli.update_accounts", side_effect=lambda mutator: mutator(data)):
+            result = reset_google_account_state("a@example.com")
+
+        self.assertEqual(result["cleared"], {"failures": 1, "cooldowns": 1})
+        self.assertEqual(data["accountState"]["failures"], {})
+        self.assertEqual(data["accountState"]["cooldowns"], {})
+        self.assertIn("a@example.com", data["accountState"]["counters"])
+
+    def test_accounts_remove_requires_yes_when_non_interactive(self):
+        argv = ["codex-antigravity", "accounts", "remove", "a@example.com"]
+        with patch.object(sys, "argv", argv):
+            with patch("sys.stdin.isatty", return_value=False):
+                with self.assertRaisesRegex(SystemExit, "--yes"):
+                    main()
 
     def test_model_overlay_catalog_and_collision_rules(self):
         with TemporaryDirectory() as tmp:
