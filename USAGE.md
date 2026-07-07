@@ -9,7 +9,7 @@ Install the command from PyPI, then run the primary Claude-in-Codex setup:
 ```bash
 uv tool install codex-antigravity-auth
 codex-antigravity setup --write --accounts 1 --model claude-3.5-sonnet --install-skill --start
-codex-antigravity doctor --codex-ready
+codex-antigravity setup --check --model claude-3.5-sonnet
 ```
 
 For a read-only check that does not mutate OAuth state, Codex config, installed skills, or gateway processes:
@@ -21,9 +21,9 @@ codex-antigravity setup --json
 codex-antigravity status --json
 ```
 
-The setup command validates the selected model/provider/base URL, preflights Google OAuth or BYOK provider readiness before any config write, prompts for missing Google OAuth desktop-client credentials on an interactive TTY, runs login when needed, writes Codex config, optionally installs the `$anti` helper, optionally starts the gateway in the background, waits for `/v1/models`, and ends with Codex readiness diagnostics. By default, V3 chooses `claude-3.5-sonnet` so fresh installs get Claude Sonnet in Codex's model picker. When `--base-url` is omitted, setup derives `http://localhost:<port>/v1` from `--port`; if both are supplied with `--start`, their ports must match. Add `--no-input` for automation that should fail instead of prompting, and add `--live` when a read-only setup check should spend one real Google Antigravity `/v1/responses` provider request.
+The setup command validates the selected model/provider/base URL, preflights Google OAuth or BYOK provider readiness before any config write, prompts for missing Google OAuth desktop-client credentials on an interactive TTY, runs login when needed, writes the Codex provider block, optionally installs the `$anti` helper, optionally starts the gateway in the background, waits for `/v1/models`, and ends with readiness diagnostics. By default, `setup --write` does **not** change top-level `model` or `model_provider`; add `--activate` only when you explicitly want the gateway model to become the active Codex default. When `--base-url` is omitted, setup derives `http://localhost:<port>/v1` from `--port`; if both are supplied with `--start`, their ports must match. Add `--no-input` for automation that should fail instead of prompting, and add `--live` when a read-only setup check should spend one real Google Antigravity `/v1/responses` provider request.
 
-`configure-codex` validates the Codex model id, provider id, provider name, and gateway base URL before writing. `--write` uses private atomic writes, preserves a symlinked Codex config path by updating its real target, and creates a private timestamped backup before changing an existing Codex config.
+`configure-codex` validates the Codex model id, provider id, provider name, and gateway base URL before writing. `--write` uses private atomic writes, preserves a symlinked Codex config path by updating its real target, and creates a private timestamped backup before changing an existing Codex config. By default it writes only `[model_providers.<provider>]`; add `--activate` to also write top-level `model` and `model_provider`.
 
 Use `setup --repair` when Codex config has drifted and you only want to reconcile the provider block and selected model. It does not run OAuth, install the `$anti` skill, or start/stop the gateway:
 
@@ -81,7 +81,7 @@ codex-antigravity install-skill --verify
 codex-antigravity install-skill --force --verify
 ```
 
-Use `setup-v2 --write` only when you want it to install or refresh the bundled skill. It does not write `~/.codex/config.toml`; use primary `setup --write`, `setup-google`, or `configure-codex --write` for that. When checking a remote gateway, export the bearer token and pass `--gateway-token-env` (defaults to `ANTIGRAVITY_GATEWAY_TOKEN`) so the `/v1/models` probe can authenticate.
+Use `setup-v2 --write` only when you want it to install or refresh the bundled skill. It does not write `~/.codex/config.toml`; use primary `setup --write`, `setup-google`, or `configure-codex --write` to install the provider block. Add `--activate` to those config-writing commands only when you explicitly want to switch the active Codex default. When checking a remote gateway, export the bearer token and pass `--gateway-token-env` (defaults to `ANTIGRAVITY_GATEWAY_TOKEN`) so the `/v1/models` probe can authenticate.
 If the existing `anti` skill is locally modified or stale, add `--force` before verification to back it up under `skills-backups` and replace it. BYOK provider checks are opt-in; add `--check-byok` to inspect provider readiness and compare configured provider models with the gateway's `/v1/models` catalog.
 
 For bounded multi-model advice, use the helper-level panel mode. It does not replace Codex's native acting model loop; it returns advisory synthesis and verifiable findings for Codex to check locally:
@@ -121,13 +121,14 @@ codex-antigravity setup-google --accounts 2
 codex-antigravity start
 ```
 
-This first verifies that Google OAuth client credentials are configured, then runs the browser OAuth login before writing Codex config so a login startup failure does not leave Codex pointed at an unusable gateway setup. It forces Google's account chooser when adding multiple accounts, stores every successful login in the encrypted rotation pool, clears stale cooldown state on re-authentication, prints the active Gemini/Claude rotation status, writes the Codex provider block, and runs `doctor` against the same config path. To add more accounts later, run `codex-antigravity login --count 2`; to inspect rotation state, run `codex-antigravity accounts`. Use `codex-antigravity accounts reset <email>` to clear persisted cooldown/failure state, `accounts reset --all --yes` for the whole pool, and `accounts remove <email> --yes` to remove a revoked account without hand-editing encrypted storage.
+This first verifies that Google OAuth client credentials are configured, then runs the browser OAuth login before writing Codex config so a login startup failure does not leave Codex pointed at an unusable gateway setup. It forces Google's account chooser when adding multiple accounts, stores every successful login in the encrypted rotation pool, clears stale cooldown state on re-authentication, prints the active Gemini/Claude rotation status, writes the Codex provider block, and runs the active-provider doctor only when `--activate` is also passed. To add more accounts later, run `codex-antigravity login --count 2`; to inspect rotation state, run `codex-antigravity accounts`. Use `codex-antigravity accounts reset <email>` to clear persisted cooldown/failure state, `accounts reset --all --yes` for the whole pool, and `accounts remove <email> --yes` to remove a revoked account without hand-editing encrypted storage.
 
 For BYOK-only use, replace `codex-antigravity login` with a provider setup command such as:
 
 ```bash
 codex-antigravity provider set deepseek --api-key-env DEEPSEEK_API_KEY --model deepseek-chat
 codex-antigravity configure-codex --write --model deepseek:deepseek-chat
+# Add --activate only if you want DeepSeek to become the active Codex default.
 codex-antigravity doctor --byok-only
 ```
 

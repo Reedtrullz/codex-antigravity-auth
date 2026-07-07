@@ -79,6 +79,7 @@ def write_ready_codex_config(
             provider_id=provider_id,
             provider_name=provider_name,
             base_url=base_url,
+            activate=True,
         ),
         encoding="utf-8",
     )
@@ -483,6 +484,7 @@ class TestGoogleAccountSetup(unittest.TestCase):
                     provider_name="Google Antigravity",
                     base_url="http://localhost:51122/v1",
                     port=51122,
+                    activate=False,
                 )
             )
 
@@ -493,8 +495,8 @@ class TestGoogleAccountSetup(unittest.TestCase):
         login_args = mock_login.call_args.args[0]
         self.assertEqual(login_args.count, 3)
         self.assertTrue(login_args.select_account)
-        mock_doctor.assert_called_once()
-        self.assertEqual(mock_doctor.call_args.kwargs["provider_id"], "antigravity")
+        self.assertFalse(configure_args.activate)
+        mock_doctor.assert_not_called()
 
     @patch("codex_antigravity_auth.cli.run_doctor")
     @patch("codex_antigravity_auth.cli.run_login")
@@ -512,12 +514,14 @@ class TestGoogleAccountSetup(unittest.TestCase):
                     provider_name="Google Antigravity",
                     base_url=None,
                     port=51123,
+                    activate=False,
                 )
             )
 
         configure_args = mock_configure.call_args.args[0]
         self.assertEqual(configure_args.base_url, "http://localhost:51123/v1")
-        self.assertEqual(mock_doctor.call_args.kwargs["expected_base_url"], "http://localhost:51123/v1")
+        self.assertFalse(configure_args.activate)
+        mock_doctor.assert_not_called()
 
     @patch("codex_antigravity_auth.cli.run_doctor")
     @patch("codex_antigravity_auth.cli.run_login")
@@ -536,6 +540,7 @@ class TestGoogleAccountSetup(unittest.TestCase):
                         provider_name="Google Antigravity",
                         base_url="localhost:51122/v1",
                         port=51122,
+                        activate=False,
                     )
                 )
 
@@ -560,6 +565,7 @@ class TestGoogleAccountSetup(unittest.TestCase):
                         provider_name="Google Antigravity",
                         base_url=None,
                         port=51122,
+                        activate=False,
                     )
                 )
 
@@ -584,6 +590,7 @@ class TestGoogleAccountSetup(unittest.TestCase):
                         provider_name="Google Antigravity",
                         base_url=None,
                         port=51122,
+                        activate=True,
                     )
                 )
 
@@ -607,6 +614,7 @@ class TestGoogleAccountSetup(unittest.TestCase):
                         provider_name="Google Antigravity",
                         base_url=None,
                         port=51122,
+                        activate=False,
                     )
                 )
 
@@ -658,11 +666,18 @@ class TestConfigureCodex(unittest.TestCase):
     def test_render_codex_config_snippet_contains_gateway_provider(self):
         snippet = render_codex_config_snippet()
 
-        self.assertIn('model = "claude-3.5-sonnet"', snippet)
-        self.assertIn('model_provider = "antigravity"', snippet)
+        self.assertNotIn('model = "claude-3.5-sonnet"', snippet)
+        self.assertNotIn('model_provider = "antigravity"', snippet)
         self.assertIn("[model_providers.antigravity]", snippet)
         self.assertIn('base_url = "http://localhost:51122/v1"', snippet)
         self.assertIn('wire_api = "responses"', snippet)
+
+    def test_render_codex_config_snippet_can_activate_gateway_provider(self):
+        snippet = render_codex_config_snippet(activate=True)
+
+        self.assertIn('model = "claude-3.5-sonnet"', snippet)
+        self.assertIn('model_provider = "antigravity"', snippet)
+        self.assertIn("[model_providers.antigravity]", snippet)
 
     def test_claude_aliases_resolve_for_native_codex_setup(self):
         self.assertEqual(validate_codex_model_id("sonnet"), "claude-3.5-sonnet")
@@ -687,6 +702,7 @@ class TestConfigureCodex(unittest.TestCase):
         )
 
         self.assertIn("--write", command)
+        self.assertNotIn("--activate", command)
         self.assertIn("--config '/tmp/codex config.toml'", command)
         self.assertIn("--model deepseek:deepseek-chat", command)
         self.assertIn("--provider ag-local", command)
@@ -818,12 +834,19 @@ class TestConfigureCodex(unittest.TestCase):
         self.assertIn("# user settings", merged)
         self.assertIn("[profiles.work]", merged)
         self.assertIn('approval_policy = "never"', merged)
-        self.assertIn('model = "claude-3.5-sonnet"', merged)
-        self.assertIn('model_provider = "antigravity"', merged)
+        self.assertIn('model = "gpt-5"', merged)
+        self.assertNotIn('model_provider = "antigravity"', merged)
         self.assertIn("[model_providers.antigravity] # managed gateway", merged)
         self.assertIn('name = "Google Antigravity"', merged)
         self.assertIn('base_url = "http://localhost:51122/v1"', merged)
         self.assertIn('wire_api = "responses"', merged)
+
+    def test_merge_codex_config_can_activate_gateway_provider(self):
+        merged = merge_codex_config('model = "gpt-5"\n', activate=True)
+
+        self.assertIn('model = "claude-3.5-sonnet"', merged)
+        self.assertIn('model_provider = "antigravity"', merged)
+        self.assertIn("[model_providers.antigravity]", merged)
 
     def test_write_codex_config_creates_backup_and_is_idempotent(self):
         with TemporaryDirectory() as tmp:
@@ -837,7 +860,10 @@ class TestConfigureCodex(unittest.TestCase):
             self.assertIsNotNone(backup_path)
             self.assertEqual(backup_path.read_text(encoding="utf-8"), 'model = "gpt-5"\n')
             assert_mode_if_posix(self, backup_path, 0o600)
-            self.assertIn('model_provider = "antigravity"', config_path.read_text(encoding="utf-8"))
+            written = config_path.read_text(encoding="utf-8")
+            self.assertIn('model = "gpt-5"', written)
+            self.assertNotIn('model_provider = "antigravity"', written)
+            self.assertIn("[model_providers.antigravity]", written)
             assert_mode_if_posix(self, config_path, 0o600)
 
             changed_again, backup_again = write_codex_config(config_path)
@@ -853,7 +879,9 @@ class TestConfigureCodex(unittest.TestCase):
 
             self.assertTrue(changed)
             self.assertIsNone(backup_path)
-            self.assertIn('model_provider = "antigravity"', config_path.read_text(encoding="utf-8"))
+            written = config_path.read_text(encoding="utf-8")
+            self.assertNotIn('model_provider = "antigravity"', written)
+            self.assertIn("[model_providers.antigravity]", written)
             assert_mode_if_posix(self, config_path, 0o600)
 
     def test_write_codex_config_does_not_overwrite_same_second_backup(self):
@@ -862,8 +890,8 @@ class TestConfigureCodex(unittest.TestCase):
             config_path.write_text('model = "gpt-5"\n', encoding="utf-8")
 
             with patch("codex_antigravity_auth.cli.time.strftime", return_value="20260702140000"):
-                changed_first, first_backup = write_codex_config(config_path, model="gemini-3.5-flash-high")
-                changed_second, second_backup = write_codex_config(config_path, model="gemini-3.5-flash-medium")
+                changed_first, first_backup = write_codex_config(config_path, model="gemini-3.5-flash-high", activate=True)
+                changed_second, second_backup = write_codex_config(config_path, model="gemini-3.5-flash-medium", activate=True)
 
             self.assertTrue(changed_first)
             self.assertTrue(changed_second)
@@ -919,7 +947,10 @@ class TestConfigureCodex(unittest.TestCase):
             self.assertTrue(changed)
             self.assertTrue(config_path.is_symlink())
             self.assertEqual(config_path.resolve(), target_path.resolve())
-            self.assertIn('model_provider = "antigravity"', target_path.read_text(encoding="utf-8"))
+            written = target_path.read_text(encoding="utf-8")
+            self.assertIn('model = "gpt-5"', written)
+            self.assertNotIn('model_provider = "antigravity"', written)
+            self.assertIn("[model_providers.antigravity]", written)
             assert_mode_if_posix(self, target_path, 0o600)
             self.assertIsNotNone(backup_path)
             self.assertEqual(backup_path.parent.resolve(), target_path.parent.resolve())
@@ -1217,6 +1248,7 @@ class TestV3NativeSetup(unittest.TestCase):
             check=False,
             json=False,
             write=False,
+            activate=False,
             no_input=False,
             accounts=1,
             model="claude-3.5-sonnet",
@@ -1307,6 +1339,41 @@ class TestV3NativeSetup(unittest.TestCase):
 
         self.assertTrue(report["ok"])
         self.assertEqual(events, ["login", "config", "skill", "start", "gateway", "doctor"])
+
+    def test_setup_write_does_not_activate_codex_provider_by_default(self):
+        args = self.setup_args(write=True)
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+            with patch("codex_antigravity_auth.cli.run_login"):
+                with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                    with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                        with patch(
+                            "codex_antigravity_auth.cli.codex_ready_report",
+                            return_value={"ok": True, "checks": [], "next_command": "codex"},
+                        ) as readiness:
+                            with patch("builtins.print"):
+                                report = run_setup(args)
+
+        self.assertTrue(report["ok"])
+        self.assertFalse(configure.call_args.args[0].activate)
+        self.assertFalse(readiness.call_args.kwargs["require_active_provider"])
+        self.assertEqual(readiness.call_args.kwargs["selected_model"], "claude-3.5-sonnet")
+
+    def test_setup_write_activate_opts_into_active_codex_provider(self):
+        args = self.setup_args(write=True, activate=True)
+        with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
+            with patch("codex_antigravity_auth.cli.run_login"):
+                with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
+                    with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                        with patch(
+                            "codex_antigravity_auth.cli.codex_ready_report",
+                            return_value={"ok": True, "checks": [], "next_command": "codex"},
+                        ) as readiness:
+                            with patch("builtins.print"):
+                                report = run_setup(args)
+
+        self.assertTrue(report["ok"])
+        self.assertTrue(configure.call_args.args[0].activate)
+        self.assertTrue(readiness.call_args.kwargs["require_active_provider"])
 
     def test_setup_derives_base_url_from_custom_port(self):
         with TemporaryDirectory() as tmp:

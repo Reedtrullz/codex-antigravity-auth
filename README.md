@@ -42,7 +42,7 @@ uv pip install -e .
 
 ## Configuration
 
-The recommended first-run path is the primary setup command. It validates OAuth credentials, prompts for missing Google OAuth desktop-client credentials on an interactive TTY, runs Google login, writes Codex config only when `--write` is present, can install the optional `$anti` helper skill, starts the gateway in the background, waits for `/v1/models`, and ends with Codex readiness diagnostics:
+The recommended first-run path is the primary setup command. It validates OAuth credentials, prompts for missing Google OAuth desktop-client credentials on an interactive TTY, runs Google login, writes the Codex provider block only when `--write` is present, can install the optional `$anti` helper skill, starts the gateway in the background, waits for `/v1/models`, and ends with readiness diagnostics. It does not change your active default Codex model unless you add `--activate`:
 
 ```bash
 codex-antigravity setup --write --accounts 1 --model claude-3.5-sonnet --install-skill --start
@@ -86,13 +86,15 @@ If your Codex provider block drifts, repair only the Codex config without OAuth 
 codex-antigravity setup --repair --config ~/.codex/config.toml --model claude-3.5-sonnet
 ```
 
-Install the Codex provider block:
+Install or refresh the Codex provider block without changing your active default model:
 
 ```bash
 codex-antigravity configure-codex --write
 ```
 
-The command validates the Codex model id, provider id, provider name, and gateway base URL before writing. It updates `~/.codex/config.toml` through a private atomic write, follows an existing symlink to update the real config target, and writes a timestamped private backup first when it changes an existing config. To inspect the TOML without writing it:
+The command validates the Codex model id, provider id, provider name, and gateway base URL before writing. It updates `~/.codex/config.toml` through a private atomic write, follows an existing symlink to update the real config target, and writes a timestamped private backup first when it changes an existing config. By default it writes only `[model_providers.antigravity]`; it does not change top-level `model` or `model_provider`. Add `--activate` only when you explicitly want Antigravity to become the active Codex default.
+
+To inspect the TOML without writing it:
 
 ```bash
 codex-antigravity configure-codex
@@ -115,7 +117,7 @@ codex-antigravity install-skill --verify
 codex-antigravity install-skill --force --verify
 ```
 
-`setup-v2 --write` installs or refreshes the bundled skill, but it does not write `~/.codex/config.toml`; use primary `setup --write`, `setup-google`, or `configure-codex --write` when you explicitly want Codex itself pointed at the gateway.
+`setup-v2 --write` installs or refreshes the bundled skill, but it does not write `~/.codex/config.toml`; use primary `setup --write`, `setup-google`, or `configure-codex --write` when you explicitly want the gateway provider block installed. Add `--activate` to primary `setup --write` or `configure-codex --write` only when you explicitly want Codex itself pointed at the gateway as the active default.
 If an existing `anti` skill differs from the bundled copy, pass `--force` with `install-skill` or `setup-v2 --write` to back it up and replace it before verifying. BYOK provider identity/key checks are skipped by default; add `--check-byok` when you want setup-v2 to inspect provider readiness and confirm configured provider models are advertised by the running gateway.
 
 The skill also ships a helper-level panel mode inspired by MoA/Fusion workflows. Codex remains the acting agent; the helper fans out to gateway-advertised models, asks a judge model to synthesize disagreements, structured findings, blind spots, and next actions, then returns advisory output for Codex to verify:
@@ -180,7 +182,7 @@ For first-run native Claude setup, prefer `setup --write`. For the older Google-
 codex-antigravity setup-google --accounts 2
 ```
 
-`setup-google` first verifies that Google OAuth client credentials are configured, then runs the browser OAuth flow before writing Codex config. That keeps Codex config untouched if login cannot start or complete. It forces Google's account chooser for multi-account setup, stores each account in the encrypted rotation pool, clears stale cooldown state for re-authenticated accounts, writes the Codex provider block after successful login unless `--skip-codex-config` is passed, and runs `doctor` against the same config path unless `--skip-doctor` is passed. You can also add more accounts later:
+`setup-google` first verifies that Google OAuth client credentials are configured, then runs the browser OAuth flow before writing Codex config. That keeps Codex config untouched if login cannot start or complete. It forces Google's account chooser for multi-account setup, stores each account in the encrypted rotation pool, clears stale cooldown state for re-authenticated accounts, writes the Codex provider block after successful login unless `--skip-codex-config` is passed, and runs the active-provider `doctor` only when `--activate` is also passed. You can also add more accounts later:
 
 ```bash
 codex-antigravity login --count 2
@@ -253,6 +255,7 @@ For BYOK-only use, point Codex at a BYOK model when writing the provider block:
 
 ```bash
 codex-antigravity configure-codex --write --model deepseek:deepseek-chat
+# Add --activate only if you want DeepSeek to become the active Codex default.
 codex-antigravity doctor --byok-only
 ```
 
@@ -286,16 +289,20 @@ codex-antigravity service install --port 51122 --host 127.0.0.1 --op-environment
 
 The 1Password CLI must be installed on `PATH` when these options are used. `start --background` and `service install` resolve `op` to an absolute path and fail before writing service manifests or starting a gateway if it is missing. Durable services still depend on your local 1Password unlock/session behavior after reboot; verify with `codex-antigravity service status` and `codex-antigravity doctor --codex-ready --live`.
 
-The `configure-codex --write` helper writes this equivalent TOML into `~/.codex/config.toml` after validation:
+The `configure-codex --write` helper writes this provider block into `~/.codex/config.toml` after validation:
+
+```toml
+[model_providers.antigravity]
+name = "Google Antigravity"
+base_url = "http://localhost:51122/v1"
+wire_api = "responses"
+```
+
+If you deliberately pass `--activate`, it also writes the active default keys:
 
 ```toml
 model = "claude-3.5-sonnet"
 model_provider = "antigravity"
-wire_api = "responses"
-
-[model_providers.antigravity]
-name = "Google Antigravity"
-base_url = "http://localhost:51122/v1"
 wire_api = "responses"
 ```
 
@@ -309,7 +316,7 @@ codex-antigravity doctor --live --live-model claude-3.5-sonnet
 codex-antigravity doctor --byok-only
 ```
 
-`doctor` parses the active Codex config, verifies `model_provider = "antigravity"` and the matching provider `base_url`, warns when PyPI has a newer package version, and exits non-zero on hard readiness failures. `doctor --codex-ready` additionally checks that the gateway is reachable, `/v1/models` advertises the selected Codex model, the model routes to Google or BYOK correctly, and the selected Google family has usable rotation state. Add `--live` when you want a real Google Antigravity `/v1/responses` generation smoke; set `CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1` to skip the once-daily package-version check. Use `--config /path/to/config.toml` to verify a non-default Codex config.
+`doctor` parses the active Codex config, verifies `model_provider = "antigravity"` and the matching provider `base_url` when Antigravity is active, warns when PyPI has a newer package version, and exits non-zero on hard readiness failures. `doctor --codex-ready` additionally checks that the gateway is reachable, `/v1/models` advertises the selected Codex model, the model routes to Google or BYOK correctly, and the selected Google family has usable rotation state. Add `--live` when you want a real Google Antigravity `/v1/responses` generation smoke; set `CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1` to skip the once-daily package-version check. Use `--config /path/to/config.toml` to verify a non-default Codex config.
 
 Before tagging a release, run the local verification stack and one credentialed live smoke:
 
