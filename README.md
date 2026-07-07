@@ -1,8 +1,34 @@
 # Codex Antigravity Auth
 
-Create a clean, reliable local gateway server that makes Google Antigravity Claude Opus/Sonnet feel native in OpenAI Codex (CLI or Desktop), with Gemini and BYOK OpenAI-compatible providers still available.
+[![PyPI](https://img.shields.io/pypi/v/codex-antigravity-auth.svg)](https://pypi.org/project/codex-antigravity-auth/)
+[![CI](https://github.com/Reedtrullz/codex-antigravity-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/Reedtrullz/codex-antigravity-auth/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Reedtrullz/codex-antigravity-auth)](https://github.com/Reedtrullz/codex-antigravity-auth/releases)
+
+Released local gateway for using Google Antigravity Claude Opus/Sonnet from OpenAI Codex CLI or Desktop. It exposes an OpenAI Responses-compatible `http://localhost:51122/v1` endpoint, handles Google OAuth/account rotation, and keeps optional Gemini and BYOK OpenAI-compatible providers available.
+
+The default setup is intentionally conservative: it can install the Codex provider block and start the gateway, but it will not replace your active Codex model unless you explicitly pass `--activate`.
+
+## Quick Start
+
+```bash
+uv tool install codex-antigravity-auth
+codex-antigravity setup --write --accounts 1 --model claude-3.5-sonnet --install-skill --start
+codex-antigravity setup --check --model claude-3.5-sonnet
+```
+
+To make Antigravity Claude the active Codex default, opt in explicitly:
+
+```bash
+codex-antigravity configure-codex --write --activate --model claude-3.5-sonnet
+```
+
+Use `$anti` only as an optional sidecar reviewer/planner after the gateway is working; Codex remains the acting agent.
 
 ## Features
+- **Claude in Codex**: Advertises Antigravity Claude Sonnet/Opus through `/v1/models` so Codex can use the local gateway like a Responses API provider.
+- **Safe setup by default**: `setup --write` and `configure-codex --write` install the provider block without changing top-level `model`/`model_provider`; `--activate` is required to switch Codex defaults.
+- **Durable local service**: Supports foreground/background gateway runs plus per-user macOS LaunchAgent, Linux systemd user unit, and Windows Scheduled Task service lifecycle.
+- **Diagnostics that explain the next step**: `setup --check`, `doctor --codex-ready`, `status`, `/health`, sanitized request logs, and `logs summary` help distinguish config, gateway, service, account, and provider-key issues.
 - **OS-Native Keyring Encryption**: Encrypts Google account tokens and stored BYOK provider config at rest via macOS Keychain, Windows Credential Manager, Linux Secret Service, or a private local fallback key.
 - **Transaction-Safe Cooldown Rotations**: Automatically rotates accounts on backend failures (such as `401`, `403`, or `429` rate limiters) with clean exponential backoff.
 - **High-Fidelity SSE Translation**: Translates stream candidate envelopes, role alignments, reasoning-text deltas, function-call items, and VALIDATED tool parameter modes into Responses API events.

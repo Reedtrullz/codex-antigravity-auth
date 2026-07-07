@@ -669,7 +669,7 @@ def local_gateway_base_url(host: str, port: int) -> str:
     return f"http://{host}:{port}/v1"
 
 
-def add_gateway_reachability(info: dict, *, host: str = "127.0.0.1", timeout: float = 0.75) -> dict:
+def add_gateway_reachability(info: dict, *, host: str = "127.0.0.1", timeout: float = 5.0) -> dict:
     base_url = local_gateway_base_url(host, int(info["port"]))
     try:
         model_ids = gateway_model_ids(base_url, timeout=timeout)
@@ -808,8 +808,7 @@ def gateway_status_info(port: int) -> dict:
 
 
 def run_gateway_status(args) -> dict:
-    info = gateway_status_info(args.port)
-    add_gateway_reachability(info)
+    info = reachable_gateway_status_info(args.port, wait=True, timeout=5.0)
     info["service"] = service_status(args.port)
     info["request_log"] = request_log_info()
     if getattr(args, "json", False):
@@ -1375,7 +1374,7 @@ def codex_ready_report(
         add_gateway_reachability(
             status_info,
             host=parsed_gateway.hostname or "127.0.0.1",
-            timeout=min(max(float(gateway_timeout), 0.1), 0.75),
+            timeout=max(float(gateway_timeout), 0.1),
         )
         service_info = service_status(gateway_port)
         if status_info["running"]:
@@ -2331,7 +2330,12 @@ def run_configure_codex(args) -> None:
         if backup_path:
             print(f"[+] Backup written: {backup_path}")
     else:
-        print(f"[*] Codex config already points at this gateway: {config_path}")
+        print(f"[*] Codex provider block already points at this gateway: {config_path}")
+    if activate:
+        print(f"[*] Active Codex default set to {args.model} via provider {args.provider}.")
+    else:
+        print("[*] Installed provider block only; existing top-level model/model_provider were left unchanged.")
+        print("[*] Add --activate only when you explicitly want this gateway to become the active Codex default.")
     print(f"[*] Start the gateway with: {gateway_start_command(args.base_url)}")
     print("[*] Optional sidecar skill: codex-antigravity install-skill")
 

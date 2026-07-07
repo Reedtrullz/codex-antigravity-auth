@@ -17,6 +17,7 @@ from codex_antigravity_auth.oauth import authorize_antigravity, encode_state
 from codex_antigravity_auth.cli import (
     OAuthCallbackHandler,
     OAuthServer,
+    add_gateway_reachability,
     account_rotation_lines,
     configure_codex_write_command,
     codex_ready_report,
@@ -813,6 +814,53 @@ class TestConfigureCodex(unittest.TestCase):
         with patch("codex_antigravity_auth.cli.write_codex_config", side_effect=RuntimeError("disk full")):
             with self.assertRaisesRegex(SystemExit, "disk full"):
                 run_configure_codex(args)
+
+    def test_run_configure_codex_provider_only_message_names_activate(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('model = "gpt-5.5"\n', encoding="utf-8")
+            args = Namespace(
+                config=str(config_path),
+                model="claude-3.5-sonnet",
+                provider="antigravity",
+                provider_name="Google Antigravity",
+                base_url="http://localhost:51122/v1",
+                write=True,
+                activate=False,
+            )
+
+            with patch("builtins.print") as mock_print:
+                run_configure_codex(args)
+
+            written = config_path.read_text(encoding="utf-8")
+
+        printed = "\n".join(call.args[0] for call in mock_print.call_args_list if call.args)
+        self.assertIn("provider block only", printed)
+        self.assertIn("left unchanged", printed)
+        self.assertIn("--activate", printed)
+        self.assertNotIn('model_provider = "antigravity"', written)
+
+    def test_run_configure_codex_activate_message_names_active_default(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            args = Namespace(
+                config=str(config_path),
+                model="claude-3.5-sonnet",
+                provider="antigravity",
+                provider_name="Google Antigravity",
+                base_url="http://localhost:51122/v1",
+                write=True,
+                activate=True,
+            )
+
+            with patch("builtins.print") as mock_print:
+                run_configure_codex(args)
+
+            written = config_path.read_text(encoding="utf-8")
+
+        printed = "\n".join(call.args[0] for call in mock_print.call_args_list if call.args)
+        self.assertIn("Active Codex default set to claude-3.5-sonnet", printed)
+        self.assertIn('model_provider = "antigravity"', written)
 
     def test_merge_codex_config_preserves_unrelated_sections(self):
         existing = "\n".join(
@@ -1804,6 +1852,40 @@ class TestV3NativeSetup(unittest.TestCase):
         self.assertEqual(info["status"], "unmanaged")
         self.assertTrue(info["reachable"])
         self.assertEqual(info["reachable_model_count"], 1)
+
+    def test_gateway_reachability_default_allows_cold_model_catalog(self):
+        info = {"port": 51122, "status": "stopped", "running": False}
+
+        with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}) as models:
+            add_gateway_reachability(info)
+
+        self.assertTrue(info["reachable"])
+        self.assertEqual(models.call_args.kwargs["timeout"], 5.0)
+
+    def test_run_gateway_status_uses_waiting_reachability_probe(self):
+        with patch(
+            "codex_antigravity_auth.cli.reachable_gateway_status_info",
+            return_value={
+                "port": 51122,
+                "status": "unmanaged",
+                "running": False,
+                "pid": None,
+                "pid_file": "/tmp/pid",
+                "log_file": "/tmp/log",
+                "process_running": False,
+                "process_matches": None,
+                "reachable": True,
+                "reachable_base_url": "http://127.0.0.1:51122/v1",
+                "reachable_model_count": 7,
+            },
+        ) as status_info:
+            with patch("codex_antigravity_auth.cli.service_status", return_value={"installed": True, "active": True}):
+                with patch("codex_antigravity_auth.cli.request_log_info", return_value={"path": "requests.jsonl"}):
+                    with patch("builtins.print"):
+                        info = run_gateway_status(Namespace(port=51122, json=False))
+
+        self.assertTrue(info["reachable"])
+        status_info.assert_called_once_with(51122, wait=True, timeout=5.0)
 
     def test_codex_ready_treats_unmanaged_reachable_gateway_as_process_ready(self):
         with TemporaryDirectory() as tmp:
