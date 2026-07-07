@@ -1,15 +1,16 @@
-# Current Integration Status — 6 July 2026
+# Current Integration Status — 7 July 2026
 
 ## Build & Test Health
-- **local pytest**: full local suite passing with `python3 -m pytest -q` (`397` tests plus `138` subtests) ✅
+- **local pytest**: full local suite passing with `python3 -m pytest -q` (`407` tests plus `138` subtests); focused CLI suite also passed with `159` tests plus `20` subtests ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
-- **wheel install smoke**: ran `python3 -m build`, `python3 -m twine check dist/*`, installed the wheel into a clean venv, ran `pip check`, verified console script help plus `service status --json`, `models list --json`, `logs --tail 1 --json`, scratch `setup --check`, and packaged `install-skill --verify` ✅
+- **wheel install smoke**: v1.6.4 branch ran `python3 -m build`, `python3 -m twine check dist/*`, installed the wheel into a clean venv, ran `pip check`, verified package version `1.6.4`, proved provider-only config guidance preserves scratch `gpt-5.5`/`xhigh`, proved `--activate` switches the scratch model/provider, verified packaged `status --json` reports 7 reachable models, and verified packaged `install-skill --verify` ✅
 - **CI matrix**: PR CI includes Ubuntu Python 3.10/3.11/3.12 plus a Windows Python 3.12 test leg ✅
-- **PR #9 CI**: head `81f555b` passed duplicate GitHub CI runs `28773161186` and `28773163025` across `package`, Ubuntu Python `3.10`/`3.11`/`3.12`, and Windows Python `3.12`; merge commit `8df3f18` passed main CI run `28773246854`; tag `v1.5.0` passed tag CI run `28773295158` ✅
+- **v1.6.3 CI/release**: PR #13 passed duplicate CI runs `28835880811` and `28835888260`; merge commit `55e0e79` passed main CI run `28835931271`; tag `v1.6.3` passed tag CI run `28835943159`; Publish workflow `28835943138` uploaded wheel and sdist to PyPI ✅
 - **live backend smoke**: credentialed live Google OAuth/runtime smoke passed on 2026-07-03 for `claude-3.5-sonnet`; live BYOK smokes passed through transient env vars for `deepseek:deepseek-v4-flash` and OpenRouter. Latest release-prep Google smoke on 2026-07-06 used a scratch Codex config, the live gateway on `127.0.0.1:51122`, and `doctor --codex-ready --live --live-model claude-3.5-sonnet`; it passed model catalog, routing, Claude account availability, and real non-streaming generation with preview `ready`. Latest OpenRouter evidence covered direct `/api/v1/auth/key` success, `/v1/models` exposure for `openrouter:openrouter/free`, and exact non-streaming sentinel `anti-openrouter-byok-ok` through `/v1/responses` with the gateway stopped afterward ✅
 - **install command**: `uv tool install codex-antigravity-auth` for normal use, `uv tool install --editable .` for development from a checkout
 - **doctor/connectivity**: redacted scratch-config `codex-antigravity doctor --codex-ready --live` passed after release-prep live Google OAuth smoke
+- **current branch diagnostics fix**: branch-local `python3 -m codex_antigravity_auth.cli status --json` reports the reachable live gateway with 7 models after extending the status reachability probe; installed PyPI `1.6.3` still has the older shorter probe until this branch is released ✅
 
 ## Core Features
 | Feature | Status |
@@ -115,22 +116,26 @@
 | Account CLI remove/reset for encrypted Google rotation store | ✅ |
 | `logs summary` request-log aggregation by route/family | ✅ |
 | `doctor --codex-ready` suggests `setup --repair` for existing config drift | ✅ |
+| Safe Codex config activation requiring explicit `--activate` | ✅ |
+| Clear provider-block-only `configure-codex --write` success messaging | ✅ |
+| Less brittle gateway status reachability probe for cold `/v1/models` responses | ✅ |
 
 ## Known Limitations
 - Live Google Antigravity, DeepSeek V4 Flash BYOK, and OpenRouter BYOK smokes have passed previously with configured credentials/API keys; current BYOK live proof still depends on fresh provider keys. The 1Password OpenRouter/DeepSeek login items inspected during the MoA/Fusion PR did not contain provider API-key-shaped values, so fresh BYOK credential material is still needed for another live provider smoke.
 - `doctor --live` and `setup --check --live` are explicit opt-in checks because they spend a real Google provider request.
 - `previous_response_id` is rejected by design in this stateless gateway; replay the full conversation, including tool calls and outputs, in `input`.
 - `/v1/responses/compact` is not implemented.
-- CI includes unit/compile checks, a release-artifact smoke job, and Windows Python 3.12 coverage. PR #10 head `e686d7b`, merge commit `b7a1464`, and tag `v1.6.0` all passed CI.
+- CI includes unit/compile checks, a release-artifact smoke job, and Windows Python 3.12 coverage. Latest released v1.6.3 proof is listed above; this v1.6.4 polish branch still needs PR CI before merge.
 - Live backend availability is covered only by the credentialed smoke runs noted above.
 - Helper-level MoA/Fusion remains advisory; virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not implemented.
 
 ## Release State
-- Current package metadata: `1.6.3` on the safe Codex config activation branch.
-- Latest tagged GitHub release before this PR: [v1.6.2](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.6.2)
-- PyPI Trusted Publishing run `28826650618` published `codex-antigravity-auth==1.6.2`; post-publish `pip install codex-antigravity-auth==1.6.2` and local command upgrade smokes passed.
+- Current package metadata: `1.6.4` on the release polish/status repair branch.
+- Latest tagged GitHub release: [v1.6.3](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.6.3)
+- PyPI Trusted Publishing run `28835943138` published `codex-antigravity-auth==1.6.3`; strict clean `pip install codex-antigravity-auth==1.6.3` plus scratch safe-config activation smoke passed.
 
 ## Next Priorities
-1. Add `/v1/responses/compact` support
-2. Expand live backend smoke coverage beyond DeepSeek/OpenRouter to additional BYOK providers
-3. Add a documented credentialed smoke-test profile for 1Password-backed BYOK providers without persisting raw API keys
+1. Merge and optionally tag `v1.6.4` after PR CI proves the status/messaging/docs polish branch.
+2. Add `/v1/responses/compact` support.
+3. Expand live backend smoke coverage beyond DeepSeek/OpenRouter to additional BYOK providers.
+4. Add a documented credentialed smoke-test profile for 1Password-backed BYOK providers without persisting raw API keys.
