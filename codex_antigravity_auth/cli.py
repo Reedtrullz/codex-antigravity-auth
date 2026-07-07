@@ -1340,6 +1340,8 @@ def codex_ready_report(
     live_model: str | None = None,
     live_timeout: float = 30.0,
     include_version_check: bool = True,
+    selected_model: str | None = None,
+    require_active_provider: bool = True,
 ) -> dict:
     checks: list[dict] = []
 
@@ -1357,14 +1359,11 @@ def codex_ready_report(
     if config_error:
         add("codex_config", "fail", config_error)
     else:
-        ready, reason = inspect_codex_gateway_config(
-            config_content or "",
-            provider_id=provider_id,
-            expected_base_url=expected_base_url,
-        )
+        inspector = inspect_codex_gateway_config if require_active_provider else inspect_codex_provider_block_config
+        ready, reason = inspector(config_content or "", provider_id=provider_id, expected_base_url=expected_base_url)
         add("codex_config", "pass" if ready else "fail", reason, path=str(config_path))
         parsed = parse_codex_config(config_content or "")
-        active_model = str(parsed.get("active_model") or "")
+        active_model = str(selected_model or parsed.get("active_model") or "")
         try:
             canonical_model = validate_codex_model_id(active_model)
             add("selected_model", "pass", f"Codex model resolves to {canonical_model}", model=canonical_model)
@@ -1941,15 +1940,22 @@ def render_codex_config_snippet(
     provider_id: str = DEFAULT_CODEX_PROVIDER_ID,
     provider_name: str = DEFAULT_CODEX_PROVIDER_NAME,
     base_url: str = DEFAULT_CODEX_BASE_URL,
+    activate: bool = False,
 ) -> str:
     model = validate_codex_model_id(model)
     provider_id = validate_codex_provider_id(provider_id)
-    return "\n".join(
+    lines: list[str] = []
+    if activate:
+        lines.extend(
+            [
+                f"model = {toml_string(model)}",
+                f"model_provider = {toml_string(provider_id)}",
+                'wire_api = "responses"',
+                "",
+            ]
+        )
+    lines.extend(
         [
-            f"model = {toml_string(model)}",
-            f"model_provider = {toml_string(provider_id)}",
-            'wire_api = "responses"',
-            "",
             render_codex_provider_table(
                 provider_id=provider_id,
                 provider_name=provider_name,
@@ -1958,6 +1964,7 @@ def render_codex_config_snippet(
             "",
         ]
     )
+    return "\n".join(lines)
 
 
 def _toml_key(line: str) -> str | None:
@@ -2038,6 +2045,7 @@ def merge_codex_config(
     provider_id: str = DEFAULT_CODEX_PROVIDER_ID,
     provider_name: str = DEFAULT_CODEX_PROVIDER_NAME,
     base_url: str = DEFAULT_CODEX_BASE_URL,
+    activate: bool = False,
 ) -> str:
     model = validate_codex_model_id(model)
     provider_id = validate_codex_provider_id(provider_id)
@@ -2049,17 +2057,19 @@ def merge_codex_config(
             provider_id=provider_id,
             provider_name=provider_name,
             base_url=base_url,
+            activate=activate,
         )
 
     lines = existing.splitlines()
-    lines = _upsert_root_keys(
-        lines,
-        {
-            "model": toml_string(model),
-            "model_provider": toml_string(provider_id),
-            "wire_api": '"responses"',
-        },
-    )
+    if activate:
+        lines = _upsert_root_keys(
+            lines,
+            {
+                "model": toml_string(model),
+                "model_provider": toml_string(provider_id),
+                "wire_api": '"responses"',
+            },
+        )
     lines = _upsert_table(
         lines,
         f"model_providers.{provider_id}",
@@ -2164,6 +2174,27 @@ def inspect_codex_gateway_config(content: str, *, provider_id: str, expected_bas
     return True, "active provider points to this gateway server"
 
 
+def inspect_codex_provider_block_config(content: str, *, provider_id: str, expected_base_url: str) -> tuple[bool, str]:
+    provider_id = validate_codex_provider_id(provider_id)
+    expected_base_url = validate_http_base_url(expected_base_url, label="Codex gateway base URL")
+    parsed = parse_codex_config(content)
+    provider_tables = parsed["provider_tables"]
+    active_provider = parsed["active_provider"]
+
+    provider_table = provider_tables.get(provider_id)
+    if not provider_table:
+        return False, f"missing [model_providers.{provider_id}] table"
+    base_url = provider_table.get("base_url")
+    if base_url != expected_base_url:
+        return False, f"provider base_url is {base_url or '(unset)'}, expected {expected_base_url}"
+    wire_api = provider_table.get("wire_api")
+    if wire_api and wire_api != "responses":
+        return False, f"provider wire_api is {wire_api}, expected responses"
+    if active_provider == provider_id:
+        return True, "provider block is installed and active"
+    return True, f"provider block is installed; active model_provider is {active_provider or '(unset)'}"
+
+
 def _write_private_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = None
@@ -2210,6 +2241,7 @@ def write_codex_config(
     provider_id: str = DEFAULT_CODEX_PROVIDER_ID,
     provider_name: str = DEFAULT_CODEX_PROVIDER_NAME,
     base_url: str = DEFAULT_CODEX_BASE_URL,
+    activate: bool = False,
 ) -> tuple[bool, Path | None]:
     model = validate_codex_model_id(model)
     provider_id = validate_codex_provider_id(provider_id)
@@ -2222,6 +2254,7 @@ def write_codex_config(
         provider_id=provider_id,
         provider_name=provider_name,
         base_url=base_url,
+        activate=activate,
     )
     if existing == updated:
         return False, None
@@ -2237,6 +2270,8 @@ def write_codex_config(
 
 def configure_codex_write_command(args) -> str:
     parts = ["codex-antigravity", "configure-codex", "--write"]
+    if getattr(args, "activate", False):
+        parts.append("--activate")
     if args.config != "~/.codex/config.toml":
         parts.extend(["--config", args.config])
     if args.model != DEFAULT_CODEX_MODEL:
@@ -2262,12 +2297,14 @@ def gateway_start_command(base_url: str) -> str:
 
 def run_configure_codex(args) -> None:
     config_path = Path(os.path.expanduser(args.config))
+    activate = bool(getattr(args, "activate", False))
     try:
         snippet = render_codex_config_snippet(
             model=args.model,
             provider_id=args.provider,
             provider_name=args.provider_name,
             base_url=args.base_url,
+            activate=activate,
         )
     except (OSError, RuntimeError, ValueError) as e:
         raise SystemExit(str(e)) from e
@@ -2285,6 +2322,7 @@ def run_configure_codex(args) -> None:
             provider_id=args.provider,
             provider_name=args.provider_name,
             base_url=args.base_url,
+            activate=activate,
         )
     except (OSError, RuntimeError, ValueError) as e:
         raise SystemExit(str(e)) from e
@@ -2450,15 +2488,18 @@ def run_setup_google(args) -> None:
                 provider=args.provider,
                 provider_name=args.provider_name,
                 base_url=base_url,
+                activate=getattr(args, "activate", False),
             )
         )
     else:
         print("[*] Skipping Codex config write.")
 
-    if not args.skip_doctor:
+    if not args.skip_doctor and getattr(args, "activate", False):
         print("[*] Running post-setup doctor...")
         if not run_doctor(expected_base_url=base_url, config=args.config, provider_id=args.provider):
             raise SystemExit("Google setup completed, but doctor found hard failures. Review the diagnostics above.")
+    elif not args.skip_doctor:
+        print("[*] Skipping active-provider doctor because --activate was not used.")
     print("[+] Google Antigravity OAuth setup is ready.")
     print(f"    Start the gateway with: codex-antigravity start --port {args.port}")
     print("    Optional Codex sidecar skill: codex-antigravity install-skill")
@@ -2664,6 +2705,7 @@ def run_setup(args) -> dict:
                 provider=args.provider,
                 provider_name=args.provider_name,
                 base_url=base_url,
+                activate=getattr(args, "activate", False),
             )
         )
         _setup_check(checks, "codex_config_repair", "pass", f"repaired {Path(os.path.expanduser(args.config))}")
@@ -2676,6 +2718,8 @@ def run_setup(args) -> dict:
             live=getattr(args, "live", False),
             live_model=getattr(args, "live_model", None),
             live_timeout=getattr(args, "live_timeout", 30.0),
+            selected_model=model,
+            require_active_provider=getattr(args, "activate", False),
         )
         checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
         ok = all(check["status"] != "fail" for check in checks)
@@ -2760,6 +2804,8 @@ def run_setup(args) -> dict:
             live=getattr(args, "live", False),
             live_model=getattr(args, "live_model", None),
             live_timeout=getattr(args, "live_timeout", 30.0),
+            selected_model=model,
+            require_active_provider=getattr(args, "activate", False),
         )
         checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
         ok = all(check["status"] != "fail" for check in checks)
@@ -2791,6 +2837,7 @@ def run_setup(args) -> dict:
             provider=args.provider,
             provider_name=args.provider_name,
             base_url=base_url,
+            activate=getattr(args, "activate", False),
         )
     )
     _setup_check(checks, "codex_config_write", "pass", f"updated {Path(os.path.expanduser(args.config))}")
@@ -2877,6 +2924,8 @@ def run_setup(args) -> dict:
         live=getattr(args, "live", False),
         live_model=getattr(args, "live_model", None),
         live_timeout=getattr(args, "live_timeout", 30.0),
+        selected_model=model,
+        require_active_provider=getattr(args, "activate", False),
     )
     checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
     ok = all(check["status"] != "fail" for check in checks)
@@ -3130,7 +3179,12 @@ def main():
     )
     setup_parser.add_argument("--check", action="store_true", help="Run read-only setup and Codex readiness checks")
     setup_parser.add_argument("--json", action="store_true", help="Print setup/readiness status as JSON")
-    setup_parser.add_argument("--write", action="store_true", help="Run login and write Codex configuration")
+    setup_parser.add_argument("--write", action="store_true", help="Run login and write the Codex provider block")
+    setup_parser.add_argument(
+        "--activate",
+        action="store_true",
+        help="Also make the gateway provider/model the active Codex default",
+    )
     setup_parser.add_argument("--repair", action="store_true", help="Repair Codex provider config without OAuth login, skill install, or gateway start")
     setup_parser.add_argument("--no-input", action="store_true", help="Fail instead of prompting when OAuth credentials are missing")
     setup_parser.add_argument("--accounts", type=positive_int, default=1, help="Number of Google login flows when --write is used")
@@ -3175,6 +3229,11 @@ def main():
     )
     setup_google_parser.add_argument("--accounts", type=positive_int, default=1, help="Number of browser login flows to run")
     setup_google_parser.add_argument("--skip-codex-config", action="store_true", help="Do not write ~/.codex/config.toml")
+    setup_google_parser.add_argument(
+        "--activate",
+        action="store_true",
+        help="Also make the gateway provider/model the active Codex default",
+    )
     setup_google_parser.add_argument("--skip-doctor", action="store_true", help="Do not run doctor after login")
     setup_google_parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path")
     setup_google_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Default Codex model to select")
@@ -3235,7 +3294,12 @@ def main():
         "configure-codex",
         help="Print or write Codex config.toml settings for this gateway",
     )
-    configure_parser.add_argument("--write", action="store_true", help="Update ~/.codex/config.toml in place")
+    configure_parser.add_argument("--write", action="store_true", help="Update the Codex provider block in config.toml")
+    configure_parser.add_argument(
+        "--activate",
+        action="store_true",
+        help="Also make this provider/model the active Codex default",
+    )
     configure_parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path")
     configure_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Default Codex model to select")
     configure_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id")

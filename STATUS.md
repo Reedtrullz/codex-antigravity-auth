@@ -126,9 +126,9 @@
 - Helper-level MoA/Fusion remains advisory; virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not implemented.
 
 ## Release State
-- Current package metadata: `1.6.2` on the service install readiness hotfix branch.
-- Latest tagged GitHub release before this PR: [v1.6.1](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.6.1)
-- PyPI Trusted Publishing run `28826373451` published `codex-antigravity-auth==1.6.1`; post-publish `pip install codex-antigravity-auth==1.6.1` and local command upgrade smokes passed.
+- Current package metadata: `1.6.3` on the safe Codex config activation branch.
+- Latest tagged GitHub release before this PR: [v1.6.2](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.6.2)
+- PyPI Trusted Publishing run `28826650618` published `codex-antigravity-auth==1.6.2`; post-publish `pip install codex-antigravity-auth==1.6.2` and local command upgrade smokes passed.
 
 ## Next Priorities
 1. Add `/v1/responses/compact` support
