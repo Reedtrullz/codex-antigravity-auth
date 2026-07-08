@@ -152,12 +152,15 @@ The skill also ships a helper-level panel mode inspired by MoA/Fusion workflows.
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode plan --scope working-tree --prompt "Plan this PR"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --model sonnet --model openrouter:deepseek/deepseek-chat --judge opus --prompt "Compare these approaches"
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --collab claude-grok --prompt "Compare these approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged --output findings
 ```
 
 Panel consensus is not proof and should not patch code directly. Structured findings include `id`, `claim`, `severity`, `lanes`, and `verify`; run the `verify` hint locally before acting. Text and JSON outputs include per-lane/judge usage and latency when the gateway/provider returns it. Broad review panels summarize oversized scopes once before fan-out instead of silently truncating raw context for every lane.
 
-BYOK panel models such as `openrouter:...` only work when the running gateway advertises them in `/v1/models`, which requires usable provider keys or a key-optional local provider setup. When a BYOK lane receives repository, diff, or file context, the helper prints and records a disclosure naming the provider lanes. Virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not supported; MoA/Fusion remains a helper workflow, not gateway-side orchestration.
+`--collab claude-grok` is an explicit collaboration profile for Claude plus Grok panels. It defaults to Sonnet, Opus, and `xai-oauth:grok-build-0.1`, gives Claude and Grok complementary review instructions, and asks the Opus judge to compare Claude-backed and Grok-backed disagreements before recommending verification steps. It still uses normal gateway-advertised models; if the Grok lane is not visible in `/v1/models`, it is recorded as a failed lane unless you require it with `--min-successes 3`.
+
+BYOK panel models such as `openrouter:...` or `xai-oauth:...` only work when the running gateway advertises them in `/v1/models`, which requires usable provider keys, key-optional local provider setup, or a refreshable OAuth login. When a BYOK lane receives repository, diff, or file context, the helper prints and records a disclosure naming the provider lanes. Virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not supported; MoA/Fusion remains a helper workflow, not gateway-side orchestration.
 
 V2 named workflow presets wrap the same advisory engine for common Codex work:
 
@@ -168,6 +171,8 @@ python3 ~/.codex/skills/anti/scripts/anti.py workflow ship-gate --scope diff --b
 python3 ~/.codex/skills/anti/scripts/anti.py workflow provider-compare --model sonnet --model openrouter:deepseek/deepseek-chat --prompt "Compare these approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow security-review --scope staged --output findings
 python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "Intermittent 502s after rotation"
+python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode review --scope staged --output findings
+python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode ask --prompt "Should this UX use route A or B?"
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
 ```
 
@@ -271,11 +276,14 @@ Built-in presets are available for OpenRouter, DeepSeek, xAI, Kimi/Moonshot, Oll
 codex-antigravity provider presets
 codex-antigravity provider set deepseek --api-key-env DEEPSEEK_API_KEY --model deepseek-chat --model deepseek-reasoner
 codex-antigravity provider set openrouter --api-key-env OPENROUTER_API_KEY --model deepseek/deepseek-chat
-codex-antigravity provider set xai --api-key-env XAI_API_KEY --model grok-code-fast-1
+codex-antigravity provider set xai --api-key-env XAI_API_KEY --model grok-build-0.1
+codex-antigravity provider login xai-oauth
 codex-antigravity provider set kimi --api-key-env KIMI_API_KEY --model kimi-k2-0711-preview
 codex-antigravity provider set ollama --base-url http://localhost:11434/v1 --model gpt-oss:20b
 codex-antigravity provider list
 ```
+
+Provider presets show their supported auth modes. For xAI/Grok there are two lanes: `xai:*` uses normal xAI console API-key billing through `XAI_API_KEY`, while `xai-oauth:*` uses a SuperGrok/X Premium OAuth login and stores refreshable tokens encrypted in `~/.codex/antigravity-xai-oauth.json`. Use `codex-antigravity provider login xai-oauth` for the browser callback flow, or `codex-antigravity provider login xai-oauth --device` for a headless/device-code flow. `codex-antigravity provider set xai --auth-mode oauth ...` fails with a pointer to `xai-oauth` so the API-key and subscription-backed routes do not get mixed.
 
 For BYOK-only use, point Codex at a BYOK model when writing the provider block:
 
@@ -285,8 +293,8 @@ codex-antigravity configure-codex --write --model deepseek:deepseek-chat
 codex-antigravity doctor --byok-only
 ```
 
-`--api-key-env` avoids persisting provider keys and reads them from the gateway process environment. If you intentionally want a provider key stored locally, pass `--api-key`; stored provider keys are encrypted in `~/.codex/antigravity-providers.json`. Built-in provider env vars include `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `MOONSHOT_API_KEY`, `OLLAMA_API_KEY`, and `OPENCODE_API_KEY`.
-The `/v1/models` catalog only advertises BYOK models when the provider has a usable stored/env key or explicitly supports key-optional loopback/local use. The generic `custom` preset is not auto-enabled; run `codex-antigravity provider set custom --base-url ... --model ...` before routing `custom:model`.
+`--api-key-env` avoids persisting provider keys and reads them from the gateway process environment. If you intentionally want a provider key stored locally, pass `--api-key`; stored provider keys are encrypted in `~/.codex/antigravity-providers.json`. Use `--auth-mode api-key` explicitly only when you want an API-key provider config to record that mode. Built-in provider env vars include `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `MOONSHOT_API_KEY`, `OLLAMA_API_KEY`, and `OPENCODE_API_KEY`.
+The `/v1/models` catalog only advertises BYOK models when the provider has a usable stored/env key, a refreshable OAuth login, or explicitly supports key-optional loopback/local use. The generic `custom` preset is not auto-enabled; run `codex-antigravity provider set custom --base-url ... --model ...` before routing `custom:model`.
 When `provider set` is given `--api-key-env`, models are configured but remain hidden from `/v1/models` until that environment variable is available to the running gateway.
 Provider ids reserve model-name separators and may only contain letters, numbers, underscores, and hyphens; model ids themselves may still contain `/` or `:`, but not whitespace or control characters. Unknown `provider:model` prefixes are rejected as BYOK routing errors before any Google account selection.
 Custom provider and Codex gateway base URLs must be absolute `http` or `https` URLs without embedded credentials, whitespace/control characters, query strings, fragments, invalid ports, or malformed bracketed hosts. Plain `http` base URLs are accepted only for loopback/local hosts; remote BYOK providers and remote gateway URLs must use `https`. Non-preset custom BYOK providers must provide a base URL before models are exposed. Stored/env BYOK API keys and extra BYOK provider header values must be printable ASCII without control characters; model-picker display names must not contain control characters. Provider API-key env var names must contain only letters, numbers, and underscores and must not start with a number. Extra headers may not override gateway-managed auth, content, host, or transport headers. Invalid BYOK provider URLs, API keys, env vars, model ids, display names, and headers are rejected before config writes; invalid BYOK provider URLs, timeouts, headers, API keys, and missing API keys are also rejected before streaming starts so Codex gets a normal HTTP error instead of a partial SSE response. Key-optional BYOK providers are only treated as keyless on loopback/local base URLs; remote custom or cloud URLs need a usable stored or env API key before they appear in Codex's picker or route requests. Function/tool names and forced `tool_choice` function names must contain only letters, numbers, underscores, and hyphens, and be 1-64 characters; malformed names are rejected or dropped before routing. Non-streaming Google failure responses use a structured `detail` object with `message` and sanitized `diagnostics`; clients should handle both this shape and older string details. BYOK streams surface provider error frames as failed Responses API streams instead of successful empty completions, ignore never-named tool-call deltas, and wait for complete valid streamed function names instead of emitting empty, partial, or malformed function names. BYOK structured tool outputs are serialized to JSON text before being sent as Chat Completions tool messages.

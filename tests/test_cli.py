@@ -2332,6 +2332,92 @@ class TestProviderCli(unittest.TestCase):
 
         mock_update.assert_not_called()
 
+    def test_provider_set_xai_oauth_auth_mode_points_to_dedicated_provider_before_write(self):
+        argv = [
+            "codex-antigravity",
+            "provider",
+            "set",
+            "xai",
+            "--auth-mode",
+            "oauth",
+            "--model",
+            "grok-code-fast-1",
+        ]
+        with patch.object(sys, "argv", argv):
+            with patch("codex_antigravity_auth.byok.update_secure_json_file") as mock_update:
+                with self.assertRaisesRegex(SystemExit, "use xai-oauth"):
+                    main()
+
+        mock_update.assert_not_called()
+
+    def test_provider_set_accepts_explicit_api_key_auth_mode(self):
+        argv = [
+            "codex-antigravity",
+            "provider",
+            "set",
+            "xai",
+            "--auth-mode",
+            "api-key",
+            "--api-key-env",
+            "MISSING_XAI_KEY",
+            "--model",
+            "grok-code-fast-1",
+        ]
+        provider = {
+            "id": "xai",
+            "displayName": "xAI",
+            "baseUrl": "https://api.x.ai/v1",
+            "authMode": "api_key",
+            "apiKeyEnv": "MISSING_XAI_KEY",
+            "models": ["grok-code-fast-1"],
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch.dict(os.environ, {}, clear=True):
+                with patch("codex_antigravity_auth.cli.set_provider_config", return_value=provider) as setter:
+                    with patch("builtins.print") as mock_print:
+                        main()
+
+        setter.assert_called_once()
+        self.assertEqual(setter.call_args.kwargs["auth_mode"], "api-key")
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("auth: api-key", printed_text)
+        self.assertIn("hidden until MISSING_XAI_KEY", printed_text)
+
+    def test_provider_presets_prints_auth_mode_and_xai_oauth_note(self):
+        argv = ["codex-antigravity", "provider", "presets"]
+        with patch.object(sys, "argv", argv):
+            with patch("builtins.print") as mock_print:
+                main()
+
+        printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
+        self.assertIn("xai: xAI", printed_text)
+        self.assertIn("xai-oauth: xAI Grok OAuth", printed_text)
+        self.assertIn("auth: api-key", printed_text)
+        self.assertIn("auth: oauth", printed_text)
+        self.assertIn("SuperGrok", printed_text)
+
+    def test_provider_oauth_commands_dispatch_for_xai_oauth(self):
+        command_cases = [
+            (["codex-antigravity", "provider", "login", "xai-oauth"], "run_xai_oauth_login"),
+            (["codex-antigravity", "provider", "login", "xai-oauth", "--device"], "run_xai_oauth_login"),
+            (["codex-antigravity", "provider", "status", "xai-oauth"], "run_xai_oauth_status"),
+            (["codex-antigravity", "provider", "refresh", "xai-oauth"], "run_xai_oauth_refresh"),
+            (["codex-antigravity", "provider", "logout", "xai-oauth", "--yes"], "run_xai_oauth_logout"),
+        ]
+        for argv, handler_name in command_cases:
+            with self.subTest(argv=argv):
+                with patch.object(sys, "argv", argv):
+                    with patch(f"codex_antigravity_auth.cli.{handler_name}") as handler:
+                        main()
+                handler.assert_called_once()
+
+    def test_provider_login_rejects_non_xai_oauth_provider(self):
+        argv = ["codex-antigravity", "provider", "login", "xai"]
+        with patch.object(sys, "argv", argv):
+            with self.assertRaisesRegex(SystemExit, "xai-oauth"):
+                main()
+
     def test_provider_set_reports_storage_failure_without_traceback(self):
         argv = [
             "codex-antigravity",
@@ -2379,6 +2465,89 @@ class TestProviderCli(unittest.TestCase):
             with patch("codex_antigravity_auth.cli.remove_provider_config", side_effect=RuntimeError("provider store locked")):
                 with self.assertRaisesRegex(SystemExit, "provider store locked"):
                     main()
+
+    def test_setup_write_for_xai_oauth_runs_xai_login_not_google_login(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            args = Namespace(
+                check=False,
+                json=False,
+                write=True,
+                repair=False,
+                accounts=1,
+                model="xai-oauth:grok-build-0.1",
+                provider="antigravity",
+                provider_name="Google Antigravity",
+                base_url=None,
+                config=str(config_path),
+                install_skill=False,
+                skill_dir=str(Path(tmp) / "skills"),
+                force=False,
+                verify_skill=False,
+                start=False,
+                port=51122,
+                host="127.0.0.1",
+                allow_remote=False,
+                gateway_timeout=0.01,
+                gateway_token_env="ANTIGRAVITY_GATEWAY_TOKEN",
+                activate=False,
+                live=False,
+                live_model=None,
+                live_timeout=30.0,
+                no_browser=False,
+            )
+            oauth_statuses = [{"ready": False}, {"ready": True}]
+            with patch("codex_antigravity_auth.cli.xai_oauth_status", side_effect=oauth_statuses):
+                with patch("codex_antigravity_auth.cli.run_xai_oauth_login") as mock_xai_login:
+                    with patch("codex_antigravity_auth.cli.run_login") as mock_google_login:
+                        with patch("codex_antigravity_auth.cli.run_configure_codex") as mock_configure:
+                            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"xai-oauth:grok-build-0.1"}):
+                                with patch("codex_antigravity_auth.cli.codex_ready_report", return_value={"ok": True, "checks": [], "next_command": "codex"}):
+                                    with patch("builtins.print"):
+                                        report = run_setup(args)
+
+        self.assertTrue(report["ok"])
+        mock_xai_login.assert_called_once()
+        mock_google_login.assert_not_called()
+        mock_configure.assert_called_once()
+
+    def test_setup_check_for_missing_xai_oauth_points_to_provider_login(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            args = Namespace(
+                check=True,
+                json=False,
+                write=False,
+                repair=False,
+                accounts=1,
+                model="xai-oauth:grok-build-0.1",
+                provider="antigravity",
+                provider_name="Google Antigravity",
+                base_url=None,
+                config=str(config_path),
+                install_skill=False,
+                skill_dir=str(Path(tmp) / "skills"),
+                force=False,
+                verify_skill=False,
+                start=False,
+                port=51122,
+                host="127.0.0.1",
+                allow_remote=False,
+                gateway_timeout=0.01,
+                gateway_token_env="ANTIGRAVITY_GATEWAY_TOKEN",
+                activate=False,
+                live=False,
+                live_model=None,
+                live_timeout=30.0,
+                no_browser=False,
+            )
+            with patch("codex_antigravity_auth.cli.xai_oauth_status", return_value={"ready": False}):
+                with patch("codex_antigravity_auth.cli.codex_ready_report", return_value={"ok": True, "checks": [], "next_command": "codex"}):
+                    with patch("builtins.print"):
+                        report = run_setup(args)
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["next_command"], "codex-antigravity provider login xai-oauth")
 
 
 class TestVNextPolishCli(unittest.TestCase):

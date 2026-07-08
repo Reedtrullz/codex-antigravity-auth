@@ -63,6 +63,21 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(payload["accounts"]["configured_accounts"], 1)
         self.assertNotIn("sensitive@example.com", serialized)
 
+    def test_health_endpoint_fails_soft_when_provider_catalog_blocks(self):
+        def slow_provider_configs():
+            time.sleep(0.2)
+            return {}
+
+        with patch("codex_antigravity_auth.server.MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS", 0.01):
+            with patch("codex_antigravity_auth.server.all_provider_configs", side_effect=slow_provider_configs):
+                response = TestClient(app).get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["provider_catalog_status"], "timeout")
+        self.assertEqual(payload["configured_route_families"]["byok"], [])
+
     def test_google_account_selection_uses_threadpool(self):
         calls = []
 

@@ -534,6 +534,10 @@ class AntiHelperTests(unittest.TestCase):
             parser.parse_args(["workflow", "debug-consensus", "--prompt", "bug", "--print-prompt"]).func,
             anti.command_workflow,
         )
+        self.assertEqual(
+            parser.parse_args(["workflow", "claude-grok", "--panel-mode", "ask", "--prompt", "bug", "--print-prompt"]).func,
+            anti.command_workflow,
+        )
 
     def test_workflow_presets_choose_expected_default_scopes(self) -> None:
         anti = load_anti()
@@ -666,6 +670,20 @@ class AntiHelperTests(unittest.TestCase):
                 )
             )
 
+    def test_workflow_claude_grok_expands_to_collaboration_panel(self) -> None:
+        anti = load_anti()
+        parser = anti.build_parser()
+
+        expansion = anti.workflow_expansion(
+            parser.parse_args(["workflow", "claude-grok", "--panel-mode", "ask", "--prompt", "compare"])
+        )
+
+        self.assertEqual(expansion[:3], ["panel", "--mode", "ask"])
+        self.assertEqual(expansion[expansion.index("--collab") + 1], "claude-grok")
+        for model in ["sonnet", "opus", "grok"]:
+            self.assertIn(model, expansion)
+        self.assertIn("Claude/Grok collaboration", " ".join(expansion))
+
     def test_failed_workflow_run_record_keeps_workflow_identity(self) -> None:
         anti = load_anti()
         with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
@@ -755,6 +773,39 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(model_used, "claude-3.5-sonnet")
         self.assertTrue(metadata["fallback_used"])
         self.assertEqual(calls, ["claude-opus-4-6", "claude-opus-4-6", "claude-3.5-sonnet"])
+
+    def test_retryable_generation_failure_reports_wedged_gateway_probe(self) -> None:
+        anti = load_anti()
+        args = anti.build_parser().parse_args(["plan", "--model", "opus", "--prompt", "hello"])
+        probes: list[float] = []
+
+        def fake_post_response(**kwargs):
+            raise anti.AntiError(
+                "/v1/responses returned HTTP 502: backend failed after 1 attempt(s). "
+                "Diagnostics: model=claude-opus-4-6, retryable=true"
+            )
+
+        def fake_fetch_model_ids(base_url: str, *, timeout: float, token_env: str):
+            probes.append(timeout)
+            raise anti.AntiError(f"request to {base_url}/models failed: timed out")
+
+        anti.post_response = fake_post_response
+        anti.fetch_model_ids = fake_fetch_model_ids
+
+        with self.assertRaises(anti.AntiError) as raised:
+            anti.generate_with_fallback(
+                args,
+                model="claude-opus-4-6",
+                prompt="hello",
+                max_output_tokens=16,
+                purpose="plan",
+            )
+
+        message = str(raised.exception)
+        self.assertIn("Gateway health check after this retryable failure also timed out", message)
+        self.assertIn("gateway appears wedged; restart recommended", message)
+        self.assertIn("--port 51122", message)
+        self.assertEqual(probes, [8.0])
 
     def test_saved_generation_sends_run_id_metadata(self) -> None:
         anti = load_anti()
@@ -1116,6 +1167,69 @@ class AntiHelperTests(unittest.TestCase):
 
         self.assertEqual(anti.resolve_panel_models(args.model), ["claude-3.5-sonnet", "claude-opus-4-6"])
         self.assertEqual(anti.resolve_model(args.judge, default=anti.DEFAULT_PANEL_JUDGE_MODEL), "claude-opus-4-6")
+
+    def test_grok_aliases_resolve_to_xai_oauth_models(self) -> None:
+        anti = load_anti()
+
+        self.assertEqual(anti.resolve_model("grok", default="sonnet"), "xai-oauth:grok-build-0.1")
+        self.assertEqual(anti.resolve_model("supergrok", default="sonnet"), "xai-oauth:grok-build-0.1")
+        self.assertEqual(anti.resolve_model("grok-4.3", default="sonnet"), "xai-oauth:grok-4.3")
+
+    def test_claude_grok_collab_defaults_models_and_prompt_contract(self) -> None:
+        anti = load_anti()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(["panel", "--mode", "ask", "--collab", "claude-grok", "--prompt", "Compare options", "--print-prompt", "--json"])
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(parsed["metadata"]["collaboration_profile"], "claude-grok")
+        self.assertEqual(
+            parsed["metadata"]["panel_models"],
+            ["claude-3.5-sonnet", "claude-opus-4-6", "xai-oauth:grok-build-0.1"],
+        )
+        self.assertIn("Claude + Grok collaboration", parsed["prompt"])
+        self.assertIn("Claude-family lanes", parsed["prompt"])
+        self.assertIn("Grok/xAI lanes", parsed["prompt"])
+
+    def test_claude_grok_judge_prompt_requires_cross_lane_synthesis(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
+            "claude-3.5-sonnet",
+            "claude-opus-4-6",
+            "xai-oauth:grok-build-0.1",
+        }
+        judge_prompts: list[str] = []
+
+        def fake_post_response(**kwargs):
+            prompt = kwargs["prompt"]
+            if "You are synthesizing an Antigravity multi-model advisory panel" in prompt:
+                judge_prompts.append(prompt)
+                return json.dumps(
+                    {
+                        "summary": "summary",
+                        "disagreements": ["Claude and Grok differ"],
+                        "findings": [],
+                        "unverifiable": [],
+                        "recommended_next_actions": [],
+                        "caveats": [],
+                    }
+                )
+            return f"lane-output from {kwargs['model']}"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(["panel", "--mode", "ask", "--collab", "claude-grok", "--prompt", "Compare options", "--json"])
+
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertTrue(judge_prompts)
+        self.assertIn("Compare Claude-backed lanes with Grok-backed lanes", judge_prompts[0])
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(parsed["metadata"]["collaboration_profile"], "claude-grok")
+        self.assertIn("xai-oauth:grok-build-0.1", parsed["panel_models"])
 
     def test_panel_review_prompt_reuses_secret_exclusion(self) -> None:
         anti = load_anti()

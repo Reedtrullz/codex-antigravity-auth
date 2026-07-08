@@ -13,6 +13,7 @@ import webbrowser
 import time
 import json
 import tempfile
+import secrets
 import urllib.error
 import urllib.request
 from importlib import metadata as importlib_metadata
@@ -24,6 +25,7 @@ from .byok import (
     all_provider_configs,
     has_provider_api_key_env,
     load_provider_config,
+    provider_auth_mode,
     provider_allows_keyless_local_use,
     provider_preset,
     remove_provider_config,
@@ -54,7 +56,9 @@ from .oauth import (
     OAUTH_HTTP_TIMEOUT_SECONDS,
     authorize_antigravity,
     decode_state,
+    encode_state,
     exchange_antigravity,
+    generate_pkce,
     token_expires_in_seconds,
 )
 from .service import install_service, service_status, uninstall_service
@@ -67,6 +71,17 @@ from .constants import (
     validate_gateway_token_strength,
 )
 from .redaction import redact_secret_text
+from .xai_oauth import (
+    XAI_OAUTH_REDIRECT_URI,
+    build_xai_authorize_url,
+    clear_xai_oauth_tokens,
+    exchange_xai_authorization_code,
+    poll_xai_device_code_token,
+    request_xai_device_code,
+    resolve_xai_oauth_access_token,
+    save_xai_oauth_token_response,
+    xai_oauth_status,
+)
 
 DEFAULT_CODEX_PROVIDER_ID = "antigravity"
 DEFAULT_CODEX_PROVIDER_NAME = "Google Antigravity"
@@ -1436,9 +1451,19 @@ def codex_ready_report(
         else:
             provider = providers.get(provider_prefix)
             if not provider:
-                add("model_route", "fail", f"BYOK provider '{provider_prefix}' is not configured")
+                if provider_prefix == "xai-oauth":
+                    oauth_status = xai_oauth_status()
+                    add(
+                        "model_route",
+                        "fail",
+                        "xAI OAuth provider is not logged in" if not oauth_status.get("ready") else "xAI OAuth provider is not visible",
+                        auth=oauth_status,
+                    )
+                else:
+                    add("model_route", "fail", f"BYOK provider '{provider_prefix}' is not configured")
             elif provider_key_status(provider, configured_label="key OK") != "key OK":
-                add("model_route", "fail", f"BYOK provider '{provider_prefix}' does not have a usable key")
+                credential_name = "OAuth login" if provider_auth_mode(provider) == "oauth" else "key"
+                add("model_route", "fail", f"BYOK provider '{provider_prefix}' does not have a usable {credential_name}")
             else:
                 configured_models = [
                     str(model.get("id") if isinstance(model, dict) else model)
@@ -1515,7 +1540,12 @@ def codex_ready_report(
         elif first == "gateway_models":
             next_command = f"codex-antigravity start --background --port {gateway_port}"
         elif first == "model_catalog":
-            next_command = "codex-antigravity status && codex-antigravity doctor --codex-ready"
+            if provider_prefix == "xai-oauth" and not xai_oauth_status().get("ready"):
+                next_command = "codex-antigravity provider login xai-oauth"
+            else:
+                next_command = "codex-antigravity status && codex-antigravity doctor --codex-ready"
+        elif first == "model_route" and provider_prefix == "xai-oauth":
+            next_command = "codex-antigravity provider login xai-oauth"
         elif first == "google_rotation":
             next_command = "codex-antigravity setup-google --accounts 1"
         else:
@@ -1867,6 +1897,10 @@ def require_safe_gateway_host(host: str, allow_remote: bool) -> None:
 
 
 def provider_key_status(provider: dict, *, configured_label: str) -> str:
+    if provider_auth_mode(provider) == "oauth":
+        if provider.get("id") == "xai-oauth":
+            return configured_label if xai_oauth_status().get("ready") else "missing oauth"
+        return "unsupported oauth"
     try:
         api_key = validate_provider_api_key(resolve_api_key(provider))
     except ValueError:
@@ -1875,6 +1909,8 @@ def provider_key_status(provider: dict, *, configured_label: str) -> str:
 
 
 def provider_configured_label(provider_id: str, provider: dict, stored_provider_ids: set[str]) -> str:
+    if provider_auth_mode(provider) == "oauth":
+        return "oauth OK"
     if provider_id in stored_provider_ids:
         return "configured"
     if has_provider_api_key_env(provider):
@@ -2449,6 +2485,111 @@ def run_local_oauth_flow(*, select_account: bool = False) -> dict:
     return result
 
 
+def require_xai_oauth_provider_arg(provider: str) -> None:
+    if provider != "xai-oauth":
+        raise SystemExit("xAI SuperGrok OAuth uses provider id `xai-oauth`.")
+
+
+def run_xai_oauth_browser_login(args) -> dict:
+    require_xai_oauth_provider_arg(args.provider)
+    pkce = generate_pkce()
+    state_id = secrets.token_urlsafe(32)
+    state = encode_state({"id": state_id})
+    nonce = secrets.token_urlsafe(32)
+    url = build_xai_authorize_url(pkce, state=state, nonce=nonce)
+
+    try:
+        server = OAuthServer(("127.0.0.1", 56121), OAuthCallbackHandler)
+    except OSError as e:
+        raise SystemExit(
+            "xAI OAuth callback port 56121 is already in use. "
+            "Stop the process using that port or run `codex-antigravity provider login xai-oauth --device`."
+        ) from e
+    server.expected_state_id = state_id
+    server.timeout = 600
+    try:
+        print("[*] Initiating xAI Grok OAuth login...")
+        print(f"[*] Callback URL: {XAI_OAUTH_REDIRECT_URI}")
+        print(f"[*] If the browser does not open automatically, navigate to:\n{url}\n")
+        webbrowser.open(url)
+        deadline = time.time() + 600
+        while server.auth_code is None:
+            if time.time() > deadline:
+                raise SystemExit("Timed out waiting for xAI OAuth callback.")
+            server.handle_request()
+        try:
+            returned_state = decode_state(server.auth_state or "")
+        except Exception as exc:
+            raise SystemExit("xAI OAuth callback state was missing or invalid.") from exc
+        if returned_state.get("id") != state_id:
+            raise SystemExit("xAI OAuth callback state did not match the active login attempt.")
+        tokens = exchange_xai_authorization_code(server.auth_code, pkce["verifier"])
+    finally:
+        server.server_close()
+    saved = save_xai_oauth_token_response(tokens)
+    print("[+] xAI Grok OAuth login saved for provider xai-oauth.")
+    print(f"[*] Models will appear as xai-oauth:<model> once the gateway can read {xai_oauth_status().get('path', 'the encrypted token store')}.")
+    return saved
+
+
+def run_xai_oauth_device_login(args) -> dict:
+    require_xai_oauth_provider_arg(args.provider)
+    print("[*] Initiating xAI Grok OAuth device-code login...")
+    device = request_xai_device_code()
+    verification_url = device.get("verification_uri_complete") or device.get("verification_uri")
+    print(f"[*] Open this URL in any browser: {verification_url}")
+    print(f"[*] Enter code: {device.get('user_code')}")
+    tokens = poll_xai_device_code_token(device)
+    saved = save_xai_oauth_token_response(tokens)
+    print("[+] xAI Grok OAuth login saved for provider xai-oauth.")
+    return saved
+
+
+def run_xai_oauth_login(args) -> dict:
+    if getattr(args, "device", False) or getattr(args, "no_browser", False):
+        return run_xai_oauth_device_login(args)
+    return run_xai_oauth_browser_login(args)
+
+
+def run_xai_oauth_status(args) -> dict:
+    require_xai_oauth_provider_arg(args.provider)
+    status = xai_oauth_status()
+    if getattr(args, "json", False):
+        print(json.dumps(status, indent=2))
+    else:
+        label = "ready" if status.get("ready") else "not ready"
+        print(f"xAI OAuth provider xai-oauth: {label}")
+        print(f"  token store: {status.get('path')}")
+        if status.get("expires_in_seconds") is not None:
+            print(f"  access token expires in: {status['expires_in_seconds']}s")
+        if not status.get("ready"):
+            print("  next command: codex-antigravity provider login xai-oauth")
+    return status
+
+
+def run_xai_oauth_refresh(args) -> dict:
+    require_xai_oauth_provider_arg(args.provider)
+    try:
+        resolve_xai_oauth_access_token(force_refresh=True)
+    except RuntimeError as exc:
+        raise SystemExit(redact_secret_text(str(exc))) from exc
+    status = xai_oauth_status()
+    print("[+] Refreshed xAI OAuth access token for provider xai-oauth.")
+    return status
+
+
+def run_xai_oauth_logout(args) -> bool:
+    require_xai_oauth_provider_arg(args.provider)
+    if not getattr(args, "yes", False):
+        raise SystemExit("Refusing to remove xAI OAuth tokens without --yes.")
+    existed = clear_xai_oauth_tokens()
+    if existed:
+        print("[+] Removed xAI OAuth tokens for provider xai-oauth.")
+    else:
+        print("[*] No xAI OAuth tokens were configured.")
+    return existed
+
+
 def run_login(args) -> None:
     count = getattr(args, "count", 1)
     select_account = getattr(args, "select_account", False) or count > 1
@@ -2547,6 +2688,8 @@ def _print_setup_report(report: dict) -> None:
 
 
 def byok_setup_next_command(provider_prefix: str, provider_model: str, provider: dict | None = None) -> str:
+    if provider_prefix == "xai-oauth":
+        return "codex-antigravity provider login xai-oauth"
     if provider is None:
         try:
             provider = provider_preset(provider_prefix)
@@ -2567,11 +2710,18 @@ def setup_byok_preflight(provider_prefix: str, provider_model: str) -> tuple[str
     except Exception as exc:
         return "fail", f"Could not load BYOK provider configuration: {redact_secret_text(str(exc))}", None
     provider = providers.get(provider_prefix)
+    if not provider and provider_prefix == "xai-oauth":
+        try:
+            provider = provider_preset("xai-oauth")
+            provider["id"] = "xai-oauth"
+        except ValueError:
+            provider = None
     if not provider:
         return "fail", f"BYOK provider '{provider_prefix}' is not configured", None
     key_status = provider_key_status(provider, configured_label="key OK")
     if key_status != "key OK":
-        return "fail", f"BYOK provider '{provider_prefix}' does not have a usable key ({key_status})", provider
+        credential_name = "OAuth login" if provider_auth_mode(provider) == "oauth" else "key"
+        return "fail", f"BYOK provider '{provider_prefix}' does not have a usable {credential_name} ({key_status})", provider
     configured_models = [
         str(model.get("id") if isinstance(model, dict) else model)
         for model in provider.get("models", [])
@@ -2767,6 +2917,16 @@ def run_setup(args) -> dict:
     else:
         _setup_check(checks, "google_oauth_credentials", "skip", f"{model} routes to BYOK")
         byok_status, byok_detail, byok_provider = setup_byok_preflight(provider_prefix or "", provider_model)
+        if args.write and provider_prefix == "xai-oauth" and byok_status == "fail":
+            run_xai_oauth_login(
+                argparse.Namespace(
+                    provider="xai-oauth",
+                    device=getattr(args, "no_browser", False),
+                    no_browser=getattr(args, "no_browser", False),
+                )
+            )
+            _setup_check(checks, "xai_oauth_login", "pass", "completed xAI Grok OAuth login")
+            byok_status, byok_detail, byok_provider = setup_byok_preflight(provider_prefix or "", provider_model)
         _setup_check(checks, "byok_provider", byok_status, byok_detail, provider=provider_prefix, model=provider_model)
         if args.write and byok_status == "fail":
             report = {
@@ -2813,15 +2973,19 @@ def run_setup(args) -> dict:
         )
         checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
         ok = all(check["status"] != "fail" for check in checks)
+        if ok:
+            next_command = "codex"
+        elif provider_prefix == "xai-oauth" and not xai_oauth_status().get("ready"):
+            next_command = "codex-antigravity provider login xai-oauth"
+        else:
+            next_command = "codex-antigravity setup --write --accounts 1 --install-skill --start"
         report = {
             "ok": ok,
             "mode": "check",
             "model": model,
             "base_url": base_url,
             "checks": checks,
-            "next_command": "codex-antigravity setup --write --accounts 1 --install-skill --start"
-            if not ok
-            else "codex",
+            "next_command": next_command,
         }
         if args.json:
             print(json.dumps(report, indent=2))
@@ -3192,6 +3356,7 @@ def main():
     setup_parser.add_argument("--repair", action="store_true", help="Repair Codex provider config without OAuth login, skill install, or gateway start")
     setup_parser.add_argument("--no-input", action="store_true", help="Fail instead of prompting when OAuth credentials are missing")
     setup_parser.add_argument("--accounts", type=positive_int, default=1, help="Number of Google login flows when --write is used")
+    setup_parser.add_argument("--no-browser", action="store_true", help="Use device-code login for xai-oauth setup instead of opening a browser")
     setup_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Default Codex model to select")
     setup_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id")
     setup_parser.add_argument("--provider-name", default=DEFAULT_CODEX_PROVIDER_NAME, help="Provider display name")
@@ -3378,11 +3543,28 @@ def main():
     provider_sub = provider_parser.add_subparsers(dest="provider_command", required=True)
     provider_sub.add_parser("list", help="List BYOK providers")
     provider_sub.add_parser("presets", help="List built-in BYOK provider presets")
+    provider_login = provider_sub.add_parser("login", help="Authenticate an OAuth-capable provider")
+    provider_login.add_argument("provider", help="Provider id; currently xai-oauth")
+    provider_login.add_argument("--device", action="store_true", help="Use xAI device-code OAuth flow")
+    provider_login.add_argument("--no-browser", action="store_true", help="Alias for --device")
+    provider_status = provider_sub.add_parser("status", help="Show OAuth provider status")
+    provider_status.add_argument("provider", help="Provider id; currently xai-oauth")
+    provider_status.add_argument("--json", action="store_true", help="Print status as JSON")
+    provider_refresh = provider_sub.add_parser("refresh", help="Refresh OAuth provider tokens")
+    provider_refresh.add_argument("provider", help="Provider id; currently xai-oauth")
+    provider_logout = provider_sub.add_parser("logout", help="Remove OAuth provider tokens")
+    provider_logout.add_argument("provider", help="Provider id; currently xai-oauth")
+    provider_logout.add_argument("--yes", action="store_true", help="Confirm token removal")
 
     provider_set = provider_sub.add_parser("set", help="Configure a BYOK provider")
     provider_set.add_argument("provider", help="Provider id, e.g. openrouter, deepseek, xai, kimi, ollama, opencode, custom")
     provider_set.add_argument("--api-key", help="API key to store encrypted")
     provider_set.add_argument("--api-key-env", help="Environment variable name to read API key from")
+    provider_set.add_argument(
+        "--auth-mode",
+        choices=["api-key", "api_key", "oauth"],
+        help="Provider auth mode. Use xai-oauth for SuperGrok OAuth; use xai for XAI_API_KEY.",
+    )
     provider_set.add_argument("--base-url", help="OpenAI-compatible base URL, e.g. https://api.deepseek.com/v1")
     provider_set.add_argument("--cloud", action="store_true", help="Use the preset cloud base URL when available")
     provider_set.add_argument("--model", action="append", dest="models", help="Provider model id to expose; repeatable")
@@ -3456,11 +3638,24 @@ def main():
     elif args.command == "models":
         run_models_command(args)
     elif args.command == "provider":
-        if args.provider_command == "presets":
+        if args.provider_command == "login":
+            run_xai_oauth_login(args)
+        elif args.provider_command == "status":
+            run_xai_oauth_status(args)
+        elif args.provider_command == "refresh":
+            run_xai_oauth_refresh(args)
+        elif args.provider_command == "logout":
+            run_xai_oauth_logout(args)
+        elif args.provider_command == "presets":
             print("[*] Built-in BYOK provider presets:")
             for provider_id, preset in PROVIDER_PRESETS.items():
                 models = ", ".join(preset.get("models", [])) or "(configure models)"
-                print(f"- {provider_id}: {preset.get('displayName')} @ {preset.get('baseUrl')} [{models}]")
+                auth_modes = ", ".join(
+                    str(mode).replace("_", "-") for mode in preset.get("authModes", ["api_key"])
+                )
+                print(f"- {provider_id}: {preset.get('displayName')} @ {preset.get('baseUrl')} [{models}] auth: {auth_modes}")
+                if preset.get("authNotes"):
+                    print(f"  note: {preset['authNotes']}")
         elif args.provider_command == "list":
             providers = all_provider_configs()
             if not providers:
@@ -3477,6 +3672,7 @@ def main():
                 models = provider.get("models", [])
                 model_list = ", ".join(str(m.get("id") if isinstance(m, dict) else m) for m in models) or "(no models)"
                 print(f"- {provider_id}: {provider.get('displayName', provider_id)} ({key_status})")
+                print(f"  auth: {provider_auth_mode(provider).replace('_', '-')}")
                 print(f"  base_url: {provider.get('baseUrl')}")
                 print(f"  models: {model_list}")
         elif args.provider_command == "set":
@@ -3502,6 +3698,7 @@ def main():
                     provider_id,
                     api_key=args.api_key,
                     api_key_env=args.api_key_env,
+                    auth_mode=args.auth_mode,
                     base_url=base_url,
                     models=args.models,
                     display_name=args.display_name,
@@ -3510,6 +3707,7 @@ def main():
             except (RuntimeError, ValueError) as e:
                 raise SystemExit(redact_secret_text(str(e))) from e
             print(f"[+] Configured BYOK provider {provider['id']} at {provider.get('baseUrl')}")
+            print(f"    auth: {provider_auth_mode(provider).replace('_', '-')}")
             if provider.get("models"):
                 key_status = provider_key_status(provider, configured_label="key OK")
                 if key_status == "key OK":

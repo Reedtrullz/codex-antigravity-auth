@@ -36,6 +36,8 @@
 | Reserved slash-style Codex/OpenAI model prefixes protected from BYOK shadowing | ✅ |
 | Encrypted API-key provider config | ✅ |
 | BYOK model exposure requires valid keys or loopback key-optional paths | ✅ |
+| BYOK auth-mode guardrails (`xai` API-key route kept separate from `xai-oauth` SuperGrok OAuth) | ✅ |
+| xAI SuperGrok OAuth browser/device login, encrypted token refresh, and `xai-oauth:*` routing | ✅ |
 | Generic `custom` BYOK preset requires explicit user configuration before routing | ✅ |
 | BYOK/Codex URL validation before config writes | ✅ |
 | Plain HTTP BYOK/gateway URLs limited to loopback/local hosts | ✅ |
@@ -92,6 +94,7 @@
 | `$anti` BYOK repo-context disclosure and large-review panel summarization | ✅ |
 | `$anti workflow` presets for review readiness, deep planning, ship gates, and provider comparison | ✅ |
 | `$anti workflow security-review` and `debug-consensus` presets | ✅ |
+| `$anti` Claude/Grok collaboration profile and workflow preset | ✅ |
 | Sanitized `$anti` run ledger with list/show/clean and dry-run pruning | ✅ |
 | Anti run-id correlation into sanitized gateway request logs | ✅ |
 | `$anti` fallback/progress controls for long model calls and retryable backend drift | ✅ |

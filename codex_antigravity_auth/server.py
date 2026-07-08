@@ -16,7 +16,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from .accounts import AccountManager
 from .byok import (
+    PROVIDER_AUTH_MODE_API_KEY,
+    PROVIDER_AUTH_MODE_OAUTH,
     all_provider_configs,
+    provider_auth_mode,
     resolve_api_key,
     split_provider_model,
     validate_http_base_url,
@@ -40,6 +43,7 @@ from .models import canonical_model_id, native_model_catalog, native_model_famil
 from .observability import request_log_info, write_request_record
 from .redaction import redact_secret_text
 from .storage import load_accounts
+from .xai_oauth import resolve_xai_oauth_access_token, xai_oauth_status
 
 
 @asynccontextmanager
@@ -56,6 +60,7 @@ REFRESH_AHEAD_THROTTLE_SECONDS = 60.0
 STREAM_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 REQUEST_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 MUTATING_JSON_PATHS = {"/v1/responses"}
+MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS = 2.0
 TEST_CLIENT_HOSTS = {"testserver"}
 GOOGLE_ACCOUNT_SCOPED_STREAM_ERROR_TERMS = (
     "401",
@@ -413,19 +418,32 @@ def google_failure_detail(
     retry_after_seconds: float | None = None,
     retry_after_source: str | None = None,
     rotation_attempted: bool = False,
+    attempt_count: int | None = None,
 ) -> dict:
+    diagnostics = google_rotation_diagnostics(
+        model,
+        retry_after_seconds=retry_after_seconds,
+        retry_after_source=retry_after_source,
+        rotation_attempted=rotation_attempted,
+    )
+    if attempt_count is not None:
+        safe_attempt_count = max(0, int(attempt_count))
+        diagnostics["attempt_count"] = safe_attempt_count
+        diagnostics["attempted_account_refs"] = [
+            f"account-{index}" for index in range(1, safe_attempt_count + 1)
+        ]
     return {
         "message": safe_error_detail(message),
-        "diagnostics": google_rotation_diagnostics(
-            model,
-            retry_after_seconds=retry_after_seconds,
-            retry_after_source=retry_after_source,
-            rotation_attempted=rotation_attempted,
-        ),
+        "diagnostics": diagnostics,
     }
 
 
 def provider_has_usable_key(provider: dict) -> bool:
+    auth_mode = provider_auth_mode(provider)
+    if auth_mode == PROVIDER_AUTH_MODE_OAUTH:
+        return provider.get("id") == "xai-oauth" and bool(xai_oauth_status().get("ready"))
+    if auth_mode != PROVIDER_AUTH_MODE_API_KEY:
+        return False
     try:
         return bool(validate_provider_api_key(resolve_api_key(provider)))
     except ValueError:
@@ -481,13 +499,18 @@ def codex_model_metadata(
     }
 
 
-@app.get("/v1/models")
-async def list_models():
-    """Return model catalog so Codex Desktop can populate its picker dropdown."""
-    import time
+def provider_model_catalog(created: int) -> list[dict]:
     byok_models = []
-    for provider_id, provider in all_provider_configs().items():
-        if not provider_has_usable_key(provider):
+    try:
+        providers = all_provider_configs()
+    except Exception:
+        return byok_models
+    for provider_id, provider in providers.items():
+        try:
+            usable = provider_has_usable_key(provider)
+        except Exception:
+            usable = False
+        if not usable:
             continue
         for model_entry in provider.get("models", []):
             if isinstance(model_entry, dict):
@@ -501,22 +524,78 @@ async def list_models():
             if not provider_model:
                 continue
             model_id = f"{provider_id}:{provider_model}"
-            byok_models.append({
-                **codex_model_metadata(
-                    model_id,
-                    f"{provider.get('displayName', provider_id)}: {display_name}",
-                    context_window,
-                    provider_id,
-                    int(time.time()),
-                )
-            })
+            byok_models.append(
+                {
+                    **codex_model_metadata(
+                        model_id,
+                        f"{provider.get('displayName', provider_id)}: {display_name}",
+                        context_window,
+                        provider_id,
+                        created,
+                    )
+                }
+            )
+    return byok_models
+
+
+async def provider_model_catalog_fail_soft(created: int) -> list[dict]:
+    try:
+        return await asyncio.wait_for(
+            run_in_threadpool(provider_model_catalog, created),
+            timeout=MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return []
+
+
+def provider_health_catalog() -> list[dict]:
+    providers = []
+    try:
+        provider_configs = all_provider_configs()
+    except Exception:
+        return providers
+    for provider_id, provider in provider_configs.items():
+        models = provider.get("models", [])
+        try:
+            usable = provider_has_usable_key(provider)
+        except Exception:
+            usable = False
+        providers.append(
+            {
+                "id": provider_id,
+                "kind": provider.get("kind"),
+                "usable": usable,
+                "model_count": len(models) if isinstance(models, list) else 0,
+            }
+        )
+    return providers
+
+
+async def provider_health_catalog_fail_soft() -> tuple[list[dict], str]:
+    try:
+        providers = await asyncio.wait_for(
+            run_in_threadpool(provider_health_catalog),
+            timeout=MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS,
+        )
+        return providers, "ok"
+    except asyncio.TimeoutError:
+        return [], "timeout"
+    except Exception:
+        return [], "error"
+
+
+@app.get("/v1/models")
+async def list_models():
+    """Return model catalog so Codex Desktop can populate its picker dropdown."""
+    created = int(time.time())
+    byok_models = await provider_model_catalog_fail_soft(created)
     models = [
         codex_model_metadata(
             m["id"],
             m["display_name"],
             m["context_window"],
             "google-antigravity",
-            int(time.time()),
+            created,
             default_reasoning_level=m.get("default_reasoning_level", "high"),
             supports_parallel_tool_calls=bool(m.get("supports_parallel_tool_calls", True)),
         )
@@ -534,21 +613,7 @@ async def health(request: Request):
     client_host = request.client.host if request.client else None
     if not request_uses_loopback_host(request, client_host):
         raise HTTPException(status_code=403, detail="Health checks are loopback-only.")
-    providers = []
-    try:
-        provider_configs = all_provider_configs()
-    except Exception:
-        provider_configs = {}
-    for provider_id, provider in provider_configs.items():
-        models = provider.get("models", [])
-        providers.append(
-            {
-                "id": provider_id,
-                "kind": provider.get("kind"),
-                "usable": provider_has_usable_key(provider),
-                "model_count": len(models) if isinstance(models, list) else 0,
-            }
-        )
+    providers, provider_catalog_status = await provider_health_catalog_fail_soft()
     catalog = native_model_catalog()
     return {
         "ok": True,
@@ -558,6 +623,7 @@ async def health(request: Request):
             "google": bool(catalog),
             "byok": providers,
         },
+        "provider_catalog_status": provider_catalog_status,
         "accounts": account_health_summary(),
         "request_log": request_log_info(),
     }
@@ -662,6 +728,21 @@ def chat_completions_url(provider: dict) -> str:
     else:
         url = f"{base_url}/chat/completions"
     return url
+
+
+def responses_api_url(provider: dict) -> str:
+    base_url = provider.get("baseUrl", "")
+    if not isinstance(base_url, str):
+        raise HTTPException(status_code=400, detail=f"Provider '{provider['id']}' baseUrl must be a string")
+    if not base_url.strip():
+        raise HTTPException(status_code=500, detail=f"Provider '{provider['id']}' has no baseUrl configured")
+    try:
+        base_url = validate_http_base_url(base_url, label=f"Provider '{provider['id']}' baseUrl")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if base_url.endswith("/responses"):
+        return base_url
+    return f"{base_url}/responses"
 
 
 def openai_compatible_timeout(provider: dict) -> float:
@@ -894,6 +975,38 @@ def prepare_openai_compatible_request(
     timeout = openai_compatible_timeout(provider)
     return payload, url, headers, timeout
 
+
+async def xai_oauth_headers(*, force_refresh: bool = False) -> dict:
+    try:
+        if force_refresh:
+            token = await run_in_threadpool(resolve_xai_oauth_access_token, force_refresh=True)
+        else:
+            token = await run_in_threadpool(resolve_xai_oauth_access_token)
+    except RuntimeError as e:
+        raise HTTPException(status_code=401, detail=redact_secret_text(str(e))) from e
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+async def prepare_xai_oauth_responses_request(
+    codex_req: dict,
+    provider: dict,
+    provider_model: str,
+    *,
+    stream: bool,
+    force_refresh: bool = False,
+) -> tuple[dict, str, dict, float]:
+    payload = dict(codex_req)
+    payload["model"] = provider_model
+    payload["stream"] = stream
+    headers = await xai_oauth_headers(force_refresh=force_refresh)
+    url = responses_api_url(provider)
+    timeout = openai_compatible_timeout(provider)
+    return payload, url, headers, timeout
+
 @app.post("/v1/responses")
 async def create_response(request: Request):
     request_id = f"req_{secrets.token_hex(8)}"
@@ -967,7 +1080,106 @@ async def create_response(request: Request):
                 error=f"BYOK provider '{provider_id}' is not configured",
             )
             raise HTTPException(status_code=404, detail=f"BYOK provider '{provider_id}' is not configured")
-        if provider.get("kind") != "openai_chat":
+        provider_kind = provider.get("kind")
+        if provider_kind == "openai_responses":
+            if provider_id != "xai-oauth" or provider_auth_mode(provider) != PROVIDER_AUTH_MODE_OAUTH:
+                await log_request(
+                    "failed",
+                    model=model,
+                    route="byok",
+                    provider=provider_id,
+                    stream=stream,
+                    http_status=500,
+                    error_class="unsupported_provider_auth",
+                    error=f"Unsupported Responses provider auth mode: {provider_auth_mode(provider)}",
+                )
+                raise HTTPException(status_code=500, detail=f"Unsupported Responses provider auth mode: {provider_auth_mode(provider)}")
+            if stream:
+                payload, url, headers, timeout = await prepare_xai_oauth_responses_request(
+                    codex_req,
+                    provider,
+                    provider_model,
+                    stream=True,
+                )
+                await log_request("stream_started", model=model, route="byok", provider=provider_id, stream=True)
+
+                async def logged_xai_oauth_stream() -> AsyncGenerator[str, None]:
+                    terminal_status = "ended"
+                    terminal_http_status = None
+                    terminal_error_class = None
+                    terminal_error = None
+                    terminal_usage = None
+                    try:
+                        async for chunk in xai_oauth_responses_sse_generator(payload, url, headers, timeout, provider, provider_model, codex_req):
+                            for line in chunk.splitlines():
+                                if not line.startswith("data: ") or line == "data: [DONE]":
+                                    continue
+                                try:
+                                    event = json.loads(line[6:])
+                                except json.JSONDecodeError:
+                                    continue
+                                event_type = event.get("type")
+                                if event_type == "response.completed":
+                                    terminal_status = "success"
+                                    terminal_http_status = 200
+                                    response_payload = event.get("response", {})
+                                    if isinstance(response_payload, dict):
+                                        terminal_usage = response_payload.get("usage")
+                                elif event_type == "response.failed":
+                                    terminal_status = "failed"
+                                    response_payload = event.get("response", {})
+                                    error_payload = response_payload.get("error", {}) if isinstance(response_payload, dict) else {}
+                                    if isinstance(error_payload, dict):
+                                        terminal_error_class = error_payload.get("code")
+                                        terminal_error = error_payload.get("message")
+                            yield chunk
+                    except Exception as exc:
+                        terminal_status = "failed"
+                        terminal_error_class = "stream_exception"
+                        terminal_error = exc
+                        raise
+                    finally:
+                        await log_request(
+                            terminal_status,
+                            model=model,
+                            route="byok",
+                            provider=provider_id,
+                            stream=True,
+                            http_status=terminal_http_status,
+                            usage=terminal_usage,
+                            error_class=terminal_error_class,
+                            error=terminal_error,
+                        )
+
+                return StreamingResponse(
+                    logged_xai_oauth_stream(),
+                    media_type="text/event-stream",
+                )
+            try:
+                response = await create_xai_oauth_response(codex_req, provider, provider_model, model)
+            except HTTPException as exc:
+                await log_request(
+                    "failed",
+                    model=model,
+                    route="byok",
+                    provider=provider_id,
+                    stream=False,
+                    http_status=exc.status_code,
+                    error_class="xai_oauth_error",
+                    error=exc.detail,
+                )
+                raise
+            await log_request(
+                "success",
+                model=model,
+                route="byok",
+                provider=provider_id,
+                stream=False,
+                http_status=200,
+                usage=response.get("usage") if isinstance(response, dict) else None,
+            )
+            return response
+        if provider_kind != "openai_chat":
             await log_request(
                 "failed",
                 model=model,
@@ -976,9 +1188,9 @@ async def create_response(request: Request):
                 stream=stream,
                 http_status=500,
                 error_class="unsupported_provider_kind",
-                error=f"Unsupported BYOK provider kind: {provider.get('kind')}",
+                error=f"Unsupported BYOK provider kind: {provider_kind}",
             )
-            raise HTTPException(status_code=500, detail=f"Unsupported BYOK provider kind: {provider.get('kind')}")
+            raise HTTPException(status_code=500, detail=f"Unsupported BYOK provider kind: {provider_kind}")
         if stream:
             payload, url, headers, timeout = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=True)
             await log_request("stream_started", model=model, route="byok", provider=provider_id, stream=True)
@@ -1154,6 +1366,7 @@ async def create_response(request: Request):
                         model,
                         "Failed to communicate with Antigravity backend after rotation",
                         rotation_attempted=rotation_attempted,
+                        attempt_count=len(response_attempts),
                     ),
                 )
 
@@ -1202,6 +1415,7 @@ async def create_response(request: Request):
                             retry_after_seconds=retry_after_seconds,
                             retry_after_source=retry_after_source,
                             rotation_attempted=rotation_attempted,
+                            attempt_count=len(response_attempts),
                         ),
                     )
 
@@ -1753,6 +1967,152 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{provider['id']} response translation failed: {safe_error_detail(e)}") from e
+
+
+def xai_oauth_entitlement_detail(provider_model: str, body: str | None = None) -> str:
+    suffix = f": {safe_error_detail(body)}" if body else ""
+    return (
+        f"xAI OAuth returned HTTP 403 for {provider_model}{suffix}. "
+        "Your SuperGrok/X Premium account may not be entitled for this OAuth API surface, "
+        "or the grant may need to be refreshed. Run `codex-antigravity provider login xai-oauth` "
+        f"again, or use the API-key route `xai:{provider_model}` with XAI_API_KEY."
+    )
+
+
+async def create_xai_oauth_response(codex_req: dict, provider: dict, provider_model: str, display_model: str) -> dict:
+    payload, url, headers, timeout = await prepare_xai_oauth_responses_request(
+        codex_req,
+        provider,
+        provider_model,
+        stream=False,
+    )
+
+    async def post_once(request_headers: dict) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return await client.post(url, json=payload, headers=request_headers)
+
+    try:
+        res = await post_once(headers)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"{provider['id']} connection error: {safe_error_detail(e)}") from e
+    if res.status_code == 401:
+        _payload, _url, refreshed_headers, _timeout = await prepare_xai_oauth_responses_request(
+            codex_req,
+            provider,
+            provider_model,
+            stream=False,
+            force_refresh=True,
+        )
+        try:
+            res = await post_once(refreshed_headers)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"{provider['id']} connection error after refresh: {safe_error_detail(e)}") from e
+    if res.status_code == 403:
+        raise HTTPException(status_code=403, detail=xai_oauth_entitlement_detail(provider_model, res.text))
+    if res.status_code != 200:
+        raise HTTPException(status_code=res.status_code, detail=f"{provider['id']} API error: {safe_error_detail(res.text)}")
+    try:
+        payload = res.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{provider['id']} response parsing failed: {safe_error_detail(e)}") from e
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail=f"{provider['id']} response parsing failed: response was not an object")
+    response = dict(payload)
+    response["model"] = display_model
+    return response
+
+
+async def xai_oauth_responses_sse_generator(
+    payload: dict,
+    url: str,
+    headers: dict,
+    timeout: float,
+    provider: dict,
+    provider_model: str,
+    codex_req: dict,
+) -> AsyncGenerator[str, None]:
+    emitted_output = False
+    retried = False
+    active_headers = headers
+
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("POST", url, json=payload, headers=active_headers) as res:
+                    if res.status_code == 401 and not emitted_output and not retried:
+                        retried = True
+                        _payload, _url, active_headers, _timeout = await prepare_xai_oauth_responses_request(
+                            codex_req,
+                            provider,
+                            provider_model,
+                            stream=True,
+                            force_refresh=True,
+                        )
+                        continue
+                    if res.status_code == 403:
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                {
+                                    "type": "response.failed",
+                                    "response": {
+                                        "status": "failed",
+                                        "model": payload.get("model"),
+                                        "error": {
+                                            "code": "xai_oauth_forbidden",
+                                            "message": xai_oauth_entitlement_detail(provider_model, (await res.aread()).decode("utf-8", errors="ignore")),
+                                        },
+                                    },
+                                }
+                            )
+                            + "\n\n"
+                        )
+                        yield "data: [DONE]\n\n"
+                        return
+                    if res.status_code != 200:
+                        body = (await res.aread()).decode("utf-8", errors="ignore")
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                {
+                                    "type": "response.failed",
+                                    "response": {
+                                        "status": "failed",
+                                        "model": payload.get("model"),
+                                        "error": {
+                                            "code": "backend_error",
+                                            "message": f"{provider['id']} returned HTTP {res.status_code}: {safe_error_detail(body)}",
+                                        },
+                                    },
+                                }
+                            )
+                            + "\n\n"
+                        )
+                        yield "data: [DONE]\n\n"
+                        return
+                    async for raw_chunk in res.aiter_bytes():
+                        chunk = raw_chunk.decode("utf-8", errors="replace")
+                        if chunk:
+                            emitted_output = True
+                            yield chunk
+                    return
+        except Exception as e:
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            "status": "failed",
+                            "model": payload.get("model"),
+                            "error": {"code": "connection_error", "message": safe_error_detail(e)},
+                        },
+                    }
+                )
+                + "\n\n"
+            )
+            yield "data: [DONE]\n\n"
+            return
 
 
 async def openai_compatible_sse_generator(

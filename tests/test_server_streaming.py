@@ -1,4 +1,5 @@
 import json
+import time
 import unittest
 import httpx
 from unittest.mock import patch, MagicMock
@@ -173,7 +174,36 @@ class TestServerStreaming(unittest.TestCase):
                             )
 
         self.assertEqual(response.status_code, 502)
+        diagnostics = response.json()["detail"]["diagnostics"]
+        self.assertEqual(diagnostics["attempt_count"], 1)
+        self.assertEqual(diagnostics["attempted_account_refs"], ["account-1"])
         self.assertEqual([call.args[0] for call in release.call_args_list], ["test@gmail.com"])
+
+    def test_models_endpoint_returns_native_catalog_when_provider_catalog_blocks(self):
+        def slow_provider_configs():
+            time.sleep(0.2)
+            return {
+                "openrouter": {
+                    "id": "openrouter",
+                    "displayName": "OpenRouter",
+                    "kind": "openai_chat",
+                    "models": ["openrouter/auto"],
+                    "apiKey": "sk-test1234567890",
+                }
+            }
+
+        started = time.monotonic()
+        with patch("codex_antigravity_auth.server.MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS", 0.01):
+            with patch("codex_antigravity_auth.server.all_provider_configs", side_effect=slow_provider_configs):
+                response = TestClient(app).get("/v1/models")
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(response.status_code, 200)
+        ids = [model["id"] for model in response.json()["data"]]
+        self.assertIn("claude-3.5-sonnet", ids)
+        self.assertIn("claude-opus-4-6", ids)
+        self.assertNotIn("openrouter:openrouter/auto", ids)
+        self.assertLess(elapsed, 1.0)
 
     def test_google_streaming_invalid_json_chunk_fails_instead_of_completing(self):
         fake_account = {"email": "test@gmail.com", "accessToken": "dummy_access"}

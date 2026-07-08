@@ -91,14 +91,17 @@ python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope diff --base origin/main --role correctness --role security --role tests
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode plan --scope working-tree --prompt "Plan this PR"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --model sonnet --model openrouter:deepseek/deepseek-chat --judge opus --prompt "Compare these approaches"
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --collab claude-grok --prompt "Compare these approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged --output findings
 ```
 
 Panel mode validates requested judge/fallback models against `/v1/models` before generation and records missing panel lanes as failed metadata when `--min-successes` can still be met. BYOK models only appear there when the gateway process has usable provider credentials or a key-optional local provider setup. Treat panel consensus as a prioritization hint, not proof; verify actionable findings locally before editing.
 
+Use `--collab claude-grok` when you explicitly want a Claude/Grok cross-check. It defaults to Sonnet, Opus, and `xai-oauth:grok-build-0.1`, asks the lanes to lean into complementary strengths, and asks the judge to compare Claude-backed and Grok-backed disagreements. This is not automatic model-loop blending; it is a bounded advisory panel. If Grok is not visible in `/v1/models`, the lane is recorded as failed unless you set `--min-successes 3` to require it.
+
 The panel judge returns a structured findings contract with `id`, `claim`, `severity`, `lanes`, and `verify`. Default prose output renders disagreements first, then findings, unverifiable observations, and caveats. `--output findings` emits just the sanitized findings JSON, while `--json` includes panel results, usage/latency metadata, caveats, findings, and the rendered output. Broad `panel --mode review` scopes reuse the review chunking path to create one bounded summary before fan-out rather than silently truncating full context for every lane.
 
-If a BYOK `provider:model` lane receives repository, diff, or file context, the helper prints and records a BYOK disclosure naming the provider lanes. Virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not supported; MoA/Fusion is a helper workflow, not gateway-side fan-out or server-side judging.
+If a BYOK `provider:model` lane, including `xai-oauth:...`, receives repository, diff, or file context, the helper prints and records a BYOK disclosure naming the provider lanes. Virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not supported; MoA/Fusion is a helper workflow, not gateway-side fan-out or server-side judging.
 
 V2 workflow presets provide safer defaults for recurring work:
 
@@ -109,6 +112,8 @@ python3 ~/.codex/skills/anti/scripts/anti.py workflow ship-gate --scope diff --b
 python3 ~/.codex/skills/anti/scripts/anti.py workflow provider-compare --model sonnet --model openrouter:deepseek/deepseek-chat --prompt "Compare these approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow security-review --scope staged --output findings
 python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "Intermittent 502s after rotation"
+python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode review --scope staged --output findings
+python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode ask --prompt "Should this UX use route A or B?"
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
 ```
 
@@ -132,7 +137,16 @@ codex-antigravity configure-codex --write --model deepseek:deepseek-chat
 codex-antigravity doctor --byok-only
 ```
 
-BYOK provider ids may contain only letters, numbers, underscores, and hyphens. Provider model ids may contain `/` or `:`, but not whitespace or control characters. Unknown `provider:model` prefixes are rejected as BYOK routing errors before any Google account selection. Non-preset custom BYOK providers must provide a base URL, and the generic `custom` preset is not auto-enabled until `provider set custom ...` is run. `--api-key-env` is preferred because it avoids persisting provider keys; `--api-key` stores a key in encrypted provider config. Stored/env BYOK API keys and extra provider header values must be printable ASCII without control characters; model-picker display names must not contain control characters. Provider API-key env var names must contain only letters, numbers, and underscores and must not start with a number. Custom provider and Codex gateway base URLs must be absolute `http` or `https` URLs without embedded credentials, whitespace/control characters, query strings, fragments, invalid ports, or malformed bracketed hosts. Plain `http` base URLs are accepted only for loopback/local hosts; remote providers and remote gateway URLs must use `https`. Extra BYOK provider headers may not override gateway-managed auth, content, host, or transport headers; malformed provider config is rejected before it is written and before streaming begins. Key-optional BYOK providers are only keyless on loopback/local base URLs; remote custom or cloud endpoints need a stored or env API key. BYOK streams surface provider error frames as failed Responses API streams, ignore never-named tool-call deltas, and wait for complete streamed function names before emitting function-call items.
+For SuperGrok/X Premium xAI access without an API key, use the dedicated OAuth lane:
+
+```bash
+codex-antigravity provider login xai-oauth
+# or, for headless/remote use:
+codex-antigravity provider login xai-oauth --device
+codex-antigravity setup --write --model xai-oauth:grok-build-0.1 --start
+```
+
+BYOK provider ids may contain only letters, numbers, underscores, and hyphens. Provider model ids may contain `/` or `:`, but not whitespace or control characters. Unknown `provider:model` prefixes are rejected as BYOK routing errors before any Google account selection. Non-preset custom BYOK providers must provide a base URL, and the generic `custom` preset is not auto-enabled until `provider set custom ...` is run. `--api-key-env` is preferred because it avoids persisting provider keys; `--api-key` stores a key in encrypted provider config. `xai:*` uses the normal xAI API-key route with `XAI_API_KEY`; `xai-oauth:*` uses encrypted SuperGrok OAuth tokens in `~/.codex/antigravity-xai-oauth.json`. `provider set xai --auth-mode oauth` fails with a pointer to `xai-oauth` so the two routes stay distinct. Stored/env BYOK API keys and extra provider header values must be printable ASCII without control characters; OAuth tokens are never written to request logs. Model-picker display names must not contain control characters. Provider API-key env var names must contain only letters, numbers, and underscores and must not start with a number. Custom provider and Codex gateway base URLs must be absolute `http` or `https` URLs without embedded credentials, whitespace/control characters, query strings, fragments, invalid ports, or malformed bracketed hosts. Plain `http` base URLs are accepted only for loopback/local hosts; remote providers and remote gateway URLs must use `https`. Extra BYOK provider headers may not override gateway-managed auth, content, host, or transport headers; malformed provider config is rejected before it is written and before streaming begins. Key-optional BYOK providers are only keyless on loopback/local base URLs; remote custom or cloud endpoints need a stored/env API key or a refreshable OAuth login. BYOK streams surface provider error frames as failed Responses API streams, ignore never-named tool-call deltas, and wait for complete streamed function names before emitting function-call items.
 Models configured with `--api-key-env` remain hidden from `/v1/models` until the env var exists in the gateway process environment. `doctor --byok-only` fails when configured BYOK providers have missing or malformed keys, and `doctor --config /path/to/config.toml` can verify non-default Codex config files.
 
 For 1Password-backed BYOK keys, store secret references in a local env file and let the gateway process run under `op run`:

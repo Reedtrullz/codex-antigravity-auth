@@ -14,6 +14,10 @@ PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 RESERVED_SLASH_PROVIDER_PREFIXES = {"openai", "openai-responses"}
+PROVIDER_AUTH_MODE_API_KEY = "api_key"
+PROVIDER_AUTH_MODE_OAUTH = "oauth"
+KNOWN_PROVIDER_AUTH_MODES = {PROVIDER_AUTH_MODE_API_KEY, PROVIDER_AUTH_MODE_OAUTH}
+SUPPORTED_PROVIDER_AUTH_MODES = {PROVIDER_AUTH_MODE_API_KEY, PROVIDER_AUTH_MODE_OAUTH}
 RESERVED_PROVIDER_HEADER_NAMES = {
     "accept-encoding",
     "authorization",
@@ -37,6 +41,7 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "kind": "openai_chat",
         "baseUrl": "https://openrouter.ai/api/v1",
         "apiKeyEnv": "OPENROUTER_API_KEY",
+        "authModes": [PROVIDER_AUTH_MODE_API_KEY],
         "models": ["openrouter/auto"],
         "headers": {
             "HTTP-Referer": "https://github.com/Reedtrullz/codex-antigravity-auth",
@@ -48,6 +53,7 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "kind": "openai_chat",
         "baseUrl": "https://api.deepseek.com",
         "apiKeyEnv": "DEEPSEEK_API_KEY",
+        "authModes": [PROVIDER_AUTH_MODE_API_KEY],
         "models": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
     },
     "xai": {
@@ -55,7 +61,21 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "kind": "openai_chat",
         "baseUrl": "https://api.x.ai/v1",
         "apiKeyEnv": "XAI_API_KEY",
-        "models": ["grok-4.3", "grok-code-fast-1"],
+        "authModes": [PROVIDER_AUTH_MODE_API_KEY],
+        "authNotes": (
+            "Use API-key auth for xAI console billing. "
+            "Use xai-oauth for SuperGrok/X Premium subscription OAuth."
+        ),
+        "models": ["grok-build-0.1", "grok-4.3", "grok-code-fast-1"],
+    },
+    "xai-oauth": {
+        "displayName": "xAI Grok OAuth (SuperGrok)",
+        "kind": "openai_responses",
+        "baseUrl": "https://api.x.ai/v1",
+        "authModes": [PROVIDER_AUTH_MODE_OAUTH],
+        "authMode": PROVIDER_AUTH_MODE_OAUTH,
+        "authNotes": "Uses a SuperGrok/X Premium OAuth login; no XAI_API_KEY is required.",
+        "models": ["grok-build-0.1", "grok-4.3"],
     },
     "kimi": {
         "displayName": "Kimi",
@@ -63,6 +83,7 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "baseUrl": "https://api.moonshot.ai/v1",
         "apiKeyEnv": "KIMI_API_KEY",
         "apiKeyEnvAliases": ["MOONSHOT_API_KEY"],
+        "authModes": [PROVIDER_AUTH_MODE_API_KEY],
         "models": ["kimi-k2-0711-preview", "kimi-k2-turbo-preview"],
     },
     "ollama": {
@@ -71,6 +92,7 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "baseUrl": "http://localhost:11434/v1",
         "cloudBaseUrl": "https://ollama.com/v1",
         "apiKeyEnv": "OLLAMA_API_KEY",
+        "authModes": [PROVIDER_AUTH_MODE_API_KEY],
         "models": ["gpt-oss:20b", "qwen3:8b"],
         "apiKeyOptional": True,
         "defaultApiKey": "ollama",
@@ -80,6 +102,7 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "kind": "openai_chat",
         "baseUrl": "http://localhost:4096/v1",
         "apiKeyEnv": "OPENCODE_API_KEY",
+        "authModes": [PROVIDER_AUTH_MODE_API_KEY],
         "models": [],
     },
     "custom": {
@@ -87,6 +110,7 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "kind": "openai_chat",
         "baseUrl": "http://localhost:8000/v1",
         "apiKeyEnv": "OPENAI_COMPATIBLE_API_KEY",
+        "authModes": [PROVIDER_AUTH_MODE_API_KEY],
         "models": [],
         "apiKeyOptional": True,
         "autoEnable": False,
@@ -188,6 +212,64 @@ def validate_provider_api_key_env(env_name: Any) -> str | None:
             "and underscores, and must not start with a number"
         )
     return value
+
+
+def normalize_provider_auth_mode(auth_mode: Any) -> str | None:
+    if auth_mode is None:
+        return None
+    if not isinstance(auth_mode, str):
+        return None
+    value = auth_mode.strip().lower().replace("-", "_")
+    if not value:
+        return ""
+    if value in KNOWN_PROVIDER_AUTH_MODES:
+        return value
+    return None
+
+
+def validate_provider_auth_mode(auth_mode: Any) -> str | None:
+    if auth_mode is None:
+        return None
+    if not isinstance(auth_mode, str):
+        raise ValueError("BYOK provider auth mode must be a string")
+    value = auth_mode.strip().lower().replace("-", "_")
+    if not value:
+        return ""
+    if value not in KNOWN_PROVIDER_AUTH_MODES:
+        allowed = ", ".join(sorted(mode.replace("_", "-") for mode in KNOWN_PROVIDER_AUTH_MODES))
+        raise ValueError(f"BYOK provider auth mode must be one of: {allowed}")
+    return value
+
+
+def provider_auth_mode(provider: dict[str, Any]) -> str:
+    configured = normalize_provider_auth_mode(provider.get("authMode"))
+    return configured or PROVIDER_AUTH_MODE_API_KEY
+
+
+def provider_oauth_unsupported_message(provider_id: str) -> str:
+    if provider_id == "xai":
+        return (
+            "use xai-oauth for SuperGrok/X Premium OAuth. "
+            "Keep provider id `xai` for XAI_API_KEY API-key billing, for example "
+            "`codex-antigravity provider set xai --api-key-env XAI_API_KEY --model grok-build-0.1`."
+        )
+    return (
+        f"Provider '{provider_id}' does not support OAuth auth mode in this OpenAI-compatible BYOK gateway yet. "
+        "Use --auth-mode api-key with an env var or stored provider key."
+    )
+
+
+def validate_supported_provider_auth_mode(provider_id: str, auth_mode: Any) -> str | None:
+    mode = validate_provider_auth_mode(auth_mode)
+    if not mode:
+        return mode
+    if mode not in SUPPORTED_PROVIDER_AUTH_MODES:
+        raise ValueError(provider_oauth_unsupported_message(provider_id))
+    preset = PROVIDER_PRESETS.get(provider_id)
+    supported_modes = preset.get("authModes", [PROVIDER_AUTH_MODE_API_KEY]) if preset else [PROVIDER_AUTH_MODE_API_KEY]
+    if mode not in supported_modes:
+        raise ValueError(provider_oauth_unsupported_message(provider_id))
+    return mode
 
 
 def validate_provider_display_name(display_name: Any) -> str | None:
@@ -326,7 +408,7 @@ def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
 
     if "kind" in normalized:
         kind = _non_empty_string(normalized.get("kind"))
-        if kind == "openai_chat":
+        if kind in {"openai_chat", "openai_responses"}:
             normalized["kind"] = kind
         else:
             normalized.pop("kind", None)
@@ -357,6 +439,12 @@ def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
             normalized["apiKeyEnv"] = api_key_env
         else:
             normalized.pop("apiKeyEnv", None)
+    if "authMode" in normalized:
+        auth_mode = normalize_provider_auth_mode(normalized.get("authMode"))
+        if auth_mode:
+            normalized["authMode"] = auth_mode
+        else:
+            normalized.pop("authMode", None)
     if "apiKey" in normalized:
         try:
             api_key = validate_provider_api_key(normalized.get("apiKey"))
@@ -458,6 +546,8 @@ def provider_preset(provider_id: str) -> dict[str, Any]:
 
 
 def resolve_api_key(provider: dict[str, Any]) -> str | None:
+    if provider_auth_mode(provider) != PROVIDER_AUTH_MODE_API_KEY:
+        return None
     api_key = _non_empty_string(provider.get("apiKey"))
     if api_key:
         return api_key
@@ -470,6 +560,8 @@ def resolve_api_key(provider: dict[str, Any]) -> str | None:
 
 
 def provider_allows_keyless_local_use(provider: dict[str, Any]) -> bool:
+    if provider_auth_mode(provider) != PROVIDER_AUTH_MODE_API_KEY:
+        return False
     if not provider.get("apiKeyOptional"):
         return False
     try:
@@ -501,6 +593,8 @@ def provider_api_key_env_names(provider: dict[str, Any]) -> list[str]:
 
 
 def has_provider_api_key_env(provider: dict[str, Any]) -> bool:
+    if provider_auth_mode(provider) != PROVIDER_AUTH_MODE_API_KEY:
+        return False
     for env_name in provider_api_key_env_names(provider):
         api_key = os.environ.get(env_name)
         if not api_key:
@@ -511,6 +605,19 @@ def has_provider_api_key_env(provider: dict[str, Any]) -> bool:
         except ValueError:
             continue
     return False
+
+
+def provider_has_oauth_tokens(provider: dict[str, Any]) -> bool:
+    if provider_auth_mode(provider) != PROVIDER_AUTH_MODE_OAUTH:
+        return False
+    if provider.get("id") != "xai-oauth":
+        return False
+    try:
+        from .xai_oauth import xai_oauth_status
+
+        return bool(xai_oauth_status().get("ready"))
+    except Exception:
+        return False
 
 
 def merged_provider_config(provider_id: str, stored: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -537,7 +644,11 @@ def all_provider_configs(include_env_enabled: bool = True) -> dict[str, dict[str
                 continue
             merged = merged_provider_config(provider_id, None)
             auto_enable_keyless = merged.get("autoEnable", True) is not False
-            if has_provider_api_key_env(merged) or (auto_enable_keyless and provider_allows_keyless_local_use(merged)):
+            if (
+                has_provider_api_key_env(merged)
+                or provider_has_oauth_tokens(merged)
+                or (auto_enable_keyless and provider_allows_keyless_local_use(merged))
+            ):
                 providers[provider_id] = merged
 
     return providers
@@ -548,6 +659,7 @@ def set_provider_config(
     *,
     api_key: str | None = None,
     api_key_env: str | None = None,
+    auth_mode: str | None = None,
     base_url: str | None = None,
     models: list[str] | None = None,
     display_name: str | None = None,
@@ -563,6 +675,7 @@ def set_provider_config(
             raise ValueError("BYOK provider base URL is required for custom providers")
     api_key = validate_provider_api_key(api_key)
     api_key_env = validate_provider_api_key_env(api_key_env)
+    auth_mode = validate_supported_provider_auth_mode(provider_id, auth_mode)
     models = validate_provider_models(models)
     display_name = validate_provider_display_name(display_name)
     headers = validate_provider_headers(headers)
@@ -579,6 +692,8 @@ def set_provider_config(
             current["apiKey"] = api_key
         if api_key_env is not None:
             current["apiKeyEnv"] = api_key_env
+        if auth_mode is not None:
+            current["authMode"] = auth_mode
         if base_url is not None:
             current["baseUrl"] = base_url
         if models is not None:

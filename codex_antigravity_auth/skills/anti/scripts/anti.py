@@ -35,12 +35,21 @@ MODEL_ALIASES = {
     "claude-sonnet": "claude-3.5-sonnet",
     "claude-3.5-sonnet": "claude-3.5-sonnet",
     "claude-3-5-sonnet": "claude-3.5-sonnet",
+    "grok": "xai-oauth:grok-build-0.1",
+    "supergrok": "xai-oauth:grok-build-0.1",
+    "xai-grok": "xai-oauth:grok-build-0.1",
+    "grok-build": "xai-oauth:grok-build-0.1",
+    "grok-build-0.1": "xai-oauth:grok-build-0.1",
+    "grok-4.3": "xai-oauth:grok-4.3",
+    "grok-4": "xai-oauth:grok-4.3",
 }
 DEFAULT_REVIEW_MODEL = "claude-opus-4-6"
 DEFAULT_CONSULT_MODEL = "claude-3.5-sonnet"
 DEFAULT_PLAN_MODEL = "claude-opus-4-6"
 DEFAULT_PANEL_MODELS = ["claude-3.5-sonnet", "claude-opus-4-6"]
 DEFAULT_PANEL_JUDGE_MODEL = "claude-opus-4-6"
+COLLAB_PROFILES = {"none", "claude-grok"}
+CLAUDE_GROK_PANEL_MODELS = ["sonnet", "opus", "grok"]
 MAX_FILE_BYTES = 180_000
 DEFAULT_MAX_PROMPT_CHARS = 120_000
 DEFAULT_MAX_SYNTHESIS_CHARS = DEFAULT_MAX_PROMPT_CHARS
@@ -48,6 +57,7 @@ PID_FILE = Path.home() / ".codex" / "anti-gateway.pid"
 LOG_FILE = Path.home() / ".codex" / "anti-gateway.log"
 RUNS_DIR = Path.home() / ".codex" / "anti-runs"
 RUN_OUTPUT_PREVIEW_CHARS = 1600
+POST_FAILURE_MODEL_PROBE_TIMEOUT = 8.0
 FALLBACK_POLICIES = {"never", "on-retryable", "on-timeout"}
 SAVE_OUTPUT_MODES = {"never", "summary", "full"}
 PANEL_OUTPUT_MODES = {"prose", "findings"}
@@ -410,6 +420,50 @@ def should_use_fallback(error: str, policy: str) -> bool:
     raise AntiError(f"unsupported fallback policy: {policy}")
 
 
+def gateway_restart_hint(base_url: str) -> str:
+    try:
+        parsed = urllib.parse.urlparse(normalize_base_url(base_url))
+        port = parsed.port
+    except Exception:
+        port = None
+    port_arg = f" --port {port}" if port else ""
+    return (
+        "gateway appears wedged; restart recommended "
+        f"(`python3 ~/.codex/skills/anti/scripts/anti.py start{port_arg}` after stopping the stale gateway, "
+        f"or `codex-antigravity stop{port_arg}` then `codex-antigravity start --background{port_arg}`)"
+    )
+
+
+def gateway_post_failure_diagnostic(args: argparse.Namespace, error: str) -> str:
+    if not (error_is_retryable(error) or error_is_timeout(error)):
+        return ""
+    base_url = getattr(args, "base_url", DEFAULT_BASE_URL)
+    token_env = getattr(args, "gateway_token_env", DEFAULT_TOKEN_ENV)
+    raw_timeout = getattr(args, "timeout", POST_FAILURE_MODEL_PROBE_TIMEOUT) or POST_FAILURE_MODEL_PROBE_TIMEOUT
+    try:
+        request_timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        request_timeout = POST_FAILURE_MODEL_PROBE_TIMEOUT
+    timeout = min(POST_FAILURE_MODEL_PROBE_TIMEOUT, max(1.0, request_timeout))
+    try:
+        fetch_model_ids(base_url, timeout=timeout, token_env=token_env)
+    except AntiError as exc:
+        probe_error = redact_sensitive_text(str(exc))
+        if error_is_timeout(probe_error):
+            return (
+                " Gateway health check after this retryable failure also timed out; "
+                + gateway_restart_hint(base_url)
+                + "."
+            )
+        return f" Gateway health check after this retryable failure also failed: {probe_error}."
+    return ""
+
+
+def enrich_generation_error(args: argparse.Namespace, error: str) -> str:
+    diagnostic = gateway_post_failure_diagnostic(args, error)
+    return error + diagnostic if diagnostic else error
+
+
 def normalize_base_url(value: str) -> str:
     value = str(value).strip()
     if not value:
@@ -766,7 +820,7 @@ def generate_with_fallback(
         error = redact_sensitive_text(str(exc))
         failures.append({"model": model, "error": error})
         if not fallback_model or fallback_model == model or not should_use_fallback(error, fallback_policy):
-            raise
+            raise AntiError(enrich_generation_error(args, error)) from exc
         progress(args, f"{purpose}: {model} failed; trying fallback {fallback_model}")
         try:
             raw_text = post_response(
@@ -783,9 +837,10 @@ def generate_with_fallback(
         except AntiError as fallback_exc:
             fallback_error = redact_sensitive_text(str(fallback_exc))
             failures.append({"model": fallback_model, "error": fallback_error})
+            enriched_fallback_error = enrich_generation_error(args, fallback_error)
             raise AntiError(
                 f"{purpose} failed on primary model {model} and fallback model {fallback_model}. "
-                f"Primary error: {error}. Fallback error: {fallback_error}"
+                f"Primary error: {error}. Fallback error: {enriched_fallback_error}"
             ) from fallback_exc
         text = str(raw_text)
         call_metadata = response_call_metadata(raw_text)
@@ -1801,8 +1856,22 @@ def check_gateway(base_url: str, *, timeout: float, token_env: str) -> bool:
         return False
 
 
-def resolve_panel_models(values: list[str] | None) -> list[str]:
-    raw_values = values or list(DEFAULT_PANEL_MODELS)
+def normalize_collab_profile(value: str | None) -> str:
+    profile = (value or "none").strip().lower()
+    if profile not in COLLAB_PROFILES:
+        raise AntiError(f"unsupported collaboration profile: {value}")
+    return profile
+
+
+def default_panel_models_for_collab(profile: str) -> list[str]:
+    if normalize_collab_profile(profile) == "claude-grok":
+        return list(CLAUDE_GROK_PANEL_MODELS)
+    return list(DEFAULT_PANEL_MODELS)
+
+
+def resolve_panel_models(values: list[str] | None, *, collab_profile: str | None = None) -> list[str]:
+    profile = normalize_collab_profile(collab_profile)
+    raw_values = values or default_panel_models_for_collab(profile)
     resolved: list[str] = []
     seen: set[str] = set()
     for value in raw_values:
@@ -1882,6 +1951,20 @@ def gpt_complement_instruction() -> str:
     return (
         "GPT-complement lens: prioritize observations, failure modes, ambiguity, and verification hints "
         "that a GPT-family acting agent might plausibly miss. Do not speculate beyond the supplied context."
+    )
+
+
+def panel_collaboration_instruction(profile: str, panel_models: list[str]) -> str:
+    if normalize_collab_profile(profile) != "claude-grok":
+        return ""
+    return "\n".join(
+        [
+            "Claude + Grok collaboration profile: use these lanes as complementary reviewers, not as a vote.",
+            "Claude-family lanes should emphasize codebase reasoning, long-context consistency, API/protocol contracts, and implementation risk.",
+            "Grok/xAI lanes should stress-test assumptions, challenge likely blind spots, look for runtime/user-workflow surprises, and propose discriminating checks.",
+            "All lanes must cite concrete evidence from the supplied context and turn disagreements into local verification steps.",
+            "Requested collaboration lanes: " + ", ".join(panel_models) + ".",
+        ]
     )
 
 
@@ -2034,7 +2117,11 @@ def render_panel_findings(findings: dict[str, Any], caveats: list[str]) -> str:
 
 def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[str], dict[str, Any]]:
     caveats: list[str] = []
+    collab_profile = normalize_collab_profile(getattr(args, "collab", "none"))
+    resolved_panel_models = list(getattr(args, "resolved_panel_models", []) or [])
     metadata: dict[str, Any] = {"panel_mode": args.mode, "roles": args.role or []}
+    if collab_profile != "none":
+        metadata["collaboration_profile"] = collab_profile
 
     if args.mode == "review":
         if args.scope == "none":
@@ -2068,6 +2155,11 @@ def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[st
     role_instruction = panel_role_instruction(args.role)
     if role_instruction:
         prompt = "\n\n".join([role_instruction, prompt])
+        prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+        metadata["prompt_chars"] = len(prompt)
+    collab_instruction = panel_collaboration_instruction(collab_profile, resolved_panel_models)
+    if collab_instruction:
+        prompt = "\n\n".join([collab_instruction, prompt])
         prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
         metadata["prompt_chars"] = len(prompt)
     prompt = "\n\n".join([gpt_complement_instruction(), prompt])
@@ -2118,6 +2210,12 @@ def build_panel_synthesis_prompt(
                 "You are synthesizing an Antigravity multi-model advisory panel for a Codex coding session.",
                 "Use only the source prompt/context and panel outputs below. Do not claim local verification, tool execution, or proof that is not present.",
                 "Prioritize disagreements, contradictions, and unique insights before consensus. Consensus is only a prioritization signal, not proof.",
+                (
+                    "Collaboration profile claude-grok: Compare Claude-backed lanes with Grok-backed lanes. "
+                    "Name meaningful agreement, contradiction, and blind spots from each family, then give local checks that can adjudicate them."
+                    if metadata.get("collaboration_profile") == "claude-grok"
+                    else ""
+                ),
                 "Return one JSON object and no surrounding prose. The object must contain: summary (string), disagreements (array of strings), findings (array of objects), unverifiable (array of strings), recommended_next_actions (array of strings), and caveats (array of strings).",
                 "Each findings item must contain: id (stable short string), claim (specific claim), severity (critical|high|medium|low|info), lanes (array of model ids that support it), and verify (a concrete local check Codex should run before acting).",
                 "Put speculative or externally dependent observations in unverifiable, not findings. Do not include secrets, credentials, raw account identifiers, or provider keys.",
@@ -2316,6 +2414,8 @@ def print_panel_result(
         print(f"- Scope: {metadata['scope']}")
     if metadata.get("status"):
         print(f"- Status: {metadata['status']}")
+    if metadata.get("collaboration_profile"):
+        print(f"- Collaboration: {metadata['collaboration_profile']}")
     for result in panel_results:
         stats = "; ".join(
             part
@@ -2408,7 +2508,9 @@ def maybe_summarize_panel_review(
 def command_panel(args: argparse.Namespace) -> int:
     if args.output not in PANEL_OUTPUT_MODES:
         raise AntiError(f"unsupported panel output mode: {args.output}")
-    panel_models = resolve_panel_models(args.model)
+    collab_profile = normalize_collab_profile(getattr(args, "collab", "none"))
+    panel_models = resolve_panel_models(args.model, collab_profile=collab_profile)
+    args.resolved_panel_models = panel_models
     judge_model = resolve_model(args.judge, default=DEFAULT_PANEL_JUDGE_MODEL)
     min_successes = args.min_successes
     if min_successes is None:
@@ -2435,6 +2537,8 @@ def command_panel(args: argparse.Namespace) -> int:
             "prompt_chars": len(prompt),
         }
     )
+    if collab_profile != "none":
+        metadata["collaboration_profile"] = collab_profile
     if args.print_prompt:
         payload = {"prompt": prompt, "metadata": metadata, "caveats": caveats}
         if args.json:
@@ -3208,19 +3312,91 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             argv.extend(["--role", role])
         for model in args.model or ["sonnet", "opus"]:
             argv.extend(["--model", model])
+    elif args.name == "claude-grok":
+        panel_mode = args.panel_mode
+        if panel_mode == "review":
+            scope = workflow_scope(args, default="staged")
+        elif panel_mode == "plan":
+            scope = workflow_scope(args, default="working-tree")
+            if scope == "diff":
+                raise AntiError("workflow claude-grok --panel-mode plan does not support --scope diff")
+            if args.base:
+                raise AntiError("workflow claude-grok --panel-mode plan does not support --base")
+            if args.changed_files_range:
+                raise AntiError("workflow claude-grok --panel-mode plan does not support --changed-files")
+            if args.files_from:
+                raise AntiError("workflow claude-grok --panel-mode plan does not support --files-from")
+        else:
+            scope = workflow_scope(args, default="none")
+            if args.base or args.changed_files_range or args.file or args.files_from or scope != "none":
+                raise AntiError(
+                    "workflow claude-grok --panel-mode ask is prompt-only; omit --scope/--base/--changed-files/--file/--files-from"
+                )
+        argv = [
+            "panel",
+            "--mode",
+            panel_mode,
+            "--collab",
+            "claude-grok",
+            "--judge",
+            args.judge,
+            "--judge-output-tokens",
+            str(args.judge_output_tokens),
+            "--max-synthesis-chars",
+            str(args.max_synthesis_chars),
+            "--max-parallel",
+            str(args.max_parallel),
+            "--output",
+            args.output,
+            *common,
+        ]
+        if panel_mode in {"review", "plan"}:
+            argv.extend(["--scope", scope])
+        if panel_mode == "review":
+            argv.extend(
+                [
+                    "--chunked",
+                    args.chunked,
+                    "--max-review-chunks",
+                    str(args.max_review_chunks),
+                    "--chunk-output-tokens",
+                    str(args.chunk_output_tokens),
+                ]
+            )
+        if args.min_successes is not None:
+            argv.extend(["--min-successes", str(args.min_successes)])
+        default_roles = {
+            "review": ["Claude/Grok collaboration", "code-correctness", "runtime-surprises", "verification-tests"],
+            "plan": ["Claude/Grok collaboration", "architecture", "execution-risk", "checkpoint-verification"],
+            "ask": ["Claude/Grok collaboration", "tradeoffs", "adversarial-cross-check", "verification"],
+        }[panel_mode]
+        for role in args.role or default_roles:
+            argv.extend(["--role", role])
+        for model in args.model or CLAUDE_GROK_PANEL_MODELS:
+            argv.extend(["--model", model])
     else:
         raise AntiError(f"unknown workflow: {args.name}")
 
-    if args.name in {"review-ready", "ship-gate", "security-review"}:
+    if args.name in {"review-ready", "ship-gate", "security-review"} or (
+        args.name == "claude-grok" and args.panel_mode == "review"
+    ):
         append_if_present(argv, "--base", args.base)
         append_if_present(argv, "--changed-files", args.changed_files_range)
         append_each(argv, "--file", args.file)
         append_each(argv, "--files-from", args.files_from)
-    elif args.name == "plan-deep":
+    elif args.name == "plan-deep" or (args.name == "claude-grok" and args.panel_mode == "plan"):
         append_each(argv, "--file", args.file)
     if args.name != "debug-consensus":
         append_if_present(argv, "--prompt-file", args.prompt_file)
     prompt = args.prompt or " ".join(args.prompt_parts or []).strip()
+    if args.name == "claude-grok":
+        if args.panel_mode == "plan" and not prompt and not args.prompt_file:
+            prompt = (
+                "Create a Claude/Grok collaboration plan. Use Claude lanes for codebase architecture and execution sequencing, "
+                "Grok lanes for adversarial assumption checks and user/runtime surprises, and return verification checkpoints."
+            )
+        elif args.panel_mode == "ask" and not prompt and not args.prompt_file:
+            raise AntiError("workflow claude-grok --panel-mode ask requires --prompt, --prompt-file, or positional prompt text")
     if args.name in {"plan-deep", "provider-compare", "debug-consensus"} and not prompt and not args.prompt_file:
         if args.name == "plan-deep":
             prompt = (
@@ -3410,6 +3586,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_gateway_args(panel, default_timeout=120.0)
     add_generation_control_args(panel)
     panel.add_argument("--mode", choices=["review", "plan", "ask"], default="review")
+    panel.add_argument("--collab", choices=sorted(COLLAB_PROFILES), default="none", help="Optional collaboration profile such as claude-grok")
     panel.add_argument("--model", action="append", help="Panel model alias/id; repeatable; defaults to sonnet + opus")
     panel.add_argument("--judge", default="opus", help="Judge model alias/id; defaults to opus")
     panel.add_argument("--role", action="append", help="Review/planning lens such as security, correctness, tests, ux")
@@ -3513,8 +3690,17 @@ def build_parser() -> argparse.ArgumentParser:
     add_generation_control_args(workflow, default_save_output="summary")
     workflow.add_argument(
         "name",
-        choices=["review-ready", "plan-deep", "ship-gate", "provider-compare", "security-review", "debug-consensus"],
+        choices=[
+            "review-ready",
+            "plan-deep",
+            "ship-gate",
+            "provider-compare",
+            "security-review",
+            "debug-consensus",
+            "claude-grok",
+        ],
     )
+    workflow.add_argument("--panel-mode", choices=["review", "plan", "ask"], default="review", help="Panel mode for collaboration workflows")
     workflow.add_argument("--model", action="append", help="Model alias/id for the workflow; repeatable for panels")
     workflow.add_argument("--judge", default="opus")
     workflow.add_argument("--role", action="append")
