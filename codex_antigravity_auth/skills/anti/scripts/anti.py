@@ -5,6 +5,7 @@ import argparse
 import concurrent.futures
 import fnmatch
 import json
+import math
 import os
 import re
 import shlex
@@ -53,6 +54,12 @@ CLAUDE_GROK_PANEL_MODELS = ["sonnet", "opus", "grok"]
 MAX_FILE_BYTES = 180_000
 DEFAULT_MAX_PROMPT_CHARS = 120_000
 DEFAULT_MAX_SYNTHESIS_CHARS = DEFAULT_MAX_PROMPT_CHARS
+CLAUDE_SAFE_PROMPT_CHARS = 30_000
+MAX_PROMPT_CHARS_HELP = (
+    "Maximum prompt chars before truncation/chunking; use 0 for unlimited. "
+    "Claude-family review/plan/panel calls still use the conservative safety budget with --chunked auto; "
+    "add --chunked off when you intentionally want one large Claude request."
+)
 PID_FILE = Path.home() / ".codex" / "anti-gateway.pid"
 LOG_FILE = Path.home() / ".codex" / "anti-gateway.log"
 RUNS_DIR = Path.home() / ".codex" / "anti-runs"
@@ -61,6 +68,10 @@ POST_FAILURE_MODEL_PROBE_TIMEOUT = 8.0
 FALLBACK_POLICIES = {"never", "on-retryable", "on-timeout"}
 SAVE_OUTPUT_MODES = {"never", "summary", "full"}
 PANEL_OUTPUT_MODES = {"prose", "findings"}
+BACKEND_TIMEOUT_METADATA_KEY = "antigravity_backend_timeout_seconds"
+BACKEND_TIMEOUT_HINT_THRESHOLD_SECONDS = 120.0
+BACKEND_TIMEOUT_HINT_BUFFER_SECONDS = 10.0
+BACKEND_TIMEOUT_HINT_MAX_SECONDS = 600.0
 
 REDACTION_MARKER = "<redacted>"
 SECRET_KEY_FRAGMENTS = (
@@ -456,12 +467,56 @@ def gateway_post_failure_diagnostic(args: argparse.Namespace, error: str) -> str
                 + "."
             )
         return f" Gateway health check after this retryable failure also failed: {probe_error}."
-    return ""
+    return (
+        " Gateway /v1/models stayed responsive after this retryable failure; "
+        "generation path appears unhealthy, not model-list readiness. "
+        "For long Claude calls, retry with a narrower or chunked scope, use a fallback model, "
+        "or inspect `codex-antigravity logs --tail 20`; restart the gateway only if /v1/models also fails."
+    )
 
 
 def enrich_generation_error(args: argparse.Namespace, error: str) -> str:
     diagnostic = gateway_post_failure_diagnostic(args, error)
     return error + diagnostic if diagnostic else error
+
+
+def backend_timeout_hint(timeout: float) -> float | None:
+    try:
+        value = float(timeout)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= BACKEND_TIMEOUT_HINT_THRESHOLD_SECONDS:
+        return None
+    return min(BACKEND_TIMEOUT_HINT_MAX_SECONDS, max(1.0, value - BACKEND_TIMEOUT_HINT_BUFFER_SECONDS))
+
+
+def is_claude_model(model: str) -> bool:
+    return str(model).startswith("claude-")
+
+
+def prompt_budget_for_model(args: argparse.Namespace, model: str) -> int:
+    raw_budget = int(getattr(args, "max_prompt_chars", DEFAULT_MAX_PROMPT_CHARS))
+    if getattr(args, "chunked", "auto") == "off" or not is_claude_model(model):
+        return raw_budget
+    if raw_budget <= 0:
+        return CLAUDE_SAFE_PROMPT_CHARS
+    return min(raw_budget, CLAUDE_SAFE_PROMPT_CHARS)
+
+
+def claude_guardrail_would_apply(args: argparse.Namespace, model: str, prompt_budget: int) -> bool:
+    raw_budget = int(getattr(args, "max_prompt_chars", DEFAULT_MAX_PROMPT_CHARS))
+    return getattr(args, "chunked", "auto") != "off" and is_claude_model(model) and (
+        raw_budget <= 0 or prompt_budget < raw_budget
+    )
+
+
+def add_claude_guardrail_caveat(caveats: list[str], *, prompt_budget: int) -> None:
+    caveat = (
+        f"Claude safety budget: split broad Opus/Sonnet work into calls of about {prompt_budget} prompt chars "
+        "to reduce timeout/auth-loss risk; use --chunked off only when you intentionally want one large call."
+    )
+    if caveat not in caveats:
+        caveats.append(caveat)
 
 
 def normalize_base_url(value: str) -> str:
@@ -726,8 +781,14 @@ def post_response(
         "max_output_tokens": max_output_tokens,
         "stream": False,
     }
+    metadata: dict[str, Any] = {}
     if run_id:
-        payload["metadata"] = {"run_id": run_id}
+        metadata["run_id"] = run_id
+    backend_timeout = backend_timeout_hint(timeout)
+    if backend_timeout is not None:
+        metadata[BACKEND_TIMEOUT_METADATA_KEY] = backend_timeout
+    if metadata:
+        payload["metadata"] = metadata
     attempts = max(0, retries) + 1
     retryable_statuses = {408, 409, 425, 429, 500, 502, 503, 504}
     last_error: str | None = None
@@ -1519,10 +1580,11 @@ def run_chunked_review(
     context: dict[str, Any],
     model: str,
     base_metadata: dict[str, Any],
+    max_prompt_chars: int,
 ) -> tuple[str, list[str], dict[str, Any]]:
     chunks, chunk_metadata = build_review_chunk_prompts(
         context,
-        max_prompt_chars=args.max_prompt_chars,
+        max_prompt_chars=max_prompt_chars,
         max_chunks=args.max_review_chunks,
     )
     if not chunks:
@@ -1581,6 +1643,7 @@ def run_chunked_review(
         "synthesis_model_used": synthesis_model,
         "synthesis_generation": synthesis_generation,
         "chunk_omitted_items": chunk_metadata["omitted_items"],
+        "prompt_budget_chars": max_prompt_chars,
         **synthesis_metadata,
     }
     return synthesis, caveats, metadata
@@ -1654,13 +1717,13 @@ def assemble_plan_prompt(args: argparse.Namespace, *, apply_limit: bool = True) 
     return prompt, caveats
 
 
-def should_chunk_plan(args: argparse.Namespace, prompt: str) -> bool:
+def should_chunk_plan(args: argparse.Namespace, prompt: str, *, max_prompt_chars: int) -> bool:
     mode = getattr(args, "chunked", "auto")
     if mode == "off":
         return False
     if mode == "always":
         return True
-    return args.max_prompt_chars > 0 and len(prompt) > args.max_prompt_chars
+    return max_prompt_chars > 0 and len(prompt) > max_prompt_chars
 
 
 def run_chunked_plan(
@@ -1669,6 +1732,7 @@ def run_chunked_plan(
     model: str,
     prompt: str,
     caveats: list[str],
+    max_prompt_chars: int,
 ) -> tuple[str, list[str], dict[str, Any], str]:
     chunk_wrapper_overhead = len(
         "\n\n".join(
@@ -1680,7 +1744,7 @@ def run_chunked_plan(
             ]
         )
     )
-    chunk_budget = max(1, args.max_prompt_chars - chunk_wrapper_overhead) if args.max_prompt_chars > 0 else len(prompt)
+    chunk_budget = max(1, max_prompt_chars - chunk_wrapper_overhead) if max_prompt_chars > 0 else len(prompt)
     prompt_chunks = split_text_by_budget(prompt, chunk_budget)
     if len(prompt_chunks) > args.max_plan_chunks:
         caveats.append(
@@ -1704,7 +1768,7 @@ def run_chunked_plan(
             ]
         )
         chunk_caveats: list[str] = []
-        chunk_prompt = apply_prompt_limit(chunk_prompt, args.max_prompt_chars, chunk_caveats)
+        chunk_prompt = apply_prompt_limit(chunk_prompt, max_prompt_chars, chunk_caveats)
         if chunk_caveats:
             caveats.extend(f"Plan chunk {index}: {caveat}" for caveat in chunk_caveats)
         sent_chunk_prompt_chars.append(len(chunk_prompt))
@@ -1753,6 +1817,7 @@ def run_chunked_plan(
         "synthesis_prompt_chars": len(synthesis_prompt),
         "synthesis_model_used": synthesis_model,
         "synthesis_generation": synthesis_generation,
+        "prompt_budget_chars": max_prompt_chars,
     }
     return text, caveats, metadata, synthesis_model
 
@@ -2075,6 +2140,13 @@ def fallback_findings_contract(text: str, caveats: list[str]) -> dict[str, Any]:
     )
 
 
+def prompt_budget_for_panel_source(args: argparse.Namespace, panel_models: list[str]) -> int:
+    for model in panel_models:
+        if is_claude_model(model):
+            return prompt_budget_for_model(args, model)
+    return int(getattr(args, "max_prompt_chars", DEFAULT_MAX_PROMPT_CHARS))
+
+
 def render_panel_findings(findings: dict[str, Any], caveats: list[str]) -> str:
     sections: list[str] = []
     if findings.get("summary"):
@@ -2126,19 +2198,29 @@ def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[st
     if args.mode == "review":
         if args.scope == "none":
             raise AntiError("panel review requires --scope working-tree, staged, files, or diff")
+        prompt_budget = prompt_budget_for_panel_source(args, resolved_panel_models)
+        claude_guardrail_available = any(
+            claude_guardrail_would_apply(args, model, prompt_budget) for model in resolved_panel_models
+        )
         context = collect_review_context(args)
         prompt, _paths, caveats, review_metadata = assemble_review_prompt_from_context(
             context,
-            max_prompt_chars=args.max_prompt_chars,
+            max_prompt_chars=prompt_budget,
         )
         extra_prompt = read_optional_prompt(args)
         if extra_prompt:
             prompt = "\n\n".join(["Additional review instructions:\n" + extra_prompt, prompt])
-            prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+            prompt = apply_prompt_limit(prompt, prompt_budget, caveats)
             review_metadata["additional_prompt_chars"] = len(extra_prompt)
+        claude_guardrail_used = claude_guardrail_available and should_run_chunked_review(args, review_metadata)
+        if claude_guardrail_used:
+            add_claude_guardrail_caveat(caveats, prompt_budget=prompt_budget)
+            context["caveats"] = list(caveats)
         metadata.update(review_metadata)
         metadata["scope"] = context["scope_line"]
         metadata["prompt_chars"] = len(prompt)
+        metadata["prompt_budget_chars"] = prompt_budget
+        metadata["claude_prompt_guardrail"] = claude_guardrail_used
         metadata["_review_context"] = context
     elif args.mode == "plan":
         if args.scope == "diff":
@@ -2475,12 +2557,14 @@ def maybe_summarize_panel_review(
 
     raw_prompt_chars = len(prompt)
     summary_model = panel_review_summary_model(panel_models)
+    prompt_budget = prompt_budget_for_model(args, summary_model)
     progress(args, f"panel review: summarizing broad review context with {summary_model} before fan-out")
     summary_text, summary_caveats, summary_metadata = run_chunked_review(
         args=args,
         context=context,
         model=summary_model,
         base_metadata=metadata,
+        max_prompt_chars=prompt_budget,
     )
     prompt = "\n\n".join(
         [
@@ -2489,13 +2573,15 @@ def maybe_summarize_panel_review(
             "## Bounded Review Summary\n" + summary_text.strip(),
         ]
     )
-    prompt = apply_prompt_limit(prompt, args.max_prompt_chars, summary_caveats)
+    fanout_prompt_budget = prompt_budget_for_panel_source(args, panel_models)
+    prompt = apply_prompt_limit(prompt, fanout_prompt_budget, summary_caveats)
     metadata = {
         **metadata,
         "panel_review_context": "chunked-summary",
         "panel_review_summary_model": summary_model,
         "raw_review_prompt_chars": raw_prompt_chars,
         "prompt_chars": len(prompt),
+        "prompt_budget_chars": fanout_prompt_budget,
         "review_summary_chars": len(summary_text),
         "review_summary_metadata": summary_metadata,
     }
@@ -2744,10 +2830,12 @@ def command_consult(args: argparse.Namespace) -> int:
 
 def command_review(args: argparse.Namespace) -> int:
     model = resolve_model(args.model, default=DEFAULT_REVIEW_MODEL)
+    prompt_budget = prompt_budget_for_model(args, model)
+    claude_guardrail_available = claude_guardrail_would_apply(args, model, prompt_budget)
     context = collect_review_context(args)
     prompt, _paths, caveats, metadata = assemble_review_prompt_from_context(
         context,
-        max_prompt_chars=args.max_prompt_chars,
+        max_prompt_chars=prompt_budget,
     )
     if args.print_prompt:
         if args.json:
@@ -2760,12 +2848,18 @@ def command_review(args: argparse.Namespace) -> int:
                 print(f"- {caveat}")
         return 0
     ensure_run_id(args)
-    if should_run_chunked_review(args, metadata):
+    chunked_review = should_run_chunked_review(args, metadata)
+    claude_guardrail_used = claude_guardrail_available and chunked_review
+    if claude_guardrail_used:
+        add_claude_guardrail_caveat(caveats, prompt_budget=prompt_budget)
+        context["caveats"] = list(caveats)
+    if chunked_review:
         text, caveats, metadata = run_chunked_review(
             args=args,
             context=context,
             model=model,
             base_metadata=metadata,
+            max_prompt_chars=prompt_budget,
         )
         model_used = metadata.get("synthesis_model_used", model)
     else:
@@ -2776,7 +2870,8 @@ def command_review(args: argparse.Namespace) -> int:
             max_output_tokens=args.max_output_tokens,
             purpose="review",
         )
-        metadata = {**metadata, "chunked": False, **generation_metadata}
+        metadata = {**metadata, "chunked": False, "prompt_budget_chars": prompt_budget, **generation_metadata}
+    metadata["claude_prompt_guardrail"] = claude_guardrail_used
     if getattr(args, "run_id", None):
         metadata["run_id"] = args.run_id
         metadata["request_log_correlation_id"] = args.run_id
@@ -2805,11 +2900,13 @@ def command_review(args: argparse.Namespace) -> int:
 
 def command_plan(args: argparse.Namespace) -> int:
     model = resolve_model(args.model, default=DEFAULT_PLAN_MODEL)
+    prompt_budget = prompt_budget_for_model(args, model)
+    claude_guardrail_available = claude_guardrail_would_apply(args, model, prompt_budget)
     prompt, caveats = assemble_plan_prompt(args, apply_limit=False)
     recorded_prompt = prompt
     if args.print_prompt:
         printable_caveats = list(caveats)
-        printable_prompt = apply_prompt_limit(prompt, args.max_prompt_chars, printable_caveats)
+        printable_prompt = apply_prompt_limit(prompt, prompt_budget, printable_caveats)
         if args.json:
             print(json.dumps({"prompt": printable_prompt, "caveats": printable_caveats}, indent=2, sort_keys=True))
             return 0
@@ -2820,17 +2917,21 @@ def command_plan(args: argparse.Namespace) -> int:
                 print(f"- {caveat}")
         return 0
     ensure_run_id(args)
-    if should_chunk_plan(args, prompt):
-        if args.max_prompt_chars > 0:
-            recorded_prompt = prompt[: args.max_prompt_chars]
+    claude_guardrail_used = claude_guardrail_available and prompt_budget > 0 and len(prompt) > prompt_budget
+    if claude_guardrail_used:
+        add_claude_guardrail_caveat(caveats, prompt_budget=prompt_budget)
+    if should_chunk_plan(args, prompt, max_prompt_chars=prompt_budget):
+        if prompt_budget > 0:
+            recorded_prompt = prompt[:prompt_budget]
         text, caveats, metadata, model_used = run_chunked_plan(
             args=args,
             model=model,
             prompt=prompt,
             caveats=caveats,
+            max_prompt_chars=prompt_budget,
         )
     else:
-        limited_prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+        limited_prompt = apply_prompt_limit(prompt, prompt_budget, caveats)
         recorded_prompt = limited_prompt
         text, model_used, generation_metadata = generate_with_fallback(
             args,
@@ -2839,7 +2940,8 @@ def command_plan(args: argparse.Namespace) -> int:
             max_output_tokens=args.max_output_tokens,
             purpose="plan",
         )
-        metadata = {"prompt_chars": len(limited_prompt), "chunked": False, **generation_metadata}
+        metadata = {"prompt_chars": len(limited_prompt), "chunked": False, "prompt_budget_chars": prompt_budget, **generation_metadata}
+    metadata["claude_prompt_guardrail"] = claude_guardrail_used
     if getattr(args, "run_id", None):
         metadata["run_id"] = args.run_id
         metadata["request_log_correlation_id"] = args.run_id
@@ -3599,7 +3701,7 @@ def build_parser() -> argparse.ArgumentParser:
     panel.add_argument("--prompt-file", help="Read ask/planning prompt text from file")
     panel.add_argument("--max-output-tokens", type=positive_int, default=2048, help="Max output tokens per panel model")
     panel.add_argument("--judge-output-tokens", type=positive_int, default=4096, help="Max output tokens for judge synthesis")
-    panel.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS)
+    panel.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
     panel.add_argument("--max-synthesis-chars", type=int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
     panel.add_argument(
         "--chunked",
@@ -3625,7 +3727,7 @@ def build_parser() -> argparse.ArgumentParser:
     consult.add_argument("--prompt", help="Prompt text")
     consult.add_argument("--prompt-file", help="Read prompt text from file")
     consult.add_argument("--max-output-tokens", type=positive_int, default=2048)
-    consult.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS)
+    consult.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS, help="Maximum prompt chars before truncation; use 0 for unlimited")
     consult.add_argument("--retry", type=int, default=1, help="Retry transient gateway/backend failures")
     consult.add_argument("--json", action="store_true", help="Emit structured JSON output")
     consult.add_argument("prompt_parts", nargs="*", help="Positional prompt text")
@@ -3644,7 +3746,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--scope", choices=["none", "working-tree", "staged", "files"], default="none")
     plan.add_argument("--file", action="append", help="Add repository file context; repeatable")
     plan.add_argument("--max-output-tokens", type=positive_int, default=6144)
-    plan.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS)
+    plan.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
     plan.add_argument("--chunked", choices=["auto", "always", "off"], default="auto")
     plan.add_argument("--max-plan-chunks", type=positive_int, default=6)
     plan.add_argument("--chunk-output-tokens", type=positive_int, default=2048)
@@ -3665,7 +3767,7 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--file", action="append", help="Limit review to path; repeatable")
     review.add_argument("--files-from", action="append", help="Read review paths from a newline- or NUL-delimited file; use - for stdin")
     review.add_argument("--max-output-tokens", type=positive_int, default=4096)
-    review.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS)
+    review.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
     review.add_argument("--retry", type=int, default=1, help="Retry transient gateway/backend failures")
     review.add_argument(
         "--chunked",
@@ -3718,7 +3820,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the expanded command's own default when set",
     )
     workflow.add_argument("--judge-output-tokens", type=positive_int, default=4096)
-    workflow.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS)
+    workflow.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
     workflow.add_argument("--max-synthesis-chars", type=int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
     workflow.add_argument("--min-successes", type=positive_int)
     workflow.add_argument("--max-parallel", type=positive_int, default=3)

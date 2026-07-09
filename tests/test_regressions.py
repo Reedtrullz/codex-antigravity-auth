@@ -28,7 +28,15 @@ from codex_antigravity_auth.oauth import (
     token_expires_in_seconds,
 )
 from codex_antigravity_auth.schema import clean_json_schema
-from codex_antigravity_auth.server import app, build_headers, retry_after_seconds_from_response, select_active_account_for_request
+from codex_antigravity_auth.server import (
+    GOOGLE_BACKEND_TIMEOUT_MAX_SECONDS,
+    GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS,
+    app,
+    build_headers,
+    google_backend_timeout_from_metadata,
+    retry_after_seconds_from_response,
+    select_active_account_for_request,
+)
 from codex_antigravity_auth.transform import (
     safe_project_id,
     transform_chat_response,
@@ -1115,6 +1123,73 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("metadata.run_id", response.json()["detail"])
         mock_providers.assert_not_called()
+
+    def test_responses_endpoint_uses_google_backend_timeout_metadata_without_forwarding_it(self):
+        fake_account = {"email": "test@example.com", "accessToken": "dummy_access"}
+        captured = {}
+
+        class MockClient:
+            def __init__(self, *args, **kwargs):
+                captured["timeout"] = kwargs.get("timeout")
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            async def post(self, *args, **kwargs):
+                captured["json"] = kwargs.get("json")
+                return httpx.Response(
+                    200,
+                    json={"response": {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}},
+                )
+
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
+            with patch("codex_antigravity_auth.server.account_manager.release_account"):
+                with patch("codex_antigravity_auth.server.account_manager.record_request"):
+                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                        response = TestClient(app).post(
+                            "/v1/responses",
+                            json={
+                                "model": "claude-opus-4-6",
+                                "input": "hello",
+                                "metadata": {
+                                    "run_id": "anti-run_123",
+                                    "antigravity_backend_timeout_seconds": 230,
+                                },
+                            },
+                        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["timeout"], 230.0)
+        self.assertNotIn("metadata", captured["json"])
+
+    def test_responses_endpoint_rejects_invalid_google_backend_timeout_metadata(self):
+        client = TestClient(app)
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_acquire:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "model": "claude-opus-4-6",
+                    "input": "hello",
+                    "metadata": {"antigravity_backend_timeout_seconds": "slow"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("metadata.antigravity_backend_timeout_seconds", response.json()["detail"])
+        mock_acquire.assert_not_called()
+
+    def test_google_backend_timeout_reader_clamps_internal_metadata(self):
+        self.assertEqual(
+            google_backend_timeout_from_metadata({"antigravity_backend_timeout_seconds": 9999}),
+            GOOGLE_BACKEND_TIMEOUT_MAX_SECONDS,
+        )
+        self.assertEqual(
+            google_backend_timeout_from_metadata({"antigravity_backend_timeout_seconds": -5}),
+            GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS,
+        )
 
     def test_responses_endpoint_rejects_malformed_tool_choice_before_routing(self):
         client = TestClient(app)

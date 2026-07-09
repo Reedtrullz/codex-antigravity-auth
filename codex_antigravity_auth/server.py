@@ -61,6 +61,10 @@ STREAM_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 REQUEST_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 MUTATING_JSON_PATHS = {"/v1/responses"}
 MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS = 2.0
+GOOGLE_BACKEND_TIMEOUT_SECONDS = 60.0
+GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS = 1.0
+GOOGLE_BACKEND_TIMEOUT_MAX_SECONDS = 600.0
+GOOGLE_BACKEND_TIMEOUT_METADATA_KEY = "antigravity_backend_timeout_seconds"
 TEST_CLIENT_HOSTS = {"testserver"}
 GOOGLE_ACCOUNT_SCOPED_STREAM_ERROR_TERMS = (
     "401",
@@ -778,6 +782,7 @@ def validate_response_request_body(value: object) -> dict:
     if metadata is not None:
         if not isinstance(metadata, dict):
             raise HTTPException(status_code=400, detail="metadata must be an object")
+        normalized_metadata = {}
         run_id = metadata.get("run_id")
         if run_id is not None:
             if not isinstance(run_id, str) or not REQUEST_RUN_ID_RE.fullmatch(run_id):
@@ -785,12 +790,31 @@ def validate_response_request_body(value: object) -> dict:
                     status_code=400,
                     detail="metadata.run_id must be 1-128 characters using letters, numbers, '_', '-', '.', or ':'",
                 )
-            value["metadata"] = {"run_id": run_id}
-        else:
-            value["metadata"] = {}
+            normalized_metadata["run_id"] = run_id
+        backend_timeout = metadata.get(GOOGLE_BACKEND_TIMEOUT_METADATA_KEY)
+        if backend_timeout is not None:
+            validate_finite_number_option(
+                backend_timeout,
+                f"metadata.{GOOGLE_BACKEND_TIMEOUT_METADATA_KEY}",
+                minimum=GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS,
+                maximum=GOOGLE_BACKEND_TIMEOUT_MAX_SECONDS,
+            )
+            normalized_metadata[GOOGLE_BACKEND_TIMEOUT_METADATA_KEY] = float(backend_timeout)
+        value["metadata"] = normalized_metadata
     validate_response_generation_options(value)
     validate_response_tool_choice(value)
     return value
+
+
+def google_backend_timeout_from_metadata(metadata: object) -> float:
+    if isinstance(metadata, dict):
+        value = metadata.get(GOOGLE_BACKEND_TIMEOUT_METADATA_KEY)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+            return max(
+                GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS,
+                min(GOOGLE_BACKEND_TIMEOUT_MAX_SECONDS, float(value)),
+            )
+    return GOOGLE_BACKEND_TIMEOUT_SECONDS
 
 
 def validate_finite_number_option(value: object, field_name: str, *, minimum: float, maximum: float | None = None) -> None:
@@ -1056,6 +1080,7 @@ async def create_response(request: Request):
     request_metadata = codex_req.pop("metadata", None)
     if isinstance(request_metadata, dict) and isinstance(request_metadata.get("run_id"), str):
         request_run_id = request_metadata["run_id"]
+    google_backend_timeout = google_backend_timeout_from_metadata(request_metadata)
 
     reject_unsupported_previous_response(codex_req)
     schedule_refresh_accounts_ahead()
@@ -1309,7 +1334,7 @@ async def create_response(request: Request):
     # Perform HTTP POST request to Antigravity endpoint with error recovery & rotation
     async def request_backend(selected_account: dict) -> httpx.Response | None:
         antigravity_req, headers = build_google_request(selected_account)
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=google_backend_timeout) as client:
             try:
                 # Do NOT stream the response inside this function, we just do normal or stream connection
                 if stream:
@@ -1778,7 +1803,7 @@ async def create_response(request: Request):
             stream_account = attempts[attempt_num]
             stream_req, stream_headers = build_google_request(stream_account)
             try:
-                async with httpx.AsyncClient(timeout=60.0) as client:
+                async with httpx.AsyncClient(timeout=google_backend_timeout) as client:
                     async with client.stream("POST", backend_url, json=stream_req, headers=stream_headers) as res:
                         if res.status_code != 200:
                             if res.status_code in (401, 403, 429):

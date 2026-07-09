@@ -807,6 +807,34 @@ class AntiHelperTests(unittest.TestCase):
         self.assertIn("--port 51122", message)
         self.assertEqual(probes, [8.0])
 
+    def test_retryable_generation_failure_reports_healthy_gateway_probe(self) -> None:
+        anti = load_anti()
+        args = anti.build_parser().parse_args(["plan", "--model", "opus", "--prompt", "hello"])
+
+        def fake_post_response(**kwargs):
+            raise anti.AntiError(
+                "/v1/responses returned HTTP 502: backend failed after 1 attempt(s). "
+                "Diagnostics: model=claude-opus-4-6, retryable=true"
+            )
+
+        anti.post_response = fake_post_response
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-opus-4-6", "claude-3.5-sonnet"}
+
+        with self.assertRaises(anti.AntiError) as raised:
+            anti.generate_with_fallback(
+                args,
+                model="claude-opus-4-6",
+                prompt="hello",
+                max_output_tokens=16,
+                purpose="plan",
+            )
+
+        message = str(raised.exception)
+        self.assertIn("Gateway /v1/models stayed responsive", message)
+        self.assertIn("generation path appears unhealthy", message)
+        self.assertIn("not model-list readiness", message)
+        self.assertNotIn("gateway appears wedged", message)
+
     def test_saved_generation_sends_run_id_metadata(self) -> None:
         anti = load_anti()
         args = anti.build_parser().parse_args(["consult", "--prompt", "hello", "--save-output", "summary"])
@@ -831,6 +859,29 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(model_used, "claude-3.5-sonnet")
         self.assertEqual(payloads[0]["metadata"], {"run_id": "anti-run_123"})
         self.assertEqual(metadata["usage"], {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3})
+
+    def test_long_generation_sends_backend_timeout_metadata(self) -> None:
+        anti = load_anti()
+        args = anti.build_parser().parse_args(["plan", "--prompt", "hello", "--timeout", "240"])
+        payloads: list[dict] = []
+
+        def fake_request_json(method, url, *, payload=None, timeout=10.0, token_env=anti.DEFAULT_TOKEN_ENV):
+            payloads.append(payload or {})
+            return 200, {"output_text": "ok"}
+
+        anti.request_json = fake_request_json
+        text, model_used, _metadata = anti.generate_with_fallback(
+            args,
+            model="claude-opus-4-6",
+            prompt="hello",
+            max_output_tokens=16,
+            purpose="plan",
+            model_ids={"claude-opus-4-6"},
+        )
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(model_used, "claude-opus-4-6")
+        self.assertEqual(payloads[0]["metadata"], {"antigravity_backend_timeout_seconds": 230.0})
 
     def test_base_url_rejects_userinfo_without_echoing_secret(self) -> None:
         anti = load_anti()
@@ -1123,6 +1174,82 @@ class AntiHelperTests(unittest.TestCase):
         parsed = json.loads(output.getvalue())
         self.assertTrue(parsed["metadata"]["chunked"])
         self.assertEqual(parsed["output_text"], "plan-synthesis")
+
+    def test_default_claude_plan_auto_chunks_before_large_single_call(self) -> None:
+        anti = load_anti()
+        chunk_prompts: list[str] = []
+
+        def fake_post_response(**kwargs):
+            prompt = kwargs["prompt"]
+            if "You are reviewing one bounded chunk" in prompt:
+                chunk_prompts.append(prompt)
+                return "chunk-note"
+            return "plan-synthesis"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(
+                [
+                    "plan",
+                    "--scope",
+                    "none",
+                    "--prompt",
+                    "x" * 45_000,
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertTrue(parsed["metadata"]["chunked"])
+        self.assertGreaterEqual(parsed["metadata"]["chunk_count"], 2)
+        self.assertEqual(parsed["metadata"]["prompt_budget_chars"], anti.CLAUDE_SAFE_PROMPT_CHARS)
+        self.assertTrue(parsed["metadata"]["claude_prompt_guardrail"])
+        self.assertTrue(all(length <= anti.CLAUDE_SAFE_PROMPT_CHARS for length in parsed["metadata"]["sent_chunk_prompt_chars"]))
+        self.assertTrue(any("Claude safety budget" in caveat for caveat in parsed["caveats"]))
+
+    def test_plan_chunk_decision_uses_explicit_claude_budget(self) -> None:
+        anti = load_anti()
+        parser = anti.build_parser()
+        args = parser.parse_args(["plan", "--model", "opus", "--max-prompt-chars", "0", "--prompt", "x"])
+        budget = anti.prompt_budget_for_model(args, "claude-opus-4-6")
+
+        self.assertEqual(budget, anti.CLAUDE_SAFE_PROMPT_CHARS)
+        self.assertFalse(hasattr(args, "_effective_prompt_budget"))
+        self.assertTrue(anti.should_chunk_plan(args, "x" * 45_000, max_prompt_chars=budget))
+
+    def test_default_claude_review_auto_chunks_before_large_single_call(self) -> None:
+        anti = load_anti()
+        calls: list[str] = []
+
+        def fake_post_response(**kwargs):
+            calls.append(kwargs["prompt"])
+            return "review-synthesis" if "synthesizing an Antigravity sidecar code review" in kwargs["prompt"] else "chunk-review"
+
+        anti.post_response = fake_post_response
+        with tempfile.TemporaryDirectory(prefix="anti-skill-test-") as tmp:
+            root = Path(tmp)
+            (root / "big.py").write_text("VALUE = '" + ("x" * 45_000) + "'\n", encoding="utf-8")
+            output = io.StringIO()
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with contextlib.redirect_stdout(output):
+                    rc = anti.main(["review", "--scope", "files", "--file", "big.py", "--json"])
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertTrue(parsed["metadata"]["chunked"])
+        self.assertGreaterEqual(parsed["metadata"]["chunk_count"], 2)
+        self.assertEqual(parsed["metadata"]["prompt_budget_chars"], anti.CLAUDE_SAFE_PROMPT_CHARS)
+        self.assertTrue(parsed["metadata"]["claude_prompt_guardrail"])
+        self.assertTrue(all(item["prompt_chars"] <= anti.CLAUDE_SAFE_PROMPT_CHARS for item in parsed["metadata"]["chunk_prompts"]))
+        self.assertTrue(any("Claude safety budget" in caveat for caveat in parsed["caveats"]))
+        self.assertGreater(len(calls), 1)
 
     def test_chunked_plan_prompt_chunks_respect_max_prompt_chars(self) -> None:
         anti = load_anti()
@@ -1744,7 +1871,7 @@ class AntiHelperTests(unittest.TestCase):
         def fake_post_response(**kwargs):
             prompt = kwargs["prompt"]
             if "Chunked Review Manifest" in prompt:
-                return "bounded summary"
+                return "bounded summary " * 5000
             if "You are synthesizing an Antigravity multi-model advisory panel" in prompt:
                 return json.dumps(
                     {
@@ -1792,6 +1919,64 @@ class AntiHelperTests(unittest.TestCase):
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["panel_review_context"], "chunked-summary")
         self.assertTrue(any("bounded chunked summary" in caveat for caveat in parsed["caveats"]))
+
+    def test_default_claude_panel_review_summarizes_before_large_fanout(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        panel_prompts: list[str] = []
+
+        def fake_post_response(**kwargs):
+            prompt = kwargs["prompt"]
+            if "Chunked Review Manifest" in prompt:
+                return "bounded summary"
+            if "You are synthesizing an Antigravity multi-model advisory panel" in prompt:
+                return json.dumps(
+                    {
+                        "summary": "summary",
+                        "disagreements": [],
+                        "findings": [],
+                        "unverifiable": [],
+                        "recommended_next_actions": [],
+                        "caveats": [],
+                    }
+                )
+            if "This panel review context was summarized" in prompt:
+                panel_prompts.append(prompt)
+                return "panel from summary"
+            return "chunk result"
+
+        anti.post_response = fake_post_response
+        with tempfile.TemporaryDirectory(prefix="anti-skill-test-") as tmp:
+            root = Path(tmp)
+            (root / "large.py").write_text("LARGE = '" + ("x" * 45_000) + "'\n", encoding="utf-8")
+            old_cwd = Path.cwd()
+            output = io.StringIO()
+            try:
+                os.chdir(root)
+                with contextlib.redirect_stdout(output):
+                    rc = anti.main(
+                        [
+                            "panel",
+                            "--mode",
+                            "review",
+                            "--scope",
+                            "files",
+                            "--file",
+                            "large.py",
+                            "--json",
+                        ]
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertTrue(panel_prompts)
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(parsed["metadata"]["panel_review_context"], "chunked-summary")
+        self.assertEqual(parsed["metadata"]["prompt_budget_chars"], anti.CLAUDE_SAFE_PROMPT_CHARS)
+        self.assertTrue(parsed["metadata"]["claude_prompt_guardrail"])
+        self.assertTrue(all(len(prompt) <= anti.CLAUDE_SAFE_PROMPT_CHARS for prompt in panel_prompts))
+        self.assertTrue(any("Claude safety budget" in caveat for caveat in parsed["caveats"]))
 
 
 if __name__ == "__main__":
