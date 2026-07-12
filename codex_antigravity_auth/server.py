@@ -45,7 +45,12 @@ from .google_transport import (
     outcome_for_backend_error,
     outcome_for_http_status,
 )
-from .openai_transport import ChatResponseAccumulator, OpenAICompatibleTransport, TransportConfigError
+from .openai_transport import (
+    ChatResponseAccumulator,
+    NativeResponsesStreamAdapter,
+    OpenAICompatibleTransport,
+    TransportConfigError,
+)
 from .response_protocol import (
     AttemptOutcome,
     CapabilityError,
@@ -2201,6 +2206,11 @@ async def xai_oauth_responses_sse_generator(
     emitted_output = False
     retried = False
     active_headers = headers
+    display_model = str(codex_req.get("model") or f"xai-oauth:{provider_model}")
+    adapter = NativeResponsesStreamAdapter(display_model=display_model)
+
+    def serialize(event: dict) -> str:
+        return "data: " + json.dumps(event) + "\n\n"
 
     while True:
         try:
@@ -2258,10 +2268,13 @@ async def xai_oauth_responses_sse_generator(
                         yield "data: [DONE]\n\n"
                         return
                     async for raw_chunk in res.aiter_bytes():
-                        chunk = raw_chunk.decode("utf-8", errors="replace")
-                        if chunk:
-                            emitted_output = True
-                            yield chunk
+                        for event in adapter.consume_bytes(raw_chunk):
+                            if event.get("type", "").startswith(("response.output", "response.reasoning")):
+                                emitted_output = True
+                            yield serialize(event)
+                    for event in adapter.finish():
+                        yield serialize(event)
+                    yield "data: [DONE]\n\n"
                     return
         except Exception as e:
             yield (

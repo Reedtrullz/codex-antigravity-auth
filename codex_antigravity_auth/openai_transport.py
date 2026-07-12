@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
 from typing import Any
 import uuid
@@ -20,6 +21,7 @@ from .response_protocol import (
     ProviderTerminal,
     TerminalKind,
     classify_terminal,
+    meaningful_output_items,
     normalize_usage,
     refusal_item,
 )
@@ -346,7 +348,10 @@ class OpenAICompatibleTransport:
         if status is None:
             status = "completed" if output else "failed"
             response["status"] = status
-        if status == "completed" and not output:
+        meaningful_output = meaningful_output_items(output)
+        if status in {"completed", "incomplete"}:
+            response["output"] = list(meaningful_output)
+        if status == "completed" and not meaningful_output:
             response["status"] = "failed"
             response["error"] = {
                 "code": "empty_response",
@@ -360,3 +365,143 @@ class OpenAICompatibleTransport:
                 "message": "The provider request failed.",
             }
         return response
+
+
+class NativeResponsesStreamAdapter:
+    """Validate a native Responses SSE stream before exposing terminal state."""
+
+    _TERMINAL_TYPES = {"response.completed", "response.incomplete", "response.failed"}
+
+    def __init__(self, *, display_model: str) -> None:
+        self.display_model = display_model
+        self._buffer = ""
+        self._terminal_event: dict[str, Any] | None = None
+        self._terminal_emitted = False
+        self._provider_done = False
+        self._visible_output_started = False
+        self._response_id = f"resp_{uuid.uuid4().hex[:12]}"
+
+    @property
+    def visible_output_started(self) -> bool:
+        return self._visible_output_started
+
+    @property
+    def terminal_seen(self) -> bool:
+        return self._terminal_event is not None
+
+    def _failure(self, code: str, message: str) -> dict[str, Any]:
+        return {
+            "type": "response.failed",
+            "response": {
+                "id": self._response_id,
+                "object": "response",
+                "status": "failed",
+                "model": self.display_model,
+                "output": [],
+                "error": {"code": code, "message": message},
+            },
+        }
+
+    def _set_failure(self, code: str, message: str) -> None:
+        self._terminal_event = self._failure(code, message)
+
+    def _release_terminal(self) -> list[dict[str, Any]]:
+        if self._terminal_event is None or self._terminal_emitted:
+            return []
+        self._terminal_emitted = True
+        return [self._terminal_event]
+
+    def _consume_line(self, line: str) -> list[dict[str, Any]]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith(":") or not stripped.startswith("data:"):
+            return []
+        data = stripped[5:].strip()
+        if data == "[DONE]":
+            if self._provider_done:
+                self._set_failure("duplicate_done", "The provider emitted [DONE] more than once.")
+            self._provider_done = True
+            if self._terminal_event is None:
+                self._set_failure(
+                    "missing_terminal_signal",
+                    "The provider stream ended without a terminal response event.",
+                )
+            return self._release_terminal()
+        if self._provider_done:
+            self._set_failure("output_after_done", "The provider emitted output after [DONE].")
+            return self._release_terminal()
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError:
+            self._set_failure("invalid_stream_chunk", "The provider returned malformed stream JSON.")
+            return []
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            self._set_failure("invalid_stream_event", "The provider returned an invalid stream event.")
+            return []
+        event_type = event["type"]
+        if event_type in self._TERMINAL_TYPES:
+            if self._terminal_event is not None:
+                self._set_failure("duplicate_terminal", "The provider emitted more than one terminal event.")
+                return []
+            response = event.get("response")
+            if not isinstance(response, dict):
+                self._set_failure("invalid_terminal_event", "The provider returned an invalid terminal event.")
+                return []
+            expected_status = event_type.removeprefix("response.")
+            provider_status = response.get("status")
+            if provider_status is not None and provider_status != expected_status:
+                self._set_failure("invalid_terminal_event", "The provider terminal status did not match its event type.")
+                return []
+            normalized = {**response, "status": expected_status, "model": self.display_model}
+            output = response.get("output")
+            meaningful = meaningful_output_items(output) if isinstance(output, list) else ()
+            if expected_status in {"completed", "incomplete"}:
+                if meaningful:
+                    normalized["output"] = list(meaningful)
+                elif self._visible_output_started:
+                    normalized.setdefault("output", [])
+                else:
+                    self._set_failure("empty_response", "The provider returned no meaningful output.")
+                    return []
+            if expected_status == "failed":
+                error = response.get("error")
+                code = error.get("code") if isinstance(error, dict) else None
+                normalized["error"] = {
+                    "code": code if isinstance(code, str) and code else "provider_error",
+                    "message": "The provider request failed.",
+                }
+            normalized_type = f"response.{expected_status}"
+            self._terminal_event = {"type": normalized_type, "response": normalized}
+            return []
+        if self._terminal_event is not None:
+            self._set_failure("output_after_terminal", "The provider emitted output after its terminal event.")
+            return []
+        if event_type.startswith("response.output") or event_type.startswith("response.reasoning"):
+            self._visible_output_started = True
+        if isinstance(event.get("response"), dict):
+            event = dict(event)
+            event["response"] = {**event["response"], "model": self.display_model}
+        return [event]
+
+    def consume_bytes(self, chunk: bytes) -> list[dict[str, Any]]:
+        if not isinstance(chunk, bytes):
+            self._set_failure("invalid_stream_chunk", "The provider returned a non-byte stream chunk.")
+            return []
+        self._buffer += chunk.decode("utf-8", errors="replace")
+        events: list[dict[str, Any]] = []
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            events.extend(self._consume_line(line))
+        return events
+
+    def finish(self) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        if self._buffer.strip():
+            events.extend(self._consume_line(self._buffer))
+        self._buffer = ""
+        if self._terminal_event is None:
+            self._set_failure(
+                "missing_terminal_signal",
+                "The provider stream ended without a terminal response event.",
+            )
+        events.extend(self._release_terminal())
+        return events
