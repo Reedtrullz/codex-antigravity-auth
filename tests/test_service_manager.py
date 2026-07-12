@@ -58,7 +58,7 @@ class TestServiceResult(unittest.TestCase):
                 subprocess.CompletedProcess([], 1, "", "not loaded"),
             ]
             with patch("codex_antigravity_auth.service.macos_launch_agent_path", return_value=path):
-                with patch("codex_antigravity_auth.service.os.getuid", None):
+                with patch("codex_antigravity_auth.service.os.getuid", None, create=True):
                     with patch("codex_antigravity_auth.service._run", side_effect=results):
                         result = install_service(51122, "127.0.0.1", platform_name="macos")
 
