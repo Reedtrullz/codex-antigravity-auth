@@ -512,6 +512,49 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("value must be at least 1", output.getvalue())
 
+    def test_generation_numeric_arguments_reject_negative_values(self) -> None:
+        anti = load_anti()
+        parser = anti.build_parser()
+
+        for argv in (
+            ["consult", "--prompt", "x", "--max-prompt-chars", "-1"],
+            ["consult", "--prompt", "x", "--retry", "-1"],
+            ["review", "--scope", "files", "--file", "x.py", "--max-synthesis-chars", "-1"],
+        ):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(argv)
+
+    def test_prompt_sources_keep_file_inline_and_positional_order(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-prompt-") as tmp:
+            prompt_file = Path(tmp) / "prompt.txt"
+            prompt_file.write_text("from-file", encoding="utf-8")
+            args = anti.build_parser().parse_args(
+                ["consult", "--prompt-file", str(prompt_file), "--prompt", "inline", "positional", "tail"]
+            )
+
+            prompt = anti.read_prompt(args)
+
+        self.assertEqual(prompt, "from-file\n\ninline\n\npositional tail")
+
+    def test_chunk_cap_manifest_matches_prompts_that_will_be_sent(self) -> None:
+        anti = load_anti()
+        context = {
+            "scope_line": "files",
+            "diff": "",
+            "file_texts": [("a.py", "a\n" * 2000), ("b.py", "b\n" * 2000)],
+            "excluded": [],
+            "caveats": [],
+        }
+
+        chunks, manifest = anti.build_review_chunk_prompts(context, max_prompt_chars=2200, max_chunks=1)
+
+        self.assertEqual(manifest["chunk_count"], len(chunks))
+        self.assertEqual(manifest["included_items"], [chunk["label"] for chunk in chunks])
+        self.assertTrue(manifest["included_files"])
+        self.assertTrue(manifest["omitted_items"])
+        self.assertEqual(manifest["status"], "incomplete")
+
     def test_panel_parser_exposes_panel_moa_and_fusion_aliases(self) -> None:
         anti = load_anti()
         parser = anti.build_parser()
@@ -946,6 +989,67 @@ class AntiHelperTests(unittest.TestCase):
             self.assertNotIn("REFRESHSECRET1234567890", stored)
             self.assertIn("<redacted>", stored)
 
+    def test_interrupted_saved_run_has_deterministic_correlation_record(self) -> None:
+        anti = load_anti()
+        anti.post_response = lambda **kwargs: (_ for _ in ()).throw(KeyboardInterrupt())
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                rc = anti.main(
+                    [
+                        "consult",
+                        "--prompt",
+                        "hello",
+                        "--save-output",
+                        "summary",
+                        "--run-id",
+                        "deterministic-interrupt-1",
+                    ]
+                )
+
+            record = json.loads(next(Path(tmp).glob("*.json")).read_text(encoding="utf-8"))
+
+        self.assertEqual(rc, 130)
+        self.assertEqual(record["id"], "deterministic-interrupt-1")
+        self.assertEqual(record["status"], "interrupted")
+        self.assertEqual(record["metadata"]["request_log_correlation_id"], "deterministic-interrupt-1")
+
+    def test_final_model_output_is_redacted_in_text_and_json(self) -> None:
+        anti = load_anti()
+        sentinel = "sk-antitest-secret-sentinel-1234567890"
+        anti.post_response = lambda **kwargs: f"result api_key={sentinel}"
+
+        for extra_args in ([], ["--json"]):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = anti.main(["consult", "--prompt", "hello", *extra_args])
+
+            self.assertEqual(rc, 0, output.getvalue())
+            self.assertNotIn(sentinel, output.getvalue())
+            self.assertIn("<redacted>", output.getvalue())
+
+    def test_panel_presentation_redacts_lane_output_findings_and_metadata(self) -> None:
+        anti = load_anti()
+        sentinel = "sk-antitest-panel-secret-1234567890"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            anti.print_panel_result(
+                panel_mode="review",
+                base_url="http://127.0.0.1:51122/v1",
+                judge_model="opus",
+                panel_models=["sonnet"],
+                panel_results=[{"model": "sonnet", "status": "success", "output_text": f"api_key={sentinel}"}],
+                text=f"api_key={sentinel}",
+                caveats=[f"api_key={sentinel}"],
+                metadata={"manifest": f"api_key={sentinel}"},
+                findings={"summary": f"api_key={sentinel}"},
+                output_json=True,
+            )
+
+        self.assertNotIn(sentinel, output.getvalue())
+        self.assertIn("<redacted>", output.getvalue())
+
     def test_runs_list_show_and_clean_use_sanitized_records(self) -> None:
         anti = load_anti()
         with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
@@ -1174,6 +1278,47 @@ class AntiHelperTests(unittest.TestCase):
         parsed = json.loads(output.getvalue())
         self.assertTrue(parsed["metadata"]["chunked"])
         self.assertEqual(parsed["output_text"], "plan-synthesis")
+
+    def test_chunked_plan_full_ledger_records_actual_calls_in_order(self) -> None:
+        anti = load_anti()
+        calls: list[str] = []
+
+        def fake_post_response(**kwargs):
+            calls.append(kwargs["prompt"])
+            return "plan-synthesis" if "synthesizing a decision-complete" in kwargs["prompt"] else "chunk-note"
+
+        anti.post_response = fake_post_response
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = anti.main(
+                    [
+                        "plan",
+                        "--scope",
+                        "none",
+                        "--prompt",
+                        "x" * 5000,
+                        "--max-prompt-chars",
+                        "1800",
+                        "--max-plan-chunks",
+                        "2",
+                        "--save-output",
+                        "full",
+                        "--run-id",
+                        "deterministic-run-7",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(rc, 0, output.getvalue())
+            record = json.loads(next(Path(tmp).glob("*.json")).read_text(encoding="utf-8"))
+            ledger = record["execution_ledger"]
+            self.assertEqual([entry["prompt"] for entry in ledger], calls)
+            self.assertEqual([entry["stage"] for entry in ledger], ["plan_chunk_1", "plan_chunk_2", "plan_synthesis"])
+            self.assertEqual(record["id"], "deterministic-run-7")
+            self.assertEqual(record["metadata"]["request_log_correlation_id"], "deterministic-run-7")
+            self.assertNotEqual(record["prompt_text"], ("x" * 1800))
 
     def test_default_claude_plan_auto_chunks_before_large_single_call(self) -> None:
         anti = load_anti()

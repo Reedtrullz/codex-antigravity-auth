@@ -52,6 +52,7 @@ codex_antigravity_auth = [
   "skills/anti/SKILL.md",
   "skills/anti/agents/*.yaml",
   "skills/anti/scripts/*.py",
+  "skills/anti/scripts/anti_lib/*.py",
   "skills/anti/tests/*.py",
 ]
 

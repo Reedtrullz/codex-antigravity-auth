@@ -20,10 +20,15 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-try:
-    from codex_antigravity_auth.redaction import redact_secret_text as package_redact_secret_text
-except Exception:  # pragma: no cover - installed personal skills can run without the package import path.
-    package_redact_secret_text = None
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+from anti_lib.chunking import chunk_manifest
+from anti_lib.context import ordered_prompt
+from anti_lib.ledger import execution_entry, prompts_as_text
+from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
+from anti_lib.runner import presentable_result
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:51122/v1"
@@ -73,66 +78,6 @@ BACKEND_TIMEOUT_HINT_THRESHOLD_SECONDS = 120.0
 BACKEND_TIMEOUT_HINT_BUFFER_SECONDS = 10.0
 BACKEND_TIMEOUT_HINT_MAX_SECONDS = 600.0
 
-REDACTION_MARKER = "<redacted>"
-SECRET_KEY_FRAGMENTS = (
-    "access_token",
-    "accesstoken",
-    "refresh_token",
-    "refreshtoken",
-    "id_token",
-    "idtoken",
-    "authorization",
-    "client_secret",
-    "clientsecret",
-    "code_verifier",
-    "codeverifier",
-    "oauth_code",
-    "oauthcode",
-    "session_token",
-    "sessiontoken",
-    "api_key",
-    "apikey",
-    "api_token",
-    "apitoken",
-    "cookie",
-    "set_cookie",
-    "setcookie",
-    "password",
-)
-EXACT_SECRET_KEYS = {
-    "access",
-    "refresh",
-    "token",
-    "secret",
-    "code",
-    "cookie",
-    "set_cookie",
-    "setcookie",
-    "key",
-}
-SECRET_KEY_REGEX = (
-    r"access_token|accessToken|refresh_token|refreshToken|id_token|idToken|client_secret|clientSecret|"
-    r"code_verifier|codeVerifier|session_token|sessionToken|oauth_code|oauthCode|authorization|refresh|"
-    r"access|token|secret|code|api_key|apiKey|apikey|api_token|apiToken|x-api-key|x-goog-api-key|cookie|set-cookie|"
-    r"set_cookie|setCookie|password|key"
-)
-TOKEN_REDACTION_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9][A-Za-z0-9_-]{16,}"),
-    re.compile(r"sk-or-v1-[A-Za-z0-9][A-Za-z0-9_-]{16,}"),
-    re.compile(r"ya29\.[A-Za-z0-9_-]+"),
-]
-BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE)
-URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s]+)@")
-JSON_SECRET_RE = re.compile(rf'(?i)("(?:{SECRET_KEY_REGEX})"\s*:\s*")[^"]*(")')
-JSON_SECRET_NUMBER_RE = re.compile(rf'(?i)("(?:{SECRET_KEY_REGEX})"\s*:\s*)-?\d+(?:\.\d+)?')
-PYTHON_REPR_SECRET_RE = re.compile(rf"(?i)('(?:{SECRET_KEY_REGEX})'\s*:\s*')[^']*(')")
-PYTHON_REPR_SECRET_NUMBER_RE = re.compile(rf"(?i)('(?:{SECRET_KEY_REGEX})'\s*:\s*)-?\d+(?:\.\d+)?")
-FORM_SECRET_RE = re.compile(rf"(?i)\b({SECRET_KEY_REGEX})=([^&\s]+)")
-UNQUOTED_SECRET_RE = re.compile(rf"(?i)\b({SECRET_KEY_REGEX})\s*[:=]\s*([^\s,;}}]+)")
-HEADER_SECRET_RE = re.compile(
-    r"(?im)(^|[ \t])((?:authorization|proxy-authorization|cookie|set-cookie|"
-    r"[\w-]*(?:api[-_]?key|api[-_]?token|token|secret|credential|password)[\w-]*)\s*:\s*)[^\r\n]+"
-)
 
 EXCLUDED_DIRS = {
     ".git",
@@ -243,91 +188,6 @@ def ensure_run_id(args: argparse.Namespace) -> str | None:
     return run_id
 
 
-def normalize_redaction_markers(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): normalize_redaction_markers(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [normalize_redaction_markers(item) for item in value]
-    if isinstance(value, tuple):
-        return [normalize_redaction_markers(item) for item in value]
-    if isinstance(value, str):
-        return value.replace("[REDACTED]", REDACTION_MARKER)
-    return value
-
-
-def key_looks_secret(key: Any) -> bool:
-    normalized = str(key).replace("-", "_").lower()
-    compact = normalized.replace("_", "")
-    metadata_suffixes = ("_chars", "chars", "_count", "count", "_tokens", "tokens")
-    if normalized.endswith(metadata_suffixes) or compact.endswith(tuple(item.replace("_", "") for item in metadata_suffixes)):
-        return False
-    if normalized in EXACT_SECRET_KEYS:
-        return True
-    return any(fragment in normalized or fragment in compact for fragment in SECRET_KEY_FRAGMENTS)
-
-
-def redact_sensitive_text(text: str) -> str:
-    redacted = str(text)
-    if package_redact_secret_text is not None:
-        try:
-            redacted = str(package_redact_secret_text(redacted))
-        except Exception:
-            pass
-    redacted = str(normalize_redaction_markers(redacted))
-    for pattern in TOKEN_REDACTION_PATTERNS:
-        redacted = pattern.sub(REDACTION_MARKER, redacted)
-    redacted = URL_USERINFO_RE.sub(lambda match: match.group(1) + REDACTION_MARKER + "@", redacted)
-    redacted = BEARER_RE.sub("Bearer " + REDACTION_MARKER, redacted)
-    redacted = HEADER_SECRET_RE.sub(lambda match: match.group(1) + match.group(2) + REDACTION_MARKER, redacted)
-    redacted = JSON_SECRET_RE.sub(lambda match: match.group(1) + REDACTION_MARKER + match.group(2), redacted)
-    redacted = JSON_SECRET_NUMBER_RE.sub(lambda match: match.group(1) + '"' + REDACTION_MARKER + '"', redacted)
-    redacted = PYTHON_REPR_SECRET_RE.sub(lambda match: match.group(1) + REDACTION_MARKER + match.group(2), redacted)
-    redacted = PYTHON_REPR_SECRET_NUMBER_RE.sub(lambda match: match.group(1) + "'" + REDACTION_MARKER + "'", redacted)
-    redacted = FORM_SECRET_RE.sub(lambda match: f"{match.group(1)}={REDACTION_MARKER}", redacted)
-    redacted = UNQUOTED_SECRET_RE.sub(lambda match: f"{match.group(1)}={REDACTION_MARKER}", redacted)
-    return redacted
-
-
-def secret_value_should_redact(key: Any, item: Any) -> bool:
-    if item is None or item == "":
-        return False
-    if isinstance(item, bool):
-        return False
-    normalized = str(key).replace("-", "_").lower()
-    if normalized == "code" and isinstance(item, int) and 100 <= item <= 599:
-        return False
-    return True
-
-
-def fallback_sanitize_json(value: Any) -> Any:
-    if isinstance(value, dict):
-        result: dict[str, Any] = {}
-        for key, item in value.items():
-            result[str(key)] = (
-                REDACTION_MARKER
-                if key_looks_secret(key) and secret_value_should_redact(key, item)
-                else fallback_sanitize_json(item)
-            )
-        return result
-    if isinstance(value, list):
-        return [fallback_sanitize_json(item) for item in value]
-    if isinstance(value, tuple):
-        return [fallback_sanitize_json(item) for item in value]
-    if isinstance(value, str):
-        return redact_sensitive_text(value)
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
-    return redact_sensitive_text(str(value))
-
-
-def sanitize_json(value: Any) -> Any:
-    # Key- and text-level redaction here is a superset of the package's redact_secrets
-    # structural pass, and redact_sensitive_text already layers in package
-    # redact_secret_text per string. Skipping the package structural pass keeps
-    # numeric/boolean leaves (HTTP codes, counts, flags) readable in run ledgers.
-    return fallback_sanitize_json(normalize_redaction_markers(value))
-
-
 def progress(args: argparse.Namespace, message: str) -> None:
     if getattr(args, "progress", False):
         eprint(f"[anti] {redact_sensitive_text(message)}")
@@ -352,6 +212,7 @@ def write_run_record(
     caveats: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
     error: str | None = None,
+    execution_ledger: list[dict[str, Any]] | None = None,
 ) -> Path | None:
     output_mode = save_output_mode(args)
     if output_mode == "never":
@@ -396,6 +257,8 @@ def write_run_record(
             record["prompt_text"] = prompt_text
         if output_text is not None:
             record["output_text"] = output_text
+        if execution_ledger is not None:
+            record["execution_ledger"] = execution_ledger
 
     record = sanitize_json(record)
     path = RUNS_DIR / f"{record['id']}.json"
@@ -545,6 +408,16 @@ def positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from exc
     if parsed < 1:
         raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
+
+
+def non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be at least 0")
     return parsed
 
 
@@ -1465,12 +1338,7 @@ def build_review_chunk_prompts(
         else:
             omitted_items.append(f"{label} (prompt still exceeds {max_prompt_chars} chars)")
 
-    metadata = {
-        "chunk_count": len(chunks),
-        "max_chunks": max_chunks,
-        "omitted_items": omitted_items,
-        "status": "incomplete" if omitted_items else "complete",
-    }
+    metadata = chunk_manifest(chunks, omitted_items, max_chunks=max_chunks)
     return chunks, metadata
 
 
@@ -1485,6 +1353,8 @@ def build_chunk_synthesis_prompt(
     manifest = {
         "scope": context["scope_line"],
         "chunk_count": len(chunks),
+        "included_files": chunk_metadata.get("included_files", []),
+        "included_items": chunk_metadata.get("included_items", []),
         "omitted_items": chunk_metadata.get("omitted_items", []),
         "chunk_labels": [chunk["label"] for chunk in chunks],
         "status": chunk_metadata.get("status", "complete"),
@@ -1592,6 +1462,7 @@ def run_chunked_review(
 
     chunk_outputs: list[str] = []
     chunk_generation: list[dict[str, Any]] = []
+    execution_ledger: list[dict[str, Any]] = []
     for index, chunk in enumerate(chunks, start=1):
         chunk_text, chunk_model, generation_metadata = generate_with_fallback(
             args,
@@ -1602,6 +1473,15 @@ def run_chunked_review(
         )
         chunk_outputs.append(chunk_text)
         chunk_generation.append({"index": index, "model_used": chunk_model, **generation_metadata})
+        execution_ledger.append(
+            execution_entry(
+                stage=f"review_chunk_{index}",
+                prompt=chunk["prompt"],
+                output=chunk_text,
+                model=chunk_model,
+                generation=generation_metadata,
+            )
+        )
 
     synthesis_prompt, synthesis_caveats, synthesis_metadata = build_chunk_synthesis_prompt(
         context=context,
@@ -1618,6 +1498,15 @@ def run_chunked_review(
         prompt=synthesis_prompt,
         max_output_tokens=args.max_output_tokens,
         purpose="review synthesis",
+    )
+    execution_ledger.append(
+        execution_entry(
+            stage="review_synthesis",
+            prompt=synthesis_prompt,
+            output=synthesis,
+            model=synthesis_model,
+            generation=synthesis_generation,
+        )
     )
     if chunk_metadata["omitted_items"]:
         caveats.append("Chunked review omitted items: " + ", ".join(chunk_metadata["omitted_items"][:20]))
@@ -1643,8 +1532,11 @@ def run_chunked_review(
         "synthesis_model_used": synthesis_model,
         "synthesis_generation": synthesis_generation,
         "chunk_omitted_items": chunk_metadata["omitted_items"],
+        "included_files": chunk_metadata["included_files"],
+        "included_items": chunk_metadata["included_items"],
         "prompt_budget_chars": max_prompt_chars,
         **synthesis_metadata,
+        "_execution_ledger": execution_ledger,
     }
     return synthesis, caveats, metadata
 
@@ -1758,6 +1650,7 @@ def run_chunked_plan(
     chunk_outputs: list[str] = []
     chunk_generation: list[dict[str, Any]] = []
     sent_chunk_prompt_chars: list[int] = []
+    execution_ledger: list[dict[str, Any]] = []
     for index, chunk in enumerate(prompt_chunks, start=1):
         chunk_prompt = "\n\n".join(
             [
@@ -1781,6 +1674,15 @@ def run_chunked_plan(
         )
         chunk_outputs.append(text)
         chunk_generation.append({"index": index, "model_used": model_used, **generation_metadata})
+        execution_ledger.append(
+            execution_entry(
+                stage=f"plan_chunk_{index}",
+                prompt=chunk_prompt,
+                output=text,
+                model=model_used,
+                generation=generation_metadata,
+            )
+        )
 
     synthesis_prompt = "\n\n".join(
         [
@@ -1807,6 +1709,15 @@ def run_chunked_plan(
         max_output_tokens=args.max_output_tokens,
         purpose="plan synthesis",
     )
+    execution_ledger.append(
+        execution_entry(
+            stage="plan_synthesis",
+            prompt=synthesis_prompt,
+            output=text,
+            model=synthesis_model,
+            generation=synthesis_generation,
+        )
+    )
     metadata = {
         "prompt_chars": len(prompt),
         "chunked": True,
@@ -1818,6 +1729,7 @@ def run_chunked_plan(
         "synthesis_model_used": synthesis_model,
         "synthesis_generation": synthesis_generation,
         "prompt_budget_chars": max_prompt_chars,
+        "_execution_ledger": execution_ledger,
     }
     return text, caveats, metadata, synthesis_model
 
@@ -1834,7 +1746,7 @@ def read_prompt(args: argparse.Namespace) -> str:
         pieces.append(args.prompt)
     if getattr(args, "prompt_parts", None):
         pieces.append(" ".join(args.prompt_parts))
-    prompt = "\n\n".join(part.strip() for part in pieces if part and part.strip()).strip()
+    prompt = ordered_prompt(pieces)
     if not prompt:
         raise AntiError("provide --prompt, --prompt-file, or a positional prompt")
     return prompt
@@ -1857,6 +1769,13 @@ def print_result(
     metadata: dict[str, Any] | None = None,
 ) -> None:
     safe_gateway = redact_sensitive_text(base_url)
+    model = redact_sensitive_text(model)
+    text, caveats, metadata = presentable_result(
+        text=text,
+        caveats=caveats or [],
+        metadata=metadata or {},
+        sanitizer=sanitize_json,
+    )
     if output_json:
         print(
             json.dumps(
@@ -1864,8 +1783,8 @@ def print_result(
                     "mode": mode,
                     "model": model,
                     "gateway": safe_gateway,
-                    "caveats": caveats or [],
-                    "metadata": metadata or {},
+                    "caveats": caveats,
+                    "metadata": metadata,
                     "output_text": text.strip(),
                 },
                 indent=2,
@@ -1875,7 +1794,7 @@ def print_result(
         return
     print(f"## Antigravity {mode} ({model})")
     print(f"- Gateway: {safe_gateway}")
-    if metadata and metadata.get("status"):
+    if metadata.get("status"):
         print(f"- Status: {metadata['status']}")
     if caveats:
         for caveat in caveats:
@@ -2461,9 +2380,16 @@ def print_panel_result(
     findings: dict[str, Any] | None = None,
 ) -> None:
     safe_gateway = redact_sensitive_text(base_url)
-    panel_results = sanitize_panel_results_for_display(panel_results)
-    caveats = [redact_sensitive_text(caveat) for caveat in caveats]
-    metadata = sanitize_json(metadata)
+    judge_model = redact_sensitive_text(judge_model)
+    panel_models = [redact_sensitive_text(model) for model in panel_models]
+    panel_results = sanitize_json(sanitize_panel_results_for_display(panel_results))
+    findings = sanitize_json(findings) if findings is not None else None
+    text, caveats, metadata = presentable_result(
+        text=text,
+        caveats=caveats,
+        metadata=metadata,
+        sanitizer=sanitize_json,
+    )
     if output_json:
         print(
             json.dumps(
@@ -2805,16 +2731,19 @@ def command_consult(args: argparse.Namespace) -> int:
     if getattr(args, "run_id", None):
         metadata["run_id"] = args.run_id
         metadata["request_log_correlation_id"] = args.run_id
+    execution_ledger = metadata.pop("_execution_ledger", None)
+    recorded_prompt = prompts_as_text(execution_ledger) if execution_ledger else prompt
     write_run_record(
         args,
         mode="consult",
         status="success",
         models=[model_used],
         base_url=args.base_url,
-        prompt_text=prompt,
+        prompt_text=recorded_prompt,
         output_text=text,
         caveats=caveats,
         metadata=metadata,
+        execution_ledger=execution_ledger,
     )
     print_result(
         mode="consult",
@@ -2875,16 +2804,19 @@ def command_review(args: argparse.Namespace) -> int:
     if getattr(args, "run_id", None):
         metadata["run_id"] = args.run_id
         metadata["request_log_correlation_id"] = args.run_id
+    execution_ledger = metadata.pop("_execution_ledger", None)
+    recorded_prompt = prompts_as_text(execution_ledger) if execution_ledger else prompt
     write_run_record(
         args,
         mode="review",
         status="success",
         models=[str(model_used)],
         base_url=args.base_url,
-        prompt_text=prompt,
+        prompt_text=recorded_prompt,
         output_text=text,
         caveats=caveats,
         metadata=metadata,
+        execution_ledger=execution_ledger,
     )
     print_result(
         mode="review",
@@ -2945,6 +2877,9 @@ def command_plan(args: argparse.Namespace) -> int:
     if getattr(args, "run_id", None):
         metadata["run_id"] = args.run_id
         metadata["request_log_correlation_id"] = args.run_id
+    execution_ledger = metadata.pop("_execution_ledger", None)
+    if execution_ledger:
+        recorded_prompt = prompts_as_text(execution_ledger)
     write_run_record(
         args,
         mode="plan",
@@ -2955,6 +2890,7 @@ def command_plan(args: argparse.Namespace) -> int:
         output_text=text,
         caveats=caveats,
         metadata=metadata,
+        execution_ledger=execution_ledger,
     )
     print_result(
         mode="plan",
@@ -3662,6 +3598,7 @@ def add_generation_control_args(
     )
     parser.add_argument("--progress", action="store_true", help="Print long-call progress to stderr")
     parser.add_argument("--run-label", help="Optional label for saved Anti run metadata")
+    parser.add_argument("--run-id", help="Stable run/correlation id for saved and gateway records")
     parser.add_argument(
         "--save-output",
         choices=sorted(SAVE_OUTPUT_MODES),
@@ -3701,8 +3638,8 @@ def build_parser() -> argparse.ArgumentParser:
     panel.add_argument("--prompt-file", help="Read ask/planning prompt text from file")
     panel.add_argument("--max-output-tokens", type=positive_int, default=2048, help="Max output tokens per panel model")
     panel.add_argument("--judge-output-tokens", type=positive_int, default=4096, help="Max output tokens for judge synthesis")
-    panel.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
-    panel.add_argument("--max-synthesis-chars", type=int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
+    panel.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
+    panel.add_argument("--max-synthesis-chars", type=non_negative_int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
     panel.add_argument(
         "--chunked",
         choices=["auto", "always", "off"],
@@ -3713,7 +3650,7 @@ def build_parser() -> argparse.ArgumentParser:
     panel.add_argument("--chunk-output-tokens", type=positive_int, default=2048, help="Max output tokens per review chunk")
     panel.add_argument("--min-successes", type=positive_int, help="Minimum successful panel model calls before judging")
     panel.add_argument("--max-parallel", type=positive_int, default=3, help="Maximum concurrent panel model calls")
-    panel.add_argument("--retry", type=int, default=1, help="Retry transient gateway/backend failures")
+    panel.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
     panel.add_argument("--output", choices=sorted(PANEL_OUTPUT_MODES), default="prose", help="Render prose or findings JSON")
     panel.add_argument("--json", action="store_true", help="Emit structured JSON output")
     panel.add_argument("--print-prompt", action="store_true", help="Print assembled source prompt without contacting gateway")
@@ -3727,8 +3664,8 @@ def build_parser() -> argparse.ArgumentParser:
     consult.add_argument("--prompt", help="Prompt text")
     consult.add_argument("--prompt-file", help="Read prompt text from file")
     consult.add_argument("--max-output-tokens", type=positive_int, default=2048)
-    consult.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS, help="Maximum prompt chars before truncation; use 0 for unlimited")
-    consult.add_argument("--retry", type=int, default=1, help="Retry transient gateway/backend failures")
+    consult.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help="Maximum prompt chars before truncation; use 0 for unlimited")
+    consult.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
     consult.add_argument("--json", action="store_true", help="Emit structured JSON output")
     consult.add_argument("prompt_parts", nargs="*", help="Positional prompt text")
     consult.set_defaults(func=command_consult)
@@ -3746,12 +3683,12 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--scope", choices=["none", "working-tree", "staged", "files"], default="none")
     plan.add_argument("--file", action="append", help="Add repository file context; repeatable")
     plan.add_argument("--max-output-tokens", type=positive_int, default=6144)
-    plan.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
+    plan.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
     plan.add_argument("--chunked", choices=["auto", "always", "off"], default="auto")
     plan.add_argument("--max-plan-chunks", type=positive_int, default=6)
     plan.add_argument("--chunk-output-tokens", type=positive_int, default=2048)
-    plan.add_argument("--max-synthesis-chars", type=int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
-    plan.add_argument("--retry", type=int, default=1, help="Retry transient gateway/backend failures")
+    plan.add_argument("--max-synthesis-chars", type=non_negative_int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
+    plan.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
     plan.add_argument("--json", action="store_true", help="Emit structured JSON output")
     plan.add_argument("--print-prompt", action="store_true", help="Print assembled prompt without contacting gateway")
     plan.add_argument("prompt_parts", nargs="*", help="Positional planning goal text")
@@ -3767,8 +3704,8 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--file", action="append", help="Limit review to path; repeatable")
     review.add_argument("--files-from", action="append", help="Read review paths from a newline- or NUL-delimited file; use - for stdin")
     review.add_argument("--max-output-tokens", type=positive_int, default=4096)
-    review.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
-    review.add_argument("--retry", type=int, default=1, help="Retry transient gateway/backend failures")
+    review.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
+    review.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
     review.add_argument(
         "--chunked",
         choices=["auto", "always", "off"],
@@ -3779,7 +3716,7 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--chunk-output-tokens", type=positive_int, default=2048, help="Max output tokens per chunk review")
     review.add_argument(
         "--max-synthesis-chars",
-        type=int,
+        type=non_negative_int,
         default=DEFAULT_MAX_SYNTHESIS_CHARS,
         help="Maximum synthesis prompt chars after chunk outputs; use 0 for unlimited",
     )
@@ -3820,11 +3757,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the expanded command's own default when set",
     )
     workflow.add_argument("--judge-output-tokens", type=positive_int, default=4096)
-    workflow.add_argument("--max-prompt-chars", type=int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
-    workflow.add_argument("--max-synthesis-chars", type=int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
+    workflow.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
+    workflow.add_argument("--max-synthesis-chars", type=non_negative_int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
     workflow.add_argument("--min-successes", type=positive_int)
     workflow.add_argument("--max-parallel", type=positive_int, default=3)
-    workflow.add_argument("--retry", type=int, default=1)
+    workflow.add_argument("--retry", type=non_negative_int, default=1)
     workflow.add_argument("--chunked", choices=["auto", "always", "off"], default="auto")
     workflow.add_argument("--max-review-chunks", type=positive_int, default=8)
     workflow.add_argument("--max-plan-chunks", type=positive_int, default=6)
@@ -3900,6 +3837,21 @@ def main(argv: list[str] | None = None) -> int:
             args.base_url = normalize_base_url(args.base_url)
         return int(args.func(args))
     except KeyboardInterrupt:
+        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False):
+            try:
+                run_id = getattr(args, "run_id", None)
+                correlation = {"request_log_correlation_id": run_id} if run_id else {}
+                write_run_record(
+                    args,
+                    mode=getattr(args, "command", "unknown"),
+                    status="interrupted",
+                    models=[],
+                    base_url=getattr(args, "base_url", None),
+                    metadata=correlation,
+                    error="Interrupted",
+                )
+            except Exception:
+                pass
         eprint("Interrupted")
         return 130
     except AntiError as exc:
