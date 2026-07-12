@@ -42,6 +42,7 @@ from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform, is_loopback_host
 from .models import canonical_model_id, native_model_catalog, native_model_family
 from .observability import request_log_info, write_request_record
 from .redaction import redact_secret_text
+from .response_protocol import CapabilityError, ProviderCapabilities, validate_capabilities
 from .storage import load_accounts
 from .xai_oauth import resolve_xai_oauth_access_token, xai_oauth_status
 
@@ -66,6 +67,14 @@ GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS = 1.0
 GOOGLE_BACKEND_TIMEOUT_MAX_SECONDS = 600.0
 GOOGLE_BACKEND_TIMEOUT_METADATA_KEY = "antigravity_backend_timeout_seconds"
 TEST_CLIENT_HOSTS = {"testserver"}
+REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
+    native_responses=True,
+    parallel_tool_calls=True,
+    structured_output=True,
+    stop_sequences=True,
+    reasoning=True,
+    streaming_usage=True,
+)
 GOOGLE_ACCOUNT_SCOPED_STREAM_ERROR_TERMS = (
     "401",
     "403",
@@ -803,6 +812,10 @@ def validate_response_request_body(value: object) -> dict:
         value["metadata"] = normalized_metadata
     validate_response_generation_options(value)
     validate_response_tool_choice(value)
+    try:
+        validate_capabilities(value, REQUEST_BOUNDARY_CAPABILITIES)
+    except CapabilityError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return value
 
 
