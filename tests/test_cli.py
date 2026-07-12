@@ -2914,6 +2914,7 @@ class TestVNextPolishCli(unittest.TestCase):
                         result = run_service_command(Namespace(service_command="status", port=51122, json=False))
 
         self.assertTrue(result["gateway"]["reachable"])
+        self.assertEqual(result["service"]["state"], "ready")
         printed = "\n".join(call.args[0] for call in mock_print.call_args_list if call.args)
         self.assertIn("Service status: installed, active", printed)
         self.assertIn("Gateway process: reachable (7 model(s) at http://127.0.0.1:51122/v1)", printed)
@@ -2972,6 +2973,34 @@ class TestVNextPolishCli(unittest.TestCase):
         printed = "\n".join(call.args[0] for call in mock_print.call_args_list if call.args)
         self.assertIn("Gateway service installed for port 51122", printed)
         self.assertIn("Gateway process: reachable (7 model(s) at http://127.0.0.1:51122/v1)", printed)
+
+    def test_service_install_does_not_claim_success_when_state_not_observed(self):
+        service = {
+            "action": "install",
+            "state": "failed",
+            "installed": False,
+            "active": False,
+            "reachable": False,
+            "changed": True,
+            "error": "bootstrap failed",
+        }
+        gateway = {"reachable": False, "reachability_error": "connection refused"}
+        with patch("codex_antigravity_auth.cli.install_service", return_value=service):
+            with patch("codex_antigravity_auth.cli.reachable_gateway_status_info", return_value=gateway):
+                with patch("builtins.print") as mock_print:
+                    with self.assertRaisesRegex(SystemExit, "bootstrap failed"):
+                        run_service_command(
+                            Namespace(
+                                service_command="install",
+                                port=51122,
+                                host="127.0.0.1",
+                                json=False,
+                                op_env_file=None,
+                                op_environment=None,
+                            )
+                        )
+        printed = "\n".join(call.args[0] for call in mock_print.call_args_list if call.args)
+        self.assertNotIn("[+] Gateway service installed", printed)
 
     def test_service_status_uses_platform_specific_probe(self):
         with patch("codex_antigravity_auth.service._run") as mock_run:

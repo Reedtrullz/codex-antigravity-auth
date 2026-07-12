@@ -62,6 +62,7 @@ from .oauth import (
     token_expires_in_seconds,
 )
 from .service import install_service, service_status, uninstall_service
+from .service_manager import observed_service_result
 from .storage import load_accounts, save_accounts, update_accounts
 from .account_state import scoped_cooldown_expiry
 from .constants import (
@@ -883,10 +884,31 @@ def run_service_command(args) -> dict:
             raise SystemExit("service requires install, uninstall, or status")
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(redact_secret_text(str(exc))) from exc
+    if action == "installed" and (
+        info.get("state") == "failed"
+        or not bool(info.get("installed"))
+        or not bool(info.get("active"))
+    ):
+        detail = info.get("error") or "service installation was not observed as installed and active"
+        raise SystemExit(redact_secret_text(str(detail)))
+    if action == "uninstalled" and bool(info.get("installed")):
+        detail = info.get("error") or "service uninstall was not observed"
+        raise SystemExit(redact_secret_text(str(detail)))
     gateway = reachable_gateway_status_info(
         args.port,
         wait=action == "installed" and bool(info.get("installed")) and bool(info.get("active")),
     )
+    result_action = {"installed": "install", "uninstalled": "uninstall"}.get(action, "status")
+    observed = observed_service_result(
+        action=result_action,
+        installed=bool(info.get("installed")),
+        active=bool(info.get("active")),
+        reachable=bool(gateway.get("reachable")),
+        changed=bool(info.get("changed", action != "status")),
+        commands=tuple(info.get("commands", ())) if isinstance(info.get("commands", ()), (list, tuple)) else (),
+        error=info.get("error"),
+    ).to_dict()
+    info = {**info, **observed}
     result = {"service": info, "gateway": gateway}
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2))
