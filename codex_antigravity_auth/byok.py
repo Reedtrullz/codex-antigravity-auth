@@ -625,15 +625,16 @@ def has_provider_api_key_env(provider: dict[str, Any]) -> bool:
     return False
 
 
-def provider_has_oauth_tokens(provider: dict[str, Any]) -> bool:
+def provider_has_oauth_tokens(provider: dict[str, Any], *, read_only: bool = False) -> bool:
     if provider_auth_mode(provider) != PROVIDER_AUTH_MODE_OAUTH:
         return False
     if provider.get("id") != "xai-oauth":
         return False
     try:
-        from .xai_oauth import xai_oauth_status
+        from .xai_oauth import xai_oauth_status, xai_oauth_status_read_only
 
-        return bool(xai_oauth_status().get("ready"))
+        status = xai_oauth_status_read_only() if read_only else xai_oauth_status()
+        return bool(status.get("ready"))
     except Exception:
         return False
 
@@ -650,7 +651,7 @@ def merged_provider_config(provider_id: str, stored: dict[str, Any] | None = Non
 
 
 def _all_provider_configs_from_data(
-    data: dict[str, Any], *, include_env_enabled: bool
+    data: dict[str, Any], *, include_env_enabled: bool, read_only: bool = False
 ) -> dict[str, dict[str, Any]]:
     providers: dict[str, dict[str, Any]] = {}
     for provider_id, stored in data.get("providers", {}).items():
@@ -665,7 +666,7 @@ def _all_provider_configs_from_data(
             auto_enable_keyless = merged.get("autoEnable", True) is not False
             if (
                 has_provider_api_key_env(merged)
-                or provider_has_oauth_tokens(merged)
+                or provider_has_oauth_tokens(merged, read_only=read_only)
                 or (auto_enable_keyless and provider_allows_keyless_local_use(merged))
             ):
                 providers[provider_id] = merged
@@ -681,6 +682,7 @@ def all_provider_configs_read_only(include_env_enabled: bool = True) -> dict[str
     return _all_provider_configs_from_data(
         load_provider_config_read_only(),
         include_env_enabled=include_env_enabled,
+        read_only=True,
     )
 
 

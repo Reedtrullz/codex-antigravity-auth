@@ -134,6 +134,19 @@ class TestProviderStorage(unittest.TestCase):
             self.assertEqual(data, {"providers": {}})
             self.assertFalse(path.parent.exists())
 
+    def test_read_only_provider_catalog_does_not_create_xai_oauth_lock(self):
+        from codex_antigravity_auth.byok import all_provider_configs_read_only
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "clean-home"
+            with patch("codex_antigravity_auth.constants.get_codex_home", return_value=home / ".codex"):
+                with patch("codex_antigravity_auth.storage.get_codex_home", return_value=home / ".codex"):
+                    with patch("codex_antigravity_auth.xai_oauth.get_codex_home", return_value=home / ".codex"):
+                        providers = all_provider_configs_read_only()
+
+            self.assertIsInstance(providers, dict)
+            self.assertFalse(home.exists())
+
     def test_account_store_diagnostics_detect_pending_migration_without_mutation(self):
         from codex_antigravity_auth.storage import account_store_diagnostics
 

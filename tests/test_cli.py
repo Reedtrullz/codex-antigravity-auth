@@ -1717,6 +1717,22 @@ class TestV3NativeSetup(unittest.TestCase):
         self.assertEqual(checks["provider_store"]["status"], "warn")
         self.assertEqual(checks["provider_capabilities"]["status"], "warn")
 
+    def test_clean_home_readiness_report_creates_no_files_or_directories(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "clean-home"
+            with patch.dict(os.environ, {"HOME": str(home), "CODEX_ANTIGRAVITY_NO_UPDATE_CHECK": "1"}, clear=False):
+                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value=set()):
+                    with patch("codex_antigravity_auth.cli.service_status", return_value={"installed": False, "active": False}):
+                        report = codex_ready_report(
+                            config="~/.codex/config.toml",
+                            provider_id="antigravity",
+                            expected_base_url="http://localhost:51122/v1",
+                            include_version_check=False,
+                        )
+
+            self.assertFalse(report["ok"])
+            self.assertFalse(home.exists(), list(home.rglob("*")) if home.exists() else [])
+
     def test_codex_ready_report_fails_when_selected_model_missing_from_gateway(self):
         with TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"

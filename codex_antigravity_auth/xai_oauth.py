@@ -12,7 +12,12 @@ from urllib.parse import urlencode
 from .constants import get_codex_home
 from .oauth import OAUTH_HTTP_TIMEOUT_SECONDS, token_expires_in_seconds
 from .redaction import redact_secret_text
-from .storage import load_secure_json_file, save_secure_json_file, update_secure_json_file
+from .storage import (
+    load_secure_json_file,
+    load_secure_json_file_read_only,
+    save_secure_json_file,
+    update_secure_json_file,
+)
 
 XAI_OAUTH_FILE = "antigravity-xai-oauth.json"
 XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
@@ -27,12 +32,23 @@ XAI_OAUTH_DEVICE_DEFAULT_INTERVAL_SECONDS = 5.0
 XAI_OAUTH_DEVICE_MIN_INTERVAL_SECONDS = 1.0
 XAI_OAUTH_DEVICE_SLOW_DOWN_SECONDS = 5.0
 XAI_OAUTH_DEVICE_DEFAULT_EXPIRES_SECONDS = 300.0
+_DEFAULT_GET_CODEX_HOME = get_codex_home
+
+
+def _codex_home_read_only() -> Path:
+    if get_codex_home is not _DEFAULT_GET_CODEX_HOME:
+        return get_codex_home()
+    return Path.home() / ".codex"
 
 
 def get_xai_oauth_json_path() -> Path:
-    path = get_codex_home() / XAI_OAUTH_FILE
+    path = xai_oauth_json_path_read_only()
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def xai_oauth_json_path_read_only() -> Path:
+    return _codex_home_read_only() / XAI_OAUTH_FILE
 
 
 def default_xai_oauth_data() -> dict[str, Any]:
@@ -93,6 +109,15 @@ def normalize_xai_oauth_data(data: dict[str, Any]) -> dict[str, Any]:
 def load_xai_oauth_data() -> dict[str, Any]:
     return load_secure_json_file(
         get_xai_oauth_json_path(),
+        default_xai_oauth_data,
+        normalize=normalize_xai_oauth_data,
+        error_label="xAI OAuth tokens",
+    )
+
+
+def load_xai_oauth_data_read_only() -> dict[str, Any]:
+    return load_secure_json_file_read_only(
+        xai_oauth_json_path_read_only(),
         default_xai_oauth_data,
         normalize=normalize_xai_oauth_data,
         error_label="xAI OAuth tokens",
@@ -414,9 +439,26 @@ def resolve_xai_oauth_access_token(
 
 
 def xai_oauth_status(*, now: float | None = None) -> dict[str, Any]:
+    return _xai_oauth_status(load_xai_oauth_data, get_xai_oauth_json_path, now=now)
+
+
+def xai_oauth_status_read_only(*, now: float | None = None) -> dict[str, Any]:
+    return _xai_oauth_status(
+        load_xai_oauth_data_read_only,
+        xai_oauth_json_path_read_only,
+        now=now,
+    )
+
+
+def _xai_oauth_status(
+    loader: Callable[[], dict[str, Any]],
+    path_provider: Callable[[], Path],
+    *,
+    now: float | None = None,
+) -> dict[str, Any]:
     timestamp = time.time() if now is None else float(now)
     try:
-        data = load_xai_oauth_data()
+        data = loader()
     except RuntimeError as exc:
         return {
             "provider": "xai-oauth",
@@ -443,5 +485,5 @@ def xai_oauth_status(*, now: float | None = None) -> dict[str, Any]:
         "expires_at": expires_at,
         "expires_in_seconds": expires_in,
         "expired": bool(expired),
-        "path": str(get_xai_oauth_json_path()),
+        "path": str(path_provider()),
     }

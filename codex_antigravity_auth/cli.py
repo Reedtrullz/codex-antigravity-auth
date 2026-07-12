@@ -97,6 +97,7 @@ from .xai_oauth import (
 
 _DEFAULT_LOAD_ACCOUNTS = load_accounts
 _DEFAULT_ALL_PROVIDER_CONFIGS = all_provider_configs
+_DEFAULT_GET_CODEX_HOME = get_codex_home
 
 
 def _diagnostic_load_accounts() -> dict:
@@ -110,6 +111,12 @@ def _diagnostic_all_provider_configs() -> dict[str, dict]:
     if all_provider_configs is not _DEFAULT_ALL_PROVIDER_CONFIGS:
         return all_provider_configs()
     return all_provider_configs_read_only()
+
+
+def _codex_home_read_only() -> Path:
+    if get_codex_home is not _DEFAULT_GET_CODEX_HOME:
+        return get_codex_home()
+    return Path(os.path.expanduser("~/.codex"))
 
 DEFAULT_CODEX_PROVIDER_ID = "antigravity"
 DEFAULT_CODEX_PROVIDER_NAME = "Google Antigravity"
@@ -560,7 +567,7 @@ def _version_tuple(version: str | None) -> tuple[int, ...]:
 
 
 def _version_cache_path() -> Path:
-    return get_codex_home() / VERSION_CACHE_FILE
+    return _codex_home_read_only() / VERSION_CACHE_FILE
 
 
 def _read_version_cache(now: float) -> dict | None:
@@ -704,7 +711,7 @@ def wait_for_gateway_model_ids(
 
 
 def gateway_runtime_paths(port: int) -> tuple[Path, Path]:
-    codex_home = get_codex_home()
+    codex_home = _codex_home_read_only()
     return codex_home / GATEWAY_PID_TEMPLATE.format(port=port), codex_home / GATEWAY_LOG_TEMPLATE.format(port=port)
 
 

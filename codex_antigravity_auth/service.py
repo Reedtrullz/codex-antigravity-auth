@@ -13,6 +13,14 @@ from .onepassword import wrap_with_onepassword
 from .redaction import redact_secret_text
 from .service_manager import observed_service_result
 
+_DEFAULT_GET_CODEX_HOME = get_codex_home
+
+
+def _codex_home_read_only() -> Path:
+    if get_codex_home is not _DEFAULT_GET_CODEX_HOME:
+        return get_codex_home()
+    return Path(os.path.expanduser("~/.codex"))
+
 
 def _service_result(
     info: dict[str, Any],
@@ -59,7 +67,7 @@ def service_task_name(port: int) -> str:
 
 
 def service_log_paths(port: int) -> tuple[Path, Path]:
-    home = get_codex_home()
+    home = _codex_home_read_only()
     return home / f"antigravity-service-{port}.out.log", home / f"antigravity-service-{port}.err.log"
 
 

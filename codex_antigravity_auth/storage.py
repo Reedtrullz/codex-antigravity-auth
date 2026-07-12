@@ -20,6 +20,13 @@ except ImportError:  # pragma: no cover - Windows fallback keeps imports working
     fcntl = None
 
 _accounts_lock = threading.RLock()
+_DEFAULT_GET_CODEX_HOME = get_codex_home
+
+
+def _codex_home_read_only() -> Path:
+    if get_codex_home is not _DEFAULT_GET_CODEX_HOME:
+        return get_codex_home()
+    return Path(os.path.expanduser("~/.codex"))
 
 # Stable service name for OS Keyring integration
 KEYRING_SERVICE_NAME = "codex-antigravity-auth"
@@ -146,7 +153,7 @@ def _peek_encryption_key() -> str | None:
         key = None
     if key:
         return key
-    fallback = get_codex_home() / FALLBACK_KEY_FILE
+    fallback = _codex_home_read_only() / FALLBACK_KEY_FILE
     if not fallback.is_file() or fallback.is_symlink():
         return None
     try:

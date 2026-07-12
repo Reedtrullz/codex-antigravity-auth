@@ -11,6 +11,14 @@ from typing import Any, Iterable
 from .constants import get_codex_home
 from .redaction import redact_secret_text
 
+_DEFAULT_GET_CODEX_HOME = get_codex_home
+
+
+def _codex_home_read_only() -> Path:
+    if get_codex_home is not _DEFAULT_GET_CODEX_HOME:
+        return get_codex_home()
+    return Path(os.path.expanduser("~/.codex"))
+
 REQUEST_LOG_FILE = "antigravity-requests.jsonl"
 REQUEST_LOG_MAX_BYTES = 10 * 1024 * 1024
 REQUEST_LOG_SECRET_KEYS = {
@@ -37,7 +45,7 @@ REQUEST_LOG_PROVIDER_KEY_RE = re.compile(r"\b(?:sk-or-v1|sk)-[A-Za-z0-9][A-Za-z0
 
 
 def request_log_path() -> Path:
-    return get_codex_home() / REQUEST_LOG_FILE
+    return _codex_home_read_only() / REQUEST_LOG_FILE
 
 
 def request_log_info() -> dict[str, Any]:
