@@ -7,6 +7,22 @@ from codex_antigravity_auth.server import app, google_rotation_diagnostics, stre
 from fastapi.testclient import TestClient
 
 class TestServerStreaming(unittest.TestCase):
+    def test_google_rotation_diagnostics_respects_family_scoped_cooldowns(self):
+        now = 1_700_000_000
+        data = {
+            "accounts": [{"email": "test@example.com"}],
+            "accountState": {
+                "cooldowns": {"test@example.com": {"claude": now + 300}},
+            },
+        }
+        with patch("codex_antigravity_auth.server.load_accounts", return_value=data):
+            with patch("codex_antigravity_auth.server.time.time", return_value=now):
+                claude = google_rotation_diagnostics("claude-3.5-sonnet")
+                gemini = google_rotation_diagnostics("gemini-3.5-flash-high")
+
+        self.assertEqual(claude["cooldown_count"], 1)
+        self.assertEqual(gemini["cooldown_count"], 0)
+
     def test_google_rotation_diagnostics_normalizes_millisecond_cooldowns(self):
         data = {
             "accounts": [{"email": "test@example.com"}],

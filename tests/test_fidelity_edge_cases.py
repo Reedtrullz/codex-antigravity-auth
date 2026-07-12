@@ -60,13 +60,13 @@ class TestTransformationEdgeCases(unittest.TestCase):
         with patch.object(manager, "_save_state_to_storage"):
             # Mark failure once
             manager.mark_failure(email, "Simulated network failure")
-            cd1 = manager._cooldowns[email]
+            cd1 = manager._cooldowns[email]["account"]
             duration1 = cd1 - time.time()
             self.assertTrue(110 <= duration1 <= 130, f"Expected ~120s cooldown, got {duration1}")
 
             # Mark failure twice
             manager.mark_failure(email, "Simulated network failure")
-            cd2 = manager._cooldowns[email]
+            cd2 = manager._cooldowns[email]["account"]
             duration2 = cd2 - time.time()
             self.assertTrue(230 <= duration2 <= 250, f"Expected ~240s cooldown, got {duration2}")
 

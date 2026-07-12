@@ -63,6 +63,7 @@ from .oauth import (
 )
 from .service import install_service, service_status, uninstall_service
 from .storage import load_accounts, save_accounts, update_accounts
+from .account_state import scoped_cooldown_expiry
 from .constants import (
     get_codex_home,
     is_loopback_host,
@@ -1319,7 +1320,7 @@ def google_family_rotation_status(data: dict, family: str) -> dict:
         if not isinstance(account, dict):
             continue
         email = account.get("email")
-        cooldown_end = normalize_epoch_seconds(cooldowns.get(email, 0))
+        cooldown_end = scoped_cooldown_expiry(cooldowns.get(email, 0), family)
         if cooldown_end > now:
             cooldown_count += 1
         else:
@@ -1726,7 +1727,11 @@ def account_rotation_lines(data: dict | None = None) -> list[str]:
                 markers.append(f"{family} active")
         expires_at = normalize_epoch_seconds(acc.get("expiresAt", 0))
         token_status = "token OK" if expires_at > now + 300 else "will refresh"
-        cooldown_end = normalize_epoch_seconds(cooldowns.get(email, 0))
+        family_expiries = {
+            family: scoped_cooldown_expiry(cooldowns.get(email, 0), family)
+            for family in ("claude", "gemini")
+        }
+        cooldown_end = max(family_expiries.values())
         if cooldown_end > now:
             cooldown_status = f"cooldown {int(cooldown_end - now)}s"
         else:

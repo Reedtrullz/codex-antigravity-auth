@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from .accounts import AccountManager
+from .account_state import scoped_cooldown_expiry
 from .byok import (
     PROVIDER_AUTH_MODE_API_KEY,
     PROVIDER_AUTH_MODE_OAUTH,
@@ -278,8 +279,8 @@ def account_health_summary() -> dict:
         if not isinstance(account, dict):
             continue
         email = str(account.get("email") or "")
-        cooldown_end = normalize_epoch_seconds(cooldowns.get(email, 0))
         for family in ("claude", "gemini"):
+            cooldown_end = scoped_cooldown_expiry(cooldowns.get(email, 0), family)
             if cooldown_end > now:
                 cooldown_summary[family]["cooling_down"] += 1
             else:
@@ -415,7 +416,7 @@ def google_rotation_diagnostics(
         if not isinstance(account, dict):
             continue
         email = account.get("email")
-        cooldown_end = normalize_epoch_seconds(cooldowns.get(email, 0))
+        cooldown_end = scoped_cooldown_expiry(cooldowns.get(email, 0), family)
         if cooldown_end > now:
             cooldown_count += 1
     return {

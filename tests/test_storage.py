@@ -82,7 +82,10 @@ class TestStorage(unittest.TestCase):
                 self.assertEqual(loaded["accounts"], [])
                 self.assertEqual(loaded["activeIndex"], 0)
                 self.assertEqual(loaded["activeIndexByFamily"], {"claude": 0, "gemini": 0})
-                self.assertEqual(loaded["accountState"], {})
+                self.assertEqual(
+                    loaded["accountState"],
+                    {"schemaVersion": 2, "failures": {}, "cooldowns": {}, "counters": {}},
+                )
 
     def test_fallback_key_permissions_are_repaired(self):
         with tempfile.TemporaryDirectory() as tmp:

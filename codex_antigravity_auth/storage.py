@@ -6,11 +6,13 @@ import keyring
 import base64
 import hashlib
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 from cryptography.fernet import Fernet
 from .constants import ANTIGRAVITY_ACCOUNTS_FILE, get_codex_home
+from .account_state import migrate_account_state
 
 try:
     import fcntl
@@ -60,7 +62,8 @@ def normalize_accounts_data(data: dict[str, Any]) -> dict[str, Any]:
     account_state = data.get("accountState")
     if account_state is not None and not isinstance(account_state, dict):
         data["accountState"] = {}
-    return data
+    migrated, _changed = migrate_account_state(data, now=time.time())
+    return migrated
 
 
 def _ensure_private_file(path: Path) -> None:

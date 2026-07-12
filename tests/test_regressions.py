@@ -847,10 +847,10 @@ class TestRegressionFixes(unittest.TestCase):
 
         self.assertEqual(selected["accessToken"], "new")
         self.assertEqual(selected["expiresAt"], 2800)
-        self.assertEqual(manager._failures, {"other@gmail.com": 2})
-        self.assertEqual(manager._cooldowns, {"other@gmail.com": 2000.0})
-        self.assertEqual(data["accountState"]["failures"], {"other@gmail.com": 2})
-        self.assertEqual(data["accountState"]["cooldowns"], {"other@gmail.com": 2000.0})
+        self.assertEqual(manager._failures, {"other@gmail.com": {"account": 2}})
+        self.assertEqual(manager._cooldowns, {"other@gmail.com": {"account": 2000.0}})
+        self.assertEqual(data["accountState"]["failures"], {"other@gmail.com": {"account": 2}})
+        self.assertEqual(data["accountState"]["cooldowns"], {"other@gmail.com": {"account": 2000.0}})
 
     def test_token_expires_in_seconds_falls_back_for_malformed_success_payloads(self):
         for payload in (
@@ -921,13 +921,13 @@ class TestRegressionFixes(unittest.TestCase):
 
         manager.mark_failure("limited@gmail.com", "429", retry_after_seconds=600)
 
-        self.assertEqual(manager._cooldowns["limited@gmail.com"], 1600)
+        self.assertEqual(manager._cooldowns["limited@gmail.com"]["account"], 1600)
 
         manager._failures["malformed@gmail.com"] = -5
         manager.mark_failure("malformed@gmail.com", "429", retry_after_seconds=True)
 
-        self.assertEqual(manager._failures["malformed@gmail.com"], 1)
-        self.assertEqual(manager._cooldowns["malformed@gmail.com"], 1120)
+        self.assertEqual(manager._failures["malformed@gmail.com"], {"account": 1})
+        self.assertEqual(manager._cooldowns["malformed@gmail.com"], {"account": 1120})
 
     def test_pkce_verifier_expires(self):
         _pkce_verifier_store["expired_state"] = {

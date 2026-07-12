@@ -88,6 +88,109 @@ class TestAccounts(unittest.TestCase):
                 self.assertEqual(selected["email"], "secondary@gmail.com")
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_rate_limit_cooldown_is_family_scoped(self, mock_update):
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("codex_antigravity_auth.accounts.get_accounts_json_path", return_value=Path(tmp) / "missing.json"):
+                manager = AccountManager()
+                manager.mark_failure(
+                    "primary@gmail.com",
+                    "rate limited",
+                    model="claude-3.5-sonnet",
+                    status_code=429,
+                )
+
+                claude = manager.select_active_account("claude-3.5-sonnet")
+                gemini = manager.select_active_account("gemini-3.5-flash-high")
+
+        self.assertEqual(claude["email"], "secondary@gmail.com")
+        self.assertEqual(gemini["email"], "primary@gmail.com")
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_backend_quota_outcome_without_http_status_is_family_scoped(self, mock_update):
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("codex_antigravity_auth.accounts.get_accounts_json_path", return_value=Path(tmp) / "missing.json"):
+                manager = AccountManager()
+                manager.mark_failure(
+                    "primary@gmail.com",
+                    "Backend payload error RESOURCE_EXHAUSTED: quota exhausted",
+                    model="claude-3.5-sonnet",
+                )
+
+                claude = manager.select_active_account("claude-3.5-sonnet")
+                gemini = manager.select_active_account("gemini-3.5-flash-high")
+
+        self.assertEqual(claude["email"], "secondary@gmail.com")
+        self.assertEqual(gemini["email"], "primary@gmail.com")
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_auth_cooldown_is_account_wide(self, mock_update):
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("codex_antigravity_auth.accounts.get_accounts_json_path", return_value=Path(tmp) / "missing.json"):
+                manager = AccountManager()
+                manager.mark_failure(
+                    "primary@gmail.com",
+                    "auth failed",
+                    model="claude-3.5-sonnet",
+                    status_code=401,
+                )
+
+                gemini = manager.select_active_account("gemini-3.5-flash-high")
+
+        self.assertEqual(gemini["email"], "secondary@gmail.com")
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_legacy_state_migration_preserves_credentials_and_fingerprint(self, mock_update):
+        fingerprint = {"deviceId": "device", "sessionToken": "session"}
+        self.accounts_data["accounts"][0]["fingerprint"] = fingerprint
+        self.accounts_data["accountState"] = {
+            "failures": {"primary@gmail.com": 1},
+            "cooldowns": {"primary@gmail.com": (time.time() + 120) * 1000},
+        }
+        before = dict(self.accounts_data["accounts"][0])
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+
+        AccountManager().select_active_account("gemini-3.5-flash-high")
+
+        self.assertEqual(self.accounts_data["accountState"]["schemaVersion"], 2)
+        self.assertEqual(self.accounts_data["accounts"][0], before)
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_empty_account_migration_persists_complete_schema(self, mock_update):
+        data = {"accounts": []}
+        mock_update.side_effect = lambda mutator: mutator(data)
+
+        self.assertIsNone(AccountManager().select_active_account("gemini-3.5-flash-high"))
+
+        self.assertEqual(
+            data["accountState"],
+            {"schemaVersion": 2, "failures": {}, "cooldowns": {}, "counters": {}},
+        )
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_clear_failures_can_clear_one_family_only(self, mock_update):
+        self.accounts_data["accountState"] = {
+            "schemaVersion": 2,
+            "failures": {"primary@gmail.com": {"account": 1, "claude": 2}},
+            "cooldowns": {"primary@gmail.com": {"account": time.time() + 300, "claude": time.time() + 300}},
+            "counters": {},
+        }
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "accounts.json"
+            path.write_text("{}", encoding="utf-8")
+            with patch("codex_antigravity_auth.accounts.get_accounts_json_path", return_value=path):
+                manager = AccountManager()
+                manager.select_active_account("gemini-3.5-flash-high")
+                manager.clear_failures("primary@gmail.com", family="claude")
+
+        scoped = self.accounts_data["accountState"]
+        self.assertEqual(scoped["failures"]["primary@gmail.com"], {"account": 1})
+        self.assertIn("account", scoped["cooldowns"]["primary@gmail.com"])
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
     @patch("codex_antigravity_auth.accounts.refresh_access_token")
     def test_token_auto_refresh_trigger(self, mock_refresh, mock_update):
         # Primary token has expired

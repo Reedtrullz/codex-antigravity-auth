@@ -1,7 +1,9 @@
 import math
 import time
 import threading
+import copy
 from typing import Any
+from .account_state import SCHEMA_VERSION, migrate_account_state
 from .storage import load_accounts, get_accounts_json_path, update_accounts
 from .oauth import refresh_access_token, token_expires_in_seconds
 from .fingerprint import generate_fingerprint
@@ -10,96 +12,36 @@ from .redaction import redact_secret_text
 class AccountManager:
     def __init__(self):
         self._lock = threading.RLock()
-        self._failures = {} # email -> failure count
-        self._cooldowns = {} # email -> cooldown end timestamp
+        self._failures = {} # email -> scoped failure counts
+        self._cooldowns = {} # email -> scoped cooldown end timestamps
         self._counters = {} # email -> family -> sanitized usage counters
         self._in_flight = {} # email -> process-local request count
 
     def _sync_state_from_storage(self, data: dict[str, Any]) -> bool:
         state_missing = "accountState" not in data
-        state = data.get("accountState", {})
-        previous_state = state if isinstance(state, dict) else {}
-        accounts = data.get("accounts", [])
-        account_emails = {
-            str(account.get("email"))
-            for account in accounts
-            if isinstance(account, dict) and account.get("email")
-        }
-        if isinstance(state, dict):
-            failures = state.get("failures", {})
-            cooldowns = state.get("cooldowns", {})
-            counters = state.get("counters", {})
-            if state_missing:
-                if self._failures:
-                    failures = {
-                        **(failures if isinstance(failures, dict) else {}),
-                        **self._failures,
-                    }
-                if self._cooldowns:
-                    cooldowns = {
-                        **(cooldowns if isinstance(cooldowns, dict) else {}),
-                        **self._cooldowns,
-                    }
-                if self._counters:
-                    counters = {
-                        **(counters if isinstance(counters, dict) else {}),
-                        **self._counters,
-                    }
-            active_cooldown_emails = set()
-            cleaned_cooldowns = {}
-            if isinstance(cooldowns, dict):
-                current_time = time.time()
-                for k, v in cooldowns.items():
-                    email = str(k)
-                    if email not in account_emails:
-                        continue
-                    if not isinstance(v, (int, float)) or isinstance(v, bool):
-                        continue
-                    cooldown_end = float(v)
-                    if math.isfinite(cooldown_end) and cooldown_end > current_time:
-                        cleaned_cooldowns[email] = cooldown_end
-                        active_cooldown_emails.add(email)
-            self._cooldowns = cleaned_cooldowns
-            cleaned_failures = {}
-            if isinstance(failures, dict):
-                for k, v in failures.items():
-                    email = str(k)
-                    if email not in active_cooldown_emails:
-                        continue
-                    if not isinstance(v, (int, float)) or isinstance(v, bool):
-                        continue
-                    failure_number = float(v)
-                    if not math.isfinite(failure_number):
-                        continue
-                    failure_count = int(failure_number)
-                    if failure_count > 0:
-                        cleaned_failures[email] = failure_count
-            self._failures = cleaned_failures
-            cleaned_counters: dict[str, dict[str, dict[str, Any]]] = {}
-            if isinstance(counters, dict):
-                for email_key, raw_families in counters.items():
-                    email = str(email_key)
-                    if email not in account_emails or not isinstance(raw_families, dict):
-                        continue
-                    family_counters: dict[str, dict[str, Any]] = {}
-                    for family_key, raw_counter in raw_families.items():
-                        family = str(family_key)
-                        if family not in {"claude", "gemini"} or not isinstance(raw_counter, dict):
-                            continue
-                        family_counters[family] = self._sanitize_counter(raw_counter)
-                    if family_counters:
-                        cleaned_counters[email] = family_counters
-            self._counters = cleaned_counters
-        else:
-            self._failures = {}
-            self._cooldowns = {}
-            self._counters = {}
-        cleaned_state = {
-            "failures": self._failures,
-            "cooldowns": self._cooldowns,
-            "counters": self._counters,
-        }
-        return previous_state != cleaned_state
+        if state_missing and (self._failures or self._cooldowns or self._counters):
+            failures = {
+                email: value if isinstance(value, dict) else {"account": value}
+                for email, value in self._failures.items()
+            }
+            cooldowns = {
+                email: value if isinstance(value, dict) else {"account": value}
+                for email, value in self._cooldowns.items()
+            }
+            data["accountState"] = {
+                "schemaVersion": SCHEMA_VERSION,
+                "failures": copy.deepcopy(failures),
+                "cooldowns": copy.deepcopy(cooldowns),
+                "counters": copy.deepcopy(self._counters),
+            }
+        migrated, changed = migrate_account_state(data, now=time.time())
+        data.clear()
+        data.update(migrated)
+        state = data["accountState"]
+        self._failures = copy.deepcopy(state["failures"])
+        self._cooldowns = copy.deepcopy(state["cooldowns"])
+        self._counters = copy.deepcopy(state["counters"])
+        return changed or state_missing
 
     def _save_state_to_storage(self) -> None:
         if not get_accounts_json_path().exists():
@@ -107,6 +49,7 @@ class AccountManager:
 
         def mutate(data: dict[str, Any]) -> None:
             data["accountState"] = {
+                "schemaVersion": SCHEMA_VERSION,
                 "failures": self._failures,
                 "cooldowns": self._cooldowns,
                 "counters": self._counters,
@@ -191,8 +134,10 @@ class AccountManager:
                 if not accounts:
                     if dirty:
                         data["accountState"] = {
+                            "schemaVersion": SCHEMA_VERSION,
                             "failures": self._failures,
                             "cooldowns": self._cooldowns,
+                            "counters": self._counters,
                         }
                     return dirty
 
@@ -214,12 +159,26 @@ class AccountManager:
                     if not email:
                         continue
 
-                    cooldown_end = self._cooldowns.get(email, 0)
+                    scoped_cooldowns = self._cooldowns.get(email, {})
+                    if isinstance(scoped_cooldowns, (int, float)) and not isinstance(scoped_cooldowns, bool):
+                        scoped_cooldowns = {"account": float(scoped_cooldowns)}
+                    if not isinstance(scoped_cooldowns, dict):
+                        scoped_cooldowns = {}
+                    cooldown_end = max(
+                        float(scoped_cooldowns.get("account", 0) or 0),
+                        float(scoped_cooldowns.get(family, 0) or 0),
+                    )
                     if cooldown_end > current_time:
                         continue
                     if cooldown_end:
-                        self._cooldowns.pop(email, None)
-                        self._failures.pop(email, None)
+                        for scope in ("account", family):
+                            if float(scoped_cooldowns.get(scope, 0) or 0) <= current_time:
+                                scoped_cooldowns.pop(scope, None)
+                                failures = self._failures.get(email, {})
+                                if isinstance(failures, dict):
+                                    failures.pop(scope, None)
+                        if not scoped_cooldowns:
+                            self._cooldowns.pop(email, None)
                         dirty = True
 
                     if not acc.get("fingerprint"):
@@ -271,6 +230,7 @@ class AccountManager:
                         dirty = True
                     data["activeIndex"] = idx
                     state_payload = {
+                        "schemaVersion": SCHEMA_VERSION,
                         "failures": self._failures,
                         "cooldowns": self._cooldowns,
                         "counters": self._counters,
@@ -283,6 +243,7 @@ class AccountManager:
                     return dirty
                 if dirty:
                     data["accountState"] = {
+                        "schemaVersion": SCHEMA_VERSION,
                         "failures": self._failures,
                         "cooldowns": self._cooldowns,
                         "counters": self._counters,
@@ -329,12 +290,16 @@ class AccountManager:
             except (TypeError, ValueError):
                 return 0
 
-    def _record_failure(self, email: str, retry_after_seconds: float | None = None) -> float:
-        previous_failures = self._failures.get(email, 0)
+    def _record_failure(self, email: str, retry_after_seconds: float | None = None, *, scope: str = "account") -> float:
+        scoped_failures = self._failures.setdefault(email, {})
+        if not isinstance(scoped_failures, dict):
+            scoped_failures = {"account": scoped_failures}
+            self._failures[email] = scoped_failures
+        previous_failures = scoped_failures.get(scope, 0)
         if not isinstance(previous_failures, int) or isinstance(previous_failures, bool) or previous_failures < 0:
             previous_failures = 0
-        self._failures[email] = previous_failures + 1
-        backoff_factor = min(self._failures[email], 5)
+        scoped_failures[scope] = previous_failures + 1
+        backoff_factor = min(scoped_failures[scope], 5)
         cooldown_duration = 120 * (2 ** (backoff_factor - 1))
         try:
             retry_after = (
@@ -346,7 +311,11 @@ class AccountManager:
             retry_after = 0.0
         if math.isfinite(retry_after) and retry_after > 0:
             cooldown_duration = max(cooldown_duration, min(retry_after, 86_400.0))
-        self._cooldowns[email] = time.time() + cooldown_duration
+        scoped_cooldowns = self._cooldowns.setdefault(email, {})
+        if not isinstance(scoped_cooldowns, dict):
+            scoped_cooldowns = {"account": scoped_cooldowns}
+            self._cooldowns[email] = scoped_cooldowns
+        scoped_cooldowns[scope] = time.time() + cooldown_duration
         return cooldown_duration
 
     def mark_failure(
@@ -361,7 +330,13 @@ class AccountManager:
         with self._lock:
             if not email:
                 return
-            cooldown_duration = self._record_failure(email, retry_after_seconds)
+            normalized_reason = str(reason).lower()
+            family_limited = status_code == 429 or any(
+                marker in normalized_reason
+                for marker in ("rate limit", "quota", "resource_exhausted")
+            )
+            scope = self._model_family(model) if family_limited and model else "account"
+            cooldown_duration = self._record_failure(email, retry_after_seconds, scope=scope)
             self._save_state_to_storage()
             
             # Print warning
@@ -471,6 +446,7 @@ class AccountManager:
                         dirty = True
                 if dirty:
                     data["accountState"] = {
+                        "schemaVersion": SCHEMA_VERSION,
                         "failures": self._failures,
                         "cooldowns": self._cooldowns,
                         "counters": self._counters,
@@ -480,8 +456,16 @@ class AccountManager:
             update_accounts(mutate)
             return summary
 
-    def clear_failures(self, email: str) -> None:
+    def clear_failures(self, email: str, family: str | None = None) -> None:
         with self._lock:
-            self._failures.pop(email, None)
-            self._cooldowns.pop(email, None)
+            if family is None:
+                self._failures.pop(email, None)
+                self._cooldowns.pop(email, None)
+            else:
+                for state in (self._failures, self._cooldowns):
+                    scoped = state.get(email)
+                    if isinstance(scoped, dict):
+                        scoped.pop(family, None)
+                        if not scoped:
+                            state.pop(email, None)
             self._save_state_to_storage()
