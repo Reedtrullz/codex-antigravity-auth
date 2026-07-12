@@ -31,7 +31,7 @@ class TestKeyInitialization(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with patch("codex_antigravity_auth.storage.get_codex_home", return_value=Path(tmp)):
-                with patch("codex_antigravity_auth.storage.fcntl", None):
+                with patch("codex_antigravity_auth.secure_store.fcntl", None):
                     with patch("codex_antigravity_auth.storage.keyring.get_password", side_effect=get_password):
                         with patch("codex_antigravity_auth.storage.keyring.set_password", side_effect=set_password):
                             with ThreadPoolExecutor(max_workers=2) as pool:

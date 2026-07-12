@@ -6,26 +6,14 @@ import keyring
 import base64
 import hashlib
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 from cryptography.fernet import Fernet, InvalidToken
 from .constants import ANTIGRAVITY_ACCOUNTS_FILE, get_codex_home
 from .account_state import SCHEMA_VERSION, migrate_account_state
-from .secure_store import SecureStore
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows fallback keeps imports working.
-    fcntl = None
-
-try:
-    import msvcrt
-except ImportError:  # pragma: no cover - only available on Windows.
-    msvcrt = None
+from .secure_store import SecureStore, file_lock as _exclusive_file_lock
 
 _accounts_lock = threading.RLock()
-_file_lock_thread_lock = threading.RLock()
 _DEFAULT_GET_CODEX_HOME = get_codex_home
 
 
@@ -88,30 +76,6 @@ def _ensure_private_file(path: Path) -> None:
             os.chmod(path, 0o600)
 
 
-@contextmanager
-def _exclusive_file_lock(path: Path):
-    with _file_lock_thread_lock:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = path.with_name(f".{path.name}.lock")
-        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            os.chmod(lock_path, 0o600)
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            elif msvcrt is not None:
-                if os.fstat(fd).st_size == 0:
-                    os.write(fd, b"\0")
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-            yield
-        finally:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            elif msvcrt is not None:
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-            os.close(fd)
-
 def _normalize_fernet_key(secret: str) -> str:
     try:
         Fernet(secret.encode("utf-8"))
@@ -142,19 +106,19 @@ def _get_encryption_key() -> str:
     if env_key:
         return _normalize_fernet_key(env_key)
 
-    try:
-        initialization_lock = get_codex_home() / "antigravity-storage-key-init"
-        with _exclusive_file_lock(initialization_lock):
+    initialization_lock = get_codex_home() / "antigravity-storage-key-init"
+    with _exclusive_file_lock(initialization_lock):
+        try:
             key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME)
             if not key:
                 candidate = Fernet.generate_key().decode("utf-8")
                 keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME, candidate)
                 key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME) or candidate
             return key
-    except Exception:
-        # Headless systems may not have a usable keyring. Use a generated,
-        # machine-local key instead of a source-known static key.
-        return _get_file_fallback_key()
+        except Exception:
+            # Headless systems may not have a usable keyring. Use a generated,
+            # machine-local key instead of a source-known static key.
+            return _get_file_fallback_key()
 
 
 def _peek_encryption_key() -> str | None:
@@ -295,9 +259,13 @@ def decrypt_payload(encrypted_bytes: bytes) -> str:
     return fernet.decrypt(encrypted_bytes).decode("utf-8")
 
 def get_accounts_json_path() -> Path:
-    p = Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    p = accounts_json_path_read_only()
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def accounts_json_path_read_only() -> Path:
+    return Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
 
 
 def _load_secure_json_unlocked(
@@ -435,7 +403,7 @@ def load_accounts() -> dict[str, Any]:
 
 
 def load_accounts_read_only() -> dict[str, Any]:
-    path = Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    path = accounts_json_path_read_only()
     return load_secure_json_file_read_only(
         path,
         default_accounts_data,

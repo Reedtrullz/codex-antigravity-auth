@@ -59,8 +59,8 @@ class TestRegressionFixes(unittest.TestCase):
                 },
             },
         }
-        with patch("codex_antigravity_auth.server.load_accounts", return_value=account_state):
-            with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
+        with patch("codex_antigravity_auth.server.load_accounts_read_only", return_value=account_state):
+            with patch("codex_antigravity_auth.server.all_provider_configs_read_only", return_value={}):
                 response = TestClient(app).get("/health")
 
         self.assertEqual(response.status_code, 200)
@@ -77,7 +77,7 @@ class TestRegressionFixes(unittest.TestCase):
             return {}
 
         with patch("codex_antigravity_auth.server.MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS", 0.01):
-            with patch("codex_antigravity_auth.server.all_provider_configs", side_effect=slow_provider_configs):
+            with patch("codex_antigravity_auth.server.all_provider_configs_read_only", side_effect=slow_provider_configs):
                 response = TestClient(app).get("/health")
 
         self.assertEqual(response.status_code, 200)
@@ -165,7 +165,7 @@ class TestRegressionFixes(unittest.TestCase):
 
         self.assertEqual(fallback_parsed[0].display_name, "Foo # Bar")
 
-    def test_responses_endpoint_schedules_refresh_ahead_without_blocking_route(self):
+    def test_responses_endpoint_rejects_unknown_route_before_scheduling_refresh(self):
         with patch("codex_antigravity_auth.server.schedule_refresh_accounts_ahead", return_value=True) as mock_schedule:
             with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
                 response = TestClient(app).post(
@@ -174,7 +174,7 @@ class TestRegressionFixes(unittest.TestCase):
                 )
 
         self.assertEqual(response.status_code, 404)
-        self.assertTrue(any(not call.args and not call.kwargs for call in mock_schedule.call_args_list))
+        mock_schedule.assert_not_called()
 
     def test_byok_stream_writes_terminal_request_log_record(self):
         provider = {
@@ -1147,7 +1147,7 @@ class TestRegressionFixes(unittest.TestCase):
 
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
             with patch("codex_antigravity_auth.server.account_manager.release_account"):
-                with patch("codex_antigravity_auth.server.account_manager.record_request"):
+                with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
                     with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                         response = TestClient(app).post(
                             "/v1/responses",

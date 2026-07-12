@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from codex_antigravity_auth.openai_transport import (
     ChatResponseAccumulator,
+    NativeResponsesStreamAdapter,
     OpenAICompatibleTransport,
     TransportConfigError,
 )
@@ -124,6 +125,16 @@ class TestOpenAIResponseTranslation(unittest.TestCase):
                 display_model="xai-oauth:model",
             )
 
+    def test_native_responses_rejects_structurally_empty_output_items(self):
+        for output in ([{}], [{"type": "message", "content": []}], [{"type": "function_call"}]):
+            with self.subTest(output=output):
+                response = self.transport.validate_native_response(
+                    {"object": "response", "status": "completed", "output": output},
+                    display_model="xai-oauth:model",
+                )
+                self.assertEqual(response["status"], "failed")
+                self.assertEqual(response["error"]["code"], "empty_response")
+
 
 class TestChatResponseAccumulator(unittest.TestCase):
     def test_clean_eof_without_done_is_failed(self):
@@ -235,6 +246,43 @@ class TestOpenAIStreamingRoute(unittest.IsolatedAsyncioTestCase):
 
 
 class TestNativeResponsesRoute(unittest.IsolatedAsyncioTestCase):
+    def _adapter_events(self, chunks):
+        adapter = NativeResponsesStreamAdapter(display_model="xai-oauth:model")
+        events = []
+        for chunk in chunks:
+            events.extend(adapter.consume_bytes(chunk))
+        events.extend(adapter.finish())
+        return events
+
+    def test_native_stream_empty_and_unterminated_inputs_fail_once(self):
+        cases = {
+            "empty": [],
+            "done_without_terminal": [b"data: [DONE]\n\n"],
+            "partial_eof": [
+                b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+            ],
+        }
+        for name, chunks in cases.items():
+            with self.subTest(name=name):
+                events = self._adapter_events(chunks)
+                terminal = [event for event in events if event["type"].startswith("response.") and event["type"] in {"response.completed", "response.incomplete", "response.failed"}]
+                self.assertEqual([event["type"] for event in terminal], ["response.failed"])
+                self.assertEqual(terminal[0]["response"]["error"]["code"], "missing_terminal_signal")
+
+    def test_native_stream_duplicate_terminal_becomes_one_failure(self):
+        completed = b'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}\n\n'
+        events = self._adapter_events([completed, completed, b"data: [DONE]\n\n"])
+        terminal = [event for event in events if event["type"] in {"response.completed", "response.incomplete", "response.failed"}]
+        self.assertEqual([event["type"] for event in terminal], ["response.failed"])
+        self.assertEqual(terminal[0]["response"]["error"]["code"], "duplicate_terminal")
+
+    def test_native_stream_valid_terminal_rewrites_display_model(self):
+        completed = b'data: {"type":"response.completed","response":{"status":"completed","model":"provider-model","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}\n\n'
+        events = self._adapter_events([completed, b"data: [DONE]\n\n"])
+        terminal = [event for event in events if event["type"] == "response.completed"]
+        self.assertEqual(len(terminal), 1)
+        self.assertEqual(terminal[0]["response"]["model"], "xai-oauth:model")
+
     async def test_xai_native_empty_completion_is_failed(self):
         from codex_antigravity_auth.server import create_xai_oauth_response
 

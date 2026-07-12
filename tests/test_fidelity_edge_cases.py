@@ -1,5 +1,7 @@
 import unittest
 import time
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 from codex_antigravity_auth.accounts import AccountManager
 from codex_antigravity_auth.transform import resolve_backend_model
@@ -57,18 +59,22 @@ class TestTransformationEdgeCases(unittest.TestCase):
         manager = AccountManager()
         email = "fail-acc@gmail.com"
 
-        with patch.object(manager, "_save_state_to_storage"):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch(
+                "codex_antigravity_auth.accounts.get_accounts_json_path",
+                return_value=Path(tmp) / "missing.json",
+            ):
             # Mark failure once
-            manager.mark_failure(email, "Simulated network failure")
-            cd1 = manager._cooldowns[email]["account"]
-            duration1 = cd1 - time.time()
-            self.assertTrue(110 <= duration1 <= 130, f"Expected ~120s cooldown, got {duration1}")
+                manager.mark_failure(email, "Simulated network failure")
+                cd1 = manager._cooldowns[email]["account"]
+                duration1 = cd1 - time.time()
+                self.assertTrue(110 <= duration1 <= 130, f"Expected ~120s cooldown, got {duration1}")
 
-            # Mark failure twice
-            manager.mark_failure(email, "Simulated network failure")
-            cd2 = manager._cooldowns[email]["account"]
-            duration2 = cd2 - time.time()
-            self.assertTrue(230 <= duration2 <= 250, f"Expected ~240s cooldown, got {duration2}")
+                # Mark failure twice
+                manager.mark_failure(email, "Simulated network failure")
+                cd2 = manager._cooldowns[email]["account"]
+                duration2 = cd2 - time.time()
+                self.assertTrue(230 <= duration2 <= 250, f"Expected ~240s cooldown, got {duration2}")
 
 if __name__ == "__main__":
     unittest.main()

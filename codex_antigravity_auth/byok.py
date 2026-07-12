@@ -6,6 +6,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .constants import is_loopback_host
+from .response_protocol import ProviderCapabilities
 from .storage import (
     load_secure_json_file,
     load_secure_json_file_read_only,
@@ -23,6 +24,17 @@ PROVIDER_AUTH_MODE_API_KEY = "api_key"
 PROVIDER_AUTH_MODE_OAUTH = "oauth"
 KNOWN_PROVIDER_AUTH_MODES = {PROVIDER_AUTH_MODE_API_KEY, PROVIDER_AUTH_MODE_OAUTH}
 SUPPORTED_PROVIDER_AUTH_MODES = {PROVIDER_AUTH_MODE_API_KEY, PROVIDER_AUTH_MODE_OAUTH}
+PROVIDER_CAPABILITY_FIELDS = frozenset(
+    {
+        "native_responses",
+        "parallel_tool_calls",
+        "structured_output",
+        "stop_sequences",
+        "reasoning",
+        "streaming_usage",
+    }
+)
+PROVIDER_TOOL_CHOICE_MODES = frozenset({"auto", "none", "required", "function"})
 RESERVED_PROVIDER_HEADER_NAMES = {
     "accept-encoding",
     "authorization",
@@ -253,6 +265,55 @@ def validate_provider_auth_mode(auth_mode: Any) -> str | None:
 def provider_auth_mode(provider: dict[str, Any]) -> str:
     configured = normalize_provider_auth_mode(provider.get("authMode"))
     return configured or PROVIDER_AUTH_MODE_API_KEY
+
+
+def provider_capabilities(
+    provider: dict[str, Any], provider_model: str | None = None
+) -> ProviderCapabilities:
+    """Return the validated capability contract for one selected BYOK route."""
+
+    kind = provider.get("kind", "openai_chat")
+    defaults = {
+        "native_responses": kind == "openai_responses",
+        "parallel_tool_calls": True,
+        "structured_output": True,
+        "stop_sequences": True,
+        "reasoning": True,
+        "streaming_usage": True,
+    }
+    overrides: list[object] = [provider.get("capabilities")]
+    if provider_model is not None:
+        for model in provider.get("models", []):
+            if isinstance(model, dict) and model.get("id") == provider_model:
+                overrides.append(model.get("capabilities"))
+                break
+
+    tool_choice_modes = PROVIDER_TOOL_CHOICE_MODES
+    for raw_overrides in overrides:
+        if raw_overrides is None:
+            continue
+        if not isinstance(raw_overrides, dict):
+            raise ValueError("provider capabilities must be an object")
+        unknown = set(raw_overrides) - PROVIDER_CAPABILITY_FIELDS - {"tool_choice_modes"}
+        if unknown:
+            raise ValueError(f"unknown provider capability: {sorted(unknown)[0]}")
+        for field_name in PROVIDER_CAPABILITY_FIELDS:
+            if field_name not in raw_overrides:
+                continue
+            value = raw_overrides[field_name]
+            if not isinstance(value, bool):
+                raise ValueError(f"{field_name} must be a boolean")
+            defaults[field_name] = value
+        if "tool_choice_modes" in raw_overrides:
+            modes = raw_overrides["tool_choice_modes"]
+            if not isinstance(modes, list) or not modes or not all(isinstance(mode, str) for mode in modes):
+                raise ValueError("tool_choice_modes must be a non-empty list of strings")
+            normalized_modes = frozenset(modes)
+            if not normalized_modes <= PROVIDER_TOOL_CHOICE_MODES:
+                raise ValueError("tool_choice_modes contains an unsupported mode")
+            tool_choice_modes = normalized_modes
+
+    return ProviderCapabilities(**defaults, tool_choice_modes=tool_choice_modes)
 
 
 def provider_oauth_unsupported_message(provider_id: str) -> str:

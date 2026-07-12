@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
-from typing import Any
+import time
+from typing import Any, AsyncIterator
 import uuid
+
+import httpx
 
 from .byok import (
     resolve_api_key,
@@ -18,8 +22,10 @@ from .response_protocol import (
     ProviderCapabilities,
     ProviderResult,
     ProviderTerminal,
+    ResponseEventBuilder,
     TerminalKind,
     classify_terminal,
+    meaningful_output_items,
     normalize_usage,
     refusal_item,
 )
@@ -209,8 +215,15 @@ class ChatResponseAccumulator:
 
 
 class OpenAICompatibleTransport:
-    def __init__(self, *, timeout: float, capabilities: ProviderCapabilities | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        timeout: float,
+        capabilities: ProviderCapabilities | None = None,
+        client_factory: Any = httpx.AsyncClient,
+    ) -> None:
         self.timeout = timeout
+        self.client_factory = client_factory
         self.capabilities = capabilities or ProviderCapabilities(
             native_responses=False,
             parallel_tool_calls=True,
@@ -327,6 +340,220 @@ class OpenAICompatibleTransport:
         )
         return ProviderResult(output=tuple(output), usage=normalized_usage, terminal=terminal)
 
+    @staticmethod
+    def _failed_result(code: str, message: str) -> ProviderResult:
+        return ProviderResult(
+            output=(),
+            usage=normalize_usage(),
+            terminal=ProviderTerminal(
+                TerminalKind.FAILED,
+                code,
+                error_code=code,
+                error_message=message,
+            ),
+        )
+
+    async def stream_chat_events(
+        self,
+        prepared: PreparedOpenAIRequest,
+        *,
+        response_id: str,
+        display_model: str,
+    ) -> AsyncIterator[dict[str, Any] | str]:
+        """Execute and normalize one Chat Completions SSE request."""
+
+        builder = ResponseEventBuilder(
+            response_id=response_id,
+            model=display_model,
+            created_at=int(time.time()),
+        )
+        accumulator = ChatResponseAccumulator()
+        tool_calls: dict[int, dict[str, str]] = {}
+        tool_seen_order: list[int] = []
+        text_active = False
+        reasoning_active = False
+        terminal_emitted = False
+        provider_done = False
+        yield builder.created()
+
+        async def fail(code: str, message: str) -> AsyncIterator[dict[str, Any] | str]:
+            nonlocal terminal_emitted
+            if reasoning_active:
+                for event in builder.finish_reasoning():
+                    yield event
+            if text_active:
+                for event in builder.finish_text():
+                    yield event
+            yield builder.error(code, message)
+            yield builder.terminal(self._failed_result(code, message))
+            terminal_emitted = True
+            yield builder.done_marker()
+
+        buffer = ""
+        try:
+            async with self.client_factory(timeout=prepared.timeout) as client:
+                async with client.stream(
+                    "POST",
+                    prepared.url,
+                    json=prepared.payload,
+                    headers=prepared.headers,
+                ) as response:
+                    if response.status_code != 200:
+                        async for event in fail(
+                            "backend_error",
+                            f"Provider returned HTTP {response.status_code}.",
+                        ):
+                            yield event
+                        return
+                    async for chunk in response.aiter_text():
+                        buffer += chunk
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            stripped = line.strip()
+                            if not stripped or not stripped.startswith("data:"):
+                                continue
+                            data = stripped[5:].strip()
+                            if data == "[DONE]":
+                                if provider_done:
+                                    async for event in fail(
+                                        "duplicate_done",
+                                        "The provider emitted [DONE] more than once.",
+                                    ):
+                                        yield event
+                                    return
+                                provider_done = True
+                                accumulator.mark_done()
+                                continue
+                            if provider_done:
+                                async for event in fail(
+                                    "output_after_done",
+                                    "The provider emitted output after [DONE].",
+                                ):
+                                    yield event
+                                return
+                            try:
+                                payload = json.loads(data)
+                            except json.JSONDecodeError:
+                                async for event in fail(
+                                    "invalid_stream_chunk",
+                                    "The provider returned malformed stream JSON.",
+                                ):
+                                    yield event
+                                return
+                            if not isinstance(payload, dict):
+                                continue
+                            provider_error = payload.get("error")
+                            if isinstance(provider_error, dict):
+                                code = provider_error.get("code")
+                                async for event in fail(
+                                    code if isinstance(code, str) and code else "provider_error",
+                                    "The provider stream failed.",
+                                ):
+                                    yield event
+                                return
+                            accumulator.consume(payload)
+                            choices = payload.get("choices", [])
+                            if not isinstance(choices, list):
+                                continue
+                            for choice in choices:
+                                if not isinstance(choice, dict):
+                                    continue
+                                delta = choice.get("delta")
+                                if not isinstance(delta, dict):
+                                    continue
+                                reasoning = delta.get("reasoning_content")
+                                if isinstance(reasoning, str) and reasoning:
+                                    reasoning_active = True
+                                    for event in builder.add_reasoning_delta(reasoning):
+                                        yield event
+                                content = delta.get("content")
+                                if isinstance(content, str) and content:
+                                    text_active = True
+                                    for event in builder.add_text_delta(content):
+                                        yield event
+                                raw_calls = delta.get("tool_calls")
+                                if not isinstance(raw_calls, list):
+                                    continue
+                                for position, raw_call in enumerate(raw_calls):
+                                    if not isinstance(raw_call, dict):
+                                        continue
+                                    raw_index = raw_call.get("index", position)
+                                    if isinstance(raw_index, bool):
+                                        continue
+                                    try:
+                                        index = int(raw_index)
+                                    except (TypeError, ValueError):
+                                        continue
+                                    if index < 0:
+                                        continue
+                                    if index not in tool_calls:
+                                        tool_seen_order.append(index)
+                                    state = tool_calls.setdefault(
+                                        index,
+                                        {"call_id": "", "name": "", "arguments": ""},
+                                    )
+                                    call_id = raw_call.get("id")
+                                    if isinstance(call_id, str) and call_id:
+                                        state["call_id"] = call_id
+                                    function = raw_call.get("function")
+                                    if not isinstance(function, dict):
+                                        continue
+                                    for field in ("name", "arguments"):
+                                        fragment = function.get(field)
+                                        if isinstance(fragment, str):
+                                            state[field] += fragment
+            if buffer.strip():
+                async for event in fail(
+                    "invalid_stream_chunk",
+                    "The provider stream ended with an incomplete SSE frame.",
+                ):
+                    yield event
+                return
+        except Exception:
+            if not terminal_emitted:
+                async for event in fail("connection_error", "The provider connection failed."):
+                    yield event
+            return
+
+        result = accumulator.finalize()
+        if reasoning_active:
+            for event in builder.finish_reasoning():
+                yield event
+        if text_active:
+            for event in builder.finish_text():
+                yield event
+        refusal = next(
+            (
+                item
+                for item in result.output
+                if item.get("type") == "message"
+                and isinstance(item.get("content"), list)
+                and item["content"]
+                and isinstance(item["content"][0], dict)
+                and item["content"][0].get("type") == "refusal"
+            ),
+            None,
+        )
+        if refusal is not None:
+            for event in builder.add_output_item(refusal):
+                yield event
+        for index in tool_seen_order:
+            state = tool_calls[index]
+            if valid_function_name(state["name"]):
+                for event in builder.add_function_call(
+                    state["name"],
+                    function_call_arguments_string(state["arguments"]),
+                    call_id=state["call_id"] or None,
+                ):
+                    yield event
+        if result.terminal.kind is TerminalKind.FAILED:
+            yield builder.error(
+                result.terminal.error_code or "provider_error",
+                result.terminal.error_message or "The provider stream failed.",
+            )
+        yield builder.terminal(result)
+        yield builder.done_marker()
+
     def validate_native_response(
         self,
         payload: object,
@@ -346,7 +573,10 @@ class OpenAICompatibleTransport:
         if status is None:
             status = "completed" if output else "failed"
             response["status"] = status
-        if status == "completed" and not output:
+        meaningful_output = meaningful_output_items(output)
+        if status in {"completed", "incomplete"}:
+            response["output"] = list(meaningful_output)
+        if status == "completed" and not meaningful_output:
             response["status"] = "failed"
             response["error"] = {
                 "code": "empty_response",
@@ -360,3 +590,143 @@ class OpenAICompatibleTransport:
                 "message": "The provider request failed.",
             }
         return response
+
+
+class NativeResponsesStreamAdapter:
+    """Validate a native Responses SSE stream before exposing terminal state."""
+
+    _TERMINAL_TYPES = {"response.completed", "response.incomplete", "response.failed"}
+
+    def __init__(self, *, display_model: str) -> None:
+        self.display_model = display_model
+        self._buffer = ""
+        self._terminal_event: dict[str, Any] | None = None
+        self._terminal_emitted = False
+        self._provider_done = False
+        self._visible_output_started = False
+        self._response_id = f"resp_{uuid.uuid4().hex[:12]}"
+
+    @property
+    def visible_output_started(self) -> bool:
+        return self._visible_output_started
+
+    @property
+    def terminal_seen(self) -> bool:
+        return self._terminal_event is not None
+
+    def _failure(self, code: str, message: str) -> dict[str, Any]:
+        return {
+            "type": "response.failed",
+            "response": {
+                "id": self._response_id,
+                "object": "response",
+                "status": "failed",
+                "model": self.display_model,
+                "output": [],
+                "error": {"code": code, "message": message},
+            },
+        }
+
+    def _set_failure(self, code: str, message: str) -> None:
+        self._terminal_event = self._failure(code, message)
+
+    def _release_terminal(self) -> list[dict[str, Any]]:
+        if self._terminal_event is None or self._terminal_emitted:
+            return []
+        self._terminal_emitted = True
+        return [self._terminal_event]
+
+    def _consume_line(self, line: str) -> list[dict[str, Any]]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith(":") or not stripped.startswith("data:"):
+            return []
+        data = stripped[5:].strip()
+        if data == "[DONE]":
+            if self._provider_done:
+                self._set_failure("duplicate_done", "The provider emitted [DONE] more than once.")
+            self._provider_done = True
+            if self._terminal_event is None:
+                self._set_failure(
+                    "missing_terminal_signal",
+                    "The provider stream ended without a terminal response event.",
+                )
+            return self._release_terminal()
+        if self._provider_done:
+            self._set_failure("output_after_done", "The provider emitted output after [DONE].")
+            return self._release_terminal()
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError:
+            self._set_failure("invalid_stream_chunk", "The provider returned malformed stream JSON.")
+            return []
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            self._set_failure("invalid_stream_event", "The provider returned an invalid stream event.")
+            return []
+        event_type = event["type"]
+        if event_type in self._TERMINAL_TYPES:
+            if self._terminal_event is not None:
+                self._set_failure("duplicate_terminal", "The provider emitted more than one terminal event.")
+                return []
+            response = event.get("response")
+            if not isinstance(response, dict):
+                self._set_failure("invalid_terminal_event", "The provider returned an invalid terminal event.")
+                return []
+            expected_status = event_type.removeprefix("response.")
+            provider_status = response.get("status")
+            if provider_status is not None and provider_status != expected_status:
+                self._set_failure("invalid_terminal_event", "The provider terminal status did not match its event type.")
+                return []
+            normalized = {**response, "status": expected_status, "model": self.display_model}
+            output = response.get("output")
+            meaningful = meaningful_output_items(output) if isinstance(output, list) else ()
+            if expected_status in {"completed", "incomplete"}:
+                if meaningful:
+                    normalized["output"] = list(meaningful)
+                elif self._visible_output_started:
+                    normalized.setdefault("output", [])
+                else:
+                    self._set_failure("empty_response", "The provider returned no meaningful output.")
+                    return []
+            if expected_status == "failed":
+                error = response.get("error")
+                code = error.get("code") if isinstance(error, dict) else None
+                normalized["error"] = {
+                    "code": code if isinstance(code, str) and code else "provider_error",
+                    "message": "The provider request failed.",
+                }
+            normalized_type = f"response.{expected_status}"
+            self._terminal_event = {"type": normalized_type, "response": normalized}
+            return []
+        if self._terminal_event is not None:
+            self._set_failure("output_after_terminal", "The provider emitted output after its terminal event.")
+            return []
+        if event_type.startswith("response.output") or event_type.startswith("response.reasoning"):
+            self._visible_output_started = True
+        if isinstance(event.get("response"), dict):
+            event = dict(event)
+            event["response"] = {**event["response"], "model": self.display_model}
+        return [event]
+
+    def consume_bytes(self, chunk: bytes) -> list[dict[str, Any]]:
+        if not isinstance(chunk, bytes):
+            self._set_failure("invalid_stream_chunk", "The provider returned a non-byte stream chunk.")
+            return []
+        self._buffer += chunk.decode("utf-8", errors="replace")
+        events: list[dict[str, Any]] = []
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            events.extend(self._consume_line(line))
+        return events
+
+    def finish(self) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        if self._buffer.strip():
+            events.extend(self._consume_line(self._buffer))
+        self._buffer = ""
+        if self._terminal_event is None:
+            self._set_failure(
+                "missing_terminal_signal",
+                "The provider stream ended without a terminal response event.",
+            )
+        events.extend(self._release_terminal())
+        return events

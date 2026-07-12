@@ -3,6 +3,7 @@ import time
 import tempfile
 from pathlib import Path
 from codex_antigravity_auth.accounts import AccountManager
+from codex_antigravity_auth.response_protocol import AttemptOutcome
 from unittest.mock import patch
 
 class TestAccounts(unittest.TestCase):
@@ -16,7 +17,49 @@ class TestAccounts(unittest.TestCase):
             "activeIndex": 0,
             "activeIndexByFamily": {"claude": 0, "gemini": 0}
         }
+
+    @staticmethod
+    def capture_mutation_results(mock_update, data):
+        mutation_results = []
+
+        def update(mutator):
+            result = mutator(data)
+            mutation_results.append(result)
+            return result
+
+        mock_update.side_effect = update
+        return mutation_results
         
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_record_attempt_is_one_authoritative_state_transition(self, mock_update):
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+        with tempfile.TemporaryDirectory() as tmp:
+            accounts_file = Path(tmp) / "antigravity-accounts.json"
+            accounts_file.write_text("{}", encoding="utf-8")
+            with patch(
+                "codex_antigravity_auth.accounts.get_accounts_json_path",
+                return_value=accounts_file,
+            ):
+                manager = AccountManager()
+                manager.record_attempt(
+                    "primary@gmail.com",
+                    "claude-3.5-sonnet",
+                    AttemptOutcome(
+                        scope="family",
+                        category="rate_limit",
+                        retry_after_seconds=60,
+                    ),
+                    usage={"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                )
+
+        state = self.accounts_data["accountState"]
+        counter = state["counters"]["primary@gmail.com"]["claude"]
+        self.assertEqual(counter["total_requests"], 1)
+        self.assertEqual(counter["failures"], 1)
+        self.assertEqual(counter["rate_limits"], 1)
+        self.assertEqual(counter["total_tokens"], 5)
+        self.assertEqual(state["failures"]["primary@gmail.com"]["claude"], 1)
+
     @patch("codex_antigravity_auth.accounts.update_accounts")
     def test_account_selection_happy_path(self, mock_update):
         mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
@@ -26,6 +69,73 @@ class TestAccounts(unittest.TestCase):
         selected = manager.select_active_account("gemini-3.5-flash-high")
         self.assertIsNotNone(selected)
         self.assertEqual(selected["email"], "primary@gmail.com")
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_unchanged_account_selection_skips_persisted_store_write(self, mock_update):
+        self.accounts_data["accountState"] = {
+            "schemaVersion": 2,
+            "failures": {},
+            "cooldowns": {},
+            "counters": {},
+        }
+        for account in self.accounts_data["accounts"]:
+            account["fingerprint"] = {"deviceId": account["email"]}
+        mutation_results = self.capture_mutation_results(mock_update, self.accounts_data)
+
+        selected = AccountManager().select_active_account("gemini-3.5-flash-high")
+
+        self.assertEqual(selected["email"], "primary@gmail.com")
+        self.assertEqual(mutation_results, [False])
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_account_selection_persists_real_state_change(self, mock_update):
+        self.accounts_data["accountState"] = {
+            "schemaVersion": 2,
+            "failures": {},
+            "cooldowns": {},
+            "counters": {},
+        }
+        mutation_results = self.capture_mutation_results(mock_update, self.accounts_data)
+
+        selected = AccountManager().select_active_account("gemini-3.5-flash-high")
+
+        self.assertEqual(selected["email"], "primary@gmail.com")
+        self.assertIn("fingerprint", selected)
+        self.assertEqual(mutation_results, [True])
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_empty_normalized_account_store_skips_persisted_write(self, mock_update):
+        data = {
+            "accounts": [],
+            "activeIndex": 0,
+            "activeIndexByFamily": {"claude": 0, "gemini": 0},
+            "accountState": {
+                "schemaVersion": 2,
+                "failures": {},
+                "cooldowns": {},
+                "counters": {},
+            },
+        }
+        mutation_results = self.capture_mutation_results(mock_update, data)
+
+        self.assertIsNone(AccountManager().select_active_account("gemini-3.5-flash-high"))
+        self.assertEqual(mutation_results, [False])
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_account_selection_persists_legacy_state_migration(self, mock_update):
+        self.accounts_data["accountState"] = {
+            "failures": {"primary@gmail.com": 1},
+            "cooldowns": {},
+        }
+        for account in self.accounts_data["accounts"]:
+            account["fingerprint"] = {"deviceId": account["email"]}
+        mutation_results = self.capture_mutation_results(mock_update, self.accounts_data)
+
+        selected = AccountManager().select_active_account("gemini-3.5-flash-high")
+
+        self.assertEqual(selected["email"], "primary@gmail.com")
+        self.assertEqual(self.accounts_data["accountState"]["schemaVersion"], 2)
+        self.assertEqual(mutation_results, [True])
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
     def test_acquire_spreads_concurrent_requests_across_accounts(self, mock_update):
@@ -70,6 +180,18 @@ class TestAccounts(unittest.TestCase):
         manager.release_account("missing@gmail.com")
 
         self.assertEqual(manager.in_flight_count("missing@gmail.com"), 0)
+
+    def test_refresh_ahead_missing_store_does_not_create_parent_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "clean-home" / ".codex" / "accounts.json"
+            with patch(
+                "codex_antigravity_auth.accounts.accounts_json_path_read_only",
+                return_value=path,
+            ):
+                summary = AccountManager().refresh_expiring_accounts()
+
+        self.assertEqual(summary, {"checked": 0, "refreshed": 0, "failed": 0})
+        self.assertFalse(path.parent.exists())
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
     def test_account_rotation_on_failure_cooldown(self, mock_update):
@@ -275,9 +397,17 @@ class TestAccounts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             accounts_file = Path(tmp) / "antigravity-accounts.json"
             accounts_file.write_text("{}", encoding="utf-8")
-            with patch("codex_antigravity_auth.accounts.get_accounts_json_path", return_value=accounts_file):
-                manager = AccountManager()
-                summary = manager.refresh_expiring_accounts(window_seconds=300)
+            with (
+                patch(
+                    "codex_antigravity_auth.accounts.accounts_json_path_read_only",
+                    return_value=accounts_file,
+                ),
+                patch(
+                    "codex_antigravity_auth.accounts.get_accounts_json_path",
+                    return_value=accounts_file,
+                ),
+            ):
+                summary = AccountManager().refresh_expiring_accounts(window_seconds=300)
 
         self.assertEqual(summary["checked"], 2)
         self.assertEqual(summary["refreshed"], 1)

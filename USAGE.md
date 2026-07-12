@@ -55,7 +55,7 @@ The request JSONL log is capped and rotated at `10 MiB`. It records request ids,
 
 `codex-antigravity doctor --codex-ready --json` includes read-only account/provider store format and migration status, account-state schema version, observed service state, and provider capability mismatches under `diagnostics`. These checks do not migrate stores or rewrite config. See `docs/refactor-migration.md` before upgrading or rolling back a store used by an older package.
 
-Google account selection is sticky for sequential requests but load-aware for concurrent ones: request handlers acquire an account, prefer the lowest process-local in-flight count among non-cooling accounts, and release it when non-streaming responses finish or streaming responses end/disconnect.
+Google account selection is sticky for sequential requests but load-aware for concurrent ones. `AccountState` owns family/account cooldowns, process-local leases, attempt counters, and persisted schema-version `2` state; request handlers release every lease when non-streaming responses finish or streaming responses end/disconnect.
 
 To expose a local model definition in Codex's model picker, add an overlay entry:
 

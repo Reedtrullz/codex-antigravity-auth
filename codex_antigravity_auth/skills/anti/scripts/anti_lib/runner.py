@@ -9,4 +9,3 @@ def presentable_result(
     """Sanitize all model-controlled fields immediately before presentation."""
     safe = sanitizer({"text": text, "caveats": caveats, "metadata": metadata})
     return str(safe["text"]), list(safe["caveats"]), dict(safe["metadata"])
-

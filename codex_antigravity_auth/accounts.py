@@ -1,21 +1,38 @@
-import math
-import time
-import threading
 import copy
-from typing import Any
-from .account_state import SCHEMA_VERSION, migrate_account_state
-from .storage import load_accounts, get_accounts_json_path, update_accounts
-from .oauth import refresh_access_token, token_expires_in_seconds
+import math
+import threading
+import time
+from typing import Any, Callable
+
+from .account_state import AccountState
 from .fingerprint import generate_fingerprint
+from .oauth import refresh_access_token, token_expires_in_seconds
 from .redaction import redact_secret_text
+from .response_protocol import AttemptOutcome
+from .storage import (
+    accounts_json_path_read_only,
+    get_accounts_json_path,
+    load_accounts,
+    update_accounts,
+)
+
 
 class AccountManager:
-    def __init__(self):
+    """Compatibility facade over the production AccountState owner."""
+
+    def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._failures = {} # email -> scoped failure counts
-        self._cooldowns = {} # email -> scoped cooldown end timestamps
-        self._counters = {} # email -> family -> sanitized usage counters
-        self._in_flight = {} # email -> process-local request count
+        self._in_flight: dict[str, int] = {}
+        self._runtime_data: dict[str, Any] = {"accounts": []}
+        self._state_owner = AccountState(
+            self._runtime_data, now=time.time, in_flight=self._in_flight
+        )
+        self._bind_compatibility_views()
+
+    def _bind_compatibility_views(self) -> None:
+        self._failures = self._state_owner.state["failures"]
+        self._cooldowns = self._state_owner.state["cooldowns"]
+        self._counters = self._state_owner.state["counters"]
 
     def _sync_state_from_storage(self, data: dict[str, Any]) -> bool:
         state_missing = "accountState" not in data
@@ -29,81 +46,40 @@ class AccountManager:
                 for email, value in self._cooldowns.items()
             }
             data["accountState"] = {
-                "schemaVersion": SCHEMA_VERSION,
-                "failures": copy.deepcopy(failures),
-                "cooldowns": copy.deepcopy(cooldowns),
-                "counters": copy.deepcopy(self._counters),
-            }
-        migrated, changed = migrate_account_state(data, now=time.time())
-        data.clear()
-        data.update(migrated)
-        state = data["accountState"]
-        self._failures = copy.deepcopy(state["failures"])
-        self._cooldowns = copy.deepcopy(state["cooldowns"])
-        self._counters = copy.deepcopy(state["counters"])
-        return changed or state_missing
-
-    def _save_state_to_storage(self) -> None:
-        if not get_accounts_json_path().exists():
-            return
-
-        def mutate(data: dict[str, Any]) -> None:
-            data["accountState"] = {
-                "schemaVersion": SCHEMA_VERSION,
-                "failures": self._failures,
-                "cooldowns": self._cooldowns,
+                "schemaVersion": 2,
+                "failures": failures,
+                "cooldowns": cooldowns,
                 "counters": self._counters,
             }
+        self._runtime_data = data
+        self._state_owner = AccountState(data, now=time.time, in_flight=self._in_flight)
+        self._bind_compatibility_views()
+        return state_missing or self._state_owner.migration_changed
+
+    def _mutate_state(self, mutation: Callable[[AccountState], None]) -> None:
+        if not get_accounts_json_path().exists():
+            mutation(self._state_owner)
+            self._bind_compatibility_views()
+            return
+
+        invoked = False
+
+        def mutate(data: dict[str, Any]) -> bool:
+            nonlocal invoked
+            invoked = True
+            self._sync_state_from_storage(data)
+            mutation(self._state_owner)
+            self._bind_compatibility_views()
+            return True
 
         update_accounts(mutate)
-
-    @staticmethod
-    def _sanitize_counter(raw_counter: dict[str, Any]) -> dict[str, Any]:
-        sanitized: dict[str, Any] = {}
-        integer_fields = (
-            "total_requests",
-            "successes",
-            "failures",
-            "rate_limits",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-        )
-        for field in integer_fields:
-            value = raw_counter.get(field, 0)
-            if isinstance(value, bool):
-                value = 0
-            try:
-                parsed = int(value)
-            except (TypeError, ValueError):
-                parsed = 0
-            sanitized[field] = max(0, parsed)
-        for field in ("last_success", "last_failure", "last_failure_class"):
-            value = raw_counter.get(field)
-            if isinstance(value, str) and not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
-                sanitized[field] = redact_secret_text(value)[:200]
-        return sanitized
+        if not invoked:
+            mutation(self._state_owner)
+            self._bind_compatibility_views()
 
     @staticmethod
     def _model_family(model: str) -> str:
         return "claude" if "claude" in str(model).lower() else "gemini"
-
-    def _counter_for(self, email: str, family: str) -> dict[str, Any]:
-        account_counters = self._counters.setdefault(email, {})
-        counter = account_counters.setdefault(
-            family,
-            {
-                "total_requests": 0,
-                "successes": 0,
-                "failures": 0,
-                "rate_limits": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
-            },
-        )
-        account_counters[family] = self._sanitize_counter(counter)
-        return account_counters[family]
 
     @staticmethod
     def _normalize_expires_at(value: Any) -> float:
@@ -113,151 +89,77 @@ class AccountManager:
             return 0
         if not math.isfinite(expires_at):
             return 0
-        # Epoch milliseconds are currently around 1.7e12; epoch seconds around 1.7e9.
         if expires_at > 10_000_000_000:
-            expires_at = expires_at / 1000
+            expires_at /= 1000
         return expires_at
 
     def get_accounts(self) -> list[dict[str, Any]]:
         with self._lock:
-            data = load_accounts()
-            return data.get("accounts", [])
+            return load_accounts().get("accounts", [])
 
     def _select_active_account(self, model: str, *, acquire: bool) -> dict[str, Any] | None:
         with self._lock:
             selected: dict[str, Any] | None = None
+            family = self._model_family(model)
 
             def mutate(data: dict[str, Any]) -> bool:
                 nonlocal selected
                 dirty = self._sync_state_from_storage(data)
-                accounts = data.get("accounts", [])
-                if not accounts:
-                    if dirty:
-                        data["accountState"] = {
-                            "schemaVersion": SCHEMA_VERSION,
-                            "failures": self._failures,
-                            "cooldowns": self._cooldowns,
-                            "counters": self._counters,
-                        }
-                    return dirty
-
-                family = "claude" if "claude" in model.lower() else "gemini"
-                family_map = data.setdefault("activeIndexByFamily", {"claude": 0, "gemini": 0})
-
-                # Prefer the sticky active index when load is tied, but spread
-                # concurrent requests across accounts with fewer in-flight calls.
-                start_index = family_map.get(family, 0)
-                if not isinstance(start_index, int) or start_index < 0 or start_index >= len(accounts):
-                    start_index = 0
-
-                current_time = time.time()
-                candidates: list[tuple[int, int, int, dict[str, Any], bool]] = []
-                for i in range(len(accounts)):
-                    idx = (start_index + i) % len(accounts)
-                    acc = accounts[idx]
-                    email = acc.get("email")
-                    if not email:
-                        continue
-
-                    scoped_cooldowns = self._cooldowns.get(email, {})
-                    if isinstance(scoped_cooldowns, (int, float)) and not isinstance(scoped_cooldowns, bool):
-                        scoped_cooldowns = {"account": float(scoped_cooldowns)}
-                    if not isinstance(scoped_cooldowns, dict):
-                        scoped_cooldowns = {}
-                    cooldown_end = max(
-                        float(scoped_cooldowns.get("account", 0) or 0),
-                        float(scoped_cooldowns.get(family, 0) or 0),
+                while True:
+                    active_index_before = data.get("activeIndex")
+                    family_index_before = data.get("activeIndexByFamily", {}).get(family)
+                    cooldowns_before = copy.deepcopy(self._state_owner.state["cooldowns"])
+                    lease = (
+                        self._state_owner.acquire(family)
+                        if acquire
+                        else self._state_owner.select(family)
                     )
-                    if cooldown_end > current_time:
-                        continue
-                    if cooldown_end:
-                        for scope in ("account", family):
-                            if float(scoped_cooldowns.get(scope, 0) or 0) <= current_time:
-                                scoped_cooldowns.pop(scope, None)
-                                failures = self._failures.get(email, {})
-                                if isinstance(failures, dict):
-                                    failures.pop(scope, None)
-                        if not scoped_cooldowns:
-                            self._cooldowns.pop(email, None)
+                    dirty = dirty or (
+                        data.get("activeIndex") != active_index_before
+                        or data.get("activeIndexByFamily", {}).get(family) != family_index_before
+                        or self._state_owner.state["cooldowns"] != cooldowns_before
+                    )
+                    if lease is None:
+                        return dirty
+                    account = lease.account
+                    email = str(account.get("email", ""))
+                    if not account.get("fingerprint"):
+                        account["fingerprint"] = generate_fingerprint()
                         dirty = True
-
-                    if not acc.get("fingerprint"):
-                        acc["fingerprint"] = generate_fingerprint()
+                    raw_expires_at = account.get("expiresAt", 0)
+                    expires_at = self._normalize_expires_at(raw_expires_at)
+                    if isinstance(raw_expires_at, bool) or raw_expires_at != expires_at:
+                        account["expiresAt"] = expires_at
                         dirty = True
+                    if account.get("accessToken") and expires_at >= time.time() + 300:
+                        selected = account
+                        return dirty
 
-                    expires_at = self._normalize_expires_at(acc.get("expiresAt", 0))
-                    if expires_at != acc.get("expiresAt", 0):
-                        acc["expiresAt"] = expires_at
-                        dirty = True
-                    needs_refresh = not acc.get("accessToken") or expires_at < current_time + 300
-
+                    refresh_token = account.get("refreshToken")
                     try:
-                        in_flight = int(self._in_flight.get(str(email), 0))
-                    except (TypeError, ValueError):
-                        in_flight = 0
-                    candidates.append((max(0, in_flight), i, idx, acc, needs_refresh))
-
-                for _in_flight, _order, idx, acc, needs_refresh in sorted(candidates, key=lambda item: (item[0], item[1])):
-                    email = acc.get("email")
-                    if not email:
-                        continue
-
-                    if needs_refresh:
-                        refresh_tok = acc.get("refreshToken")
-                        if refresh_tok:
-                            try:
-                                refreshed = refresh_access_token(refresh_tok)
-                                acc["accessToken"] = refreshed["access_token"]
-                                acc["expiresAt"] = time.time() + token_expires_in_seconds(refreshed)
-                                if refreshed.get("refresh_token"):
-                                    acc["refreshToken"] = refreshed["refresh_token"]
-                                dirty = True
-                            except Exception as e:
-                                self._record_failure(email, retry_after_seconds=None)
-                                print(f"[*] Account {email} flagged as cooling down. Reason: {redact_secret_text(f'Token refresh failed: {e}')}")
-                                dirty = True
-                                continue
-                        else:
-                            self._record_failure(email, retry_after_seconds=None)
-                            print(f"[*] Account {email} flagged as cooling down. Reason: Token expired and no refresh token is available")
-                            dirty = True
-                            continue
-
-                    if family_map.get(family) != idx:
-                        dirty = True
-                    family_map[family] = idx
-                    if data.get("activeIndex") != idx:
-                        dirty = True
-                    data["activeIndex"] = idx
-                    state_payload = {
-                        "schemaVersion": SCHEMA_VERSION,
-                        "failures": self._failures,
-                        "cooldowns": self._cooldowns,
-                        "counters": self._counters,
-                    }
-                    if self._failures or self._cooldowns or self._counters or data.get("accountState"):
-                        if data.get("accountState") != state_payload:
-                            dirty = True
-                        data["accountState"] = state_payload
-                    selected = acc
-                    return dirty
-                if dirty:
-                    data["accountState"] = {
-                        "schemaVersion": SCHEMA_VERSION,
-                        "failures": self._failures,
-                        "cooldowns": self._cooldowns,
-                        "counters": self._counters,
-                    }
-                return dirty
+                        if not refresh_token:
+                            raise RuntimeError("Token expired and no refresh token is available")
+                        refreshed = refresh_access_token(refresh_token)
+                        account["accessToken"] = refreshed["access_token"]
+                        account["expiresAt"] = time.time() + token_expires_in_seconds(refreshed)
+                        if refreshed.get("refresh_token"):
+                            account["refreshToken"] = refreshed["refresh_token"]
+                        selected = account
+                        return True
+                    except Exception as exc:
+                        if acquire:
+                            self._state_owner.release(lease)
+                        self._state_owner.apply_cooldown(
+                            email,
+                            family,
+                            AttemptOutcome(scope="account", category="auth"),
+                        )
+                        print(
+                            f"[*] Account {email} flagged as cooling down. Reason: "
+                            f"{redact_secret_text(str(exc))}"
+                        )
 
             update_accounts(mutate)
-            if acquire and selected and selected.get("email"):
-                email = str(selected["email"])
-                try:
-                    current = int(self._in_flight.get(email, 0))
-                except (TypeError, ValueError):
-                    current = 0
-                self._in_flight[email] = max(0, current) + 1
             return selected
 
     def select_active_account(self, model: str) -> dict[str, Any] | None:
@@ -270,53 +172,13 @@ class AccountManager:
         if not email:
             return
         with self._lock:
-            key = str(email)
-            try:
-                current = int(self._in_flight.get(key, 0))
-            except (TypeError, ValueError):
-                current = 0
-            next_value = max(0, current - 1)
-            if next_value:
-                self._in_flight[key] = next_value
-            else:
-                self._in_flight.pop(key, None)
+            self._state_owner.release_email(str(email))
 
     def in_flight_count(self, email: str | None) -> int:
         if not email:
             return 0
         with self._lock:
-            try:
-                return max(0, int(self._in_flight.get(str(email), 0)))
-            except (TypeError, ValueError):
-                return 0
-
-    def _record_failure(self, email: str, retry_after_seconds: float | None = None, *, scope: str = "account") -> float:
-        scoped_failures = self._failures.setdefault(email, {})
-        if not isinstance(scoped_failures, dict):
-            scoped_failures = {"account": scoped_failures}
-            self._failures[email] = scoped_failures
-        previous_failures = scoped_failures.get(scope, 0)
-        if not isinstance(previous_failures, int) or isinstance(previous_failures, bool) or previous_failures < 0:
-            previous_failures = 0
-        scoped_failures[scope] = previous_failures + 1
-        backoff_factor = min(scoped_failures[scope], 5)
-        cooldown_duration = 120 * (2 ** (backoff_factor - 1))
-        try:
-            retry_after = (
-                float(retry_after_seconds)
-                if retry_after_seconds is not None and not isinstance(retry_after_seconds, bool)
-                else 0.0
-            )
-        except (TypeError, ValueError):
-            retry_after = 0.0
-        if math.isfinite(retry_after) and retry_after > 0:
-            cooldown_duration = max(cooldown_duration, min(retry_after, 86_400.0))
-        scoped_cooldowns = self._cooldowns.setdefault(email, {})
-        if not isinstance(scoped_cooldowns, dict):
-            scoped_cooldowns = {"account": scoped_cooldowns}
-            self._cooldowns[email] = scoped_cooldowns
-        scoped_cooldowns[scope] = time.time() + cooldown_duration
-        return cooldown_duration
+            return self._state_owner.in_flight(str(email))
 
     def mark_failure(
         self,
@@ -335,12 +197,51 @@ class AccountManager:
                 marker in normalized_reason
                 for marker in ("rate limit", "quota", "resource_exhausted")
             )
-            scope = self._model_family(model) if family_limited and model else "account"
-            cooldown_duration = self._record_failure(email, retry_after_seconds, scope=scope)
-            self._save_state_to_storage()
-            
-            # Print warning
-            print(f"[*] Account {email} flagged as cooling down for {cooldown_duration}s. Reason: {redact_secret_text(reason)}")
+            family = self._model_family(model or "")
+            outcome = AttemptOutcome(
+                scope="family" if family_limited and model else "account",
+                category="rate_limit" if family_limited else "auth",
+                retry_after_seconds=(
+                    None if isinstance(retry_after_seconds, bool) else retry_after_seconds
+                ),
+            )
+            duration = 0.0
+
+            def mutation(state: AccountState) -> None:
+                nonlocal duration
+                duration = state.apply_cooldown(email, family, outcome)
+
+            self._mutate_state(mutation)
+            print(
+                f"[*] Account {email} flagged as cooling down for {duration}s. "
+                f"Reason: {redact_secret_text(reason)}"
+            )
+
+    def record_attempt(
+        self,
+        email: str,
+        model: str,
+        outcome: AttemptOutcome,
+        *,
+        status_code: int | None = None,
+        error_class: str | None = None,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
+        del status_code
+        if not email:
+            return
+        with self._lock:
+            self._mutate_state(
+                lambda state: state.record_email(
+                    email,
+                    self._model_family(model),
+                    outcome,
+                    usage=usage,
+                    error_class=(
+                        redact_secret_text(str(error_class))[:200] if error_class else None
+                    ),
+                )
+            )
 
     def record_request(
         self,
@@ -352,120 +253,60 @@ class AccountManager:
         error_class: str | None = None,
         usage: dict[str, Any] | None = None,
     ) -> None:
-        with self._lock:
-            self._record_request_locked(
-                email,
-                model,
-                status=status,
-                status_code=status_code,
-                error_class=error_class,
-                usage=usage,
-                persist=True,
-            )
-
-    def _record_request_locked(
-        self,
-        email: str,
-        model: str,
-        *,
-        status: str,
-        status_code: int | None = None,
-        error_class: str | None = None,
-        usage: dict[str, Any] | None = None,
-        persist: bool,
-    ) -> None:
-        if not email:
-            return
-        family = self._model_family(model)
-        counter = self._counter_for(email, family)
-        counter["total_requests"] = int(counter.get("total_requests", 0)) + 1
-        now_text = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        if status == "success":
-            counter["successes"] = int(counter.get("successes", 0)) + 1
-            counter["last_success"] = now_text
-        else:
-            counter["failures"] = int(counter.get("failures", 0)) + 1
-            if status_code == 429:
-                counter["rate_limits"] = int(counter.get("rate_limits", 0)) + 1
-            counter["last_failure"] = now_text
-            if error_class:
-                counter["last_failure_class"] = redact_secret_text(str(error_class))[:200]
-        if usage:
-            for usage_field, counter_field in (
-                ("input_tokens", "input_tokens"),
-                ("output_tokens", "output_tokens"),
-                ("total_tokens", "total_tokens"),
-            ):
-                value = usage.get(usage_field)
-                if isinstance(value, bool):
-                    continue
-                try:
-                    parsed = int(value)
-                except (TypeError, ValueError):
-                    continue
-                if parsed > 0:
-                    counter[counter_field] = int(counter.get(counter_field, 0)) + parsed
-        self._counters[email][family] = self._sanitize_counter(counter)
-        if persist:
-            self._save_state_to_storage()
+        category = "success" if status == "success" else (
+            "rate_limit" if status_code == 429 else "transport"
+        )
+        self.record_attempt(
+            email,
+            model,
+            AttemptOutcome(scope="none", category=category),
+            status_code=status_code,
+            error_class=error_class,
+            usage=usage,
+        )
 
     def refresh_expiring_accounts(self, window_seconds: int = 300) -> dict[str, int]:
         with self._lock:
             summary = {"checked": 0, "refreshed": 0, "failed": 0}
-            if not get_accounts_json_path().exists():
+            if not accounts_json_path_read_only().exists():
                 return summary
             current_time = time.time()
 
             def mutate(data: dict[str, Any]) -> bool:
-                dirty = self._sync_state_from_storage(data)
+                self._sync_state_from_storage(data)
                 accounts = data.get("accounts", [])
                 if not isinstance(accounts, list):
-                    return dirty
-                for acc in accounts:
-                    if not isinstance(acc, dict):
+                    return True
+                for account in accounts:
+                    if not isinstance(account, dict):
                         continue
-                    email = acc.get("email")
-                    refresh_tok = acc.get("refreshToken")
-                    if not email or not refresh_tok:
+                    email = str(account.get("email", ""))
+                    refresh_token = account.get("refreshToken")
+                    if not email or not refresh_token:
                         continue
                     summary["checked"] += 1
-                    expires_at = self._normalize_expires_at(acc.get("expiresAt", 0))
+                    expires_at = self._normalize_expires_at(account.get("expiresAt", 0))
                     if expires_at > current_time + max(0, int(window_seconds)):
                         continue
                     try:
-                        refreshed = refresh_access_token(refresh_tok)
-                        acc["accessToken"] = refreshed["access_token"]
-                        acc["expiresAt"] = current_time + token_expires_in_seconds(refreshed)
+                        refreshed = refresh_access_token(refresh_token)
+                        account["accessToken"] = refreshed["access_token"]
+                        account["expiresAt"] = current_time + token_expires_in_seconds(refreshed)
                         if refreshed.get("refresh_token"):
-                            acc["refreshToken"] = refreshed["refresh_token"]
+                            account["refreshToken"] = refreshed["refresh_token"]
                         summary["refreshed"] += 1
-                        dirty = True
                     except Exception:
-                        self._record_failure(str(email), retry_after_seconds=None)
+                        self._state_owner.apply_cooldown(
+                            email,
+                            "gemini",
+                            AttemptOutcome(scope="account", category="auth"),
+                        )
                         summary["failed"] += 1
-                        dirty = True
-                if dirty:
-                    data["accountState"] = {
-                        "schemaVersion": SCHEMA_VERSION,
-                        "failures": self._failures,
-                        "cooldowns": self._cooldowns,
-                        "counters": self._counters,
-                    }
-                return dirty
+                return True
 
             update_accounts(mutate)
             return summary
 
     def clear_failures(self, email: str, family: str | None = None) -> None:
         with self._lock:
-            if family is None:
-                self._failures.pop(email, None)
-                self._cooldowns.pop(email, None)
-            else:
-                for state in (self._failures, self._cooldowns):
-                    scoped = state.get(email)
-                    if isinstance(scoped, dict):
-                        scoped.pop(family, None)
-                        if not scoped:
-                            state.pop(email, None)
-            self._save_state_to_storage()
+            self._mutate_state(lambda state: state.clear_failures(email, family))

@@ -14,6 +14,8 @@ Before upgrading a production-like local setup, copy the encrypted account/provi
 
 Account, provider, xAI OAuth, and model-overlay writes use a locked temporary file, `fsync`, atomic replacement, and private permissions. Plaintext JSON is still accepted for compatibility and is encrypted on a normal mutating load. Wrong-key encrypted data is reported as a decryption failure and is not reinterpreted as plaintext.
 
+`/health`, `/v1/models`, and doctor/readiness diagnostics use read-only store and OAuth-status probes. They do not create lock files, encryption keys, directories, or migration writes. Mutating operations share one path-scoped cross-process lock; a lock-acquisition failure is surfaced and never triggers an unsafe fallback write.
+
 ## Response terminal behavior
 
 Provider responses are classified as `completed`, `incomplete`, or `failed` through a shared protocol contract.
@@ -27,7 +29,7 @@ Clients that previously treated every HTTP 200 as success must inspect the respo
 
 ## Compatibility shims
 
-The legacy transform functions, secure-storage helpers, account-manager methods, service dictionary serializers, and server request-construction exports remain as thin compatibility wrappers because repository and downstream callers still use them. New work should target `response_protocol.py`, `google_transport.py`, `openai_transport.py`, `account_state.py`, `secure_store.py`, and `service_manager.py` directly.
+The legacy transform functions, secure-storage helpers, account-manager methods, and service dictionary serializers remain as thin compatibility wrappers because repository and downstream callers still use them. Streaming response parsing and lifecycle events now belong to `google_transport.py`, `openai_transport.py`, and `ResponseEventBuilder`; `server.py` owns only routing, retry, lease, cancellation, and request-log orchestration.
 
 The bundled `anti.py` script remains executable and re-exports its existing test-facing functions. Its implementation modules now live under `scripts/anti_lib/` and are included in wheels and installed-skill verification.
 
@@ -46,4 +48,3 @@ Install and uninstall commands exit non-zero when post-action observation does n
 ## Python compatibility
 
 The declared minimum remains Python 3.10. CI continues to cover 3.10, 3.11, and 3.12, plus a blocking Python 3.14 evaluation lane. Python 3.14 was locally validated against the full suite before that lane was added; this change does not raise the minimum version.
-
