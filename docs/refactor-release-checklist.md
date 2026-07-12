@@ -101,3 +101,17 @@ Exact artifact source: `c939726f15ea201f7ff0f7b4a06decfa3841ec87` on `codex/rele
 - [ ] CI, merge, tag, publish, deploy, and public `1.7.0` state remain unclaimed.
 - [ ] Credentialed Google/BYOK generation was not run because live provider authorization was not part of this release-matrix step.
 - [ ] Real service install/uninstall and real `~/.codex/config.toml` mutation were not run.
+
+## Final pre-ship fix evidence — 2026-07-13
+
+Exact code source: `ce8b1ab44fab489adf9e1fc6c43ec8416c1d59c0` on `codex/release-hardening-1.7.0`. The worktree was clean before the deterministic artifact build. This supersedes the earlier artifact hashes for release-candidate code.
+
+- [x] The final P2 fix suppresses encrypted account-store rewrites for unchanged healthy and normalized-empty selection while preserving writes for index/cooldown cleanup, fingerprint creation, expiry normalization, refresh, and schema migration.
+- [x] Four regression tests cover unchanged selection, empty normalized state, real persisted mutation, and legacy migration.
+- [x] Python 3.10.4: focused account/state/storage tests passed — 40 tests; compileall and full suite passed — 581 tests, 193 subtests, one existing Starlette/httpx deprecation warning.
+- [x] Python 3.14.5: isolated `.[dev]` install, compileall, and full suite passed — 581 tests, 193 subtests, the same warning. A direct dependency-free interpreter attempt failed collection before the isolated rerun and is not treated as code evidence.
+- [x] `git diff --check` passed.
+- [x] `SOURCE_DATE_EPOCH` was set from `ce8b1ab`; bounded wheel/sdist build and Twine checks passed.
+- [x] Wheel: `codex_antigravity_auth-1.7.0-py3-none-any.whl`, 186329 bytes, SHA-256 `e07e5692f3802f66e61149e7824e3ccfc16fce97bfcdf7db9b1e37176e2ba752`.
+- [x] Sdist: `codex_antigravity_auth-1.7.0.tar.gz`, 256642 bytes, SHA-256 `6667c7088d18999c1f2bc55a95083f60efdf4e9c662cd188b5f7e792e8c018d5`.
+- [ ] Push, PR, CI, merge, tag, publish, and public-package verification remain unclaimed until completed below.
