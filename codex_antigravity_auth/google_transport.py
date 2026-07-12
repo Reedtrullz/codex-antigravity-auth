@@ -55,6 +55,19 @@ def outcome_for_http_status(status_code: int) -> AttemptOutcome:
     return AttemptOutcome(scope="none", category="transport")
 
 
+def outcome_for_backend_error(code: str, message: str) -> AttemptOutcome:
+    combined = f"{code} {message}".lower()
+    if "resource_exhausted" in combined or "quota" in combined:
+        return AttemptOutcome(scope="family", category="quota")
+    if code == "429" or "rate limit" in combined or "rate_limit" in combined:
+        return AttemptOutcome(scope="family", category="rate_limit")
+    if any(term in combined for term in ("401", "403", "unauthenticated", "permission_denied", "auth")):
+        return AttemptOutcome(scope="account", category="auth")
+    if "invalid_argument" in combined or code == "400":
+        return AttemptOutcome(scope="none", category="invalid_request")
+    return AttemptOutcome(scope="none", category="transport")
+
+
 def _safe_header_string(value: object) -> str | None:
     if not isinstance(value, str) or not value:
         return None

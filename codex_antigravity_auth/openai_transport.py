@@ -2,8 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import math
 from typing import Any
 import uuid
+
+from .byok import (
+    resolve_api_key,
+    validate_http_base_url,
+    validate_provider_api_key,
+    validate_provider_headers,
+)
 
 from .response_protocol import (
     ProviderCapabilities,
@@ -15,6 +24,21 @@ from .response_protocol import (
     refusal_item,
 )
 from .transform import function_call_arguments_string, valid_function_name
+from .transform import transform_request_to_chat
+
+
+class TransportConfigError(ValueError):
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class PreparedOpenAIRequest:
+    payload: dict[str, Any]
+    url: str
+    headers: dict[str, str]
+    timeout: float
 
 
 def _message_output(message: object) -> list[dict[str, Any]]:
@@ -194,6 +218,77 @@ class OpenAICompatibleTransport:
             stop_sequences=True,
             reasoning=True,
             streaming_usage=True,
+        )
+
+    def provider_timeout(self, provider: dict[str, Any]) -> float:
+        timeout = provider.get("timeout", self.timeout)
+        if (
+            not isinstance(timeout, (int, float))
+            or isinstance(timeout, bool)
+            or not math.isfinite(float(timeout))
+            or float(timeout) <= 0
+        ):
+            raise TransportConfigError(400, f"Provider '{provider['id']}' timeout must be a positive number")
+        return float(timeout)
+
+    def _base_url(self, provider: dict[str, Any]) -> str:
+        base_url = provider.get("baseUrl", "")
+        if not isinstance(base_url, str):
+            raise TransportConfigError(400, f"Provider '{provider['id']}' baseUrl must be a string")
+        if not base_url.strip():
+            raise TransportConfigError(500, f"Provider '{provider['id']}' has no baseUrl configured")
+        try:
+            return validate_http_base_url(base_url, label=f"Provider '{provider['id']}' baseUrl")
+        except ValueError as exc:
+            raise TransportConfigError(400, str(exc)) from exc
+
+    def chat_completions_url(self, provider: dict[str, Any]) -> str:
+        base_url = self._base_url(provider)
+        return base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+
+    def responses_url(self, provider: dict[str, Any]) -> str:
+        base_url = self._base_url(provider)
+        return base_url if base_url.endswith("/responses") else f"{base_url}/responses"
+
+    def build_headers(self, provider: dict[str, Any]) -> dict[str, str]:
+        try:
+            api_key = validate_provider_api_key(resolve_api_key(provider))
+        except ValueError as exc:
+            raise TransportConfigError(400, f"Provider '{provider['id']}' {exc}") from exc
+        if not api_key:
+            raise TransportConfigError(
+                401,
+                f"No API key configured for provider '{provider['id']}'. "
+                f"Set {provider.get('apiKeyEnv', 'provider API key')} or run provider set.",
+            )
+        try:
+            provider_headers = validate_provider_headers(provider.get("headers", {}) or {})
+        except ValueError as exc:
+            raise TransportConfigError(400, str(exc)) from exc
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            **(provider_headers or {}),
+        }
+
+    def prepare_chat_request(
+        self,
+        request: dict[str, Any],
+        provider: dict[str, Any],
+        provider_model: str,
+        *,
+        stream: bool,
+    ) -> PreparedOpenAIRequest:
+        try:
+            payload = transform_request_to_chat({**request, "stream": stream}, provider_model)
+        except ValueError as exc:
+            raise TransportConfigError(400, str(exc)) from exc
+        payload["stream"] = stream
+        return PreparedOpenAIRequest(
+            payload=payload,
+            url=self.chat_completions_url(provider),
+            headers=self.build_headers(provider),
+            timeout=self.provider_timeout(provider),
         )
 
     def parse_chat_response(self, payload: object) -> ProviderResult:

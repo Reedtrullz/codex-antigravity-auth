@@ -9,6 +9,7 @@ from codex_antigravity_auth.google_transport import (
     GoogleHTTPError,
     GoogleResponseAccumulator,
     GoogleTransport,
+    outcome_for_backend_error,
 )
 from codex_antigravity_auth.response_protocol import TerminalKind
 from codex_antigravity_auth.transform import transform_response
@@ -17,6 +18,19 @@ from codex_antigravity_auth.transform import transform_response
 class TestGoogleResponseTranslation(unittest.TestCase):
     def setUp(self):
         self.transport = GoogleTransport(timeout=5)
+
+    def test_backend_error_outcomes_are_typed_by_policy_scope(self):
+        cases = [
+            ("RESOURCE_EXHAUSTED", "quota exhausted", "family", "quota"),
+            ("429", "rate limited", "family", "rate_limit"),
+            ("UNAUTHENTICATED", "expired", "account", "auth"),
+            ("INVALID_ARGUMENT", "bad request", "none", "invalid_request"),
+            ("INTERNAL", "backend failed", "none", "transport"),
+        ]
+        for code, message, scope, category in cases:
+            with self.subTest(code=code):
+                outcome = outcome_for_backend_error(code, message)
+                self.assertEqual((outcome.scope, outcome.category), (scope, category))
 
     def test_parses_wrapped_and_unwrapped_text_responses(self):
         candidate = {

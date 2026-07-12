@@ -2,12 +2,50 @@ import unittest
 import json
 from unittest.mock import patch
 
-from codex_antigravity_auth.openai_transport import ChatResponseAccumulator, OpenAICompatibleTransport
+from codex_antigravity_auth.openai_transport import (
+    ChatResponseAccumulator,
+    OpenAICompatibleTransport,
+    TransportConfigError,
+)
 from codex_antigravity_auth.response_protocol import TerminalKind
 from codex_antigravity_auth.transform import transform_chat_response, transform_request_to_chat
 
 
 class TestOpenAIRequestTranslation(unittest.TestCase):
+    def test_transport_owns_chat_request_url_headers_timeout_and_payload(self):
+        transport = OpenAICompatibleTransport(timeout=5)
+        prepared = transport.prepare_chat_request(
+            {"model": "custom:model", "input": "hello"},
+            {
+                "id": "custom",
+                "baseUrl": "https://provider.example/v1",
+                "apiKey": "sk-test-provider-key-1234567890",
+                "headers": {"X-Title": "Test"},
+                "timeout": 12,
+            },
+            "model",
+            stream=True,
+        )
+
+        self.assertEqual(prepared.url, "https://provider.example/v1/chat/completions")
+        self.assertEqual(prepared.timeout, 12.0)
+        self.assertEqual(prepared.payload["model"], "model")
+        self.assertTrue(prepared.payload["stream"])
+        self.assertEqual(prepared.headers["Authorization"], "Bearer sk-test-provider-key-1234567890")
+        self.assertEqual(prepared.headers["X-Title"], "Test")
+
+    def test_transport_configuration_errors_keep_http_semantics(self):
+        transport = OpenAICompatibleTransport(timeout=5)
+        with self.assertRaises(TransportConfigError) as raised:
+            transport.prepare_chat_request(
+                {"input": "hello"},
+                {"id": "custom", "baseUrl": "https://provider.example/v1"},
+                "model",
+                stream=False,
+            )
+
+        self.assertEqual(raised.exception.status_code, 401)
+
     def test_forwards_parallel_tool_calls_true_and_false(self):
         for value in (True, False):
             with self.subTest(value=value):

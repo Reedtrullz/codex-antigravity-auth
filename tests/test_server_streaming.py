@@ -1,10 +1,12 @@
 import json
+import asyncio
 import time
 import unittest
 import httpx
 from unittest.mock import patch, MagicMock
-from codex_antigravity_auth.server import app, google_rotation_diagnostics, stream_error_from_payload
+from codex_antigravity_auth.server import app, create_response, google_rotation_diagnostics, stream_error_from_payload
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 class TestServerStreaming(unittest.TestCase):
     def test_google_rotation_diagnostics_respects_family_scoped_cooldowns(self):
@@ -194,6 +196,330 @@ class TestServerStreaming(unittest.TestCase):
         self.assertEqual(diagnostics["attempt_count"], 1)
         self.assertEqual(diagnostics["attempted_account_refs"], ["account-1"])
         self.assertEqual([call.args[0] for call in release.call_args_list], ["test@gmail.com"])
+
+    def test_google_rotation_records_and_releases_every_attempted_account(self):
+        first = {"email": "first@gmail.com", "accessToken": "first-token"}
+        second = {"email": "second@gmail.com", "accessToken": "second-token"}
+
+        class MockClient:
+            responses = [
+                httpx.Response(401, text="expired"),
+                httpx.Response(
+                    200,
+                    json={
+                        "candidates": [
+                            {"finishReason": "STOP", "content": {"parts": [{"text": "ok"}]}}
+                        ]
+                    },
+                ),
+            ]
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            async def post(self, *args, **kwargs):
+                return self.responses.pop(0)
+
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", side_effect=[first, second]):
+            with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
+                with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
+                    with patch("codex_antigravity_auth.server.account_manager.record_request") as record:
+                        with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                            response = TestClient(app).post(
+                                "/v1/responses",
+                                json={"model": "gemini-3.5-flash-high", "input": "hello"},
+                            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([call.args[0] for call in release.call_args_list], ["first@gmail.com", "second@gmail.com"])
+        self.assertEqual([call.args[0] for call in record.call_args_list], ["first@gmail.com", "second@gmail.com"])
+        self.assertEqual([call.kwargs["status"] for call in record.call_args_list], ["failure", "success"])
+        self.assertEqual(record.call_args_list[0].kwargs["error_class"], "auth")
+
+    def test_google_stream_disconnect_records_cancellation_and_releases_lease(self):
+        account = {"email": "cancelled@gmail.com", "accessToken": "token"}
+
+        async def scenario():
+            sent = False
+
+            async def receive():
+                nonlocal sent
+                if sent:
+                    return {"type": "http.disconnect"}
+                sent = True
+                return {
+                    "type": "http.request",
+                    "body": json.dumps(
+                        {"model": "gemini-3.5-flash-high", "input": "hello", "stream": True}
+                    ).encode(),
+                    "more_body": False,
+                }
+
+            request = Request(
+                {
+                    "type": "http",
+                    "method": "POST",
+                    "path": "/v1/responses",
+                    "headers": [],
+                    "query_string": b"",
+                    "client": ("testserver", 50000),
+                    "server": ("testserver", 80),
+                    "scheme": "http",
+                },
+                receive,
+            )
+            response = await create_response(request)
+            iterator = response.body_iterator
+            first_event = await iterator.__anext__()
+            await iterator.aclose()
+            return first_event
+
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account):
+            with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
+                with patch("codex_antigravity_auth.server.account_manager.record_request") as record:
+                    first_event = asyncio.run(scenario())
+
+        self.assertIn("response.created", first_event)
+        release.assert_called_once_with("cancelled@gmail.com")
+        record.assert_called_once()
+        self.assertEqual(record.call_args.kwargs["status"], "failure")
+        self.assertEqual(record.call_args.kwargs["error_class"], "cancelled")
+
+    def test_google_non_streaming_terminal_matrix_has_one_attempt_and_release(self):
+        account = {"email": "matrix@gmail.com", "accessToken": "token"}
+        cases = [
+            (
+                "completed",
+                {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "ok"}]}}]},
+                "completed",
+                "success",
+            ),
+            (
+                "incomplete",
+                {"candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": "partial"}]}}]},
+                "incomplete",
+                "success",
+            ),
+            ("refusal", {"promptFeedback": {"blockReason": "SAFETY"}, "candidates": []}, "completed", "success"),
+            ("empty", {"candidates": []}, "failed", "failure"),
+            ("malformed", {"candidates": "bad"}, "failed", "failure"),
+        ]
+
+        for name, payload, expected_terminal, expected_attempt_status in cases:
+            with self.subTest(name=name):
+                class MockClient:
+                    def __init__(self, *args, **kwargs):
+                        pass
+
+                    async def __aenter__(self):
+                        return self
+
+                    async def __aexit__(self, exc_type, exc_val, exc_tb):
+                        pass
+
+                    async def post(self, *args, **kwargs):
+                        return httpx.Response(200, json=payload)
+
+                with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account) as acquire:
+                    with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
+                        with patch("codex_antigravity_auth.server.account_manager.record_request") as record:
+                            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                                response = TestClient(app).post(
+                                    "/v1/responses",
+                                    json={"model": "gemini-3.5-flash-high", "input": "hello"},
+                                )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["status"], expected_terminal)
+                acquire.assert_called_once()
+                release.assert_called_once_with("matrix@gmail.com")
+                record.assert_called_once()
+                self.assertEqual(record.call_args.kwargs["status"], expected_attempt_status)
+
+    def test_byok_chat_non_streaming_terminal_matrix_uses_protocol_contract(self):
+        provider = {
+            "id": "matrix",
+            "kind": "openai_chat",
+            "baseUrl": "https://example.invalid/v1",
+            "apiKey": "sk-test-matrix-key-1234567890",
+            "models": ["model"],
+        }
+        cases = [
+            (
+                "completed",
+                {"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]},
+                "completed",
+            ),
+            (
+                "incomplete",
+                {"choices": [{"finish_reason": "length", "message": {"content": "partial"}}]},
+                "incomplete",
+            ),
+            (
+                "refusal",
+                {"choices": [{"finish_reason": "content_filter", "message": {"content": None}}]},
+                "completed",
+            ),
+            ("empty", {"choices": []}, "failed"),
+            ("malformed", {"choices": "bad"}, "failed"),
+        ]
+
+        for name, payload, expected_terminal in cases:
+            with self.subTest(name=name):
+                class MockClient:
+                    def __init__(self, *args, **kwargs):
+                        pass
+
+                    async def __aenter__(self):
+                        return self
+
+                    async def __aexit__(self, exc_type, exc_val, exc_tb):
+                        pass
+
+                    async def post(self, *args, **kwargs):
+                        return httpx.Response(200, json=payload)
+
+                with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"matrix": provider}):
+                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                        response = TestClient(app).post(
+                            "/v1/responses",
+                            json={"model": "matrix:model", "input": "hello"},
+                        )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["status"], expected_terminal)
+
+    def test_native_responses_non_streaming_terminal_matrix_validates_provider_payload(self):
+        provider = {
+            "id": "xai-oauth",
+            "kind": "openai_responses",
+            "authMode": "oauth",
+            "baseUrl": "https://api.x.ai/v1",
+            "models": ["model"],
+        }
+        message = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "ok"}],
+        }
+        refusal = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "refusal", "refusal": "declined"}],
+        }
+        cases = [
+            ("completed", {"status": "completed", "output": [message]}, 200, "completed"),
+            ("incomplete", {"status": "incomplete", "output": [message]}, 200, "incomplete"),
+            ("refusal", {"status": "completed", "output": [refusal]}, 200, "completed"),
+            ("empty", {"status": "completed", "output": []}, 200, "failed"),
+            ("failed", {"status": "failed", "output": [], "error": {"code": "provider_failed"}}, 200, "failed"),
+            ("malformed", {"status": "completed", "output": "bad"}, 502, None),
+        ]
+
+        for name, payload, expected_http, expected_terminal in cases:
+            with self.subTest(name=name):
+                class MockClient:
+                    def __init__(self, *args, **kwargs):
+                        pass
+
+                    async def __aenter__(self):
+                        return self
+
+                    async def __aexit__(self, exc_type, exc_val, exc_tb):
+                        pass
+
+                    async def post(self, *args, **kwargs):
+                        return httpx.Response(200, json=payload)
+
+                with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"xai-oauth": provider}):
+                    with patch("codex_antigravity_auth.server.resolve_xai_oauth_access_token", return_value="oauth-token"):
+                        with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                            response = TestClient(app).post(
+                                "/v1/responses",
+                                json={"model": "xai-oauth:model", "input": "hello"},
+                            )
+
+                self.assertEqual(response.status_code, expected_http, response.text)
+                if expected_terminal is not None:
+                    self.assertEqual(response.json()["status"], expected_terminal)
+
+    def test_google_streaming_terminal_matrix_records_one_attempt_and_release(self):
+        account = {"email": "stream-matrix@gmail.com", "accessToken": "token"}
+        cases = [
+            (
+                "incomplete",
+                ['data: {"candidates":[{"finishReason":"MAX_TOKENS","content":{"parts":[{"text":"partial"}]}}]}\n', "data: [DONE]\n"],
+                "response.incomplete",
+                "success",
+            ),
+            (
+                "refusal",
+                ['data: {"promptFeedback":{"blockReason":"SAFETY"},"candidates":[]}\n', "data: [DONE]\n"],
+                "response.completed",
+                "success",
+            ),
+            ("empty", ["data: [DONE]\n"], "response.failed", "failure"),
+        ]
+
+        for name, chunks, terminal_event, attempt_status in cases:
+            with self.subTest(name=name):
+                class AsyncText:
+                    def __init__(self):
+                        self.items = list(chunks)
+
+                    def __aiter__(self):
+                        return self
+
+                    async def __anext__(self):
+                        if not self.items:
+                            raise StopAsyncIteration
+                        return self.items.pop(0)
+
+                response_mock = MagicMock(spec=httpx.Response)
+                response_mock.status_code = 200
+                response_mock.aiter_text = MagicMock(return_value=AsyncText())
+
+                class StreamContext:
+                    async def __aenter__(self):
+                        return response_mock
+
+                    async def __aexit__(self, exc_type, exc_val, exc_tb):
+                        pass
+
+                class MockClient:
+                    def __init__(self, *args, **kwargs):
+                        pass
+
+                    async def __aenter__(self):
+                        return self
+
+                    async def __aexit__(self, exc_type, exc_val, exc_tb):
+                        pass
+
+                    def stream(self, *args, **kwargs):
+                        return StreamContext()
+
+                with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account) as acquire:
+                    with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
+                        with patch("codex_antigravity_auth.server.account_manager.record_request") as record:
+                            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                                response = TestClient(app).post(
+                                    "/v1/responses",
+                                    json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
+                                )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertIn(terminal_event, response.text)
+                acquire.assert_called_once()
+                release.assert_called_once_with("stream-matrix@gmail.com")
+                record.assert_called_once()
+                self.assertEqual(record.call_args.kwargs["status"], attempt_status)
 
     def test_models_endpoint_returns_native_catalog_when_provider_catalog_blocks(self):
         def slow_provider_configs():
@@ -604,11 +930,13 @@ class TestServerStreaming(unittest.TestCase):
                 side_effect=[first_account, second_account],
             ):
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure") as mock_mark_failure:
-                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
-                        response = test_client.post(
-                            "/v1/responses",
-                            json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
-                        )
+                    with patch("codex_antigravity_auth.server.account_manager.record_request") as record:
+                        with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
+                            with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                                response = test_client.post(
+                                    "/v1/responses",
+                                    json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
+                                )
 
             self.assertEqual(response.status_code, 200)
             self.assertIn("rotated ok", response.text)
@@ -616,6 +944,9 @@ class TestServerStreaming(unittest.TestCase):
             self.assertEqual([request["json"]["project"] for request in requests], ["project-first", "project-second"])
             mock_mark_failure.assert_called_once()
             self.assertEqual(mock_mark_failure.call_args.args[0], "first@gmail.com")
+            self.assertEqual([call.args[0] for call in record.call_args_list], ["first@gmail.com", "second@gmail.com"])
+            self.assertEqual([call.kwargs["status"] for call in record.call_args_list], ["failure", "success"])
+            self.assertEqual([call.args[0] for call in release.call_args_list], ["first@gmail.com", "second@gmail.com"])
 
     def test_google_streaming_rotation_discards_failed_attempt_usage(self):
         with TestClient(app) as test_client:

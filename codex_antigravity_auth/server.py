@@ -23,9 +23,7 @@ from .byok import (
     provider_auth_mode,
     resolve_api_key,
     split_provider_model,
-    validate_http_base_url,
     validate_provider_api_key,
-    validate_provider_headers,
     validate_provider_id,
 )
 from .transform import (
@@ -33,7 +31,6 @@ from .transform import (
     function_call_arguments_string,
     safe_project_id,
     transform_chat_response,
-    transform_request_to_chat,
     usage_counts,
     valid_function_name,
 )
@@ -41,9 +38,16 @@ from .constants import get_platform, is_loopback_host, validate_gateway_token_st
 from .models import canonical_model_id, native_model_catalog, native_model_family
 from .observability import request_log_info, write_request_record
 from .redaction import redact_secret_text
-from .google_transport import AccountLease, GoogleResponseAccumulator, GoogleTransport
-from .openai_transport import ChatResponseAccumulator, OpenAICompatibleTransport
+from .google_transport import (
+    AccountLease,
+    GoogleResponseAccumulator,
+    GoogleTransport,
+    outcome_for_backend_error,
+    outcome_for_http_status,
+)
+from .openai_transport import ChatResponseAccumulator, OpenAICompatibleTransport, TransportConfigError
 from .response_protocol import (
+    AttemptOutcome,
     CapabilityError,
     ProviderCapabilities,
     TerminalKind,
@@ -230,6 +234,25 @@ async def record_account_request(
         status=status,
         status_code=status_code,
         error_class=error_class,
+        usage=usage,
+    )
+
+
+async def record_attempt_outcome(
+    email: str,
+    model: str,
+    outcome: AttemptOutcome,
+    *,
+    status_code: int | None = None,
+    usage: dict | None = None,
+    error_class: str | None = None,
+) -> None:
+    await record_account_request(
+        email,
+        model,
+        status="success" if outcome.category == "success" else "failure",
+        status_code=status_code,
+        error_class=None if outcome.category == "success" else (error_class or outcome.category),
         usage=usage,
     )
 
@@ -648,133 +671,45 @@ async def health(request: Request):
         "request_log": request_log_info(),
     }
 
-def safe_header_string(value: object) -> str | None:
-    if not isinstance(value, str) or not value:
-        return None
-    if any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in value):
-        return None
-    return value
-
-
-def safe_client_metadata(value: object) -> dict:
-    if not isinstance(value, dict):
-        return {}
-
-    metadata = {}
-    for key, raw_value in value.items():
-        safe_key = safe_header_string(key)
-        if safe_key is None:
-            continue
-        if isinstance(raw_value, str):
-            safe_value = safe_header_string(raw_value)
-            if safe_value is not None:
-                metadata[safe_key] = safe_value
-        elif raw_value is None or isinstance(raw_value, bool):
-            metadata[safe_key] = raw_value
-        elif isinstance(raw_value, (int, float)) and math.isfinite(raw_value):
-            metadata[safe_key] = raw_value
-    return metadata
-
-
 def build_headers(account: dict) -> dict:
-    platform = get_platform()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/2.0.0 Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36",
-        "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-        "Client-Metadata": f'{{"ideType":"ANTIGRAVITY","platform":"{platform}","pluginType":"GEMINI"}}',
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {account['accessToken']}",
-    }
-    
-    # Fingerprints are locally persisted, so tolerate stale or malformed data.
-    fp = account.get("fingerprint")
-    if isinstance(fp, dict):
-        user_agent = safe_header_string(fp.get("userAgent"))
-        api_client = safe_header_string(fp.get("apiClient"))
-        if user_agent is not None:
-            headers["User-Agent"] = user_agent
-        if api_client is not None:
-            headers["X-Goog-Api-Client"] = api_client
-        if fp.get("clientMetadata"):
-            metadata = safe_client_metadata(fp.get("clientMetadata"))
-            device_id = safe_header_string(fp.get("deviceId"))
-            session_token = safe_header_string(fp.get("sessionToken"))
-            if device_id is not None:
-                metadata["deviceId"] = device_id
-            if session_token is not None:
-                metadata["sessionToken"] = session_token
-            if metadata:
-                headers["Client-Metadata"] = json.dumps(metadata)
-            
-    return headers
+    project_id = safe_project_id(account.get("projectId")) or safe_project_id(account.get("managedProjectId"))
+    fingerprint = account.get("fingerprint")
+    return GoogleTransport(timeout=GOOGLE_BACKEND_TIMEOUT_SECONDS, platform_name=get_platform()).build_headers(
+        AccountLease(
+            email=account.get("email", ""),
+            project_id=project_id,
+            access_token=account["accessToken"],
+            fingerprint=fingerprint if isinstance(fingerprint, dict) else None,
+        )
+    )
 
 
 def build_openai_compatible_headers(provider: dict) -> dict:
-    api_key = resolve_api_key(provider)
     try:
-        api_key = validate_provider_api_key(api_key)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Provider '{provider['id']}' {str(e)}") from e
-    if not api_key:
-        raise HTTPException(
-            status_code=401,
-            detail=f"No API key configured for provider '{provider['id']}'. Set {provider.get('apiKeyEnv', 'provider API key')} or run provider set.",
-        )
-    provider_headers = provider.get("headers", {}) or {}
-    try:
-        provider_headers = validate_provider_headers(provider_headers)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    headers.update(provider_headers or {})
-    return headers
+        return OpenAICompatibleTransport(timeout=120.0).build_headers(provider)
+    except TransportConfigError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 def chat_completions_url(provider: dict) -> str:
-    base_url = provider.get("baseUrl", "")
-    if not isinstance(base_url, str):
-        raise HTTPException(status_code=400, detail=f"Provider '{provider['id']}' baseUrl must be a string")
-    if not base_url.strip():
-        raise HTTPException(status_code=500, detail=f"Provider '{provider['id']}' has no baseUrl configured")
     try:
-        base_url = validate_http_base_url(base_url, label=f"Provider '{provider['id']}' baseUrl")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    if base_url.endswith("/chat/completions"):
-        url = base_url
-    else:
-        url = f"{base_url}/chat/completions"
-    return url
+        return OpenAICompatibleTransport(timeout=120.0).chat_completions_url(provider)
+    except TransportConfigError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 def responses_api_url(provider: dict) -> str:
-    base_url = provider.get("baseUrl", "")
-    if not isinstance(base_url, str):
-        raise HTTPException(status_code=400, detail=f"Provider '{provider['id']}' baseUrl must be a string")
-    if not base_url.strip():
-        raise HTTPException(status_code=500, detail=f"Provider '{provider['id']}' has no baseUrl configured")
     try:
-        base_url = validate_http_base_url(base_url, label=f"Provider '{provider['id']}' baseUrl")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    if base_url.endswith("/responses"):
-        return base_url
-    return f"{base_url}/responses"
+        return OpenAICompatibleTransport(timeout=120.0).responses_url(provider)
+    except TransportConfigError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 def openai_compatible_timeout(provider: dict) -> float:
-    timeout = provider.get("timeout", 120.0)
-    if (
-        not isinstance(timeout, (int, float))
-        or isinstance(timeout, bool)
-        or not math.isfinite(float(timeout))
-        or float(timeout) <= 0
-    ):
-        raise HTTPException(status_code=400, detail=f"Provider '{provider['id']}' timeout must be a positive number")
-    return float(timeout)
+    try:
+        return OpenAICompatibleTransport(timeout=120.0).provider_timeout(provider)
+    except TransportConfigError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 def reject_unsupported_previous_response(codex_req: dict) -> None:
@@ -1010,14 +945,15 @@ def prepare_openai_compatible_request(
     stream: bool,
 ) -> tuple[dict, str, dict, float]:
     try:
-        payload = transform_request_to_chat({**codex_req, "stream": stream}, provider_model)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    payload["stream"] = stream
-    headers = build_openai_compatible_headers(provider)
-    url = chat_completions_url(provider)
-    timeout = openai_compatible_timeout(provider)
-    return payload, url, headers, timeout
+        prepared = OpenAICompatibleTransport(timeout=120.0).prepare_chat_request(
+            codex_req,
+            provider,
+            provider_model,
+            stream=stream,
+        )
+    except TransportConfigError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return prepared.payload, prepared.url, prepared.headers, prepared.timeout
 
 
 async def xai_oauth_headers(*, force_refresh: bool = False) -> dict:
@@ -1382,15 +1318,22 @@ async def create_response(request: Request):
                 new_account = await acquire_active_account_for_request(model)
                 rotation_attempted = True
                 if new_account:
+                    await record_attempt_outcome(
+                        response_account.get("email", ""),
+                        model,
+                        AttemptOutcome(scope="none", category="transport"),
+                        status_code=502,
+                        error_class="connection_error",
+                    )
                     response_attempts.append(new_account)
                     response_account = new_account
                     res = await request_backend(response_account)
 
             if not res:
-                await record_account_request(
+                await record_attempt_outcome(
                     response_account.get("email", ""),
                     model,
-                    status="failure",
+                    AttemptOutcome(scope="none", category="transport"),
                     status_code=502,
                     error_class="connection_error",
                 )
@@ -1429,14 +1372,24 @@ async def create_response(request: Request):
                 new_account = await acquire_active_account_for_request(model)
                 rotation_attempted = True
                 if new_account:
+                    await record_attempt_outcome(
+                        response_account.get("email", ""),
+                        model,
+                        AttemptOutcome(
+                            scope="family" if res.status_code == 429 else "account",
+                            category="rate_limit" if res.status_code == 429 else "auth",
+                            retry_after_seconds=retry_after_seconds,
+                        ),
+                        status_code=res.status_code,
+                    )
                     response_attempts.append(new_account)
                     response_account = new_account
                     res = await request_backend(response_account)
                 if not res:
-                    await record_account_request(
+                    await record_attempt_outcome(
                         response_account.get("email", ""),
                         model,
-                        status="failure",
+                        AttemptOutcome(scope="none", category="transport"),
                         status_code=502,
                         error_class="connection_error",
                     )
@@ -1474,10 +1427,10 @@ async def create_response(request: Request):
                     model=model,
                     status_code=res.status_code,
                 )
-                await record_account_request(
+                await record_attempt_outcome(
                     response_account.get("email", ""),
                     model,
-                    status="failure",
+                    outcome_for_http_status(res.status_code),
                     status_code=res.status_code,
                     error_class="auth_failure",
                 )
@@ -1514,10 +1467,10 @@ async def create_response(request: Request):
                     model=model,
                     status_code=429,
                 )
-                await record_account_request(
+                await record_attempt_outcome(
                     response_account.get("email", ""),
                     model,
-                    status="failure",
+                    outcome_for_http_status(429),
                     status_code=429,
                     error_class="rate_limited",
                 )
@@ -1545,10 +1498,10 @@ async def create_response(request: Request):
                 )
 
             if res.status_code != 200:
-                await record_account_request(
+                await record_attempt_outcome(
                     response_account.get("email", ""),
                     model,
-                    status="failure",
+                    outcome_for_http_status(res.status_code),
                     status_code=res.status_code,
                     error_class="backend_http_error",
                 )
@@ -1588,10 +1541,10 @@ async def create_response(request: Request):
                             f"Backend payload error {code}: {safe_error_detail(message)}",
                             model=model,
                         )
-                    await record_account_request(
+                    await record_attempt_outcome(
                         response_account.get("email", ""),
                         model,
-                        status="failure",
+                        outcome_for_backend_error(code, message),
                         status_code=status_code_from_backend_error(code, message),
                         error_class=code,
                     )
@@ -1622,10 +1575,13 @@ async def create_response(request: Request):
                     created_at=int(time.time()),
                 )
                 request_succeeded = provider_result.terminal.kind is not TerminalKind.FAILED
-                await record_account_request(
+                await record_attempt_outcome(
                     response_account.get("email", ""),
                     model,
-                    status="success" if request_succeeded else "failure",
+                    AttemptOutcome(
+                        scope="none",
+                        category="success" if request_succeeded else "transport",
+                    ),
                     status_code=200,
                     usage=codex_resp.get("usage") if isinstance(codex_resp, dict) else None,
                     error_class=None if request_succeeded else provider_result.terminal.error_code,
@@ -1646,10 +1602,10 @@ async def create_response(request: Request):
             except HTTPException:
                 raise
             except Exception as e:
-                await record_account_request(
+                await record_attempt_outcome(
                     response_account.get("email", ""),
                     model,
-                    status="failure",
+                    AttemptOutcome(scope="none", category="transport"),
                     status_code=500,
                     error_class="translation_error",
                 )
@@ -1671,6 +1627,28 @@ async def create_response(request: Request):
 
     # Handle standard SSE streaming response path
     stream_attempts = [account]
+    recorded_stream_attempts: set[str] = set()
+
+    async def record_stream_attempt(
+        selected_account: dict,
+        outcome: AttemptOutcome,
+        *,
+        status_code: int | None = None,
+        usage: dict | None = None,
+        error_class: str | None = None,
+    ) -> None:
+        email = selected_account.get("email", "")
+        if email in recorded_stream_attempts:
+            return
+        await record_attempt_outcome(
+            email,
+            model,
+            outcome,
+            status_code=status_code,
+            usage=usage,
+            error_class=error_class,
+        )
+        recorded_stream_attempts.add(email)
 
     async def sse_generator() -> AsyncGenerator[str, None]:
         import uuid
@@ -1876,10 +1854,9 @@ async def create_response(request: Request):
                 last_error = safe_error_detail(e)
 
             if stream_failed:
-                await record_account_request(
-                    stream_account.get("email", ""),
-                    model,
-                    status="failure",
+                await record_stream_attempt(
+                    stream_account,
+                    outcome_for_backend_error(last_error_code, last_error or ""),
                     status_code=None,
                     error_class=last_error_code,
                 )
@@ -1900,6 +1877,11 @@ async def create_response(request: Request):
             if stream_retry_requested and attempt_num == 0:
                 rotated = await acquire_active_account_for_request(model)
                 if rotated and rotated.get("email") != stream_account.get("email"):
+                    await record_stream_attempt(
+                        stream_account,
+                        outcome_for_backend_error(last_error_code, last_error or ""),
+                        error_class=last_error_code,
+                    )
                     usage = None
                     last_error = None
                     last_error_code = "backend_error"
@@ -1911,6 +1893,11 @@ async def create_response(request: Request):
             elif attempt_num == 0:
                 rotated = await acquire_active_account_for_request(model)
                 if rotated and rotated.get("email") != stream_account.get("email"):
+                    await record_stream_attempt(
+                        stream_account,
+                        outcome_for_backend_error(last_error_code, last_error or ""),
+                        error_class=last_error_code,
+                    )
                     attempts.append(rotated)
                     attempt_num += 1
                     continue
@@ -1920,10 +1907,9 @@ async def create_response(request: Request):
 
         if not completed:
             final_account = attempts[min(attempt_num, len(attempts) - 1)]
-            await record_account_request(
-                final_account.get("email", ""),
-                model,
-                status="failure",
+            await record_stream_attempt(
+                final_account,
+                outcome_for_backend_error(last_error_code, last_error or ""),
                 status_code=None,
                 error_class=last_error_code,
             )
@@ -1947,10 +1933,9 @@ async def create_response(request: Request):
             final_account = attempts[min(attempt_num, len(attempts) - 1)]
             error_code = provider_result.terminal.error_code or "backend_error"
             error_message = provider_result.terminal.error_message or "Google Antigravity stream failed"
-            await record_account_request(
-                final_account.get("email", ""),
-                model,
-                status="failure",
+            await record_stream_attempt(
+                final_account,
+                AttemptOutcome(scope="none", category="transport"),
                 status_code=200,
                 error_class=error_code,
             )
@@ -2033,10 +2018,9 @@ async def create_response(request: Request):
         if usage:
             done_response["usage"] = usage
         final_account = attempts[min(attempt_num, len(attempts) - 1)]
-        await record_account_request(
-            final_account.get("email", ""),
-            model,
-            status="success",
+        await record_stream_attempt(
+            final_account,
+            AttemptOutcome(scope="none", category="success"),
             status_code=200,
             usage=usage,
         )
@@ -2059,6 +2043,11 @@ async def create_response(request: Request):
                 yield chunk
         finally:
             for used_account in stream_attempts:
+                await record_stream_attempt(
+                    used_account,
+                    AttemptOutcome(scope="none", category="cancelled"),
+                    error_class="cancelled",
+                )
                 await release_account_for_request(used_account.get("email"))
 
     return StreamingResponse(managed_sse_generator(), media_type="text/event-stream")
