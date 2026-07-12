@@ -59,8 +59,8 @@ class TestRegressionFixes(unittest.TestCase):
                 },
             },
         }
-        with patch("codex_antigravity_auth.server.load_accounts", return_value=account_state):
-            with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
+        with patch("codex_antigravity_auth.server.load_accounts_read_only", return_value=account_state):
+            with patch("codex_antigravity_auth.server.all_provider_configs_read_only", return_value={}):
                 response = TestClient(app).get("/health")
 
         self.assertEqual(response.status_code, 200)

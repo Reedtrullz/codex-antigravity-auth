@@ -8,7 +8,12 @@ from .fingerprint import generate_fingerprint
 from .oauth import refresh_access_token, token_expires_in_seconds
 from .redaction import redact_secret_text
 from .response_protocol import AttemptOutcome
-from .storage import get_accounts_json_path, load_accounts, update_accounts
+from .storage import (
+    accounts_json_path_read_only,
+    get_accounts_json_path,
+    load_accounts,
+    update_accounts,
+)
 
 
 class AccountManager:
@@ -250,7 +255,7 @@ class AccountManager:
     def refresh_expiring_accounts(self, window_seconds: int = 300) -> dict[str, int]:
         with self._lock:
             summary = {"checked": 0, "refreshed": 0, "failed": 0}
-            if not get_accounts_json_path().exists():
+            if not accounts_json_path_read_only().exists():
                 return summary
             current_time = time.time()
 

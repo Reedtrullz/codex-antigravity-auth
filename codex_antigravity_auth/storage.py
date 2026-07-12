@@ -259,9 +259,13 @@ def decrypt_payload(encrypted_bytes: bytes) -> str:
     return fernet.decrypt(encrypted_bytes).decode("utf-8")
 
 def get_accounts_json_path() -> Path:
-    p = Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    p = accounts_json_path_read_only()
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def accounts_json_path_read_only() -> Path:
+    return Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
 
 
 def _load_secure_json_unlocked(
@@ -399,7 +403,7 @@ def load_accounts() -> dict[str, Any]:
 
 
 def load_accounts_read_only() -> dict[str, Any]:
-    path = Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    path = accounts_json_path_read_only()
     return load_secure_json_file_read_only(
         path,
         default_accounts_data,

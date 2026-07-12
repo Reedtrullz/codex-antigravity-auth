@@ -17,7 +17,7 @@ class TestServerStreaming(unittest.TestCase):
                 "cooldowns": {"test@example.com": {"claude": now + 300}},
             },
         }
-        with patch("codex_antigravity_auth.server.load_accounts", return_value=data):
+        with patch("codex_antigravity_auth.server.load_accounts_read_only", return_value=data):
             with patch("codex_antigravity_auth.server.time.time", return_value=now):
                 claude = google_rotation_diagnostics("claude-3.5-sonnet")
                 gemini = google_rotation_diagnostics("gemini-3.5-flash-high")
@@ -30,7 +30,7 @@ class TestServerStreaming(unittest.TestCase):
             "accounts": [{"email": "test@example.com"}],
             "accountState": {"cooldowns": {"test@example.com": 1_700_000_000_000}},
         }
-        with patch("codex_antigravity_auth.server.load_accounts", return_value=data):
+        with patch("codex_antigravity_auth.server.load_accounts_read_only", return_value=data):
             with patch("codex_antigravity_auth.server.time.time", return_value=1_700_000_001):
                 diagnostics = google_rotation_diagnostics("claude-3.5-sonnet")
 

@@ -141,6 +141,22 @@ class TestProviderStorage(unittest.TestCase):
         self.assertEqual(health.status_code, 200, health.text)
         self.assertGreaterEqual(read_only.call_count, 2)
 
+    def test_health_uses_read_only_account_loading(self):
+        from codex_antigravity_auth.server import app
+
+        with patch(
+            "codex_antigravity_auth.server.load_accounts",
+            side_effect=AssertionError("mutating account loader used"),
+        ):
+            with patch(
+                "codex_antigravity_auth.server.load_accounts_read_only",
+                return_value={"accounts": [], "accountState": {}},
+            ) as read_only:
+                response = TestClient(app).get("/health")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        read_only.assert_called()
+
     def test_models_oauth_readiness_probe_is_read_only(self):
         from codex_antigravity_auth.server import app
 

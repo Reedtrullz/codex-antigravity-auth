@@ -102,6 +102,18 @@ class TestAccounts(unittest.TestCase):
 
         self.assertEqual(manager.in_flight_count("missing@gmail.com"), 0)
 
+    def test_refresh_ahead_missing_store_does_not_create_parent_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "clean-home" / ".codex" / "accounts.json"
+            with patch(
+                "codex_antigravity_auth.accounts.accounts_json_path_read_only",
+                return_value=path,
+            ):
+                summary = AccountManager().refresh_expiring_accounts()
+
+        self.assertEqual(summary, {"checked": 0, "refreshed": 0, "failed": 0})
+        self.assertFalse(path.parent.exists())
+
     @patch("codex_antigravity_auth.accounts.update_accounts")
     def test_account_rotation_on_failure_cooldown(self, mock_update):
         mock_update.side_effect = lambda mutator: mutator(self.accounts_data)

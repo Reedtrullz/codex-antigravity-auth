@@ -61,7 +61,7 @@ from .response_protocol import (
     response_from_result,
     validate_capabilities,
 )
-from .storage import load_accounts
+from .storage import load_accounts, load_accounts_read_only
 from .xai_oauth import (
     resolve_xai_oauth_access_token,
     xai_oauth_status_read_only,
@@ -257,7 +257,7 @@ def schedule_refresh_accounts_ahead(*, force: bool = False) -> bool:
 
 def account_health_summary() -> dict:
     try:
-        data = load_accounts()
+        data = load_accounts_read_only()
     except Exception:
         return {"configured_accounts": 0, "cooldowns": {}, "counters": {}, "load_error": "account store unavailable"}
     accounts = data.get("accounts", []) if isinstance(data, dict) else []
@@ -402,7 +402,7 @@ def google_rotation_diagnostics(
 ) -> dict:
     family = native_model_family(model)
     try:
-        data = load_accounts()
+        data = load_accounts_read_only()
     except Exception:
         data = {}
     accounts = data.get("accounts", []) if isinstance(data, dict) else []
