@@ -52,7 +52,7 @@ Codex Desktop/CLI  ←  Responses API formatted response
 - **Python 3.10+** — use `python3` or activate venv
 - **Virtual env**: `source .venv/bin/activate`
 - **Install**: `uv pip install -e .`
-- **Test**: `python3 -m pytest` (current suite: 575 tests plus 193 subtests, all must pass)
+- **Test**: `python3 -m pytest` (current suite: 577 tests plus 193 subtests, all must pass)
 - **Run server**: `codex-antigravity start --port 51122`
 - **Credentials**: `~/.codex/antigravity-credentials.json` or env vars
 - **Accounts**: `~/.codex/antigravity-accounts.json` (Fernet-encrypted)

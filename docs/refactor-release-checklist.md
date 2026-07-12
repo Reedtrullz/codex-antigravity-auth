@@ -77,6 +77,27 @@ Exact source: `6bd82d2718ce438a19f17ff7eb254a9bd8b44680` on `codex/comprehensive
 
 - Package metadata is `1.7.0`; the public GitHub release and PyPI package were both verified as `1.6.4` on 2026-07-12.
 - The Publish workflow now requires its artifact build and the full Ubuntu 3.10/3.11/3.12/3.14 plus Windows 3.12 test matrix before the PyPI job can run.
-- The post-workflow-edit Python 3.10 local suite passed — 575 tests, 193 subtests, and the existing Starlette/httpx deprecation warning.
-- Final source SHA, Python 3.10/3.14 counts, artifact hashes, installed-wheel proof, clean-home proof, and dependency audit are recorded in the next task after they are rerun.
+- Final source SHA, Python 3.10/3.14 counts, artifact hashes, installed-wheel proof, clean-home proof, and dependency audit are recorded below.
 - CI, tag, publish, public `1.7.0`, service mutation, real Codex configuration changes, and credentialed Google/BYOK calls remain explicitly unclaimed.
+
+## Recorded `1.7.0` local evidence — 2026-07-12
+
+Exact artifact source: `c939726f15ea201f7ff0f7b4a06decfa3841ec87` on `codex/release-hardening-1.7.0`. The worktree was clean at that source commit. Disk guard passed with 67 GiB available.
+
+- [x] Python 3.10.4: compileall and full suite passed — 577 tests, 193 subtests, one existing Starlette/httpx deprecation warning.
+- [x] Python 3.14.5: isolated `.[dev]` install, compileall, and the same full suite passed — 577 tests, 193 subtests, the same warning.
+- [x] `git diff --check` and `git diff --check v1.6.4..HEAD` passed before the artifact build.
+- [x] Publish workflow contract tests passed: PyPI requires both build and the Ubuntu 3.10/3.11/3.12/3.14 plus Windows 3.12 matrix; the tag/version guard remains enabled.
+- [x] `SOURCE_DATE_EPOCH` was set from the source commit timestamp. Build and Twine checks passed for both artifacts.
+- [x] Wheel: `codex_antigravity_auth-1.7.0-py3-none-any.whl`, 186157 bytes, SHA-256 `e682a44c02bce557f53ba99a2f1a9e72def3ddb080e63cd2e761141841edd732`.
+- [x] Sdist: `codex_antigravity_auth-1.7.0.tar.gz`, 256235 bytes, SHA-256 `ca3e20986a01d0140edaea846f01433eb768699653141dc0bb902b186cb15063`.
+- [x] Wheel contained 39 entries and every required Anti asset; sdist contained 75 entries and the license.
+- [x] Clean Python 3.12 wheel install passed `pip check`, reported version `1.7.0`, and passed CLI help, doctor help, provider presets, and temporary-home `install-skill --verify`.
+- [x] Installed Anti direct help and all 88 installed-skill tests passed outside the checkout.
+- [x] `pip-audit --path <wheel site-packages>` reported no known dependency vulnerabilities. The unpublished local project itself was explicitly skipped because `1.7.0` is not yet on PyPI.
+- [x] The installed wheel started under `env -i` on temporary loopback port 51280. `/health` returned `ok=true`, `/v1/models` returned 7 models, and non-live `doctor --codex-ready --json` returned expected exit 1 for the intentionally missing temporary Codex config.
+- [x] The running-wheel HOME remained completely empty after startup, health, models, and doctor checks: no directories, locks, keys, account/provider/OAuth stores, or configuration were created.
+- [x] An initial runtime check found that health created an account lock in an empty HOME. Commit `c939726` moved startup refresh path checks and health/rotation diagnostics to read-only account paths; the complete source and artifact matrix was rerun after that fix and passed.
+- [ ] CI, merge, tag, publish, deploy, and public `1.7.0` state remain unclaimed.
+- [ ] Credentialed Google/BYOK generation was not run because live provider authorization was not part of this release-matrix step.
+- [ ] Real service install/uninstall and real `~/.codex/config.toml` mutation were not run.

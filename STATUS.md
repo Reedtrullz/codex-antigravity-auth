@@ -1,10 +1,10 @@
 # Current Integration Status — 12 July 2026
 
 ## Build & Test Health
-- **local pytest**: the `1.7.0` release-hardening worktree passes `575` tests plus `193` subtests on Python 3.10; final multi-Python and artifact evidence is recorded in `docs/refactor-release-checklist.md` after the release matrix rerun ✅
+- **local pytest**: the `1.7.0` release-hardening worktree passes `577` tests plus `193` subtests on Python 3.10.4 and Python 3.14.5 ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
 - **diff hygiene**: `git diff --check` ✅
-- **wheel install smoke**: `1.6.4` evidence is historical; the `1.7.0` wheel/sdist and clean-install checks are pending the final non-credentialed release matrix
+- **wheel install smoke**: the `1.7.0` wheel/sdist passed Twine, content, clean Python 3.12 install, dependency, CLI, installed Anti, audit, and empty-home running-wheel checks; hashes are recorded in `docs/refactor-release-checklist.md` ✅
 - **CI matrix**: PR #15 passed duplicate CI runs `28988039196` and `28988040461`, including package, Ubuntu Python 3.10/3.11/3.12, and Windows Python 3.12 jobs ✅
 - **v1.6.3 CI/release**: PR #13 passed duplicate CI runs `28835880811` and `28835888260`; merge commit `55e0e79` passed main CI run `28835931271`; tag `v1.6.3` passed tag CI run `28835943159`; Publish workflow `28835943138` uploaded wheel and sdist to PyPI ✅
 - **live backend smoke**: credentialed live Google OAuth/runtime smoke passed on 2026-07-03 for `claude-3.5-sonnet`; live BYOK smokes passed through transient env vars for `deepseek:deepseek-v4-flash` and OpenRouter. Latest release-prep Google smoke on 2026-07-06 used a scratch Codex config, the live gateway on `127.0.0.1:51122`, and `doctor --codex-ready --live --live-model claude-3.5-sonnet`; it passed model catalog, routing, Claude account availability, and real non-streaming generation with preview `ready`. Latest OpenRouter evidence covered direct `/api/v1/auth/key` success, `/v1/models` exposure for `openrouter:openrouter/free`, and exact non-streaming sentinel `anti-openrouter-byok-ok` through `/v1/responses` with the gateway stopped afterward ✅
