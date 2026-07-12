@@ -9,6 +9,7 @@ import threading
 import warnings
 from pathlib import Path
 from typing import Any
+from .secure_store import SecureStore
 
 try:
     import tomllib
@@ -347,9 +348,7 @@ def save_model_overlays(models: list[NativeModel]) -> None:
     path = model_overlay_path()
     if path.is_symlink():
         raise ValueError(f"Refusing to overwrite symlinked model overlay file: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_model_overlay_toml(models), encoding="utf-8")
-    os.chmod(path, 0o600)
+    SecureStore().atomic_write_text(path, render_model_overlay_toml(models), mode=0o600)
     invalidate_model_overlay_cache()
 
 

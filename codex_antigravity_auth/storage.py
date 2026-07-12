@@ -5,7 +5,6 @@ import threading
 import keyring
 import base64
 import hashlib
-import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,6 +12,7 @@ from typing import Any, Callable
 from cryptography.fernet import Fernet
 from .constants import ANTIGRAVITY_ACCOUNTS_FILE, get_codex_home
 from .account_state import migrate_account_state
+from .secure_store import SecureStore
 
 try:
     import fcntl
@@ -121,12 +121,14 @@ def _get_encryption_key() -> str:
         return _normalize_fernet_key(env_key)
 
     try:
-        key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME)
-        if not key:
-            # Generate a new Fernet key and save it securely in the OS Keychain/Credential Manager
-            key = Fernet.generate_key().decode("utf-8")
-            keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME, key)
-        return key
+        initialization_lock = get_codex_home() / "antigravity-storage-key-init"
+        with _exclusive_file_lock(initialization_lock):
+            key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME)
+            if not key:
+                candidate = Fernet.generate_key().decode("utf-8")
+                keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME, candidate)
+                key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME) or candidate
+            return key
     except Exception:
         # Headless systems may not have a usable keyring. Use a generated,
         # machine-local key instead of a source-known static key.
@@ -173,24 +175,13 @@ def _load_secure_json_unlocked(
 
 
 def _save_secure_json_unlocked(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = None
-    try:
-        encrypted_data = encrypt_payload(json.dumps(data, indent=2))
-        with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent, prefix=f".{path.name}.", suffix=".tmp") as f:
-            temp_path = Path(f.name)
-            f.write(encrypted_data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(temp_path, 0o600)
-        os.replace(temp_path, path)
-    except Exception:
-        if temp_path and temp_path.exists():
-            try:
-                temp_path.unlink()
-            except Exception:
-                pass
-        raise
+    encrypted_data = encrypt_payload(json.dumps(data, indent=2))
+    # The caller already owns the cross-process store lock.
+    SecureStore(key_provider=_get_encryption_key)._atomic_write_bytes_unlocked(
+        path,
+        encrypted_data,
+        mode=0o600,
+    )
 
 
 def load_secure_json_file(
