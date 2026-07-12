@@ -397,9 +397,17 @@ class TestAccounts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             accounts_file = Path(tmp) / "antigravity-accounts.json"
             accounts_file.write_text("{}", encoding="utf-8")
-            with patch("codex_antigravity_auth.accounts.get_accounts_json_path", return_value=accounts_file):
-                manager = AccountManager()
-                summary = manager.refresh_expiring_accounts(window_seconds=300)
+            with (
+                patch(
+                    "codex_antigravity_auth.accounts.accounts_json_path_read_only",
+                    return_value=accounts_file,
+                ),
+                patch(
+                    "codex_antigravity_auth.accounts.get_accounts_json_path",
+                    return_value=accounts_file,
+                ),
+            ):
+                summary = AccountManager().refresh_expiring_accounts(window_seconds=300)
 
         self.assertEqual(summary["checked"], 2)
         self.assertEqual(summary["refreshed"], 1)
