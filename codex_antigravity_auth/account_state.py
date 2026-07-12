@@ -151,11 +151,12 @@ class AccountState:
         data: dict[str, Any],
         *,
         now: Callable[[], float] = time.time,
+        in_flight: dict[str, int] | None = None,
     ) -> None:
         self.data = data
         self._now = now
         self._lock = threading.RLock()
-        self._in_flight: dict[str, int] = {}
+        self._in_flight = in_flight if in_flight is not None else {}
         migrated, _changed = migrate_account_state(data, now=now())
         data.clear()
         data.update(migrated)
@@ -164,7 +165,7 @@ class AccountState:
     def state(self) -> dict[str, Any]:
         return self.data["accountState"]
 
-    def acquire(self, family: str) -> Lease | None:
+    def _select(self, family: str, *, acquire: bool) -> Lease | None:
         if family not in FAMILIES:
             raise ValueError(f"unsupported model family: {family}")
         with self._lock:
@@ -196,8 +197,15 @@ class AccountState:
             family_map[family] = index
             self.data["activeIndex"] = index
             email = str(account["email"])
-            self._in_flight[email] = self._in_flight.get(email, 0) + 1
+            if acquire:
+                self._in_flight[email] = self._in_flight.get(email, 0) + 1
             return Lease(account=account, family=family)
+
+    def select(self, family: str) -> Lease | None:
+        return self._select(family, acquire=False)
+
+    def acquire(self, family: str) -> Lease | None:
+        return self._select(family, acquire=True)
 
     def release(self, lease: Lease | None) -> None:
         if lease is not None:
@@ -222,32 +230,85 @@ class AccountState:
         counter = families.setdefault(family, _counter({}))
         return counter
 
-    def record(self, lease: Lease, outcome: AttemptOutcome) -> None:
+    def record(
+        self,
+        lease: Lease,
+        outcome: AttemptOutcome,
+        *,
+        usage: dict[str, Any] | None = None,
+        error_class: str | None = None,
+    ) -> None:
+        self.record_email(
+            str(lease.account.get("email", "")),
+            lease.family,
+            outcome,
+            usage=usage,
+            error_class=error_class,
+        )
+
+    def record_email(
+        self,
+        email: str,
+        family: str,
+        outcome: AttemptOutcome,
+        *,
+        usage: dict[str, Any] | None = None,
+        error_class: str | None = None,
+    ) -> None:
+        if family not in FAMILIES:
+            raise ValueError(f"unsupported model family: {family}")
         with self._lock:
-            email = str(lease.account.get("email", ""))
             if not email:
                 return
-            counter = self._counter_for(email, lease.family)
+            counter = self._counter_for(email, family)
             counter["total_requests"] += 1
             timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._now()))
             if outcome.category == "success":
                 counter["successes"] += 1
                 counter["last_success"] = timestamp
-                return
-            counter["failures"] += 1
-            counter["last_failure"] = timestamp
-            counter["last_failure_class"] = outcome.category
-            if outcome.category == "rate_limit":
-                counter["rate_limits"] += 1
+            else:
+                counter["failures"] += 1
+                counter["last_failure"] = timestamp
+                counter["last_failure_class"] = (error_class or outcome.category)[:200]
+                if outcome.category == "rate_limit":
+                    counter["rate_limits"] += 1
+            if usage:
+                for field in ("input_tokens", "output_tokens", "total_tokens"):
+                    value = usage.get(field)
+                    if isinstance(value, bool):
+                        continue
+                    try:
+                        count = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if count > 0:
+                        counter[field] += count
             if outcome.scope == "none":
                 return
-            scope = "account" if outcome.scope == "account" else lease.family
-            failures = self.state["failures"].setdefault(email, {})
-            failures[scope] = failures.get(scope, 0) + 1
-            backoff = 120 * (2 ** (min(failures[scope], 5) - 1))
-            retry_after = outcome.retry_after_seconds or 0
-            duration = max(backoff, min(float(retry_after), 86_400))
-            self.state["cooldowns"].setdefault(email, {})[scope] = self._now() + duration
+            self._apply_cooldown(email, family, outcome)
+
+    def _apply_cooldown(self, email: str, family: str, outcome: AttemptOutcome) -> float:
+        scope = "account" if outcome.scope == "account" else family
+        failures = self.state["failures"].setdefault(email, {})
+        if not isinstance(failures, dict):
+            failures = {}
+            self.state["failures"][email] = failures
+        failures[scope] = failures.get(scope, 0) + 1
+        backoff = 120 * (2 ** (min(failures[scope], 5) - 1))
+        retry_after = outcome.retry_after_seconds or 0
+        duration = max(backoff, min(float(retry_after), 86_400))
+        cooldowns = self.state["cooldowns"].setdefault(email, {})
+        if not isinstance(cooldowns, dict):
+            cooldowns = {}
+            self.state["cooldowns"][email] = cooldowns
+        cooldowns[scope] = self._now() + duration
+        return duration
+
+    def apply_cooldown(self, email: str, family: str, outcome: AttemptOutcome) -> float:
+        if outcome.scope == "none":
+            return 0
+        with self._lock:
+            return self._apply_cooldown(email, family, outcome)
 
     def clear_failures(self, email: str, family: str | None = None) -> None:
         with self._lock:

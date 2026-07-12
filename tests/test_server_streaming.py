@@ -151,7 +151,7 @@ class TestServerStreaming(unittest.TestCase):
                 )
 
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
-            with patch("codex_antigravity_auth.server.account_manager.mark_failure") as mock_mark_failure:
+            with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
                 with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                     response = TestClient(app).post(
                         "/v1/responses",
@@ -163,7 +163,8 @@ class TestServerStreaming(unittest.TestCase):
         self.assertIn("quota exhausted", detail["message"])
         self.assertEqual(detail["diagnostics"]["selected_account_family"], "gemini")
         self.assertIn("rotation_attempted", detail["diagnostics"])
-        mock_mark_failure.assert_called_once()
+        record.assert_called_once()
+        self.assertEqual(record.call_args.args[2].category, "quota")
 
     def test_google_non_streaming_releases_acquired_account_on_backend_failure(self):
         fake_account = {"email": "test@gmail.com", "accessToken": "dummy_access"}
@@ -184,7 +185,7 @@ class TestServerStreaming(unittest.TestCase):
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", side_effect=[fake_account, None]):
             with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
-                    with patch("codex_antigravity_auth.server.account_manager.record_request"):
+                    with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
                         with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                             response = TestClient(app).post(
                                 "/v1/responses",
@@ -229,7 +230,7 @@ class TestServerStreaming(unittest.TestCase):
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", side_effect=[first, second]):
             with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
-                    with patch("codex_antigravity_auth.server.account_manager.record_request") as record:
+                    with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
                         with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                             response = TestClient(app).post(
                                 "/v1/responses",
@@ -239,7 +240,7 @@ class TestServerStreaming(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual([call.args[0] for call in release.call_args_list], ["first@gmail.com", "second@gmail.com"])
         self.assertEqual([call.args[0] for call in record.call_args_list], ["first@gmail.com", "second@gmail.com"])
-        self.assertEqual([call.kwargs["status"] for call in record.call_args_list], ["failure", "success"])
+        self.assertEqual([call.args[2].category for call in record.call_args_list], ["auth", "success"])
         self.assertEqual(record.call_args_list[0].kwargs["error_class"], "auth")
 
     def test_google_stream_disconnect_records_cancellation_and_releases_lease(self):
@@ -282,14 +283,14 @@ class TestServerStreaming(unittest.TestCase):
 
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account):
             with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
-                with patch("codex_antigravity_auth.server.account_manager.record_request") as record:
+                with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
                     with patch("codex_antigravity_auth.server.write_request_record") as request_log:
                         first_event = asyncio.run(scenario())
 
         self.assertIn("response.created", first_event)
         release.assert_called_once_with("cancelled@gmail.com")
         record.assert_called_once()
-        self.assertEqual(record.call_args.kwargs["status"], "failure")
+        self.assertEqual(record.call_args.args[2].category, "cancelled")
         self.assertEqual(record.call_args.kwargs["error_class"], "cancelled")
         request_log.assert_called_once()
         self.assertTrue(request_log.call_args.args[0]["cancelled"])
@@ -329,7 +330,7 @@ class TestServerStreaming(unittest.TestCase):
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", side_effect=[first, second]):
             with patch("codex_antigravity_auth.server.account_manager.release_account"):
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
-                    with patch("codex_antigravity_auth.server.account_manager.record_request"):
+                    with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
                         with patch("codex_antigravity_auth.server.write_request_record", side_effect=records.append):
                             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                                 response = TestClient(app).post(
@@ -390,7 +391,7 @@ class TestServerStreaming(unittest.TestCase):
 
                 with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account) as acquire:
                     with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
-                        with patch("codex_antigravity_auth.server.account_manager.record_request") as record:
+                        with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
                             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                                 response = TestClient(app).post(
                                     "/v1/responses",
@@ -402,7 +403,10 @@ class TestServerStreaming(unittest.TestCase):
                 acquire.assert_called_once()
                 release.assert_called_once_with("matrix@gmail.com")
                 record.assert_called_once()
-                self.assertEqual(record.call_args.kwargs["status"], expected_attempt_status)
+                self.assertEqual(
+                    record.call_args.args[2].category == "success",
+                    expected_attempt_status == "success",
+                )
 
     def test_byok_chat_non_streaming_terminal_matrix_uses_protocol_contract(self):
         provider = {
@@ -569,7 +573,7 @@ class TestServerStreaming(unittest.TestCase):
 
                 with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account) as acquire:
                     with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
-                        with patch("codex_antigravity_auth.server.account_manager.record_request") as record:
+                        with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
                             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                                 response = TestClient(app).post(
                                     "/v1/responses",
@@ -581,7 +585,10 @@ class TestServerStreaming(unittest.TestCase):
                 acquire.assert_called_once()
                 release.assert_called_once_with("stream-matrix@gmail.com")
                 record.assert_called_once()
-                self.assertEqual(record.call_args.kwargs["status"], attempt_status)
+                self.assertEqual(
+                    record.call_args.args[2].category == "success",
+                    attempt_status == "success",
+                )
 
     def test_models_endpoint_returns_native_catalog_when_provider_catalog_blocks(self):
         def slow_provider_configs():
@@ -799,7 +806,7 @@ class TestServerStreaming(unittest.TestCase):
                     pass
 
             with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
-                with patch("codex_antigravity_auth.server.account_manager.mark_failure") as mock_mark_failure:
+                with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
                     with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
                         response = test_client.post(
                             "/v1/responses",
@@ -817,9 +824,9 @@ class TestServerStreaming(unittest.TestCase):
             ]
             failed_events = [event for event in events if event.get("type") == "response.failed"]
             self.assertEqual(failed_events[0]["response"]["error"]["code"], "rate_limit_exceeded")
-            mock_mark_failure.assert_called_once()
-            self.assertEqual(mock_mark_failure.call_args.args[0], "test@gmail.com")
-            self.assertIn("rate_limit_exceeded", mock_mark_failure.call_args.args[1])
+            record.assert_called_once()
+            self.assertEqual(record.call_args.args[0], "test@gmail.com")
+            self.assertEqual(record.call_args.args[2].category, "quota")
 
     def test_streaming_rotation_rebuilds_request_with_rotated_project(self):
         with TestClient(app) as test_client:
@@ -991,8 +998,7 @@ class TestServerStreaming(unittest.TestCase):
                 "codex_antigravity_auth.server.account_manager.acquire_account",
                 side_effect=[first_account, second_account],
             ):
-                with patch("codex_antigravity_auth.server.account_manager.mark_failure") as mock_mark_failure:
-                    with patch("codex_antigravity_auth.server.account_manager.record_request") as record:
+                with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
                         with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
                             with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
                                 response = test_client.post(
@@ -1004,10 +1010,11 @@ class TestServerStreaming(unittest.TestCase):
             self.assertIn("rotated ok", response.text)
             self.assertNotIn("response.failed", response.text)
             self.assertEqual([request["json"]["project"] for request in requests], ["project-first", "project-second"])
-            mock_mark_failure.assert_called_once()
-            self.assertEqual(mock_mark_failure.call_args.args[0], "first@gmail.com")
             self.assertEqual([call.args[0] for call in record.call_args_list], ["first@gmail.com", "second@gmail.com"])
-            self.assertEqual([call.kwargs["status"] for call in record.call_args_list], ["failure", "success"])
+            self.assertEqual(
+                [call.args[2].category for call in record.call_args_list],
+                ["quota", "success"],
+            )
             self.assertEqual([call.args[0] for call in release.call_args_list], ["first@gmail.com", "second@gmail.com"])
 
     def test_google_streaming_rotation_discards_failed_attempt_usage(self):
@@ -1169,8 +1176,7 @@ class TestServerStreaming(unittest.TestCase):
                 "codex_antigravity_auth.server.account_manager.acquire_account",
                 return_value=first_account,
             ) as mock_select:
-                with patch("codex_antigravity_auth.server.account_manager.mark_failure") as mock_mark_failure:
-                    with patch("codex_antigravity_auth.server.account_manager.record_request"):
+                with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
                         with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
                             response = test_client.post(
                                 "/v1/responses",
@@ -1180,7 +1186,8 @@ class TestServerStreaming(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(attempts, ["project-first"])
             self.assertEqual(mock_select.call_count, 1)
-            mock_mark_failure.assert_called_once()
+            record.assert_called_once()
+            self.assertEqual(record.call_args.args[2].category, "quota")
             self.assertIn("partial", response.text)
             self.assertIn("response.failed", response.text)
 

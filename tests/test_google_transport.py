@@ -382,7 +382,7 @@ class TestGoogleRouteTerminalFidelity(unittest.TestCase):
         account = {"email": "person@example.com", "accessToken": "token", "projectId": "safe-project"}
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account):
             with patch("codex_antigravity_auth.server.account_manager.release_account"):
-                with patch("codex_antigravity_auth.server.account_manager.record_request"):
+                with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
                     with patch("codex_antigravity_auth.server.httpx.AsyncClient", Client):
                         return TestClient(app).post(
                             "/v1/responses",
@@ -458,7 +458,7 @@ class TestGoogleRouteTerminalFidelity(unittest.TestCase):
         account = {"email": "person@example.com", "accessToken": "token", "projectId": "safe-project"}
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account):
             with patch("codex_antigravity_auth.server.account_manager.release_account"):
-                with patch("codex_antigravity_auth.server.account_manager.record_request"):
+                with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
                     with patch("codex_antigravity_auth.server.httpx.AsyncClient", Client):
                         return TestClient(app).post(
                             "/v1/responses",

@@ -3,6 +3,7 @@ import time
 import tempfile
 from pathlib import Path
 from codex_antigravity_auth.accounts import AccountManager
+from codex_antigravity_auth.response_protocol import AttemptOutcome
 from unittest.mock import patch
 
 class TestAccounts(unittest.TestCase):
@@ -17,6 +18,36 @@ class TestAccounts(unittest.TestCase):
             "activeIndexByFamily": {"claude": 0, "gemini": 0}
         }
         
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_record_attempt_is_one_authoritative_state_transition(self, mock_update):
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+        with tempfile.TemporaryDirectory() as tmp:
+            accounts_file = Path(tmp) / "antigravity-accounts.json"
+            accounts_file.write_text("{}", encoding="utf-8")
+            with patch(
+                "codex_antigravity_auth.accounts.get_accounts_json_path",
+                return_value=accounts_file,
+            ):
+                manager = AccountManager()
+                manager.record_attempt(
+                    "primary@gmail.com",
+                    "claude-3.5-sonnet",
+                    AttemptOutcome(
+                        scope="family",
+                        category="rate_limit",
+                        retry_after_seconds=60,
+                    ),
+                    usage={"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                )
+
+        state = self.accounts_data["accountState"]
+        counter = state["counters"]["primary@gmail.com"]["claude"]
+        self.assertEqual(counter["total_requests"], 1)
+        self.assertEqual(counter["failures"], 1)
+        self.assertEqual(counter["rate_limits"], 1)
+        self.assertEqual(counter["total_tokens"], 5)
+        self.assertEqual(state["failures"]["primary@gmail.com"]["claude"], 1)
+
     @patch("codex_antigravity_auth.accounts.update_accounts")
     def test_account_selection_happy_path(self, mock_update):
         mock_update.side_effect = lambda mutator: mutator(self.accounts_data)

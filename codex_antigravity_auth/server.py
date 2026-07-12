@@ -211,44 +211,6 @@ async def release_account_for_request(email: str | None) -> None:
     await run_in_threadpool(account_manager.release_account, email)
 
 
-async def mark_account_failure(
-    email: str,
-    reason: str,
-    retry_after_seconds: float | None = None,
-    *,
-    model: str | None = None,
-    status_code: int | None = None,
-) -> None:
-    await run_in_threadpool(
-        account_manager.mark_failure,
-        email,
-        reason,
-        retry_after_seconds,
-        model=model,
-        status_code=status_code,
-    )
-
-
-async def record_account_request(
-    email: str,
-    model: str,
-    *,
-    status: str,
-    status_code: int | None = None,
-    error_class: str | None = None,
-    usage: dict | None = None,
-) -> None:
-    await run_in_threadpool(
-        account_manager.record_request,
-        email,
-        model,
-        status=status,
-        status_code=status_code,
-        error_class=error_class,
-        usage=usage,
-    )
-
-
 async def record_attempt_outcome(
     email: str,
     model: str,
@@ -258,12 +220,15 @@ async def record_attempt_outcome(
     usage: dict | None = None,
     error_class: str | None = None,
 ) -> None:
-    await record_account_request(
+    await run_in_threadpool(
+        account_manager.record_attempt,
         email,
         model,
-        status="success" if outcome.category == "success" else "failure",
+        outcome,
         status_code=status_code,
-        error_class=None if outcome.category == "success" else (error_class or outcome.category),
+        error_class=(
+            None if outcome.category == "success" else (error_class or outcome.category)
+        ),
         usage=usage,
     )
 
@@ -1362,12 +1327,7 @@ async def create_response(request: Request):
             if stream:
                 return None
             return await google_transport.post(codex_req, account_lease(selected_account))
-        except Exception as e:
-            await mark_account_failure(
-                selected_account["email"],
-                f"Connection error: {safe_error_detail(e)}",
-                model=model,
-            )
+        except Exception:
             return None
 
     # Handle standard non-streaming response path
@@ -1426,29 +1386,21 @@ async def create_response(request: Request):
             if res.status_code in (401, 403, 429):
                 retry_after_seconds = retry_after_seconds_from_response(res)
                 retry_after_source = retry_after_source_from_response(res)
-                reason = "Rate limited / Quota exceeded" if res.status_code == 429 else f"Auth failure {res.status_code}: {safe_error_detail(res.text)}"
                 cooldown_scope = "family" if res.status_code == 429 else "account"
                 cooldown_category = "rate_limit" if res.status_code == 429 else "auth"
-                await mark_account_failure(
-                    response_account["email"],
-                    reason,
-                    retry_after_seconds,
-                    model=model,
+                await record_attempt_outcome(
+                    response_account.get("email", ""),
+                    model,
+                    AttemptOutcome(
+                        scope=cooldown_scope,
+                        category=cooldown_category,
+                        retry_after_seconds=retry_after_seconds,
+                    ),
                     status_code=res.status_code,
                 )
                 new_account = await acquire_active_account_for_request(model)
                 rotation_attempted = True
                 if new_account:
-                    await record_attempt_outcome(
-                        response_account.get("email", ""),
-                        model,
-                        AttemptOutcome(
-                            scope="family" if res.status_code == 429 else "account",
-                            category="rate_limit" if res.status_code == 429 else "auth",
-                            retry_after_seconds=retry_after_seconds,
-                        ),
-                        status_code=res.status_code,
-                    )
                     response_attempts.append(new_account)
                     response_account = new_account
                     res = await request_backend(response_account)
@@ -1487,13 +1439,6 @@ async def create_response(request: Request):
             if res.status_code in (401, 403):
                 retry_after_seconds = retry_after_seconds_from_response(res)
                 retry_after_source = retry_after_source_from_response(res)
-                await mark_account_failure(
-                    response_account["email"],
-                    f"Auth failure {res.status_code}: {safe_error_detail(res.text)}",
-                    retry_after_seconds,
-                    model=model,
-                    status_code=res.status_code,
-                )
                 await record_attempt_outcome(
                     response_account.get("email", ""),
                     model,
@@ -1527,13 +1472,6 @@ async def create_response(request: Request):
             if res.status_code == 429:
                 retry_after_seconds = retry_after_seconds_from_response(res)
                 retry_after_source = retry_after_source_from_response(res)
-                await mark_account_failure(
-                    response_account["email"],
-                    "Rate limited / Quota exceeded",
-                    retry_after_seconds,
-                    model=model,
-                    status_code=429,
-                )
                 await record_attempt_outcome(
                     response_account.get("email", ""),
                     model,
@@ -1602,12 +1540,6 @@ async def create_response(request: Request):
                 backend_error = backend_error_from_payload(gemini_resp)
                 if backend_error:
                     code, message = backend_error
-                    if google_stream_error_is_account_scoped(code, message):
-                        await mark_account_failure(
-                            response_account["email"],
-                            f"Backend payload error {code}: {safe_error_detail(message)}",
-                            model=model,
-                        )
                     await record_attempt_outcome(
                         response_account.get("email", ""),
                         model,
@@ -1800,10 +1732,10 @@ async def create_response(request: Request):
                 last_error_code = code
                 last_error = f"Google Antigravity stream returned {code}: {message}"
                 if google_stream_error_is_account_scoped(code, message):
-                    await mark_account_failure(
-                        stream_account["email"],
-                        f"Streaming backend error {code}: {safe_error_detail(message)}",
-                        model=model,
+                    await record_stream_attempt(
+                        stream_account,
+                        outcome_for_backend_error(code, message),
+                        error_class=code,
                     )
                     if not backend_output_started:
                         stream_retry_requested = True
@@ -1890,14 +1822,17 @@ async def create_response(request: Request):
                 async with google_transport.stream(codex_req, account_lease(stream_account)) as res:
                     if res.status_code != 200:
                         if res.status_code in (401, 403, 429):
-                            body_bytes = await res.aread()
-                            body_text = body_bytes.decode("utf-8", errors="ignore")
-                            await mark_account_failure(
-                                stream_account["email"],
-                                f"Streaming HTTP {res.status_code}: {safe_error_detail(body_text)}",
-                                retry_after_seconds_from_response(res),
-                                model=model,
+                            retry_after = retry_after_seconds_from_response(res)
+                            base_outcome = outcome_for_http_status(res.status_code)
+                            await record_stream_attempt(
+                                stream_account,
+                                AttemptOutcome(
+                                    scope=base_outcome.scope,
+                                    category=base_outcome.category,
+                                    retry_after_seconds=retry_after,
+                                ),
                                 status_code=res.status_code,
+                                error_class=base_outcome.category,
                             )
                         last_error_code = "backend_error"
                         last_error = f"Google Antigravity returned HTTP {res.status_code}"
@@ -1919,11 +1854,6 @@ async def create_response(request: Request):
                         if not stream_failed and not stream_retry_requested:
                             completed = True
             except Exception as e:
-                await mark_account_failure(
-                    stream_account["email"],
-                    f"Streaming connection error: {safe_error_detail(e)}",
-                    model=model,
-                )
                 last_error_code = "connection_error"
                 last_error = safe_error_detail(e)
 
