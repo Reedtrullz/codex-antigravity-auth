@@ -41,6 +41,7 @@ from .models import canonical_model_id, native_model_catalog, native_model_famil
 from .observability import request_log_info, write_request_record
 from .redaction import redact_secret_text
 from .google_transport import AccountLease, GoogleResponseAccumulator, GoogleTransport
+from .openai_transport import ChatResponseAccumulator, OpenAICompatibleTransport
 from .response_protocol import (
     CapabilityError,
     ProviderCapabilities,
@@ -2135,9 +2136,16 @@ async def create_xai_oauth_response(codex_req: dict, provider: dict, provider_mo
         raise HTTPException(status_code=500, detail=f"{provider['id']} response parsing failed: {safe_error_detail(e)}") from e
     if not isinstance(payload, dict):
         raise HTTPException(status_code=500, detail=f"{provider['id']} response parsing failed: response was not an object")
-    response = dict(payload)
-    response["model"] = display_model
-    return response
+    try:
+        return OpenAICompatibleTransport(timeout=timeout).validate_native_response(
+            payload,
+            display_model=display_model,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"{provider['id']} returned an invalid Responses payload: {safe_error_detail(e)}",
+        ) from e
 
 
 async def xai_oauth_responses_sse_generator(
@@ -2257,6 +2265,7 @@ async def openai_compatible_sse_generator(
     text_output_index = None
     sequence_number = 0
     stream_failed = False
+    chat_stream_accumulator = ChatResponseAccumulator()
 
     def stream_event(payload: dict) -> str:
         nonlocal sequence_number
@@ -2289,6 +2298,7 @@ async def openai_compatible_sse_generator(
             return
         data_payload = line[5:].strip()
         if data_payload == "[DONE]":
+            chat_stream_accumulator.mark_done()
             return
         try:
             parsed = json.loads(data_payload)
@@ -2306,6 +2316,7 @@ async def openai_compatible_sse_generator(
             async for event in fail_stream(code, message):
                 yield event
             return
+        chat_stream_accumulator.consume(parsed)
         if isinstance(parsed.get("usage"), dict):
             provider_usage = parsed["usage"]
             usage = usage_counts(
@@ -2412,6 +2423,48 @@ async def openai_compatible_sse_generator(
     if stream_failed:
         return
 
+    provider_result = chat_stream_accumulator.finalize()
+    if provider_result.terminal.kind is TerminalKind.FAILED:
+        async for event in fail_stream(
+            provider_result.terminal.error_code or "backend_error",
+            provider_result.terminal.error_message or "Provider stream failed",
+        ):
+            yield event
+        return
+
+    refusal_output = next(
+        (
+            item
+            for item in provider_result.output
+            if item.get("type") == "message"
+            and isinstance(item.get("content"), list)
+            and item["content"]
+            and isinstance(item["content"][0], dict)
+            and item["content"][0].get("type") == "refusal"
+        ),
+        None,
+    )
+    if refusal_output is not None:
+        refusal_index = next_output_index
+        next_output_index += 1
+        yield stream_event(
+            {
+                "type": "response.output_item.added",
+                "response_id": response_id,
+                "output_index": refusal_index,
+                "item": refusal_output,
+            }
+        )
+        yield stream_event(
+            {
+                "type": "response.output_item.done",
+                "response_id": response_id,
+                "output_index": refusal_index,
+                "item": refusal_output,
+            }
+        )
+        indexed_output_items.append((refusal_index, refusal_output))
+
     for idx in tool_seen_order:
         item = tool_calls[idx]
         if not valid_function_name(item.get("name")):
@@ -2455,11 +2508,15 @@ async def openai_compatible_sse_generator(
         "id": response_id,
         "object": "response",
         "created_at": created_at,
-        "status": "completed",
+        "status": provider_result.terminal.kind.value,
         "model": display_model,
         "output": done_output,
     }
     if usage:
         done_response["usage"] = usage
-    yield stream_event({'type': 'response.completed', 'response': done_response})
+    if provider_result.terminal.kind is TerminalKind.INCOMPLETE:
+        done_response["incomplete_details"] = {
+            "reason": provider_result.terminal.incomplete_reason or provider_result.terminal.reason
+        }
+    yield stream_event({'type': f'response.{provider_result.terminal.kind.value}', 'response': done_response})
     yield "data: [DONE]\n\n"

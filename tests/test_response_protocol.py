@@ -169,6 +169,10 @@ class TestCapabilityValidation(unittest.TestCase):
         with self.assertRaisesRegex(CapabilityError, "parallel_tool_calls"):
             validate_capabilities({"parallel_tool_calls": False}, limited)
 
+    def test_rejects_non_boolean_parallel_tool_control(self):
+        with self.assertRaisesRegex(CapabilityError, "boolean"):
+            validate_capabilities({"parallel_tool_calls": "false"}, self.full)
+
     def test_rejects_unsupported_tool_choice_mode(self):
         limited = ProviderCapabilities(
             native_responses=False,

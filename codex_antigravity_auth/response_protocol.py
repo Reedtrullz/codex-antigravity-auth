@@ -230,6 +230,8 @@ def _advertised_function_names(request: dict[str, Any]) -> set[str]:
 
 
 def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabilities) -> None:
+    if "parallel_tool_calls" in request and not isinstance(request["parallel_tool_calls"], bool):
+        raise CapabilityError("parallel_tool_calls must be a boolean")
     if "parallel_tool_calls" in request and not capabilities.parallel_tool_calls:
         raise CapabilityError("parallel_tool_calls is not supported by the selected route")
 

@@ -819,6 +819,8 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
         payload["top_p"] = codex_req["top_p"]
     if "stop" in codex_req:
         payload["stop"] = codex_req["stop"]
+    if "parallel_tool_calls" in codex_req:
+        payload["parallel_tool_calls"] = codex_req["parallel_tool_calls"]
     response_format = text_format_to_chat_response_format()
     if response_format:
         payload["response_format"] = response_format
@@ -844,82 +846,15 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
 
 
 def transform_chat_response(chat_resp: dict, model: str) -> dict:
-    """Translate OpenAI-compatible Chat Completions response to Responses API."""
-    if not isinstance(chat_resp, dict):
-        chat_resp = {}
-    output_items = []
-    choices = chat_resp.get("choices", [])
-    if not isinstance(choices, list):
-        choices = []
-    for choice in choices:
-        if not isinstance(choice, dict):
-            continue
-        message = choice.get("message", {}) or {}
-        if not isinstance(message, dict):
-            continue
-        reasoning_content = message.get("reasoning_content")
-        if isinstance(reasoning_content, str) and reasoning_content:
-            output_items.append({
-                "type": "reasoning",
-                "id": f"rs_{uuid.uuid4().hex[:8]}",
-                "encrypted_content": "",
-                "step_by_step_summary": str(reasoning_content),
-            })
-        content = message.get("content")
-        if isinstance(content, str) and content:
-            text = content
-        elif isinstance(content, list):
-            text = "".join(part.get("text", "") for part in content if isinstance(part, dict) and isinstance(part.get("text"), str))
-        else:
-            text = ""
-        if text:
-            output_items.append({
-                "type": "message",
-                "id": f"msg_{uuid.uuid4().hex[:8]}",
-                "status": "completed",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
-            })
-        tool_calls = message.get("tool_calls", []) or []
-        if not isinstance(tool_calls, list):
-            tool_calls = []
-        for tool_call in tool_calls:
-            if not isinstance(tool_call, dict):
-                continue
-            fn = tool_call.get("function", {}) or {}
-            if not isinstance(fn, dict):
-                continue
-            name = fn.get("name")
-            if not valid_function_name(name):
-                continue
-            arguments = fn.get("arguments", "{}")
-            arguments = function_call_arguments_string(arguments)
-            provider_call_id = tool_call.get("id") if isinstance(tool_call.get("id"), str) and tool_call.get("id") else None
-            item_id = provider_call_id or f"fc_{uuid.uuid4().hex[:8]}"
-            call_id = provider_call_id or f"call_{uuid.uuid4().hex[:8]}"
-            output_items.append({
-                "type": "function_call",
-                "id": item_id,
-                "call_id": call_id,
-                "name": name,
-                "arguments": arguments,
-            })
+    """Compatibility wrapper around the shared OpenAI terminal contract."""
+    from .openai_transport import OpenAICompatibleTransport
+    from .response_protocol import response_from_result
 
-    usage = chat_resp.get("usage", {}) or {}
-    if not isinstance(usage, dict):
-        usage = {}
-    translated_usage = usage_counts(
-        usage.get("prompt_tokens", usage.get("input_tokens", 0)),
-        usage.get("completion_tokens", usage.get("output_tokens", 0)),
-        usage.get("total_tokens", 0),
+    payload = chat_resp if isinstance(chat_resp, dict) else {}
+    result = OpenAICompatibleTransport(timeout=0).parse_chat_response(payload)
+    return response_from_result(
+        result,
+        response_id=result.provider_response_id or f"resp_{uuid.uuid4().hex[:12]}",
+        model=model,
+        created_at=_created_at(payload.get("created")),
     )
-
-    return {
-        "id": f"resp_{uuid.uuid4().hex[:12]}",
-        "object": "response",
-        "created_at": _created_at(chat_resp.get("created")),
-        "model": model,
-        "output": output_items,
-        "usage": translated_usage,
-        "status": "completed",
-    }
