@@ -123,6 +123,47 @@ class TestCredentialResolution(unittest.TestCase):
 
 
 class TestProviderStorage(unittest.TestCase):
+    def test_models_and_health_catalogs_use_read_only_provider_loading(self):
+        from codex_antigravity_auth.server import app
+
+        with patch(
+            "codex_antigravity_auth.server.all_provider_configs",
+            side_effect=AssertionError("mutating provider loader used"),
+        ):
+            with patch(
+                "codex_antigravity_auth.server.all_provider_configs_read_only",
+                return_value={},
+            ) as read_only:
+                models = TestClient(app).get("/v1/models")
+                health = TestClient(app).get("/health")
+
+        self.assertEqual(models.status_code, 200, models.text)
+        self.assertEqual(health.status_code, 200, health.text)
+        self.assertGreaterEqual(read_only.call_count, 2)
+
+    def test_models_oauth_readiness_probe_is_read_only(self):
+        from codex_antigravity_auth.server import app
+
+        provider = {
+            "id": "xai-oauth",
+            "kind": "openai_responses",
+            "authMode": "oauth",
+            "models": ["grok-build-0.1"],
+        }
+        with patch(
+            "codex_antigravity_auth.server.all_provider_configs_read_only",
+            return_value={"xai-oauth": provider},
+        ):
+            with patch(
+                "codex_antigravity_auth.server.xai_oauth_status_read_only",
+                return_value={"ready": True},
+            ) as read_only_status:
+                response = TestClient(app).get("/v1/models")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("xai-oauth:grok-build-0.1", [m["id"] for m in response.json()["data"]])
+        read_only_status.assert_called()
+
     def test_read_only_provider_diagnostics_do_not_create_parent_directory(self):
         from codex_antigravity_auth.byok import load_provider_config_read_only
 

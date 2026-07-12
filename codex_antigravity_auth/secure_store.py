@@ -23,7 +23,8 @@ except ImportError:  # pragma: no cover - only available on Windows.
     msvcrt = None
 
 T = TypeVar("T")
-_file_lock_thread_lock = threading.RLock()
+_file_lock_registry_guard = threading.Lock()
+_file_lock_thread_locks: dict[str, threading.RLock] = {}
 
 
 class StoreError(RuntimeError):
@@ -48,10 +49,14 @@ class StorePermissionError(StoreError):
 
 @contextmanager
 def file_lock(path: Path):
-    with _file_lock_thread_lock:
+    lock_key = os.path.abspath(os.path.expanduser(str(path)))
+    with _file_lock_registry_guard:
+        thread_lock = _file_lock_thread_locks.setdefault(lock_key, threading.RLock())
+    with thread_lock:
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = path.with_name(f".{path.name}.lock")
         descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        acquired = False
         try:
             os.chmod(lock_path, 0o600)
             if fcntl is not None:
@@ -61,14 +66,17 @@ def file_lock(path: Path):
                     os.write(descriptor, b"\0")
                 os.lseek(descriptor, 0, os.SEEK_SET)
                 msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            acquired = True
             yield
         finally:
-            if fcntl is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            elif msvcrt is not None:
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
-            os.close(descriptor)
+            try:
+                if acquired and fcntl is not None:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                elif acquired and msvcrt is not None:
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            finally:
+                os.close(descriptor)
 
 
 class SecureStore:

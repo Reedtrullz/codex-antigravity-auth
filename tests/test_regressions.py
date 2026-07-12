@@ -77,7 +77,7 @@ class TestRegressionFixes(unittest.TestCase):
             return {}
 
         with patch("codex_antigravity_auth.server.MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS", 0.01):
-            with patch("codex_antigravity_auth.server.all_provider_configs", side_effect=slow_provider_configs):
+            with patch("codex_antigravity_auth.server.all_provider_configs_read_only", side_effect=slow_provider_configs):
                 response = TestClient(app).get("/health")
 
         self.assertEqual(response.status_code, 200)

@@ -100,7 +100,7 @@ class TestBYOKProviders(unittest.TestCase):
             ],
         }
         with patch(
-            "codex_antigravity_auth.server.all_provider_configs",
+            "codex_antigravity_auth.server.all_provider_configs_read_only",
             return_value={"limited": provider},
         ):
             response = TestClient(app).get("/v1/models")
@@ -335,7 +335,11 @@ class TestBYOKProviders(unittest.TestCase):
             self.assertEqual(split_provider_model("good-provider:ok"), ("good-provider", "ok"))
             self.assertEqual(split_provider_model("bad:provider:m"), ("bad", "provider:m"))
 
-            model_ids = [model["id"] for model in TestClient(app).get("/v1/models").json()["data"]]
+            with patch(
+                "codex_antigravity_auth.server.all_provider_configs_read_only",
+                return_value=providers,
+            ):
+                model_ids = [model["id"] for model in TestClient(app).get("/v1/models").json()["data"]]
             self.assertIn("good-provider:ok", model_ids)
             self.assertNotIn("bad:provider:m", model_ids)
             self.assertNotIn("bad/provider:m", model_ids)
@@ -504,7 +508,10 @@ class TestBYOKProviders(unittest.TestCase):
         normalized = normalize_provider_config(stored)
 
         with patch("codex_antigravity_auth.byok.load_provider_config", return_value=normalized):
-            with patch("codex_antigravity_auth.server.all_provider_configs", wraps=all_provider_configs):
+            with patch(
+                "codex_antigravity_auth.server.all_provider_configs_read_only",
+                return_value=all_provider_configs(),
+            ):
                 response = TestClient(app).get("/v1/models")
 
         self.assertEqual(response.status_code, 200)
@@ -917,7 +924,7 @@ class TestBYOKProviders(unittest.TestCase):
             "models": ["deepseek-chat"],
         }
 
-        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"deepseek": provider}):
+        with patch("codex_antigravity_auth.server.all_provider_configs_read_only", return_value={"deepseek": provider}):
             response = TestClient(app).get("/v1/models")
 
         self.assertEqual(response.status_code, 200)
@@ -950,8 +957,8 @@ class TestBYOKProviders(unittest.TestCase):
             "models": ["grok-build-0.1", "grok-4.3"],
         }
 
-        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"xai-oauth": provider}):
-            with patch("codex_antigravity_auth.server.xai_oauth_status", return_value={"ready": True}):
+        with patch("codex_antigravity_auth.server.all_provider_configs_read_only", return_value={"xai-oauth": provider}):
+            with patch("codex_antigravity_auth.server.xai_oauth_status_read_only", return_value={"ready": True}):
                 response = TestClient(app).get("/v1/models")
 
         self.assertEqual(response.status_code, 200)
@@ -969,8 +976,8 @@ class TestBYOKProviders(unittest.TestCase):
             "models": ["grok-build-0.1"],
         }
 
-        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"xai-oauth": provider}):
-            with patch("codex_antigravity_auth.server.xai_oauth_status", return_value={"ready": False}):
+        with patch("codex_antigravity_auth.server.all_provider_configs_read_only", return_value={"xai-oauth": provider}):
+            with patch("codex_antigravity_auth.server.xai_oauth_status_read_only", return_value={"ready": False}):
                 response = TestClient(app).get("/v1/models")
 
         self.assertEqual(response.status_code, 200)
@@ -1014,7 +1021,7 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertFalse(provider_allows_keyless_local_use(remote_provider))
         self.assertIsNone(resolve_api_key(remote_provider))
 
-        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"ollama": remote_provider}):
+        with patch("codex_antigravity_auth.server.all_provider_configs_read_only", return_value={"ollama": remote_provider}):
             response = TestClient(app).get("/v1/models")
 
         self.assertEqual(response.status_code, 200)

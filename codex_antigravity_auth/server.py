@@ -20,6 +20,7 @@ from .byok import (
     PROVIDER_AUTH_MODE_API_KEY,
     PROVIDER_AUTH_MODE_OAUTH,
     all_provider_configs,
+    all_provider_configs_read_only,
     provider_capabilities,
     provider_auth_mode,
     resolve_api_key,
@@ -66,7 +67,10 @@ from .response_protocol import (
     validate_capabilities,
 )
 from .storage import load_accounts
-from .xai_oauth import resolve_xai_oauth_access_token, xai_oauth_status
+from .xai_oauth import (
+    resolve_xai_oauth_access_token,
+    xai_oauth_status_read_only,
+)
 
 
 @asynccontextmanager
@@ -460,7 +464,9 @@ def google_failure_detail(
 def provider_has_usable_key(provider: dict) -> bool:
     auth_mode = provider_auth_mode(provider)
     if auth_mode == PROVIDER_AUTH_MODE_OAUTH:
-        return provider.get("id") == "xai-oauth" and bool(xai_oauth_status().get("ready"))
+        return provider.get("id") == "xai-oauth" and bool(
+            xai_oauth_status_read_only().get("ready")
+        )
     if auth_mode != PROVIDER_AUTH_MODE_API_KEY:
         return False
     try:
@@ -521,7 +527,7 @@ def codex_model_metadata(
 def provider_model_catalog(created: int) -> list[dict]:
     byok_models = []
     try:
-        providers = all_provider_configs()
+        providers = all_provider_configs_read_only()
     except Exception:
         return byok_models
     for provider_id, provider in providers.items():
@@ -575,7 +581,7 @@ async def provider_model_catalog_fail_soft(created: int) -> list[dict]:
 def provider_health_catalog() -> list[dict]:
     providers = []
     try:
-        provider_configs = all_provider_configs()
+        provider_configs = all_provider_configs_read_only()
     except Exception:
         return providers
     for provider_id, provider in provider_configs.items():
