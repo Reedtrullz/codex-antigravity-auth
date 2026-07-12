@@ -45,6 +45,37 @@ jobs:
       - name: Check artifact metadata
         run: python -m twine check dist/*
 
+      - name: Verify package contents and installed CLI
+        run: |
+          python - <<'PY'
+          import pathlib
+          import zipfile
+
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          required = {
+              "codex_antigravity_auth/skills/anti/SKILL.md",
+              "codex_antigravity_auth/skills/anti/agents/openai.yaml",
+              "codex_antigravity_auth/skills/anti/scripts/anti.py",
+              "codex_antigravity_auth/skills/anti/scripts/anti_lib/__init__.py",
+              "codex_antigravity_auth/skills/anti/scripts/anti_lib/chunking.py",
+              "codex_antigravity_auth/skills/anti/scripts/anti_lib/context.py",
+              "codex_antigravity_auth/skills/anti/scripts/anti_lib/ledger.py",
+              "codex_antigravity_auth/skills/anti/scripts/anti_lib/redaction.py",
+              "codex_antigravity_auth/skills/anti/scripts/anti_lib/runner.py",
+              "codex_antigravity_auth/skills/anti/tests/test_anti.py",
+          }
+          with zipfile.ZipFile(wheel) as archive:
+              missing = sorted(required - set(archive.namelist()))
+          if missing:
+              raise SystemExit(f"Required Anti package assets missing: {missing}")
+          PY
+          python -m venv /tmp/codex-antigravity-publish-wheel
+          /tmp/codex-antigravity-publish-wheel/bin/python -m pip install dist/*.whl
+          /tmp/codex-antigravity-publish-wheel/bin/codex-antigravity --help
+          /tmp/codex-antigravity-publish-wheel/bin/codex-antigravity doctor --help
+          /tmp/codex-antigravity-publish-wheel/bin/codex-antigravity provider presets
+          HOME=/tmp/codex-antigravity-publish-home /tmp/codex-antigravity-publish-wheel/bin/codex-antigravity install-skill --verify
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:

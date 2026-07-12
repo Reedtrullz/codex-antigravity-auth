@@ -51,7 +51,9 @@ codex-antigravity logs clean
 curl http://127.0.0.1:51122/health
 ```
 
-The request JSONL log is capped and rotated at `10 MiB`. It records request ids, model route/provider/family, stream mode, status, latency, retry/rotation hints, HTTP status, usage totals, and redacted errors. It does not store raw prompts, request bodies, provider keys, OAuth tokens, account emails, or encrypted stores. `logs summary` aggregates those sanitized records by route/family with request counts, success rate, p50/p95 latency, 429 counts, rotation attempts, and top error classes.
+The request JSONL log is capped and rotated at `10 MiB`. It records request ids, Anti run correlation, model route/provider/family, stream mode, terminal reason, attempt/rotation counts, cooldown scope/category, cancellation, latency, HTTP status, usage totals, and redacted errors. It does not store raw prompts, request bodies, provider keys, OAuth tokens, account emails, or encrypted stores. `logs summary` aggregates those sanitized records by route/family with terminal, attempt, rotation, cancellation, usage, success-rate, latency, 429, and error-class metrics.
+
+`codex-antigravity doctor --codex-ready --json` includes read-only account/provider store format and migration status, account-state schema version, observed service state, and provider capability mismatches under `diagnostics`. These checks do not migrate stores or rewrite config. See `docs/refactor-migration.md` before upgrading or rolling back a store used by an older package.
 
 Google account selection is sticky for sequential requests but load-aware for concurrent ones: request handlers acquire an account, prefer the lowest process-local in-flight count among non-cooling accounts, and release it when non-streaming responses finish or streaming responses end/disconnect.
 

@@ -17,6 +17,8 @@ jobs:
             python-version: "3.11"
           - os: ubuntu-latest
             python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.14"
           - os: windows-latest
             python-version: "3.12"
 
@@ -32,11 +34,11 @@ jobs:
       - name: Install package
         run: python -m pip install -e ".[dev]"
 
-      - name: Run tests
-        run: python -m pytest
-
       - name: Compile sources
-        run: python -m compileall codex_antigravity_auth tests
+        run: python -m compileall -q codex_antigravity_auth tests
+
+      - name: Run tests
+        run: python -m pytest -q
 
   package:
     runs-on: ubuntu-latest
@@ -59,7 +61,7 @@ jobs:
       - name: Check artifact metadata
         run: python -m twine check dist/*
 
-      - name: Check artifacts include license
+      - name: Check artifact contents
         run: |
           python - <<'PY'
           import pathlib
@@ -71,9 +73,25 @@ jobs:
           sdist = next(dist.glob("*.tar.gz"))
 
           with zipfile.ZipFile(wheel) as zf:
-              wheel_names = zf.namelist()
+              wheel_names = set(zf.namelist())
           if not any(name.endswith(".dist-info/licenses/LICENSE") or name.endswith("/LICENSE") for name in wheel_names):
               raise SystemExit(f"LICENSE missing from wheel {wheel}")
+
+          required_suffixes = {
+              "codex_antigravity_auth/skills/anti/SKILL.md",
+              "codex_antigravity_auth/skills/anti/agents/openai.yaml",
+              "codex_antigravity_auth/skills/anti/scripts/anti.py",
+              "codex_antigravity_auth/skills/anti/scripts/anti_lib/__init__.py",
+              "codex_antigravity_auth/skills/anti/scripts/anti_lib/chunking.py",
+              "codex_antigravity_auth/skills/anti/scripts/anti_lib/context.py",
+              "codex_antigravity_auth/skills/anti/scripts/anti_lib/ledger.py",
+              "codex_antigravity_auth/skills/anti/scripts/anti_lib/redaction.py",
+              "codex_antigravity_auth/skills/anti/scripts/anti_lib/runner.py",
+              "codex_antigravity_auth/skills/anti/tests/test_anti.py",
+          }
+          missing = sorted(required_suffixes - wheel_names)
+          if missing:
+              raise SystemExit(f"Required Anti package assets missing from wheel: {missing}")
 
           with tarfile.open(sdist) as tf:
               sdist_names = tf.getnames()
@@ -90,3 +108,5 @@ jobs:
           /tmp/codex-antigravity-wheel/bin/codex-antigravity --help
           /tmp/codex-antigravity-wheel/bin/codex-antigravity doctor --help
           /tmp/codex-antigravity-wheel/bin/codex-antigravity provider presets
+          HOME=/tmp/codex-antigravity-home /tmp/codex-antigravity-wheel/bin/codex-antigravity install-skill --verify
+          HOME=/tmp/codex-antigravity-home /tmp/codex-antigravity-wheel/bin/python /tmp/codex-antigravity-home/.codex/skills/anti/scripts/anti.py consult --help
