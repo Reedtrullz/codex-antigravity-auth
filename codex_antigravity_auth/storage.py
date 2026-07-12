@@ -9,9 +9,9 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from .constants import ANTIGRAVITY_ACCOUNTS_FILE, get_codex_home
-from .account_state import migrate_account_state
+from .account_state import SCHEMA_VERSION, migrate_account_state
 from .secure_store import SecureStore
 
 try:
@@ -134,6 +134,134 @@ def _get_encryption_key() -> str:
         # machine-local key instead of a source-known static key.
         return _get_file_fallback_key()
 
+
+def _peek_encryption_key() -> str | None:
+    """Return an already-configured key without creating keyring or fallback state."""
+    env_key = os.environ.get("ANTIGRAVITY_STORAGE_KEY")
+    if env_key:
+        return _normalize_fernet_key(env_key)
+    try:
+        key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME)
+    except Exception:
+        key = None
+    if key:
+        return key
+    fallback = get_codex_home() / FALLBACK_KEY_FILE
+    if not fallback.is_file() or fallback.is_symlink():
+        return None
+    try:
+        return fallback.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def account_store_diagnostics() -> dict[str, Any]:
+    """Inspect account-store format and schema without migrating or writing it."""
+    path = Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    report: dict[str, Any] = {
+        "path": str(path),
+        "exists": path.is_file(),
+        "accessible": False,
+        "format": "missing" if not path.exists() else "unknown",
+        "migration": "none" if not path.exists() else "blocked",
+        "account_state_schema_version": 0,
+        "target_account_state_schema_version": SCHEMA_VERSION,
+        "account_count": 0,
+    }
+    if not path.exists():
+        report["accessible"] = True
+        return report
+    if path.is_symlink() or not path.is_file():
+        report["error_class"] = "unsafe_path"
+        return report
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        report["error_class"] = "read_error"
+        return report
+    stripped = raw.lstrip()
+    try:
+        if stripped.startswith(b"{"):
+            decoded = raw.decode("utf-8")
+            report["format"] = "plaintext"
+        else:
+            key = _peek_encryption_key()
+            if not key:
+                report["format"] = "encrypted"
+                report["error_class"] = "key_unavailable"
+                return report
+            decoded = Fernet(key.encode("utf-8")).decrypt(raw).decode("utf-8")
+            report["format"] = "encrypted"
+        data = json.loads(decoded)
+    except (InvalidToken, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        report["error_class"] = "invalid_or_undecryptable"
+        return report
+    if not isinstance(data, dict):
+        report["error_class"] = "invalid_top_level"
+        return report
+    accounts = data.get("accounts")
+    state = data.get("accountState")
+    version = state.get("schemaVersion") if isinstance(state, dict) else None
+    report.update(
+        {
+            "accessible": True,
+            "account_count": len(accounts) if isinstance(accounts, list) else 0,
+            "account_state_schema_version": version if isinstance(version, int) and not isinstance(version, bool) else 0,
+        }
+    )
+    report["migration"] = (
+        "completed"
+        if report["format"] == "encrypted" and report["account_state_schema_version"] == SCHEMA_VERSION
+        else "pending"
+    )
+    return report
+
+
+def provider_store_diagnostics(path: Path) -> dict[str, Any]:
+    """Inspect provider-store encryption/accessibility without loading or migrating it."""
+    report: dict[str, Any] = {
+        "path": str(path),
+        "exists": path.is_file(),
+        "accessible": False,
+        "format": "missing" if not path.exists() else "unknown",
+        "migration": "none" if not path.exists() else "blocked",
+        "provider_count": 0,
+    }
+    if not path.exists():
+        report["accessible"] = True
+        return report
+    if path.is_symlink() or not path.is_file():
+        report["error_class"] = "unsafe_path"
+        return report
+    try:
+        raw = path.read_bytes()
+        if raw.lstrip().startswith(b"{"):
+            decoded = raw.decode("utf-8")
+            report["format"] = "plaintext"
+        else:
+            key = _peek_encryption_key()
+            report["format"] = "encrypted"
+            if not key:
+                report["error_class"] = "key_unavailable"
+                return report
+            decoded = Fernet(key.encode("utf-8")).decrypt(raw).decode("utf-8")
+        data = json.loads(decoded)
+    except (OSError, InvalidToken, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        report["error_class"] = "invalid_or_undecryptable"
+        return report
+    if not isinstance(data, dict):
+        report["error_class"] = "invalid_top_level"
+        return report
+    providers = data.get("providers")
+    report.update(
+        {
+            "accessible": True,
+            "provider_count": len(providers) if isinstance(providers, dict) else 0,
+            "migration": "completed" if report["format"] == "encrypted" else "pending",
+        }
+    )
+    return report
+
 def encrypt_payload(data_str: str) -> bytes:
     key = _get_encryption_key()
     fernet = Fernet(key.encode("utf-8"))
@@ -203,6 +331,35 @@ def load_secure_json_file(
         raise RuntimeError(f"Failed to load {error_label} file {path}: {e}") from e
 
 
+def load_secure_json_file_read_only(
+    path: Path,
+    default_factory: Callable[[], dict[str, Any]],
+    *,
+    normalize: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    error_label: str,
+) -> dict[str, Any]:
+    """Read a secure store without chmod, migration, key creation, or writes."""
+    if not path.exists():
+        return default_factory()
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"Failed to inspect {error_label} file {path}: unsafe store path")
+    try:
+        raw = path.read_bytes()
+        if raw.lstrip().startswith(b"{"):
+            decoded = raw.decode("utf-8")
+        else:
+            key = _peek_encryption_key()
+            if not key:
+                raise RuntimeError("configured encryption key is unavailable")
+            decoded = Fernet(key.encode("utf-8")).decrypt(raw).decode("utf-8")
+        data = json.loads(decoded)
+        if not isinstance(data, dict):
+            raise ValueError("top-level JSON value is not an object")
+        return normalize(data) if normalize else data
+    except Exception as exc:
+        raise RuntimeError(f"Failed to inspect {error_label} file {path}: {exc}") from exc
+
+
 def save_secure_json_file(
     path: Path,
     data: dict[str, Any],
@@ -253,6 +410,16 @@ def load_accounts() -> dict[str, Any]:
             normalize=normalize_accounts_data,
             error_label="accounts",
         )
+
+
+def load_accounts_read_only() -> dict[str, Any]:
+    path = Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    return load_secure_json_file_read_only(
+        path,
+        default_accounts_data,
+        normalize=normalize_accounts_data,
+        error_label="accounts",
+    )
 
 def save_accounts(data: dict[str, Any]) -> None:
     with _accounts_lock:

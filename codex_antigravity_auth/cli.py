@@ -23,11 +23,14 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from .byok import (
     PROVIDER_PRESETS,
     all_provider_configs,
+    all_provider_configs_read_only,
     has_provider_api_key_env,
+    get_providers_json_path,
     load_provider_config,
     provider_auth_mode,
     provider_allows_keyless_local_use,
     provider_preset,
+    providers_json_path_read_only,
     remove_provider_config,
     resolve_api_key,
     set_provider_config,
@@ -63,7 +66,14 @@ from .oauth import (
 )
 from .service import install_service, service_status, uninstall_service
 from .service_manager import observed_service_result
-from .storage import load_accounts, save_accounts, update_accounts
+from .storage import (
+    account_store_diagnostics,
+    load_accounts,
+    load_accounts_read_only,
+    provider_store_diagnostics,
+    save_accounts,
+    update_accounts,
+)
 from .account_state import scoped_cooldown_expiry
 from .constants import (
     get_codex_home,
@@ -84,6 +94,22 @@ from .xai_oauth import (
     save_xai_oauth_token_response,
     xai_oauth_status,
 )
+
+_DEFAULT_LOAD_ACCOUNTS = load_accounts
+_DEFAULT_ALL_PROVIDER_CONFIGS = all_provider_configs
+
+
+def _diagnostic_load_accounts() -> dict:
+    # Preserve test/plugin monkeypatch seams while keeping production diagnostics read-only.
+    if load_accounts is not _DEFAULT_LOAD_ACCOUNTS:
+        return load_accounts()
+    return load_accounts_read_only()
+
+
+def _diagnostic_all_provider_configs() -> dict[str, dict]:
+    if all_provider_configs is not _DEFAULT_ALL_PROVIDER_CONFIGS:
+        return all_provider_configs()
+    return all_provider_configs_read_only()
 
 DEFAULT_CODEX_PROVIDER_ID = "antigravity"
 DEFAULT_CODEX_PROVIDER_NAME = "Google Antigravity"
@@ -1366,6 +1392,38 @@ def _read_codex_config_for_readiness(config: str) -> tuple[Path, str | None, str
         return config_path, None, f"Could not read Codex config: {redact_secret_text(str(exc))}"
 
 
+def readiness_storage_diagnostics() -> dict[str, dict]:
+    return {
+        "account_store": account_store_diagnostics(),
+        "provider_store": provider_store_diagnostics(providers_json_path_read_only()),
+    }
+
+
+def provider_capability_mismatches(providers: dict[str, dict]) -> list[dict[str, str]]:
+    mismatches: list[dict[str, str]] = []
+    for provider_id, provider in sorted(providers.items()):
+        kind = provider.get("kind")
+        auth_mode = provider_auth_mode(provider)
+        if kind == "openai_chat" and auth_mode != "api_key":
+            mismatches.append(
+                {"provider": provider_id, "reason": "openai_chat routes require api_key auth"}
+            )
+        elif kind == "openai_responses" and not (
+            provider_id == "xai-oauth" and auth_mode == "oauth"
+        ):
+            mismatches.append(
+                {
+                    "provider": provider_id,
+                    "reason": "native Responses routing currently requires xai-oauth OAuth",
+                }
+            )
+        elif kind not in {"openai_chat", "openai_responses"}:
+            mismatches.append(
+                {"provider": provider_id, "reason": f"unsupported provider kind: {kind}"}
+            )
+    return mismatches
+
+
 def codex_ready_report(
     *,
     config: str,
@@ -1390,6 +1448,8 @@ def codex_ready_report(
     canonical_model = ""
     gateway_ids: set[str] | None = None
     route = "unknown"
+    service_snapshot: dict = {}
+    capability_mismatches: list[dict[str, str]] = []
     parsed_gateway = urlparse(expected_base_url)
     gateway_port = parsed_gateway.port or 51122
 
@@ -1415,6 +1475,7 @@ def codex_ready_report(
             timeout=max(float(gateway_timeout), 0.1),
         )
         service_info = service_status(gateway_port)
+        service_snapshot = service_info
         if status_info["running"]:
             add("gateway_process", "pass", f"gateway process is running on port {gateway_port}", process_status=status_info["status"])
         elif status_info.get("reachable"):
@@ -1468,7 +1529,8 @@ def codex_ready_report(
     if selected_for_catalog and provider_prefix is not None:
         route = "byok"
         try:
-            providers = all_provider_configs()
+            providers = _diagnostic_all_provider_configs()
+            capability_mismatches = provider_capability_mismatches(providers)
         except Exception as exc:
             add("model_route", "fail", f"Could not load BYOK provider configuration: {redact_secret_text(str(exc))}")
         else:
@@ -1505,7 +1567,7 @@ def codex_ready_report(
             add("model_route", "warn", f"{selected_for_catalog} is not a known built-in Google Antigravity model")
         family = native_model_family(selected_for_catalog)
         try:
-            rotation = google_family_rotation_status(load_accounts(), family)
+            rotation = google_family_rotation_status(_diagnostic_load_accounts(), family)
         except Exception as exc:
             add("google_rotation", "fail", f"Could not load Google account rotation state: {redact_secret_text(str(exc))}", family=family)
         else:
@@ -1551,6 +1613,32 @@ def codex_ready_report(
             latest=version.get("latest"),
         )
 
+    storage_diagnostics = readiness_storage_diagnostics()
+    for name, store in storage_diagnostics.items():
+        if not store.get("accessible"):
+            status = "fail" if store.get("exists") else "warn"
+        elif store.get("migration") == "pending":
+            status = "warn"
+        else:
+            status = "pass"
+        add(
+            name,
+            status,
+            f"{store.get('format')} store; migration {store.get('migration')}",
+            store=store,
+        )
+    if not capability_mismatches:
+        try:
+            capability_mismatches = provider_capability_mismatches(_diagnostic_all_provider_configs())
+        except Exception as exc:
+            capability_mismatches = [{"provider": "unknown", "reason": redact_secret_text(str(exc))}]
+    add(
+        "provider_capabilities",
+        "warn" if capability_mismatches else "pass",
+        f"{len(capability_mismatches)} provider capability mismatch(es)",
+        mismatches=capability_mismatches,
+    )
+
     failed = [check for check in checks if check["status"] == "fail"]
     ok = not failed
     next_command = "codex"
@@ -1583,6 +1671,11 @@ def codex_ready_report(
         "route": route,
         "checks": checks,
         "request_log": request_log_info(),
+        "diagnostics": {
+            **storage_diagnostics,
+            "service": service_snapshot,
+            "provider_capability_mismatches": capability_mismatches,
+        },
         "next_command": next_command,
     }
 
@@ -3225,7 +3318,7 @@ def run_doctor(
         print("[INFO] Authenticated Accounts: skipped (--byok-only)")
     else:
         try:
-            data = load_accounts()
+            data = _diagnostic_load_accounts()
         except Exception as e:
             healthy = False
             print(f"[FAIL] Authenticated Accounts: could not load account store ({redact_secret_text(str(e))})")
@@ -3248,7 +3341,7 @@ def run_doctor(
 
     # Check BYOK providers
     try:
-        providers = all_provider_configs()
+        providers = _diagnostic_all_provider_configs()
         if providers:
             provider_statuses = {
                 byok_provider_id: provider_key_status(provider, configured_label="key OK")

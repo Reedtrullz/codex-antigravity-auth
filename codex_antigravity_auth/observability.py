@@ -91,6 +91,14 @@ def sanitize_request_record(record: dict[str, Any]) -> dict[str, Any]:
         "usage",
         "error_class",
         "error",
+        "terminal_kind",
+        "terminal_reason",
+        "attempt_count",
+        "rotation_count",
+        "cooldown_scope",
+        "cooldown_category",
+        "outcome_category",
+        "cancelled",
     }
     sanitized = {key: _redact_json(value) for key, value in record.items() if key in allowed}
     sanitized.setdefault("timestamp", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
@@ -222,6 +230,11 @@ def request_log_summary(*, since: str | None = "24h", now: float | None = None) 
                 "failure_count": 0,
                 "rate_limit_count": 0,
                 "rotation_attempted_count": 0,
+                "attempt_count": 0,
+                "rotation_count": 0,
+                "cancellation_count": 0,
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "terminal_counts": {},
                 "_latencies": [],
                 "_errors": {},
             },
@@ -244,6 +257,28 @@ def request_log_summary(*, since: str | None = "24h", now: float | None = None) 
             pass
         if bool(record.get("rotation_attempted")):
             group["rotation_attempted_count"] += 1
+        try:
+            group["attempt_count"] += max(0, int(record.get("attempt_count", 1)))
+        except (TypeError, ValueError):
+            group["attempt_count"] += 1
+        try:
+            group["rotation_count"] += max(0, int(record.get("rotation_count", 0)))
+        except (TypeError, ValueError):
+            pass
+        if bool(record.get("cancelled")):
+            group["cancellation_count"] += 1
+        usage = record.get("usage")
+        if isinstance(usage, dict):
+            for field in ("input_tokens", "output_tokens", "total_tokens"):
+                try:
+                    group["usage"][field] += max(0, int(usage.get(field, 0)))
+                except (TypeError, ValueError):
+                    pass
+        terminal_kind = record.get("terminal_kind")
+        if isinstance(terminal_kind, str) and terminal_kind in {"completed", "incomplete", "failed"}:
+            group["terminal_counts"][terminal_kind] = int(
+                group["terminal_counts"].get(terminal_kind, 0)
+            ) + 1
         error_class = record.get("error_class")
         if isinstance(error_class, str) and error_class:
             errors = group["_errors"]

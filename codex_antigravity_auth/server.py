@@ -1007,6 +1007,14 @@ async def create_response(request: Request):
         usage: dict | None = None,
         error_class: str | None = None,
         error: object | None = None,
+        terminal_kind: str | None = None,
+        terminal_reason: str | None = None,
+        attempt_count: int | None = None,
+        rotation_count: int | None = None,
+        cooldown_scope: str | None = None,
+        cooldown_category: str | None = None,
+        outcome_category: str | None = None,
+        cancelled: bool = False,
     ) -> None:
         record = {
             "request_id": request_id,
@@ -1024,6 +1032,14 @@ async def create_response(request: Request):
             "usage": usage,
             "error_class": error_class,
             "error": safe_error_detail(error) if error is not None else None,
+            "terminal_kind": terminal_kind,
+            "terminal_reason": terminal_reason,
+            "attempt_count": attempt_count,
+            "rotation_count": rotation_count,
+            "cooldown_scope": cooldown_scope,
+            "cooldown_category": cooldown_category,
+            "outcome_category": outcome_category,
+            "cancelled": cancelled,
         }
         await run_in_threadpool(write_request_record, record)
 
@@ -1312,6 +1328,8 @@ async def create_response(request: Request):
         response_account = account
         response_attempts = [account]
         rotation_attempted = False
+        cooldown_scope: str | None = None
+        cooldown_category: str | None = None
         try:
             res = await request_backend(response_account)
             if not res:
@@ -1362,6 +1380,8 @@ async def create_response(request: Request):
                 retry_after_seconds = retry_after_seconds_from_response(res)
                 retry_after_source = retry_after_source_from_response(res)
                 reason = "Rate limited / Quota exceeded" if res.status_code == 429 else f"Auth failure {res.status_code}: {safe_error_detail(res.text)}"
+                cooldown_scope = "family" if res.status_code == 429 else "account"
+                cooldown_category = "rate_limit" if res.status_code == 429 else "auth"
                 await mark_account_failure(
                     response_account["email"],
                     reason,
@@ -1597,6 +1617,13 @@ async def create_response(request: Request):
                     usage=codex_resp.get("usage") if isinstance(codex_resp, dict) else None,
                     error_class=None if request_succeeded else provider_result.terminal.error_code,
                     error=None if request_succeeded else provider_result.terminal.error_message,
+                    terminal_kind=provider_result.terminal.kind.value,
+                    terminal_reason=provider_result.terminal.reason,
+                    attempt_count=len(response_attempts),
+                    rotation_count=max(0, len(response_attempts) - 1),
+                    outcome_category="success" if request_succeeded else "transport",
+                    cooldown_scope=cooldown_scope,
+                    cooldown_category=cooldown_category,
                 )
                 return codex_resp
             except HTTPException:
@@ -2033,6 +2060,11 @@ async def create_response(request: Request):
             http_status=200,
             rotation_attempted=len(attempts) > 1,
             usage=usage,
+            terminal_kind=provider_result.terminal.kind.value,
+            terminal_reason=provider_result.terminal.reason,
+            attempt_count=len(attempts),
+            rotation_count=max(0, len(attempts) - 1),
+            outcome_category="success",
         )
         yield stream_event({'type': f'response.{provider_result.terminal.kind.value}', 'response': done_response})
         yield "data: [DONE]\n\n"
@@ -2042,6 +2074,25 @@ async def create_response(request: Request):
             async for chunk in sse_generator():
                 yield chunk
         finally:
+            cancelled = any(
+                used_account.get("email", "") not in recorded_stream_attempts
+                for used_account in stream_attempts
+            )
+            if cancelled:
+                await log_request(
+                    "cancelled",
+                    model=model,
+                    route="google",
+                    family=family,
+                    stream=True,
+                    terminal_kind="failed",
+                    terminal_reason="cancelled",
+                    attempt_count=len(stream_attempts),
+                    rotation_count=max(0, len(stream_attempts) - 1),
+                    outcome_category="cancelled",
+                    cancelled=True,
+                    error_class="cancelled",
+                )
             for used_account in stream_attempts:
                 await record_stream_attempt(
                     used_account,

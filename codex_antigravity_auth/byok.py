@@ -6,7 +6,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .constants import is_loopback_host
-from .storage import load_secure_json_file, save_secure_json_file, update_secure_json_file
+from .storage import (
+    load_secure_json_file,
+    load_secure_json_file_read_only,
+    save_secure_json_file,
+    update_secure_json_file,
+)
 
 
 PROVIDERS_FILE = "~/.codex/antigravity-providers.json"
@@ -119,9 +124,13 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
 
 
 def get_providers_json_path() -> Path:
-    p = Path(os.path.expanduser(PROVIDERS_FILE))
+    p = providers_json_path_read_only()
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def providers_json_path_read_only() -> Path:
+    return Path(os.path.expanduser(PROVIDERS_FILE))
 
 
 def default_provider_config() -> dict[str, Any]:
@@ -527,6 +536,15 @@ def load_provider_config() -> dict[str, Any]:
     )
 
 
+def load_provider_config_read_only() -> dict[str, Any]:
+    return load_secure_json_file_read_only(
+        providers_json_path_read_only(),
+        default_provider_config,
+        normalize=normalize_provider_config,
+        error_label="BYOK providers",
+    )
+
+
 def save_provider_config(data: dict[str, Any]) -> None:
     path = get_providers_json_path()
     save_secure_json_file(
@@ -631,8 +649,9 @@ def merged_provider_config(provider_id: str, stored: dict[str, Any] | None = Non
     return merged
 
 
-def all_provider_configs(include_env_enabled: bool = True) -> dict[str, dict[str, Any]]:
-    data = load_provider_config()
+def _all_provider_configs_from_data(
+    data: dict[str, Any], *, include_env_enabled: bool
+) -> dict[str, dict[str, Any]]:
     providers: dict[str, dict[str, Any]] = {}
     for provider_id, stored in data.get("providers", {}).items():
         if isinstance(stored, dict):
@@ -652,6 +671,17 @@ def all_provider_configs(include_env_enabled: bool = True) -> dict[str, dict[str
                 providers[provider_id] = merged
 
     return providers
+
+
+def all_provider_configs(include_env_enabled: bool = True) -> dict[str, dict[str, Any]]:
+    return _all_provider_configs_from_data(load_provider_config(), include_env_enabled=include_env_enabled)
+
+
+def all_provider_configs_read_only(include_env_enabled: bool = True) -> dict[str, dict[str, Any]]:
+    return _all_provider_configs_from_data(
+        load_provider_config_read_only(),
+        include_env_enabled=include_env_enabled,
+    )
 
 
 def set_provider_config(

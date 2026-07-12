@@ -283,13 +283,75 @@ class TestServerStreaming(unittest.TestCase):
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account):
             with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
                 with patch("codex_antigravity_auth.server.account_manager.record_request") as record:
-                    first_event = asyncio.run(scenario())
+                    with patch("codex_antigravity_auth.server.write_request_record") as request_log:
+                        first_event = asyncio.run(scenario())
 
         self.assertIn("response.created", first_event)
         release.assert_called_once_with("cancelled@gmail.com")
         record.assert_called_once()
         self.assertEqual(record.call_args.kwargs["status"], "failure")
         self.assertEqual(record.call_args.kwargs["error_class"], "cancelled")
+        request_log.assert_called_once()
+        self.assertTrue(request_log.call_args.args[0]["cancelled"])
+        self.assertEqual(request_log.call_args.args[0]["outcome_category"], "cancelled")
+
+    def test_google_request_log_records_terminal_attempt_rotation_and_usage(self):
+        first = {"email": "first@gmail.com", "accessToken": "first-token"}
+        second = {"email": "second@gmail.com", "accessToken": "second-token"}
+
+        class MockClient:
+            responses = [
+                httpx.Response(429, headers={"Retry-After": "10"}, text="quota"),
+                httpx.Response(
+                    200,
+                    json={
+                        "candidates": [
+                            {"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": "partial"}]}}
+                        ],
+                        "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 3, "totalTokenCount": 5},
+                    },
+                ),
+            ]
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            async def post(self, *args, **kwargs):
+                return self.responses.pop(0)
+
+        records = []
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", side_effect=[first, second]):
+            with patch("codex_antigravity_auth.server.account_manager.release_account"):
+                with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
+                    with patch("codex_antigravity_auth.server.account_manager.record_request"):
+                        with patch("codex_antigravity_auth.server.write_request_record", side_effect=records.append):
+                            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                                response = TestClient(app).post(
+                                    "/v1/responses",
+                                    json={
+                                        "model": "gemini-3.5-flash-high",
+                                        "input": "hello",
+                                        "metadata": {"run_id": "anti-correlated-run"},
+                                    },
+                                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        terminal = records[-1]
+        self.assertEqual(terminal["run_id"], "anti-correlated-run")
+        self.assertEqual(terminal["terminal_kind"], "incomplete")
+        self.assertEqual(terminal["terminal_reason"], "max_tokens")
+        self.assertEqual(terminal["attempt_count"], 2)
+        self.assertEqual(terminal["rotation_count"], 1)
+        self.assertEqual(terminal["outcome_category"], "success")
+        self.assertEqual(terminal["cooldown_scope"], "family")
+        self.assertEqual(terminal["cooldown_category"], "rate_limit")
+        self.assertEqual(terminal["usage"], {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5})
 
     def test_google_non_streaming_terminal_matrix_has_one_attempt_and_release(self):
         account = {"email": "matrix@gmail.com", "accessToken": "token"}

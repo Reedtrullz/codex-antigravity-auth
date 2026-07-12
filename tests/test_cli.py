@@ -1674,6 +1674,49 @@ class TestV3NativeSetup(unittest.TestCase):
         self.assertEqual(report["canonical_model"], "claude-3.5-sonnet")
         self.assertEqual(report["route"], "google")
 
+    def test_codex_ready_report_exposes_store_service_and_capability_diagnostics(self):
+        account_store = {
+            "exists": True,
+            "accessible": True,
+            "format": "encrypted",
+            "migration": "completed",
+            "account_state_schema_version": 2,
+        }
+        provider_store = {
+            "exists": True,
+            "accessible": True,
+            "format": "plaintext",
+            "migration": "pending",
+            "provider_count": 1,
+        }
+        service = {"state": "ready", "installed": True, "active": True, "reachable": True}
+        unsupported = {"bad": {"id": "bad", "kind": "unknown", "authMode": "api_key"}}
+
+        with patch(
+            "codex_antigravity_auth.cli.readiness_storage_diagnostics",
+            return_value={"account_store": account_store, "provider_store": provider_store},
+        ):
+            with patch("codex_antigravity_auth.cli.service_status", return_value=service):
+                with patch("codex_antigravity_auth.cli.gateway_status_info", return_value={"running": False, "status": "stopped"}):
+                    with patch("codex_antigravity_auth.cli.add_gateway_reachability"):
+                        with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value=set()):
+                            with patch("codex_antigravity_auth.cli.all_provider_configs", return_value=unsupported):
+                                report = codex_ready_report(
+                                    config="/missing/config.toml",
+                                    provider_id="antigravity",
+                                    expected_base_url="http://localhost:51122/v1",
+                                    include_version_check=False,
+                                )
+
+        diagnostics = report["diagnostics"]
+        self.assertEqual(diagnostics["account_store"]["account_state_schema_version"], 2)
+        self.assertEqual(diagnostics["provider_store"]["migration"], "pending")
+        self.assertEqual(diagnostics["service"]["state"], "ready")
+        self.assertEqual(diagnostics["provider_capability_mismatches"][0]["provider"], "bad")
+        checks = {check["name"]: check for check in report["checks"]}
+        self.assertEqual(checks["provider_store"]["status"], "warn")
+        self.assertEqual(checks["provider_capabilities"]["status"], "warn")
+
     def test_codex_ready_report_fails_when_selected_model_missing_from_gateway(self):
         with TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
@@ -3039,6 +3082,43 @@ class TestVNextPolishCli(unittest.TestCase):
         self.assertNotIn("sk-testsecret1234567890", serialized)
         self.assertIn("[REDACTED]", serialized)
 
+    def test_request_log_keeps_sanitized_terminal_attempt_and_correlation_fields(self):
+        with TemporaryDirectory() as tmp:
+            with patch("codex_antigravity_auth.observability.get_codex_home", return_value=Path(tmp)):
+                write_request_record(
+                    {
+                        "request_id": "req_structured",
+                        "run_id": "anti-run-structured",
+                        "route": "google",
+                        "terminal_kind": "incomplete",
+                        "terminal_reason": "max_output_tokens",
+                        "attempt_count": 2,
+                        "rotation_count": 1,
+                        "cooldown_scope": "family",
+                        "cooldown_category": "quota",
+                        "outcome_category": "quota",
+                        "latency_ms": 42,
+                        "usage": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+                        "cancelled": False,
+                        "account_email": "private@example.com",
+                        "access_token": "private-token",
+                        "body": {"input": "private prompt"},
+                    }
+                )
+                record = list(iter_request_records())[-1]
+
+        self.assertEqual(record["terminal_kind"], "incomplete")
+        self.assertEqual(record["attempt_count"], 2)
+        self.assertEqual(record["rotation_count"], 1)
+        self.assertEqual(record["cooldown_scope"], "family")
+        self.assertEqual(record["cooldown_category"], "quota")
+        self.assertEqual(record["outcome_category"], "quota")
+        self.assertFalse(record["cancelled"])
+        serialized = json.dumps(record)
+        self.assertNotIn("private@example.com", serialized)
+        self.assertNotIn("private-token", serialized)
+        self.assertNotIn("private prompt", serialized)
+
     def test_request_log_summary_aggregates_latency_errors_and_malformed_lines(self):
         now = 1_700_000_000.0
 
@@ -3059,6 +3139,9 @@ class TestVNextPolishCli(unittest.TestCase):
                                 "status": "success",
                                 "latency_ms": 100,
                                 "http_status": 200,
+                                "attempt_count": 1,
+                                "terminal_kind": "completed",
+                                "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
                             }
                         ),
                         json.dumps(
@@ -3072,6 +3155,10 @@ class TestVNextPolishCli(unittest.TestCase):
                                 "http_status": 429,
                                 "rotation_attempted": True,
                                 "error_class": "rate_limited",
+                                "attempt_count": 2,
+                                "rotation_count": 1,
+                                "terminal_kind": "failed",
+                                "cancelled": True,
                             }
                         ),
                         json.dumps(
@@ -3114,6 +3201,11 @@ class TestVNextPolishCli(unittest.TestCase):
         self.assertEqual(google["success_count"], 1)
         self.assertEqual(google["rate_limit_count"], 1)
         self.assertEqual(google["rotation_attempted_count"], 1)
+        self.assertEqual(google["attempt_count"], 3)
+        self.assertEqual(google["rotation_count"], 1)
+        self.assertEqual(google["cancellation_count"], 1)
+        self.assertEqual(google["terminal_counts"], {"completed": 1, "failed": 1})
+        self.assertEqual(google["usage"]["total_tokens"], 5)
         self.assertEqual(google["p50_latency_ms"], 100)
         self.assertEqual(google["p95_latency_ms"], 900)
         self.assertEqual(google["top_error_classes"], [{"error_class": "rate_limited", "count": 1}])

@@ -72,9 +72,12 @@ codex-antigravity start
 ```bash
 codex-antigravity doctor        # diagnostics
 codex-antigravity doctor --byok-only
+codex-antigravity doctor --codex-ready --json  # read-only store/schema/service/capability report
 python3 -m pytest -q             # current full local suite
 curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
 ```
+
+Treat verification evidence in layers: unit/mocked route tests prove local contracts; wheel and installed-skill checks prove packaging; `/health`, service status, and model-catalog readbacks prove the running local gateway; only an explicit `doctor --codex-ready --live` or manual `/v1/responses` call proves a credentialed provider path. Do not present local or mocked evidence as a live-provider claim.
 
 ## Manual Smoke Test
 ```bash

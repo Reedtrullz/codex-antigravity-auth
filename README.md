@@ -245,7 +245,7 @@ codex-antigravity logs clean
 curl http://127.0.0.1:51122/health
 ```
 
-`logs summary` aggregates the sanitized request log by route/family with request counts, success rate, p50/p95 latency, 429 counts, rotation attempts, and top error classes. It never reads prompts, request bodies, OAuth material, provider keys, account emails, or encrypted stores.
+`logs summary` aggregates the sanitized request log by route/family with request/attempt/rotation counts, terminal outcomes, cancellations, token usage, success rate, p50/p95 latency, 429 counts, and top error classes. Individual records include the terminal reason, cooldown scope/category, and Anti `run_id` correlation when available. It never records prompts, request bodies, OAuth material, provider keys, or account emails.
 
 The loopback-only `/health` endpoint reports process health, native model count, BYOK route visibility, anonymous account cooldown summaries, and the request-log path.
 
@@ -350,7 +350,7 @@ codex-antigravity doctor --live --live-model claude-3.5-sonnet
 codex-antigravity doctor --byok-only
 ```
 
-`doctor` parses the active Codex config, verifies `model_provider = "antigravity"` and the matching provider `base_url` when Antigravity is active, warns when PyPI has a newer package version, and exits non-zero on hard readiness failures. `doctor --codex-ready` additionally checks that the gateway is reachable, `/v1/models` advertises the selected Codex model, the model routes to Google or BYOK correctly, and the selected Google family has usable rotation state. Add `--live` when you want a real Google Antigravity `/v1/responses` generation smoke; set `CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1` to skip the once-daily package-version check. Use `--config /path/to/config.toml` to verify a non-default Codex config.
+`doctor` parses the active Codex config, verifies `model_provider = "antigravity"` and the matching provider `base_url` when Antigravity is active, warns when PyPI has a newer package version, and exits non-zero on hard readiness failures. `doctor --codex-ready` additionally checks gateway reachability, `/v1/models`, route/account readiness, observed service state, read-only account/provider store accessibility and migration status, account-state schema version, and provider capability mismatches. `--json` exposes those fields under `diagnostics`. These store checks do not chmod, migrate, create encryption keys, or rewrite configuration. Add `--live` only when you want a real provider `/v1/responses` generation smoke; set `CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1` to skip the once-daily package-version check.
 
 Before tagging a release, run the local verification stack and one credentialed live smoke:
 

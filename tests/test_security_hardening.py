@@ -123,6 +123,41 @@ class TestCredentialResolution(unittest.TestCase):
 
 
 class TestProviderStorage(unittest.TestCase):
+    def test_read_only_provider_diagnostics_do_not_create_parent_directory(self):
+        from codex_antigravity_auth.byok import load_provider_config_read_only
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "missing" / "providers.json"
+            with patch("codex_antigravity_auth.byok.PROVIDERS_FILE", str(path)):
+                data = load_provider_config_read_only()
+
+            self.assertEqual(data, {"providers": {}})
+            self.assertFalse(path.parent.exists())
+
+    def test_account_store_diagnostics_detect_pending_migration_without_mutation(self):
+        from codex_antigravity_auth.storage import account_store_diagnostics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "accounts.json"
+            original = json.dumps(
+                {
+                    "accounts": [{"email": "private@example.com"}],
+                    "accountState": {"cooldowns": {"private@example.com": 1_900_000_000}},
+                }
+            ).encode()
+            path.write_bytes(original)
+
+            with patch("codex_antigravity_auth.storage.ANTIGRAVITY_ACCOUNTS_FILE", str(path)):
+                report = account_store_diagnostics()
+
+            self.assertEqual(path.read_bytes(), original)
+            self.assertTrue(report["accessible"])
+            self.assertEqual(report["format"], "plaintext")
+            self.assertEqual(report["migration"], "pending")
+            self.assertEqual(report["account_state_schema_version"], 0)
+            self.assertEqual(report["account_count"], 1)
+            self.assertNotIn("private@example.com", json.dumps(report))
+
     def test_provider_config_write_uses_private_temp_and_cleans_failed_replace(self):
         from codex_antigravity_auth.byok import save_provider_config
 
