@@ -6,7 +6,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import json
 import math
-from typing import Any
+import time
+from typing import Any, AsyncIterator
 import uuid
 
 import httpx
@@ -16,6 +17,7 @@ from .response_protocol import (
     AttemptOutcome,
     ProviderResult,
     ProviderTerminal,
+    ResponseEventBuilder,
     TerminalKind,
     classify_terminal,
     normalize_usage,
@@ -39,10 +41,23 @@ class AccountLease:
 
 
 class GoogleHTTPError(RuntimeError):
-    def __init__(self, status_code: int, outcome: AttemptOutcome) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        outcome: AttemptOutcome,
+        response: httpx.Response | None = None,
+    ) -> None:
         super().__init__(f"Google Antigravity returned HTTP {status_code}")
         self.status_code = status_code
         self.outcome = outcome
+        self.response = response
+
+
+class GoogleStreamPayloadError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 def outcome_for_http_status(status_code: int) -> AttemptOutcome:
@@ -229,6 +244,167 @@ class GoogleResponseAccumulator:
         return ProviderResult(output=tuple(output), usage=self._usage, terminal=terminal)
 
 
+def _stream_payload_error(payload: object) -> tuple[str, str] | None:
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code") or error.get("status") or "backend_error"
+    message = error.get("message") or "The Google provider stream failed."
+    return str(code), str(message)
+
+
+class GoogleStreamEventAdapter:
+    def __init__(self, *, response_id: str, display_model: str) -> None:
+        self.builder = ResponseEventBuilder(
+            response_id=response_id,
+            model=display_model,
+            created_at=int(time.time()),
+        )
+        self.accumulator = GoogleResponseAccumulator()
+        self.created_emitted = False
+        self.visible_output_started = False
+        self.text_active = False
+        self.reasoning_active = False
+        self.terminal_emitted = False
+        self.provider_done = False
+
+    def created(self) -> dict[str, Any]:
+        self.created_emitted = True
+        return self.builder.created()
+
+    def mark_done(self) -> None:
+        if self.provider_done:
+            raise GoogleStreamPayloadError(
+                "duplicate_done", "The Google provider emitted [DONE] more than once."
+            )
+        self.provider_done = True
+        self.accumulator.mark_done()
+
+    def reset_attempt(self) -> None:
+        if self.visible_output_started:
+            raise RuntimeError("cannot reset a Google stream after visible output")
+        self.accumulator = GoogleResponseAccumulator()
+
+    def consume(self, payload: object) -> list[dict[str, Any]]:
+        if self.provider_done:
+            raise GoogleStreamPayloadError(
+                "output_after_done", "The Google provider emitted output after done."
+            )
+        if isinstance(payload, dict) and "response" in payload:
+            payload = payload.get("response")
+        error = _stream_payload_error(payload)
+        if error is not None:
+            raise GoogleStreamPayloadError(*error)
+        if not isinstance(payload, dict):
+            self.accumulator.mark_malformed()
+            return []
+        self.accumulator.consume(payload)
+        events: list[dict[str, Any]] = []
+        candidates = payload.get("candidates", [])
+        if not isinstance(candidates, list):
+            return events
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content")
+            if not isinstance(content, dict):
+                continue
+            parts = content.get("parts", [])
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("thought") is True or part.get("type") == "thinking":
+                    text = part.get("text") or part.get("thinking")
+                    if isinstance(text, str) and text:
+                        self.reasoning_active = True
+                        self.visible_output_started = True
+                        events.extend(self.builder.add_reasoning_delta(text))
+                    continue
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    self.text_active = True
+                    self.visible_output_started = True
+                    events.extend(self.builder.add_text_delta(text))
+                    continue
+                function_call = part.get("functionCall")
+                if not isinstance(function_call, dict):
+                    continue
+                name = function_call.get("name")
+                if not valid_function_name(name):
+                    continue
+                self.visible_output_started = True
+                call_id = function_call.get("id")
+                events.extend(
+                    self.builder.add_function_call(
+                        name,
+                        function_call_arguments_json(function_call.get("args", {})),
+                        call_id=call_id if isinstance(call_id, str) else None,
+                    )
+                )
+        return events
+
+    def finish(self) -> list[dict[str, Any] | str]:
+        events: list[dict[str, Any] | str] = []
+        result = self.accumulator.finalize()
+        if self.reasoning_active:
+            events.extend(self.builder.finish_reasoning())
+        if self.text_active:
+            events.extend(self.builder.finish_text())
+        refusal = next(
+            (
+                item
+                for item in result.output
+                if item.get("type") == "message"
+                and isinstance(item.get("content"), list)
+                and item["content"]
+                and isinstance(item["content"][0], dict)
+                and item["content"][0].get("type") == "refusal"
+            ),
+            None,
+        )
+        if refusal is not None:
+            events.extend(self.builder.add_output_item(refusal))
+        if result.terminal.kind is TerminalKind.FAILED:
+            events.append(
+                self.builder.error(
+                    result.terminal.error_code or "provider_error",
+                    result.terminal.error_message or "The provider stream failed.",
+                )
+            )
+        events.append(self.builder.terminal(result))
+        events.append(self.builder.done_marker())
+        self.terminal_emitted = True
+        return events
+
+    def fail(self, code: str, message: str) -> list[dict[str, Any] | str]:
+        if self.terminal_emitted:
+            return []
+        events: list[dict[str, Any] | str] = []
+        if self.reasoning_active:
+            events.extend(self.builder.finish_reasoning())
+        if self.text_active:
+            events.extend(self.builder.finish_text())
+        result = ProviderResult(
+            output=(),
+            usage=normalize_usage(),
+            terminal=ProviderTerminal(
+                TerminalKind.FAILED,
+                code,
+                error_code=code,
+                error_message=message,
+            ),
+        )
+        events.append(self.builder.error(code, message))
+        events.append(self.builder.terminal(result))
+        events.append(self.builder.done_marker())
+        self.terminal_emitted = True
+        return events
+
+
 class GoogleTransport:
     def __init__(
         self,
@@ -316,6 +492,59 @@ class GoogleTransport:
                 headers=self.build_headers(lease),
             ) as response:
                 yield response
+
+    async def stream_events(
+        self,
+        request: dict[str, Any],
+        lease: AccountLease,
+        *,
+        response_id: str,
+        display_model: str,
+        adapter: GoogleStreamEventAdapter | None = None,
+    ) -> AsyncIterator[dict[str, Any] | str]:
+        adapter = adapter or GoogleStreamEventAdapter(
+            response_id=response_id,
+            display_model=display_model,
+        )
+        if not adapter.created_emitted:
+            yield adapter.created()
+        async with self.stream(request, lease) as response:
+            if response.status_code != 200:
+                raise GoogleHTTPError(
+                    response.status_code,
+                    outcome_for_http_status(response.status_code),
+                    response,
+                )
+            buffer = ""
+            async for chunk in response.aiter_text():
+                buffer += chunk
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    stripped = line.strip()
+                    if not stripped or not stripped.startswith("data:"):
+                        continue
+                    data = stripped[5:].strip()
+                    if data == "[DONE]":
+                        adapter.mark_done()
+                        continue
+                    try:
+                        payload = json.loads(data)
+                    except json.JSONDecodeError as exc:
+                        raise GoogleStreamPayloadError(
+                            "invalid_stream_chunk",
+                            "The Google provider returned malformed stream JSON.",
+                        ) from exc
+                    if isinstance(payload, list):
+                        payload = payload[0] if payload else {}
+                    for event in adapter.consume(payload):
+                        yield event
+            if buffer.strip():
+                raise GoogleStreamPayloadError(
+                    "invalid_stream_chunk",
+                    "The Google provider stream ended with an incomplete SSE frame.",
+                )
+        for event in adapter.finish():
+            yield event
 
     def parse_response(self, payload: object) -> ProviderResult:
         if isinstance(payload, list):

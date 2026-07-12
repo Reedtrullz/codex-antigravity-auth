@@ -437,7 +437,7 @@ class TestServerErrorRedaction(unittest.TestCase):
 
         self.assertNotIn("raw-token", response.text)
         self.assertNotIn("raw-api-key", response.text)
-        self.assertIn(REDACTED, response.text)
+        self.assertIn("Provider returned HTTP 401", response.text)
 
 
 if __name__ == "__main__":

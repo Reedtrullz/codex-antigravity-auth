@@ -1110,7 +1110,10 @@ class TestServerStreaming(unittest.TestCase):
             self.assertEqual(attempts, ["project-first", "project-second"])
             self.assertIn("rotated ok", response.text)
             self.assertNotIn("response.failed", response.text)
-            self.assertNotIn("usage", completed[0]["response"])
+            self.assertEqual(
+                completed[0]["response"]["usage"],
+                {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            )
 
     def test_google_streaming_does_not_rotate_after_output_started(self):
         with TestClient(app) as test_client:

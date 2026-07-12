@@ -8,6 +8,8 @@ from codex_antigravity_auth.google_transport import (
     AccountLease,
     GoogleHTTPError,
     GoogleResponseAccumulator,
+    GoogleStreamEventAdapter,
+    GoogleStreamPayloadError,
     GoogleTransport,
     outcome_for_backend_error,
 )
@@ -145,6 +147,14 @@ class TestGoogleResponseTranslation(unittest.TestCase):
 
 
 class TestGoogleStreamingAccumulator(unittest.TestCase):
+    def test_stream_adapter_rejects_output_after_done(self):
+        adapter = GoogleStreamEventAdapter(response_id="resp_test", display_model="test-model")
+        adapter.created()
+        adapter.mark_done()
+
+        with self.assertRaisesRegex(GoogleStreamPayloadError, "after.*done"):
+            adapter.consume({"candidates": [{"content": {"parts": [{"text": "late"}]}}]})
+
     def test_empty_clean_eof_is_failed(self):
         result = GoogleResponseAccumulator().finalize()
 

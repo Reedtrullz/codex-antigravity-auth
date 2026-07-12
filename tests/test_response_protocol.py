@@ -153,6 +153,10 @@ class TestResponseEventBuilder(unittest.TestCase):
         call_events = [event for event in events if event["type"].startswith("response.function_call")]
         self.assertEqual({event["output_index"] for event in call_events}, {2})
         self.assertEqual({event["item_id"] for event in call_events}, {"fc_call_1"})
+        done_items = [
+            event["item"] for event in events if event["type"] == "response.output_item.done"
+        ]
+        self.assertEqual(events[-1]["response"]["output"], done_items)
         self.assertEqual(self.builder.done_marker(), "[DONE]")
 
     def test_incremental_events_reject_duplicate_finish_and_output_after_terminal(self):

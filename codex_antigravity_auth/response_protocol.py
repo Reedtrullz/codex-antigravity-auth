@@ -347,6 +347,7 @@ class ResponseEventBuilder:
         self._done = False
         self._text_state: dict[str, Any] | None = None
         self._reasoning_state: dict[str, Any] | None = None
+        self._completed_items: dict[int, dict[str, Any]] = {}
 
     def _event(self, event_type: str, **fields: Any) -> dict[str, Any]:
         event = {"type": event_type, "sequence_number": self._sequence_number, **fields}
@@ -387,10 +388,15 @@ class ResponseEventBuilder:
             stable_item["id"] = f"item_{uuid.uuid4().hex[:12]}"
         output_index = self._next_output_index
         self._next_output_index += 1
+        self._completed_items[output_index] = dict(stable_item)
         return [
             self._event("response.output_item.added", output_index=output_index, item=dict(stable_item)),
             self._event("response.output_item.done", output_index=output_index, item=dict(stable_item)),
         ]
+
+    def error(self, code: str, message: str) -> dict[str, Any]:
+        self._require_output_open()
+        return self._event("error", error={"code": code, "message": message})
 
     def _require_output_open(self) -> None:
         if not self._created:
@@ -462,6 +468,7 @@ class ResponseEventBuilder:
             "role": "assistant",
             "content": [part],
         }
+        self._completed_items[self._text_state["output_index"]] = dict(item)
         common = {
             "item_id": self._text_state["id"],
             "output_index": self._text_state["output_index"],
@@ -526,6 +533,7 @@ class ResponseEventBuilder:
             "encrypted_content": "",
             "step_by_step_summary": self._reasoning_state["text"],
         }
+        self._completed_items[self._reasoning_state["output_index"]] = dict(item)
         return [
             self._event(
                 "response.reasoning_text.done",
@@ -564,6 +572,7 @@ class ResponseEventBuilder:
             "arguments": "",
         }
         done_item = {**added_item, "arguments": arguments}
+        self._completed_items[output_index] = dict(done_item)
         events = [
             self._event("response.output_item.added", output_index=output_index, item=added_item),
         ]
@@ -596,6 +605,15 @@ class ResponseEventBuilder:
         if self._terminal:
             raise ProtocolStateError("a terminal event has already been emitted")
         self._terminal = True
+        if self._completed_items:
+            result = ProviderResult(
+                output=tuple(
+                    self._completed_items[index] for index in sorted(self._completed_items)
+                ),
+                usage=result.usage,
+                terminal=result.terminal,
+                provider_response_id=result.provider_response_id,
+            )
         return self._event(f"response.{result.terminal.kind.value}", response=self._response(result))
 
     def done_marker(self) -> str:

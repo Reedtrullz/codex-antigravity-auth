@@ -28,14 +28,7 @@ from .byok import (
     validate_provider_api_key,
     validate_provider_id,
 )
-from .transform import (
-    function_call_arguments_json,
-    function_call_arguments_string,
-    safe_project_id,
-    transform_chat_response,
-    usage_counts,
-    valid_function_name,
-)
+from .transform import safe_project_id, transform_chat_response, valid_function_name
 from .constants import get_platform, is_loopback_host, validate_gateway_token_strength
 from .models import (
     canonical_model_id,
@@ -47,15 +40,17 @@ from .observability import request_log_info, write_request_record
 from .redaction import redact_secret_text
 from .google_transport import (
     AccountLease,
-    GoogleResponseAccumulator,
+    GoogleHTTPError,
+    GoogleStreamEventAdapter,
+    GoogleStreamPayloadError,
     GoogleTransport,
     outcome_for_backend_error,
     outcome_for_http_status,
 )
 from .openai_transport import (
-    ChatResponseAccumulator,
     NativeResponsesStreamAdapter,
     OpenAICompatibleTransport,
+    PreparedOpenAIRequest,
     TransportConfigError,
 )
 from .response_protocol import (
@@ -841,18 +836,6 @@ def validate_provider_model_id(provider_id: str | None, provider_model: str) -> 
         raise HTTPException(status_code=400, detail=str(e)) from e
     if not provider_model:
         raise HTTPException(status_code=400, detail=f"Provider '{provider_id}' model id must be non-empty")
-
-
-def chat_tool_call_delta_index(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        index = int(value)
-    except (TypeError, ValueError):
-        return None
-    if index < 0:
-        return None
-    return index
 
 
 def stream_string(value: object) -> str | None:
@@ -1665,392 +1648,173 @@ async def create_response(request: Request):
     async def sse_generator() -> AsyncGenerator[str, None]:
         import uuid
         response_id = f"resp_{uuid.uuid4().hex[:12]}"
-        created_at = int(time.time())
-        output_text = ""
-        reasoning_text = ""
-        indexed_output_items = []
-        usage = None
-        next_output_index = 0
-        text_output_index = None
-        sequence_number = 0
-        stream_failed = False
-        last_error = None
-        last_error_code = "backend_error"
-        backend_output_started = False
-        stream_retry_requested = False
-        google_stream_accumulator = GoogleResponseAccumulator()
-
-        def stream_event(payload: dict) -> str:
-            nonlocal sequence_number
-            payload = dict(payload)
-            payload["sequence_number"] = sequence_number
-            sequence_number += 1
-            return f"data: {json.dumps(payload)}\n\n"
-        
-        # 1. response.created
-        yield stream_event({'type': 'response.created', 'response': {'id': response_id, 'object': 'response', 'status': 'in_progress'}})
-
-        msg_id = f"msg_{uuid.uuid4().hex[:8]}"
-
-        def start_text_message_events():
-            nonlocal next_output_index, text_output_index
-            if text_output_index is not None:
-                return
-            text_output_index = next_output_index
-            next_output_index += 1
-            yield stream_event({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': text_output_index, 'item': {'type': 'message', 'id': msg_id, 'role': 'assistant', 'status': 'in_progress', 'content': []}})
-            yield stream_event({'type': 'response.content_part.added', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'part': {'type': 'output_text', 'text': '', 'annotations': []}})
-
-        async def fail_stream(code: str, message: str) -> AsyncGenerator[str, None]:
-            message = safe_error_detail(message)
-            yield stream_event({'type': 'error', 'error': {'code': code, 'message': message}})
-            yield stream_event({'type': 'response.failed', 'response': {'id': response_id, 'object': 'response', 'status': 'failed', 'error': {'code': code, 'message': message}}})
-            yield "data: [DONE]\n\n"
-
-        async def parse_stream_line(line: str) -> AsyncGenerator[str, None]:
-            nonlocal output_text, reasoning_text, usage, next_output_index, stream_failed, last_error, last_error_code, backend_output_started, stream_retry_requested
-            line = line.strip()
-            if not line or not line.startswith("data:"):
-                return
-            data_payload = line[5:].strip()
-            if data_payload == "[DONE]":
-                google_stream_accumulator.mark_done()
-                return
-            try:
-                parsed = json.loads(data_payload)
-            except json.JSONDecodeError as e:
-                stream_failed = True
-                async for event in fail_stream("invalid_stream_chunk", f"Invalid Antigravity SSE JSON chunk: {e}"):
-                    yield event
-                return
-            # If list-wrapped chunk format
-            if isinstance(parsed, list) and parsed:
-                parsed = parsed[0]
-            if not isinstance(parsed, dict):
-                return
-            stream_error = stream_error_from_payload(parsed)
-            if "response" in parsed and isinstance(parsed["response"], dict):
-                parsed = parsed["response"]
-                if stream_error is None:
-                    stream_error = stream_error_from_payload(parsed)
-            if stream_error:
-                code, message = stream_error
-                last_error_code = code
-                last_error = f"Google Antigravity stream returned {code}: {message}"
-                if google_stream_error_is_account_scoped(code, message):
-                    await record_stream_attempt(
-                        stream_account,
-                        outcome_for_backend_error(code, message),
-                        error_class=code,
-                    )
-                    if not backend_output_started:
-                        stream_retry_requested = True
-                        return
-                stream_failed = True
-                async for event in fail_stream(code, message):
-                    yield event
-                return
-            google_stream_accumulator.consume(parsed)
-            if isinstance(parsed.get("usageMetadata"), dict):
-                usage_meta = parsed["usageMetadata"]
-                usage = usage_counts(
-                    usage_meta.get("promptTokenCount", 0),
-                    usage_meta.get("candidatesTokenCount", 0),
-                    usage_meta.get("totalTokenCount", 0),
-                )
-            candidates = parsed.get("candidates", [])
-            if not isinstance(candidates, list):
-                return
-            for cand in candidates:
-                if not isinstance(cand, dict):
-                    continue
-                content = cand.get("content", {})
-                if not isinstance(content, dict):
-                    continue
-                parts = content.get("parts", [])
-                if not isinstance(parts, list):
-                    continue
-                for part in parts:
-                    if not isinstance(part, dict):
-                        continue
-                    # Yield reasoning/thinking blocks in separate reasoning events
-                    if part.get("thought") is True or part.get("type") == "thinking":
-                        thought_text = stream_string(part.get("text")) or stream_string(part.get("thinking"))
-                        if thought_text:
-                            reasoning_text += thought_text
-                            backend_output_started = True
-                            yield stream_event({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': thought_text})
-                    elif "text" in part:
-                        text = stream_string(part.get("text"))
-                        if text is None:
-                            continue
-                        output_text += text
-                        backend_output_started = True
-                        for event in start_text_message_events():
-                            yield event
-                        yield stream_event({'type': 'response.output_text.delta', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'delta': text})
-                    elif "functionCall" in part:
-                        fc = part["functionCall"]
-                        if not isinstance(fc, dict):
-                            continue
-                        name = stream_string(fc.get("name"))
-                        if not valid_function_name(name):
-                            continue
-                        call_id = stream_string(fc.get("id")) or f"call_{uuid.uuid4().hex[:8]}"
-                        item_id = f"fc_{uuid.uuid4().hex[:8]}"
-                        output_index = next_output_index
-                        next_output_index += 1
-                        args = fc.get("args", {})
-                        arguments = function_call_arguments_json(args)
-                        item = {
-                            "type": "function_call",
-                            "id": item_id,
-                            "call_id": call_id,
-                            "name": name,
-                            "arguments": "",
-                        }
-                        backend_output_started = True
-                        yield stream_event({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': output_index, 'item': item})
-                        if arguments:
-                            yield stream_event({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': item_id, 'output_index': output_index, 'delta': arguments})
-                        item["arguments"] = arguments
-                        yield stream_event({'type': 'response.function_call_arguments.done', 'response_id': response_id, 'item_id': item_id, 'output_index': output_index, 'name': name, 'arguments': arguments})
-                        yield stream_event({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': output_index, 'item': item})
-                        indexed_output_items.append((output_index, dict(item)))
-
-        completed = False
-        attempts = stream_attempts
+        adapter = GoogleStreamEventAdapter(response_id=response_id, display_model=model)
         attempt_num = 0
-        while attempt_num < len(attempts):
-            stream_retry_requested = False
-            stream_account = attempts[attempt_num]
-            try:
-                async with google_transport.stream(codex_req, account_lease(stream_account)) as res:
-                    if res.status_code != 200:
-                        if res.status_code in (401, 403, 429):
-                            retry_after = retry_after_seconds_from_response(res)
-                            base_outcome = outcome_for_http_status(res.status_code)
-                            await record_stream_attempt(
-                                stream_account,
-                                AttemptOutcome(
-                                    scope=base_outcome.scope,
-                                    category=base_outcome.category,
-                                    retry_after_seconds=retry_after,
-                                ),
-                                status_code=res.status_code,
-                                error_class=base_outcome.category,
-                            )
-                        last_error_code = "backend_error"
-                        last_error = f"Google Antigravity returned HTTP {res.status_code}"
-                    else:
-                        buffer = ""
-                        async for chunk in res.aiter_text():
-                            buffer += chunk
-                            while "\n" in buffer:
-                                line, buffer = buffer.split("\n", 1)
-                                async for event in parse_stream_line(line):
-                                    yield event
-                                if stream_failed or stream_retry_requested:
-                                    break
-                            if stream_failed or stream_retry_requested:
-                                break
-                        if buffer.strip() and not stream_failed and not stream_retry_requested:
-                            async for event in parse_stream_line(buffer):
-                                yield event
-                        if not stream_failed and not stream_retry_requested:
-                            completed = True
-            except Exception as e:
-                last_error_code = "connection_error"
-                last_error = safe_error_detail(e)
 
-            if stream_failed:
+        def serialize_transport_event(event: dict | str) -> str:
+            if event == "[DONE]":
+                return "data: [DONE]\n\n"
+            return f"data: {json.dumps(event)}\n\n"
+
+        while attempt_num < len(stream_attempts):
+            stream_account = stream_attempts[attempt_num]
+            terminal_event: dict | None = None
+            try:
+                async for event in google_transport.stream_events(
+                    codex_req,
+                    account_lease(stream_account),
+                    response_id=response_id,
+                    display_model=model,
+                    adapter=adapter,
+                ):
+                    if isinstance(event, dict) and event.get("type") in {
+                        "response.completed",
+                        "response.incomplete",
+                        "response.failed",
+                    }:
+                        terminal_event = event
+                    yield serialize_transport_event(event)
+            except GoogleHTTPError as exc:
+                try:
+                    retry_after = (
+                        retry_after_seconds_from_response(exc.response)
+                        if exc.response is not None
+                        else None
+                    )
+                except (AttributeError, TypeError):
+                    retry_after = None
+                outcome = AttemptOutcome(
+                    scope=exc.outcome.scope,
+                    category=exc.outcome.category,
+                    retry_after_seconds=retry_after,
+                )
                 await record_stream_attempt(
                     stream_account,
-                    outcome_for_backend_error(last_error_code, last_error or ""),
-                    status_code=None,
-                    error_class=last_error_code,
+                    outcome,
+                    status_code=exc.status_code,
+                    error_class=outcome.category,
                 )
-                await log_request(
-                    "failed",
-                    model=model,
-                    route="google",
-                    family=family,
-                    stream=True,
-                    error_class=last_error_code,
-                    error=last_error or "Google Antigravity stream failed",
-                    rotation_attempted=len(attempts) > 1,
-                    usage=usage,
+                error_code = outcome.category
+                error_message = f"Google Antigravity returned HTTP {exc.status_code}."
+            except GoogleStreamPayloadError as exc:
+                outcome = outcome_for_backend_error(exc.code, exc.message)
+                await record_stream_attempt(
+                    stream_account,
+                    outcome,
+                    error_class=exc.code,
                 )
-                return
-            if completed:
-                break
-            if stream_retry_requested and attempt_num == 0:
-                rotated = await acquire_active_account_for_request(model)
-                if rotated and rotated.get("email") != stream_account.get("email"):
-                    await record_stream_attempt(
-                        stream_account,
-                        outcome_for_backend_error(last_error_code, last_error or ""),
-                        error_class=last_error_code,
+                error_code = exc.code
+                error_message = safe_error_detail(exc.message)
+                if adapter.visible_output_started:
+                    if not adapter.created_emitted:
+                        yield serialize_transport_event(adapter.created())
+                    for event in adapter.fail(error_code, error_message):
+                        yield serialize_transport_event(event)
+                    await log_request(
+                        "failed",
+                        model=model,
+                        route="google",
+                        family=family,
+                        stream=True,
+                        error_class=error_code,
+                        error=error_message,
+                        rotation_attempted=attempt_num > 0,
                     )
-                    usage = None
-                    last_error = None
-                    last_error_code = "backend_error"
-                    attempts.append(rotated)
-                    attempt_num += 1
-                    continue
-                if rotated:
-                    await release_account_for_request(rotated.get("email"))
-            elif attempt_num == 0:
-                rotated = await acquire_active_account_for_request(model)
-                if rotated and rotated.get("email") != stream_account.get("email"):
-                    await record_stream_attempt(
-                        stream_account,
-                        outcome_for_backend_error(last_error_code, last_error or ""),
-                        error_class=last_error_code,
+                    return
+            except Exception as exc:
+                outcome = AttemptOutcome(scope="none", category="transport")
+                await record_stream_attempt(
+                    stream_account,
+                    outcome,
+                    error_class="connection_error",
+                )
+                error_code = "connection_error"
+                error_message = safe_error_detail(exc)
+            else:
+                if terminal_event is None:
+                    error_code = "missing_terminal_signal"
+                    error_message = "The Google provider stream ended without a terminal event."
+                else:
+                    response_payload = terminal_event.get("response", {})
+                    terminal_status = terminal_event["type"].removeprefix("response.")
+                    usage_payload = (
+                        response_payload.get("usage")
+                        if isinstance(response_payload, dict)
+                        else None
                     )
-                    attempts.append(rotated)
-                    attempt_num += 1
-                    continue
-                if rotated:
-                    await release_account_for_request(rotated.get("email"))
-            break
+                    if terminal_status in {"completed", "incomplete"}:
+                        await record_stream_attempt(
+                            stream_account,
+                            AttemptOutcome(scope="none", category="success"),
+                            status_code=200,
+                            usage=usage_payload,
+                        )
+                        await log_request(
+                            "success",
+                            model=model,
+                            route="google",
+                            family=family,
+                            stream=True,
+                            http_status=200,
+                            rotation_attempted=attempt_num > 0,
+                            usage=usage_payload,
+                            terminal_kind=terminal_status,
+                            terminal_reason=terminal_status,
+                            attempt_count=len(stream_attempts),
+                            rotation_count=attempt_num,
+                            outcome_category="success",
+                        )
+                    else:
+                        error = (
+                            response_payload.get("error", {})
+                            if isinstance(response_payload, dict)
+                            else {}
+                        )
+                        await record_stream_attempt(
+                            stream_account,
+                            AttemptOutcome(scope="none", category="transport"),
+                            status_code=200,
+                            error_class=error.get("code") if isinstance(error, dict) else None,
+                        )
+                        await log_request(
+                            "failed",
+                            model=model,
+                            route="google",
+                            family=family,
+                            stream=True,
+                            http_status=200,
+                            error_class=error.get("code") if isinstance(error, dict) else None,
+                            error=error.get("message") if isinstance(error, dict) else None,
+                            rotation_attempted=attempt_num > 0,
+                        )
+                    return
 
-        if not completed:
-            final_account = attempts[min(attempt_num, len(attempts) - 1)]
-            await record_stream_attempt(
-                final_account,
-                outcome_for_backend_error(last_error_code, last_error or ""),
-                status_code=None,
-                error_class=last_error_code,
-            )
+            if attempt_num == 0 and not adapter.visible_output_started:
+                rotated = await acquire_active_account_for_request(model)
+                if rotated and rotated.get("email") != stream_account.get("email"):
+                    adapter.reset_attempt()
+                    stream_attempts.append(rotated)
+                    attempt_num += 1
+                    continue
+                if rotated:
+                    await release_account_for_request(rotated.get("email"))
+            if not adapter.created_emitted:
+                yield serialize_transport_event(adapter.created())
+            for event in adapter.fail(error_code, error_message):
+                yield serialize_transport_event(event)
             await log_request(
                 "failed",
                 model=model,
                 route="google",
                 family=family,
                 stream=True,
-                error_class=last_error_code,
-                error=last_error or "Google Antigravity stream failed",
-                rotation_attempted=len(attempts) > 1,
-                usage=usage,
-            )
-            async for event in fail_stream(last_error_code, last_error or "Google Antigravity stream failed"):
-                yield event
-            return
-                
-        provider_result = google_stream_accumulator.finalize()
-        if provider_result.terminal.kind is TerminalKind.FAILED:
-            final_account = attempts[min(attempt_num, len(attempts) - 1)]
-            error_code = provider_result.terminal.error_code or "backend_error"
-            error_message = provider_result.terminal.error_message or "Google Antigravity stream failed"
-            await record_stream_attempt(
-                final_account,
-                AttemptOutcome(scope="none", category="transport"),
-                status_code=200,
-                error_class=error_code,
-            )
-            await log_request(
-                "failed",
-                model=model,
-                route="google",
-                family=family,
-                stream=True,
-                http_status=200,
                 error_class=error_code,
                 error=error_message,
-                rotation_attempted=len(attempts) > 1,
-                usage=usage,
+                rotation_attempted=attempt_num > 0,
             )
-            async for event in fail_stream(error_code, error_message):
-                yield event
             return
 
-        # 4. Final terminal events
-        if text_output_index is not None:
-            message_item = {'type': 'message', 'id': msg_id, 'status': 'completed', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': output_text, 'annotations': []}]}
-            yield stream_event({'type': 'response.output_text.done', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'text': output_text})
-            yield stream_event({'type': 'response.content_part.done', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'part': {'type': 'output_text', 'text': output_text, 'annotations': []}})
-            yield stream_event({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': text_output_index, 'item': message_item})
-            indexed_output_items.append((text_output_index, message_item))
-        refusal_output = next(
-            (
-                item
-                for item in provider_result.output
-                if item.get("type") == "message"
-                and isinstance(item.get("content"), list)
-                and item["content"]
-                and isinstance(item["content"][0], dict)
-                and item["content"][0].get("type") == "refusal"
-            ),
-            None,
-        )
-        if refusal_output is not None:
-            refusal_index = next_output_index
-            next_output_index += 1
-            yield stream_event(
-                {
-                    "type": "response.output_item.added",
-                    "response_id": response_id,
-                    "output_index": refusal_index,
-                    "item": refusal_output,
-                }
-            )
-            yield stream_event(
-                {
-                    "type": "response.output_item.done",
-                    "response_id": response_id,
-                    "output_index": refusal_index,
-                    "item": refusal_output,
-                }
-            )
-            indexed_output_items.append((refusal_index, refusal_output))
-        done_output = []
-        if reasoning_text:
-            done_output.append({
-                "type": "reasoning",
-                "id": f"rs_{uuid.uuid4().hex[:8]}",
-                "encrypted_content": "",
-                "step_by_step_summary": reasoning_text,
-            })
-        done_output.extend(item for _output_index, item in sorted(indexed_output_items, key=lambda entry: entry[0]))
-        done_response = {
-            'id': response_id,
-            'object': 'response',
-            'created_at': created_at,
-            'model': model,
-            'output': done_output,
-            'status': provider_result.terminal.kind.value,
-        }
-        if provider_result.terminal.kind is TerminalKind.INCOMPLETE:
-            done_response["incomplete_details"] = {
-                "reason": provider_result.terminal.incomplete_reason or provider_result.terminal.reason
-            }
-        if usage:
-            done_response["usage"] = usage
-        final_account = attempts[min(attempt_num, len(attempts) - 1)]
-        await record_stream_attempt(
-            final_account,
-            AttemptOutcome(scope="none", category="success"),
-            status_code=200,
-            usage=usage,
-        )
-        await log_request(
-            "success",
-            model=model,
-            route="google",
-            family=family,
-            stream=True,
-            http_status=200,
-            rotation_attempted=len(attempts) > 1,
-            usage=usage,
-            terminal_kind=provider_result.terminal.kind.value,
-            terminal_reason=provider_result.terminal.reason,
-            attempt_count=len(attempts),
-            rotation_count=max(0, len(attempts) - 1),
-            outcome_category="success",
-        )
-        yield stream_event({'type': f'response.{provider_result.terminal.kind.value}', 'response': done_response})
-        yield "data: [DONE]\n\n"
+        return
 
     async def managed_sse_generator() -> AsyncGenerator[str, None]:
         try:
@@ -2284,271 +2048,23 @@ async def openai_compatible_sse_generator(
     import uuid
 
     response_id = f"resp_{uuid.uuid4().hex[:12]}"
-    created_at = int(time.time())
-    msg_id = f"msg_{uuid.uuid4().hex[:8]}"
-    output_text = ""
-    reasoning_text = ""
-    usage = None
-    tool_calls: dict[int, dict] = {}
-    tool_seen_order: list[int] = []
-    tool_output_indices: dict[int, int] = {}
-    indexed_output_items = []
-    next_output_index = 0
-    text_output_index = None
-    sequence_number = 0
-    stream_failed = False
-    chat_stream_accumulator = ChatResponseAccumulator()
-
-    def stream_event(payload: dict) -> str:
-        nonlocal sequence_number
-        payload = dict(payload)
-        payload["sequence_number"] = sequence_number
-        sequence_number += 1
-        return f"data: {json.dumps(payload)}\n\n"
-
-    yield stream_event({'type': 'response.created', 'response': {'id': response_id, 'object': 'response', 'status': 'in_progress', 'model': display_model}})
-
-    def start_text_message_events():
-        nonlocal next_output_index, text_output_index
-        if text_output_index is not None:
-            return
-        text_output_index = next_output_index
-        next_output_index += 1
-        yield stream_event({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': text_output_index, 'item': {'type': 'message', 'id': msg_id, 'role': 'assistant', 'status': 'in_progress', 'content': []}})
-        yield stream_event({'type': 'response.content_part.added', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'part': {'type': 'output_text', 'text': '', 'annotations': []}})
-
-    async def fail_stream(code: str, message: str) -> AsyncGenerator[str, None]:
-        message = safe_error_detail(message)
-        yield stream_event({'type': 'error', 'error': {'code': code, 'message': message}})
-        yield stream_event({'type': 'response.failed', 'response': {'id': response_id, 'object': 'response', 'status': 'failed', 'model': display_model, 'error': {'code': code, 'message': message}}})
-        yield "data: [DONE]\n\n"
-
-    async def parse_chat_stream_line(line: str) -> AsyncGenerator[str, None]:
-        nonlocal output_text, reasoning_text, usage, next_output_index, stream_failed
-        line = line.strip()
-        if not line or not line.startswith("data:"):
-            return
-        data_payload = line[5:].strip()
-        if data_payload == "[DONE]":
-            chat_stream_accumulator.mark_done()
-            return
-        try:
-            parsed = json.loads(data_payload)
-        except json.JSONDecodeError as e:
-            stream_failed = True
-            async for event in fail_stream("invalid_stream_chunk", f"Invalid {provider['id']} SSE JSON chunk: {e}"):
-                yield event
-            return
-        if not isinstance(parsed, dict):
-            return
-        stream_error = stream_error_from_payload(parsed)
-        if stream_error:
-            code, message = stream_error
-            stream_failed = True
-            async for event in fail_stream(code, message):
-                yield event
-            return
-        chat_stream_accumulator.consume(parsed)
-        if isinstance(parsed.get("usage"), dict):
-            provider_usage = parsed["usage"]
-            usage = usage_counts(
-                provider_usage.get("prompt_tokens", provider_usage.get("input_tokens", 0)),
-                provider_usage.get("completion_tokens", provider_usage.get("output_tokens", 0)),
-                provider_usage.get("total_tokens", 0),
-            )
-        choices = parsed.get("choices", []) or []
-        if not isinstance(choices, list):
-            return
-        for choice in choices:
-            if not isinstance(choice, dict):
-                continue
-            delta = choice.get("delta", {}) or {}
-            if not isinstance(delta, dict):
-                continue
-            reasoning_content = stream_string(delta.get("reasoning_content"))
-            if reasoning_content:
-                reasoning_text += reasoning_content
-                yield stream_event({'type': 'response.reasoning_text.delta', 'response_id': response_id, 'delta': reasoning_content})
-            content_delta = stream_string(delta.get("content"))
-            if content_delta:
-                output_text += content_delta
-                for event in start_text_message_events():
-                    yield event
-                yield stream_event({'type': 'response.output_text.delta', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'delta': content_delta})
-            tool_deltas = delta.get("tool_calls", []) or []
-            if not isinstance(tool_deltas, list):
-                continue
-            for tool_delta in tool_deltas:
-                if not isinstance(tool_delta, dict):
-                    continue
-                idx = chat_tool_call_delta_index(tool_delta.get("index", 0))
-                if idx is None:
-                    continue
-                fn = tool_delta.get("function", {}) or {}
-                if not isinstance(fn, dict):
-                    continue
-                generated_call_id = stream_string(tool_delta.get("id")) or f"call_{uuid.uuid4().hex[:8]}"
-                if idx not in tool_calls:
-                    tool_seen_order.append(idx)
-                    tool_calls[idx] = {
-                        "id": f"fc_{uuid.uuid4().hex[:8]}",
-                        "type": "function_call",
-                        "call_id": generated_call_id,
-                        "name": "",
-                        "arguments": "",
-                    }
-                state = tool_calls[idx]
-                tool_call_id = stream_string(tool_delta.get("id"))
-                if tool_call_id:
-                    state["call_id"] = tool_call_id
-                buffered_arguments = state.get("arguments", "")
-                name_delta = stream_string(fn.get("name"))
-                arguments_delta = stream_string(fn.get("arguments"))
-                if name_delta:
-                    state["name"] += name_delta
-                new_tool_item = (
-                    idx not in tool_output_indices
-                    and valid_function_name(state["name"])
-                    and bool(arguments_delta)
-                    and not name_delta
-                )
-                if new_tool_item:
-                    tool_output_indices[idx] = next_output_index
-                    next_output_index += 1
-                    item = dict(state)
-                    item["arguments"] = ""
-                    yield stream_event({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': tool_output_indices[idx], 'item': item})
-                    if buffered_arguments:
-                        yield stream_event({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': buffered_arguments})
-                if arguments_delta:
-                    state["arguments"] += arguments_delta
-                    if idx in tool_output_indices:
-                        yield stream_event({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': state['id'], 'output_index': tool_output_indices[idx], 'delta': arguments_delta})
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("POST", url, json=payload, headers=headers) as res:
-                if res.status_code != 200:
-                    body = (await res.aread()).decode("utf-8", errors="ignore")
-                    async for event in fail_stream("backend_error", f"{provider['id']} returned HTTP {res.status_code}: {body}"):
-                        yield event
-                    return
-                buffer = ""
-                async for chunk in res.aiter_text():
-                    buffer += chunk
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        async for event in parse_chat_stream_line(line):
-                            yield event
-                        if stream_failed:
-                            break
-                    if stream_failed:
-                        break
-                if buffer.strip() and not stream_failed:
-                    async for event in parse_chat_stream_line(buffer):
-                        yield event
-    except Exception as e:
-        async for event in fail_stream("connection_error", safe_error_detail(e)):
-            yield event
-        return
-
-    if stream_failed:
-        return
-
-    provider_result = chat_stream_accumulator.finalize()
-    if provider_result.terminal.kind is TerminalKind.FAILED:
-        async for event in fail_stream(
-            provider_result.terminal.error_code or "backend_error",
-            provider_result.terminal.error_message or "Provider stream failed",
-        ):
-            yield event
-        return
-
-    refusal_output = next(
-        (
-            item
-            for item in provider_result.output
-            if item.get("type") == "message"
-            and isinstance(item.get("content"), list)
-            and item["content"]
-            and isinstance(item["content"][0], dict)
-            and item["content"][0].get("type") == "refusal"
-        ),
-        None,
+    transport = OpenAICompatibleTransport(
+        timeout=timeout,
+        client_factory=httpx.AsyncClient,
     )
-    if refusal_output is not None:
-        refusal_index = next_output_index
-        next_output_index += 1
-        yield stream_event(
-            {
-                "type": "response.output_item.added",
-                "response_id": response_id,
-                "output_index": refusal_index,
-                "item": refusal_output,
-            }
-        )
-        yield stream_event(
-            {
-                "type": "response.output_item.done",
-                "response_id": response_id,
-                "output_index": refusal_index,
-                "item": refusal_output,
-            }
-        )
-        indexed_output_items.append((refusal_index, refusal_output))
-
-    for idx in tool_seen_order:
-        item = tool_calls[idx]
-        if not valid_function_name(item.get("name")):
-            continue
-        if idx not in tool_output_indices:
-            tool_output_indices[idx] = next_output_index
-            next_output_index += 1
-            added_item = dict(item)
-            added_item["arguments"] = ""
-            yield stream_event({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': tool_output_indices[idx], 'item': added_item})
-            if item.get("arguments"):
-                yield stream_event({'type': 'response.function_call_arguments.delta', 'response_id': response_id, 'item_id': item['id'], 'output_index': tool_output_indices[idx], 'delta': item['arguments']})
-
-    for idx in sorted(tool_output_indices, key=lambda tool_idx: tool_output_indices[tool_idx]):
-        item = tool_calls[idx]
-        if not valid_function_name(item.get("name")):
-            continue
-        output_index = tool_output_indices[idx]
-        arguments = function_call_arguments_string(item.get("arguments", ""))
-        item["arguments"] = arguments
-        yield stream_event({'type': 'response.function_call_arguments.done', 'response_id': response_id, 'item_id': item['id'], 'output_index': output_index, 'name': item.get('name', ''), 'arguments': arguments})
-        yield stream_event({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': output_index, 'item': item})
-        indexed_output_items.append((output_index, dict(item)))
-
-    if text_output_index is not None:
-        message_item = {'type': 'message', 'id': msg_id, 'status': 'completed', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': output_text, 'annotations': []}]}
-        yield stream_event({'type': 'response.output_text.done', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'text': output_text})
-        yield stream_event({'type': 'response.content_part.done', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'part': {'type': 'output_text', 'text': output_text, 'annotations': []}})
-        yield stream_event({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': text_output_index, 'item': message_item})
-        indexed_output_items.append((text_output_index, message_item))
-    done_output = []
-    if reasoning_text:
-        done_output.append({
-            "type": "reasoning",
-            "id": f"rs_{uuid.uuid4().hex[:8]}",
-            "encrypted_content": "",
-            "step_by_step_summary": reasoning_text,
-        })
-    done_output.extend(item for _output_index, item in sorted(indexed_output_items, key=lambda entry: entry[0]))
-    done_response = {
-        "id": response_id,
-        "object": "response",
-        "created_at": created_at,
-        "status": provider_result.terminal.kind.value,
-        "model": display_model,
-        "output": done_output,
-    }
-    if usage:
-        done_response["usage"] = usage
-    if provider_result.terminal.kind is TerminalKind.INCOMPLETE:
-        done_response["incomplete_details"] = {
-            "reason": provider_result.terminal.incomplete_reason or provider_result.terminal.reason
-        }
-    yield stream_event({'type': f'response.{provider_result.terminal.kind.value}', 'response': done_response})
-    yield "data: [DONE]\n\n"
+    prepared = PreparedOpenAIRequest(
+        payload=payload,
+        url=url,
+        headers=headers,
+        timeout=timeout,
+    )
+    async for event in transport.stream_chat_events(
+        prepared,
+        response_id=response_id,
+        display_model=display_model,
+    ):
+        if event == "[DONE]":
+            yield "data: [DONE]\n\n"
+        else:
+            yield f"data: {json.dumps(event)}\n\n"
+    return
