@@ -17,6 +17,18 @@ class TestAccounts(unittest.TestCase):
             "activeIndex": 0,
             "activeIndexByFamily": {"claude": 0, "gemini": 0}
         }
+
+    @staticmethod
+    def capture_mutation_results(mock_update, data):
+        mutation_results = []
+
+        def update(mutator):
+            result = mutator(data)
+            mutation_results.append(result)
+            return result
+
+        mock_update.side_effect = update
+        return mutation_results
         
     @patch("codex_antigravity_auth.accounts.update_accounts")
     def test_record_attempt_is_one_authoritative_state_transition(self, mock_update):
@@ -57,6 +69,73 @@ class TestAccounts(unittest.TestCase):
         selected = manager.select_active_account("gemini-3.5-flash-high")
         self.assertIsNotNone(selected)
         self.assertEqual(selected["email"], "primary@gmail.com")
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_unchanged_account_selection_skips_persisted_store_write(self, mock_update):
+        self.accounts_data["accountState"] = {
+            "schemaVersion": 2,
+            "failures": {},
+            "cooldowns": {},
+            "counters": {},
+        }
+        for account in self.accounts_data["accounts"]:
+            account["fingerprint"] = {"deviceId": account["email"]}
+        mutation_results = self.capture_mutation_results(mock_update, self.accounts_data)
+
+        selected = AccountManager().select_active_account("gemini-3.5-flash-high")
+
+        self.assertEqual(selected["email"], "primary@gmail.com")
+        self.assertEqual(mutation_results, [False])
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_account_selection_persists_real_state_change(self, mock_update):
+        self.accounts_data["accountState"] = {
+            "schemaVersion": 2,
+            "failures": {},
+            "cooldowns": {},
+            "counters": {},
+        }
+        mutation_results = self.capture_mutation_results(mock_update, self.accounts_data)
+
+        selected = AccountManager().select_active_account("gemini-3.5-flash-high")
+
+        self.assertEqual(selected["email"], "primary@gmail.com")
+        self.assertIn("fingerprint", selected)
+        self.assertEqual(mutation_results, [True])
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_empty_normalized_account_store_skips_persisted_write(self, mock_update):
+        data = {
+            "accounts": [],
+            "activeIndex": 0,
+            "activeIndexByFamily": {"claude": 0, "gemini": 0},
+            "accountState": {
+                "schemaVersion": 2,
+                "failures": {},
+                "cooldowns": {},
+                "counters": {},
+            },
+        }
+        mutation_results = self.capture_mutation_results(mock_update, data)
+
+        self.assertIsNone(AccountManager().select_active_account("gemini-3.5-flash-high"))
+        self.assertEqual(mutation_results, [False])
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    def test_account_selection_persists_legacy_state_migration(self, mock_update):
+        self.accounts_data["accountState"] = {
+            "failures": {"primary@gmail.com": 1},
+            "cooldowns": {},
+        }
+        for account in self.accounts_data["accounts"]:
+            account["fingerprint"] = {"deviceId": account["email"]}
+        mutation_results = self.capture_mutation_results(mock_update, self.accounts_data)
+
+        selected = AccountManager().select_active_account("gemini-3.5-flash-high")
+
+        self.assertEqual(selected["email"], "primary@gmail.com")
+        self.assertEqual(self.accounts_data["accountState"]["schemaVersion"], 2)
+        self.assertEqual(mutation_results, [True])
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
     def test_acquire_spreads_concurrent_requests_across_accounts(self, mock_update):

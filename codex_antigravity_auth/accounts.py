@@ -1,3 +1,4 @@
+import copy
 import math
 import threading
 import time
@@ -53,7 +54,7 @@ class AccountManager:
         self._runtime_data = data
         self._state_owner = AccountState(data, now=time.time, in_flight=self._in_flight)
         self._bind_compatibility_views()
-        return state_missing
+        return state_missing or self._state_owner.migration_changed
 
     def _mutate_state(self, mutation: Callable[[AccountState], None]) -> None:
         if not get_accounts_json_path().exists():
@@ -103,24 +104,36 @@ class AccountManager:
 
             def mutate(data: dict[str, Any]) -> bool:
                 nonlocal selected
-                self._sync_state_from_storage(data)
+                dirty = self._sync_state_from_storage(data)
                 while True:
+                    active_index_before = data.get("activeIndex")
+                    family_index_before = data.get("activeIndexByFamily", {}).get(family)
+                    cooldowns_before = copy.deepcopy(self._state_owner.state["cooldowns"])
                     lease = (
                         self._state_owner.acquire(family)
                         if acquire
                         else self._state_owner.select(family)
                     )
+                    dirty = dirty or (
+                        data.get("activeIndex") != active_index_before
+                        or data.get("activeIndexByFamily", {}).get(family) != family_index_before
+                        or self._state_owner.state["cooldowns"] != cooldowns_before
+                    )
                     if lease is None:
-                        return True
+                        return dirty
                     account = lease.account
                     email = str(account.get("email", ""))
                     if not account.get("fingerprint"):
                         account["fingerprint"] = generate_fingerprint()
-                    expires_at = self._normalize_expires_at(account.get("expiresAt", 0))
-                    account["expiresAt"] = expires_at
+                        dirty = True
+                    raw_expires_at = account.get("expiresAt", 0)
+                    expires_at = self._normalize_expires_at(raw_expires_at)
+                    if isinstance(raw_expires_at, bool) or raw_expires_at != expires_at:
+                        account["expiresAt"] = expires_at
+                        dirty = True
                     if account.get("accessToken") and expires_at >= time.time() + 300:
                         selected = account
-                        return True
+                        return dirty
 
                     refresh_token = account.get("refreshToken")
                     try:

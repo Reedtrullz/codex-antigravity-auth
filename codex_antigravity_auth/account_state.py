@@ -157,7 +157,7 @@ class AccountState:
         self._now = now
         self._lock = threading.RLock()
         self._in_flight = in_flight if in_flight is not None else {}
-        migrated, _changed = migrate_account_state(data, now=now())
+        migrated, self.migration_changed = migrate_account_state(data, now=now())
         data.clear()
         data.update(migrated)
 
