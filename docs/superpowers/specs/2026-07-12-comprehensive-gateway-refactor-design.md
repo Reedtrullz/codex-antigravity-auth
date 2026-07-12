@@ -4,7 +4,7 @@
 
 **Date:** 2026-07-12
 
-**Repository:** `/Users/reidar/Projectos/codex-antigravity-auth`
+**Repository:** repository root
 
 ## Summary
 
@@ -93,6 +93,8 @@ Owns OpenAI-compatible routes:
 
 Unsupported fields are rejected with a client error or reported as unsupported capability; they are not silently discarded.
 
+Tool-choice semantics are provider-neutral at the request boundary: `auto` permits text or tools, `none` disables tool invocation, `required` requires at least one advertised tool call, and a function-specific choice restricts invocation to the named advertised function. Each adapter must either map that semantic faithfully or reject the request with HTTP 400 before provider execution. OpenAI-compatible adapters forward the equivalent Chat Completions shape. The Google adapter maps these values through its function-calling configuration and allowed-function list; it must not use an undocumented mode without a live contract fixture. `parallel_tool_calls` is forwarded where the provider exposes an equivalent control; a route that cannot honor `false` must reject it instead of silently allowing parallel calls.
+
 ### `account_state.py`
 
 Owns Google account selection and outcomes:
@@ -175,9 +177,9 @@ Use `completed` only when the provider produced meaningful assistant text, reaso
 
 Use `incomplete` for max-token termination, provider truncation, interrupted generation with a provider-declared resumable condition, or another terminal condition that maps to Responses `incomplete_details`.
 
-### Refused
+### Refusal output
 
-Use a refusal output when the provider exposes a clear safety or policy block with enough structured information to distinguish it from transport failure. Sanitized provider context may be included without raw prompts or policy internals.
+Use a refusal output item when the provider exposes a clear safety or policy block with enough structured information to distinguish it from transport failure. Refusal is an output variant inside a `completed` response, not a fourth terminal response status or SSE terminal event. Sanitized provider context may be included without raw prompts or policy internals.
 
 ### Failed
 
@@ -233,6 +235,27 @@ The persisted state evolves from account-wide maps to scoped state. The normaliz
 ```
 
 Legacy numeric failure and cooldown entries migrate conservatively into `account` scope so upgrades do not prematurely retry a previously cooled-down account. Expired and malformed state is pruned. Migration is idempotent and occurs inside one locked transaction.
+
+Cooldown values are absolute Unix epoch seconds stored as finite JSON numbers. `0` means no active cooldown and is normalized away during persistence. Epoch-millisecond legacy values are divided by 1000 before scope migration. Retry durations are converted to bounded absolute expiry timestamps before storage.
+
+Each persisted family counter uses this normalized shape:
+
+```json
+{
+  "total_requests": 0,
+  "successes": 0,
+  "failures": 0,
+  "rate_limits": 0,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "total_tokens": 0,
+  "last_success": "2026-07-12T00:00:00Z",
+  "last_failure": "2026-07-12T00:00:00Z",
+  "last_failure_class": "rate_limited"
+}
+```
+
+Counters are stored under `accountState.counters[email][family]`, where `family` is `claude` or `gemini`. Integer fields are non-negative integers. Timestamp and failure-class fields are optional sanitized strings. One backend attempt increments `total_requests` exactly once for the account and family actually attempted; retries on a second account create a separate counter update for that account.
 
 ## Persistence and Migration Safety
 
@@ -306,6 +329,7 @@ A shared fixture matrix runs against Google and OpenAI-compatible adapters for:
 - Usage-only terminal chunks.
 - Client cancellation and lease release.
 - `parallel_tool_calls` true and false.
+- `tool_choice` values `auto`, `none`, `required`, and a function-specific choice.
 
 Golden SSE tests assert the entire ordered event sequence, not substring presence.
 
@@ -324,6 +348,7 @@ Golden SSE tests assert the entire ordered event sequence, not substring presenc
 - Clean wheel/sdist build and installation.
 - Packaged Anti installation and its full test suite.
 - Python 3.10, 3.11, and 3.12, plus the supported Windows job.
+- A separate compatibility-evaluation job for newer Python releases; expanding the declared support matrix requires the full unit, package, and clean-install gates to pass first.
 
 ### Static and security gates
 
