@@ -19,7 +19,13 @@ try:
 except ImportError:  # pragma: no cover - Windows fallback keeps imports working.
     fcntl = None
 
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - only available on Windows.
+    msvcrt = None
+
 _accounts_lock = threading.RLock()
+_file_lock_thread_lock = threading.RLock()
 _DEFAULT_GET_CODEX_HOME = get_codex_home
 
 
@@ -84,18 +90,27 @@ def _ensure_private_file(path: Path) -> None:
 
 @contextmanager
 def _exclusive_file_lock(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_name(f".{path.name}.lock")
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        os.chmod(lock_path, 0o600)
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+    with _file_lock_thread_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name(f".{path.name}.lock")
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            os.chmod(lock_path, 0o600)
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            elif msvcrt is not None:
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            os.close(fd)
 
 def _normalize_fernet_key(secret: str) -> str:
     try:

@@ -166,6 +166,11 @@ WantedBy=default.target
 """
 
 
+def _launchd_uid() -> int:
+    getuid = getattr(os, "getuid", None)
+    return getuid() if callable(getuid) else 0
+
+
 def install_service(
     port: int,
     host: str,
@@ -185,9 +190,10 @@ def install_service(
             encoding="utf-8",
         )
         os.chmod(path, 0o600)
-        bootout = _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(path)], allow_failure=True)
-        bootstrap = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(path)], allow_failure=True)
-        enable = _run(["launchctl", "enable", f"gui/{os.getuid()}/{service_label(port)}"], allow_failure=True)
+        uid = _launchd_uid()
+        bootout = _run(["launchctl", "bootout", f"gui/{uid}", str(path)], allow_failure=True)
+        bootstrap = _run(["launchctl", "bootstrap", f"gui/{uid}", str(path)], allow_failure=True)
+        enable = _run(["launchctl", "enable", f"gui/{uid}/{service_label(port)}"], allow_failure=True)
         status = service_status(port, platform_name=platform_name)
         error = None
         if bootstrap.returncode != 0 or enable.returncode != 0 or not status.get("installed") or not status.get("active"):
@@ -239,7 +245,7 @@ def uninstall_service(port: int, *, platform_name: str | None = None) -> dict[st
     platform_name = platform_name or service_platform()
     if platform_name == "macos":
         path = macos_launch_agent_path(port)
-        bootout = _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(path)], allow_failure=True)
+        bootout = _run(["launchctl", "bootout", f"gui/{_launchd_uid()}", str(path)], allow_failure=True)
         if path.exists() and not path.is_symlink():
             path.unlink()
         status = service_status(port, platform_name=platform_name)
@@ -281,7 +287,7 @@ def service_status(port: int, *, platform_name: str | None = None) -> dict[str, 
     platform_name = platform_name or service_platform()
     if platform_name == "macos":
         path = macos_launch_agent_path(port)
-        loaded = _run(["launchctl", "print", f"gui/{os.getuid()}/{service_label(port)}"], allow_failure=True).returncode == 0
+        loaded = _run(["launchctl", "print", f"gui/{_launchd_uid()}/{service_label(port)}"], allow_failure=True).returncode == 0
         return _service_result(
             {"platform": platform_name, "installed": path.is_file(), "active": loaded, "reachable": False, "path": str(path)},
             action="status",
