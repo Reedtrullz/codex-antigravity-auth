@@ -52,7 +52,7 @@ Run only with explicit authorization. Record model/route, terminal state, latenc
 - [ ] Credentialed Google/BYOK behavior is marked unverified unless the live section above was actually run
 - [ ] CI, deploy, publish, merge, and public-package state are not claimed from local evidence
 
-## Recorded local evidence — 2026-07-12
+## Historical `1.6.4` local evidence — 2026-07-12
 
 Exact source: `6bd82d2718ce438a19f17ff7eb254a9bd8b44680` on `codex/comprehensive-gateway-refactor`; worktree was clean before the evidence build.
 
@@ -72,3 +72,11 @@ Exact source: `6bd82d2718ce438a19f17ff7eb254a9bd8b44680` on `codex/comprehensive
 - [ ] Credentialed Google and BYOK generation were not run because provider-spend/live authorization was not explicit.
 - [ ] Real service install/uninstall was not run because host service mutation was not explicitly authorized.
 - [ ] CI, merge, deploy, publish, and public-package state remain unclaimed.
+
+## `1.7.0` release candidate status
+
+- Package metadata is `1.7.0`; the public GitHub release and PyPI package were both verified as `1.6.4` on 2026-07-12.
+- The Publish workflow now requires its artifact build and the full Ubuntu 3.10/3.11/3.12/3.14 plus Windows 3.12 test matrix before the PyPI job can run.
+- The post-workflow-edit Python 3.10 local suite passed — 575 tests, 193 subtests, and the existing Starlette/httpx deprecation warning.
+- Final source SHA, Python 3.10/3.14 counts, artifact hashes, installed-wheel proof, clean-home proof, and dependency audit are recorded in the next task after they are rerun.
+- CI, tag, publish, public `1.7.0`, service mutation, real Codex configuration changes, and credentialed Google/BYOK calls remain explicitly unclaimed.

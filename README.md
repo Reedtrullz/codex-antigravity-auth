@@ -352,13 +352,14 @@ codex-antigravity doctor --byok-only
 
 `doctor` parses the active Codex config, verifies `model_provider = "antigravity"` and the matching provider `base_url` when Antigravity is active, warns when PyPI has a newer package version, and exits non-zero on hard readiness failures. `doctor --codex-ready` additionally checks gateway reachability, `/v1/models`, route/account readiness, observed service state, read-only account/provider store accessibility and migration status, account-state schema version, and provider capability mismatches. `--json` exposes those fields under `diagnostics`. These store checks do not chmod, migrate, create encryption keys, or rewrite configuration. Add `--live` only when you want a real provider `/v1/responses` generation smoke; set `CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1` to skip the once-daily package-version check.
 
-Before tagging a release, run the local verification stack and one credentialed live smoke:
+Before tagging a release, run the local verification stack. Run credentialed live smokes only with explicit authorization and record them separately from local/package evidence:
 
 ```bash
 python3 -m pytest -q
 python3 -m compileall -q codex_antigravity_auth tests
 git diff --check
 codex-antigravity models doctor
+# Explicitly authorized only:
 codex-antigravity doctor --codex-ready --live --live-model claude-3.5-sonnet
 ```
 
@@ -371,6 +372,6 @@ python3 -m pytest
 
 ## Release Automation
 
-Tagged releases are prepared for PyPI Trusted Publishing. The `.github/workflows/publish.yml` workflow runs on `v*` tags, builds sdist/wheel artifacts, checks them with Twine, uploads the artifacts between jobs, and publishes with `pypa/gh-action-pypi-publish@release/v1` using OIDC (`id-token: write`) in the `pypi` environment.
+Tagged releases are prepared for PyPI Trusted Publishing. The `.github/workflows/publish.yml` workflow runs on `v*` tags, requires the full Ubuntu Python 3.10/3.11/3.12/3.14 plus Windows Python 3.12 test matrix and a checked sdist/wheel build, then publishes with `pypa/gh-action-pypi-publish@release/v1` using OIDC (`id-token: write`) in the `pypi` environment. The tag must exactly match the package version.
 
 Before the first PyPI publish, configure the PyPI project `codex-antigravity-auth` with a trusted publisher for this GitHub repository, workflow file `.github/workflows/publish.yml`, and environment `pypi`. No local PyPI API token is required or expected.

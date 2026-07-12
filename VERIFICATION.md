@@ -79,6 +79,8 @@ curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
 
 Treat verification evidence in layers: unit/mocked route tests prove local contracts; wheel and installed-skill checks prove packaging; `/health`, service status, and model-catalog readbacks prove the running local gateway; only an explicit `doctor --codex-ready --live` or manual `/v1/responses` call proves a credentialed provider path. Do not present local or mocked evidence as a live-provider claim.
 
+For the `1.7.0` release candidate, the publish workflow is blocked on both its artifact build and the same five-lane test matrix used by CI. The public GitHub release and PyPI package remain `1.6.4` as verified on 2026-07-12; no `1.7.0` tag, CI, publish, service mutation, or credentialed live-provider result is claimed by local release preparation.
+
 ## Manual Smoke Test
 ```bash
 curl -s -X POST http://localhost:51122/v1/responses \
@@ -106,7 +108,7 @@ curl -s -X POST http://localhost:51122/v1/responses \
 
 If you want to smoke `deepseek:deepseek-v4-flash` instead, include `--model deepseek-v4-flash` in the DeepSeek `provider set` command so it appears in `/v1/models`.
 
-The latest credentialed smokes were run on 2026-07-03 against PR #1 head `e6a81ac` before squash merge `191daa4`. DeepSeek used a transient `DEEPSEEK_API_KEY` environment variable only, did not persist the key, exposed `deepseek:deepseek-v4-flash` in `/v1/models`, and returned exact sentinels for both non-streaming and streaming `/v1/responses`.
+Historical credentialed smokes were run on 2026-07-03 against PR #1 head `e6a81ac` before squash merge `191daa4`; they are not evidence for `1.7.0`. DeepSeek used a transient `DEEPSEEK_API_KEY` environment variable only, did not persist the key, exposed `deepseek:deepseek-v4-flash` in `/v1/models`, and returned exact sentinels for both non-streaming and streaming `/v1/responses`.
 OpenRouter was also smoke-tested with a transient `OPENROUTER_API_KEY` environment variable only: `/v1/models` exposed `openrouter:openrouter/auto`, non-streaming and streaming `/v1/responses` returned exact sentinels for `openrouter:openrouter/auto`, and manual explicit routing returned an exact non-streaming sentinel for `openrouter:deepseek/deepseek-chat`. The Anti V2 workflow release has local package/unit proof and CI proof recorded in `STATUS.md`, but has not rerun credentialed live Google or BYOK generation smokes.
 
 ## Switching Between ChatGPT and Antigravity
