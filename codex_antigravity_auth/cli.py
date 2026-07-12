@@ -28,6 +28,7 @@ from .byok import (
     get_providers_json_path,
     load_provider_config,
     provider_auth_mode,
+    provider_capabilities,
     provider_allows_keyless_local_use,
     provider_preset,
     providers_json_path_read_only,
@@ -1411,6 +1412,11 @@ def provider_capability_mismatches(providers: dict[str, dict]) -> list[dict[str,
     for provider_id, provider in sorted(providers.items()):
         kind = provider.get("kind")
         auth_mode = provider_auth_mode(provider)
+        try:
+            provider_capabilities(provider)
+        except ValueError as exc:
+            mismatches.append({"provider": provider_id, "reason": str(exc)})
+            continue
         if kind == "openai_chat" and auth_mode != "api_key":
             mismatches.append(
                 {"provider": provider_id, "reason": "openai_chat routes require api_key auth"}

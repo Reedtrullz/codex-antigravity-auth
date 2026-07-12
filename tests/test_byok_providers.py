@@ -10,6 +10,7 @@ from codex_antigravity_auth.byok import (
     all_provider_configs,
     normalize_provider_config,
     normalize_provider_entry,
+    provider_capabilities,
     provider_auth_mode,
     provider_oauth_unsupported_message,
     provider_api_key_env_names,
@@ -31,6 +32,83 @@ from codex_antigravity_auth.transform import transform_chat_response, transform_
 
 
 class TestBYOKProviders(unittest.TestCase):
+    def test_provider_capabilities_use_route_defaults_and_validated_overrides(self):
+        chat = provider_capabilities({"kind": "openai_chat"})
+        self.assertFalse(chat.native_responses)
+        self.assertTrue(chat.parallel_tool_calls)
+
+        limited = provider_capabilities(
+            {
+                "kind": "openai_chat",
+                "capabilities": {
+                    "parallel_tool_calls": False,
+                    "structured_output": False,
+                    "tool_choice_modes": ["auto", "none"],
+                },
+            }
+        )
+        self.assertFalse(limited.parallel_tool_calls)
+        self.assertFalse(limited.structured_output)
+        self.assertEqual(limited.tool_choice_modes, frozenset({"auto", "none"}))
+
+        with self.assertRaisesRegex(ValueError, "parallel_tool_calls must be a boolean"):
+            provider_capabilities(
+                {"kind": "openai_chat", "capabilities": {"parallel_tool_calls": "false"}}
+            )
+
+    def test_unsupported_route_capability_fails_before_credentials_or_network(self):
+        provider = {
+            "id": "limited",
+            "displayName": "Limited",
+            "kind": "openai_chat",
+            "baseUrl": "https://example.invalid/v1",
+            "models": ["model"],
+            "capabilities": {"parallel_tool_calls": False},
+        }
+        with patch(
+            "codex_antigravity_auth.server.all_provider_configs",
+            return_value={"limited": provider},
+        ):
+            with patch("codex_antigravity_auth.server.resolve_api_key") as resolve_key:
+                with patch("codex_antigravity_auth.server.httpx.AsyncClient") as client:
+                    response = TestClient(app).post(
+                        "/v1/responses",
+                        json={
+                            "model": "limited:model",
+                            "input": "hello",
+                            "parallel_tool_calls": False,
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("parallel_tool_calls is not supported", response.json()["detail"])
+        resolve_key.assert_not_called()
+        client.assert_not_called()
+
+    def test_models_catalog_uses_selected_provider_capabilities(self):
+        provider = {
+            "id": "limited",
+            "displayName": "Limited",
+            "kind": "openai_chat",
+            "baseUrl": "https://example.invalid/v1",
+            "apiKey": "sk-test-key-1234567890",
+            "models": [
+                {
+                    "id": "model",
+                    "capabilities": {"parallel_tool_calls": False},
+                }
+            ],
+        }
+        with patch(
+            "codex_antigravity_auth.server.all_provider_configs",
+            return_value={"limited": provider},
+        ):
+            response = TestClient(app).get("/v1/models")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        advertised = {model["id"]: model for model in response.json()["data"]}
+        self.assertFalse(advertised["limited:model"]["supports_parallel_tool_calls"])
+
     def test_named_provider_presets_exist(self):
         for provider_id in ("openrouter", "deepseek", "xai", "kimi", "ollama", "opencode"):
             self.assertIn(provider_id, PROVIDER_PRESETS)

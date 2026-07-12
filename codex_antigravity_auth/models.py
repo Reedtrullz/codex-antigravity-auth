@@ -9,6 +9,7 @@ import threading
 import warnings
 from pathlib import Path
 from typing import Any
+from .response_protocol import ProviderCapabilities
 from .secure_store import SecureStore
 
 try:
@@ -401,6 +402,20 @@ def native_model_family(model: str) -> str:
     if definition:
         return definition.family
     return "claude" if "claude" in str(model).lower() else "gemini"
+
+
+def native_model_capabilities(model: str) -> ProviderCapabilities:
+    definition = native_model_definition(model)
+    return ProviderCapabilities(
+        native_responses=False,
+        parallel_tool_calls=(
+            definition.supports_parallel_tool_calls if definition is not None else True
+        ),
+        structured_output=True,
+        stop_sequences=True,
+        reasoning=True,
+        streaming_usage=True,
+    )
 
 
 def native_model_catalog(*, strict_overlays: bool = False) -> list[dict[str, Any]]:

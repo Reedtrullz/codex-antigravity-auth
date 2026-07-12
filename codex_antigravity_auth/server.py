@@ -20,6 +20,7 @@ from .byok import (
     PROVIDER_AUTH_MODE_API_KEY,
     PROVIDER_AUTH_MODE_OAUTH,
     all_provider_configs,
+    provider_capabilities,
     provider_auth_mode,
     resolve_api_key,
     split_provider_model,
@@ -35,7 +36,12 @@ from .transform import (
     valid_function_name,
 )
 from .constants import get_platform, is_loopback_host, validate_gateway_token_strength
-from .models import canonical_model_id, native_model_catalog, native_model_family
+from .models import (
+    canonical_model_id,
+    native_model_capabilities,
+    native_model_catalog,
+    native_model_family,
+)
 from .observability import request_log_info, write_request_record
 from .redaction import redact_secret_text
 from .google_transport import (
@@ -572,6 +578,10 @@ def provider_model_catalog(created: int) -> list[dict]:
             if not provider_model:
                 continue
             model_id = f"{provider_id}:{provider_model}"
+            try:
+                capabilities = provider_capabilities(provider, provider_model)
+            except ValueError:
+                continue
             byok_models.append(
                 {
                     **codex_model_metadata(
@@ -580,6 +590,7 @@ def provider_model_catalog(created: int) -> list[dict]:
                         context_window,
                         provider_id,
                         created,
+                        supports_parallel_tool_calls=capabilities.parallel_tool_calls,
                     )
                 }
             )
@@ -1060,8 +1071,6 @@ async def create_response(request: Request):
     google_backend_timeout = google_backend_timeout_from_metadata(request_metadata)
 
     reject_unsupported_previous_response(codex_req)
-    schedule_refresh_accounts_ahead()
-        
     model = response_model_id(codex_req)
     codex_req["model"] = model
     stream = response_stream_flag(codex_req)
@@ -1082,6 +1091,23 @@ async def create_response(request: Request):
                 error=f"BYOK provider '{provider_id}' is not configured",
             )
             raise HTTPException(status_code=404, detail=f"BYOK provider '{provider_id}' is not configured")
+        try:
+            validate_capabilities(
+                codex_req,
+                provider_capabilities(provider, provider_model),
+            )
+        except (CapabilityError, ValueError) as exc:
+            await log_request(
+                "failed",
+                model=model,
+                route="byok",
+                provider=provider_id,
+                stream=stream,
+                http_status=400,
+                error_class="unsupported_route_capability",
+                error=exc,
+            )
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         provider_kind = provider.get("kind")
         if provider_kind == "openai_responses":
             if provider_id != "xai-oauth" or provider_auth_mode(provider) != PROVIDER_AUTH_MODE_OAUTH:
@@ -1274,6 +1300,22 @@ async def create_response(request: Request):
         )
         return response
     
+    try:
+        validate_capabilities(codex_req, native_model_capabilities(model))
+    except CapabilityError as exc:
+        await log_request(
+            "failed",
+            model=model,
+            route="google",
+            family=native_model_family(model),
+            stream=stream,
+            http_status=400,
+            error_class="unsupported_route_capability",
+            error=exc,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    schedule_refresh_accounts_ahead()
+
     # 1. Select account automatically from pool
     family = native_model_family(model)
     account = await acquire_active_account_for_request(model)
