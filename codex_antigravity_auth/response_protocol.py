@@ -160,6 +160,48 @@ def _has_meaningful_output(output: Sequence[dict[str, Any]]) -> bool:
     return False
 
 
+def meaningful_output_items(output: Sequence[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
+    """Return supported output items that contain enough data to be actionable."""
+
+    meaningful: list[dict[str, Any]] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "function_call":
+            if (
+                isinstance(item.get("id"), str)
+                and item["id"]
+                and isinstance(item.get("call_id"), str)
+                and item["call_id"]
+                and isinstance(item.get("name"), str)
+                and item["name"]
+                and isinstance(item.get("arguments"), str)
+            ):
+                meaningful.append(item)
+            continue
+        if item_type == "reasoning":
+            summary = item.get("step_by_step_summary") or item.get("summary")
+            if (isinstance(summary, str) and summary) or (isinstance(summary, list) and summary):
+                meaningful.append(item)
+            continue
+        if item_type != "message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        if any(
+            isinstance(part, dict)
+            and (
+                (part.get("type") == "output_text" and isinstance(part.get("text"), str) and bool(part["text"]))
+                or (part.get("type") == "refusal" and isinstance(part.get("refusal"), str) and bool(part["refusal"]))
+            )
+            for part in content
+        ):
+            meaningful.append(item)
+    return tuple(meaningful)
+
+
 def classify_terminal(
     *,
     output: Sequence[dict[str, Any]],
@@ -303,6 +345,8 @@ class ResponseEventBuilder:
         self._created = False
         self._terminal = False
         self._done = False
+        self._text_state: dict[str, Any] | None = None
+        self._reasoning_state: dict[str, Any] | None = None
 
     def _event(self, event_type: str, **fields: Any) -> dict[str, Any]:
         event = {"type": event_type, "sequence_number": self._sequence_number, **fields}
@@ -347,6 +391,204 @@ class ResponseEventBuilder:
             self._event("response.output_item.added", output_index=output_index, item=dict(stable_item)),
             self._event("response.output_item.done", output_index=output_index, item=dict(stable_item)),
         ]
+
+    def _require_output_open(self) -> None:
+        if not self._created:
+            raise ProtocolStateError("response.created must be emitted before output")
+        if self._terminal:
+            raise ProtocolStateError("cannot add output after the terminal event")
+
+    def add_text_delta(self, delta: str) -> list[dict[str, Any]]:
+        self._require_output_open()
+        if not isinstance(delta, str) or not delta:
+            raise ProtocolStateError("text delta must be a non-empty string")
+        events: list[dict[str, Any]] = []
+        if self._text_state is None:
+            self._text_state = {
+                "id": f"msg_{uuid.uuid4().hex[:12]}",
+                "output_index": self._next_output_index,
+                "text": "",
+                "finished": False,
+            }
+            self._next_output_index += 1
+            item = {
+                "type": "message",
+                "id": self._text_state["id"],
+                "status": "in_progress",
+                "role": "assistant",
+                "content": [],
+            }
+            events.extend(
+                [
+                    self._event(
+                        "response.output_item.added",
+                        output_index=self._text_state["output_index"],
+                        item=item,
+                    ),
+                    self._event(
+                        "response.content_part.added",
+                        item_id=self._text_state["id"],
+                        output_index=self._text_state["output_index"],
+                        content_index=0,
+                        part={"type": "output_text", "text": "", "annotations": []},
+                    ),
+                ]
+            )
+        if self._text_state["finished"]:
+            raise ProtocolStateError("text output has already been finished")
+        self._text_state["text"] += delta
+        events.append(
+            self._event(
+                "response.output_text.delta",
+                item_id=self._text_state["id"],
+                output_index=self._text_state["output_index"],
+                content_index=0,
+                delta=delta,
+            )
+        )
+        return events
+
+    def finish_text(self) -> list[dict[str, Any]]:
+        self._require_output_open()
+        if self._text_state is None or self._text_state["finished"]:
+            raise ProtocolStateError("text output is not active")
+        self._text_state["finished"] = True
+        text = self._text_state["text"]
+        part = {"type": "output_text", "text": text, "annotations": []}
+        item = {
+            "type": "message",
+            "id": self._text_state["id"],
+            "status": "completed",
+            "role": "assistant",
+            "content": [part],
+        }
+        common = {
+            "item_id": self._text_state["id"],
+            "output_index": self._text_state["output_index"],
+            "content_index": 0,
+        }
+        return [
+            self._event("response.output_text.done", **common, text=text),
+            self._event("response.content_part.done", **common, part=part),
+            self._event(
+                "response.output_item.done",
+                output_index=self._text_state["output_index"],
+                item=item,
+            ),
+        ]
+
+    def add_reasoning_delta(self, delta: str) -> list[dict[str, Any]]:
+        self._require_output_open()
+        if not isinstance(delta, str) or not delta:
+            raise ProtocolStateError("reasoning delta must be a non-empty string")
+        events: list[dict[str, Any]] = []
+        if self._reasoning_state is None:
+            self._reasoning_state = {
+                "id": f"rs_{uuid.uuid4().hex[:12]}",
+                "output_index": self._next_output_index,
+                "text": "",
+                "finished": False,
+            }
+            self._next_output_index += 1
+            events.append(
+                self._event(
+                    "response.output_item.added",
+                    output_index=self._reasoning_state["output_index"],
+                    item={
+                        "type": "reasoning",
+                        "id": self._reasoning_state["id"],
+                        "encrypted_content": "",
+                        "step_by_step_summary": "",
+                    },
+                )
+            )
+        if self._reasoning_state["finished"]:
+            raise ProtocolStateError("reasoning output has already been finished")
+        self._reasoning_state["text"] += delta
+        events.append(
+            self._event(
+                "response.reasoning_text.delta",
+                item_id=self._reasoning_state["id"],
+                output_index=self._reasoning_state["output_index"],
+                delta=delta,
+            )
+        )
+        return events
+
+    def finish_reasoning(self) -> list[dict[str, Any]]:
+        self._require_output_open()
+        if self._reasoning_state is None or self._reasoning_state["finished"]:
+            raise ProtocolStateError("reasoning output is not active")
+        self._reasoning_state["finished"] = True
+        item = {
+            "type": "reasoning",
+            "id": self._reasoning_state["id"],
+            "encrypted_content": "",
+            "step_by_step_summary": self._reasoning_state["text"],
+        }
+        return [
+            self._event(
+                "response.reasoning_text.done",
+                item_id=self._reasoning_state["id"],
+                output_index=self._reasoning_state["output_index"],
+                text=self._reasoning_state["text"],
+            ),
+            self._event(
+                "response.output_item.done",
+                output_index=self._reasoning_state["output_index"],
+                item=item,
+            ),
+        ]
+
+    def add_function_call(
+        self,
+        name: str,
+        arguments: str,
+        *,
+        call_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self._require_output_open()
+        if not isinstance(name, str) or not name:
+            raise ProtocolStateError("function call name must be a non-empty string")
+        if not isinstance(arguments, str):
+            raise ProtocolStateError("function call arguments must be a string")
+        stable_call_id = call_id if isinstance(call_id, str) and call_id else f"call_{uuid.uuid4().hex[:12]}"
+        item_id = f"fc_{stable_call_id}" if stable_call_id.startswith("call_") else f"fc_{uuid.uuid4().hex[:12]}"
+        output_index = self._next_output_index
+        self._next_output_index += 1
+        added_item = {
+            "type": "function_call",
+            "id": item_id,
+            "call_id": stable_call_id,
+            "name": name,
+            "arguments": "",
+        }
+        done_item = {**added_item, "arguments": arguments}
+        events = [
+            self._event("response.output_item.added", output_index=output_index, item=added_item),
+        ]
+        if arguments:
+            events.append(
+                self._event(
+                    "response.function_call_arguments.delta",
+                    item_id=item_id,
+                    output_index=output_index,
+                    delta=arguments,
+                )
+            )
+        events.extend(
+            [
+                self._event(
+                    "response.function_call_arguments.done",
+                    item_id=item_id,
+                    output_index=output_index,
+                    name=name,
+                    arguments=arguments,
+                ),
+                self._event("response.output_item.done", output_index=output_index, item=done_item),
+            ]
+        )
+        return events
 
     def terminal(self, result: ProviderResult) -> dict[str, Any]:
         if not self._created:

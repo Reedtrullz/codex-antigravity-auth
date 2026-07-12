@@ -15,6 +15,7 @@ from codex_antigravity_auth.response_protocol import (
     classify_terminal,
     normalize_usage,
     refusal_item,
+    meaningful_output_items,
     validate_capabilities,
 )
 
@@ -127,6 +128,49 @@ class TestResponseEventBuilder(unittest.TestCase):
         with self.assertRaises(ProtocolStateError):
             self.builder.done_marker()
 
+    def test_incremental_events_keep_sequence_identity_and_indices_stable(self):
+        result = ProviderResult(
+            output=(message_item("hello"),),
+            usage=normalize_usage(input_tokens=1, output_tokens=2),
+            terminal=ProviderTerminal(TerminalKind.COMPLETED, "stop"),
+        )
+
+        events = [self.builder.created()]
+        events.extend(self.builder.add_text_delta("hel"))
+        events.extend(self.builder.add_text_delta("lo"))
+        events.extend(self.builder.finish_text())
+        events.extend(self.builder.add_reasoning_delta("because"))
+        events.extend(self.builder.finish_reasoning())
+        events.extend(self.builder.add_function_call("lookup", '{"q":"x"}', call_id="call_1"))
+        events.append(self.builder.terminal(result))
+
+        self.assertEqual(
+            [event["sequence_number"] for event in events],
+            list(range(len(events))),
+        )
+        text_events = [event for event in events if event.get("item_id", "").startswith("msg_")]
+        self.assertEqual(len({event["item_id"] for event in text_events}), 1)
+        call_events = [event for event in events if event["type"].startswith("response.function_call")]
+        self.assertEqual({event["output_index"] for event in call_events}, {2})
+        self.assertEqual({event["item_id"] for event in call_events}, {"fc_call_1"})
+        self.assertEqual(self.builder.done_marker(), "[DONE]")
+
+    def test_incremental_events_reject_duplicate_finish_and_output_after_terminal(self):
+        self.builder.created()
+        self.builder.add_text_delta("hello")
+        self.builder.finish_text()
+        with self.assertRaises(ProtocolStateError):
+            self.builder.finish_text()
+
+        result = ProviderResult(
+            output=(message_item("hello"),),
+            usage=normalize_usage(),
+            terminal=ProviderTerminal(TerminalKind.COMPLETED, "stop"),
+        )
+        self.builder.terminal(result)
+        with self.assertRaises(ProtocolStateError):
+            self.builder.add_reasoning_delta("late")
+
 
 class TestCapabilityValidation(unittest.TestCase):
     def setUp(self):
@@ -207,6 +251,29 @@ class TestCapabilityValidation(unittest.TestCase):
 
 
 class TestProtocolValueObjects(unittest.TestCase):
+    def test_filters_native_output_to_meaningful_supported_items(self):
+        valid = [
+            message_item("hello"),
+            refusal_item({"blockReason": "SAFETY"}),
+            {"type": "reasoning", "id": "rs_1", "step_by_step_summary": "because"},
+            {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": "{}",
+            },
+        ]
+        invalid = [
+            {},
+            {"type": "message", "content": []},
+            {"type": "message", "content": [{"type": "refusal", "refusal": ""}]},
+            {"type": "function_call", "name": "lookup"},
+            {"type": "unknown", "value": "data"},
+        ]
+
+        self.assertEqual(meaningful_output_items([*invalid, *valid]), tuple(valid))
+
     def test_normalizes_usage_to_non_negative_integer_totals(self):
         self.assertEqual(
             normalize_usage(input_tokens="2", output_tokens=-4, total_tokens=None),
