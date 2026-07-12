@@ -11,6 +11,7 @@ from codex_antigravity_auth.response_protocol import (
     ProtocolStateError,
     ResponseEventBuilder,
     TerminalKind,
+    response_from_result,
     classify_terminal,
     normalize_usage,
     refusal_item,
@@ -213,6 +214,42 @@ class TestProtocolValueObjects(unittest.TestCase):
             AttemptOutcome(scope="provider", category="transport")
         with self.assertRaises(ValueError):
             AttemptOutcome(scope="family", category="rate_limit", retry_after_seconds=-1)
+
+    def test_builds_non_streaming_incomplete_and_failed_responses(self):
+        incomplete = response_from_result(
+            ProviderResult(
+                output=(message_item("partial"),),
+                usage=normalize_usage(input_tokens=1, output_tokens=2),
+                terminal=ProviderTerminal(
+                    TerminalKind.INCOMPLETE,
+                    "MAX_TOKENS",
+                    incomplete_reason="max_output_tokens",
+                ),
+            ),
+            response_id="resp_incomplete",
+            model="test-model",
+            created_at=123,
+        )
+        failed = response_from_result(
+            ProviderResult(
+                output=(),
+                usage=normalize_usage(),
+                terminal=ProviderTerminal(
+                    TerminalKind.FAILED,
+                    "empty_response",
+                    error_code="empty_response",
+                    error_message="No output.",
+                ),
+            ),
+            response_id="resp_failed",
+            model="test-model",
+            created_at=123,
+        )
+
+        self.assertEqual(incomplete["status"], "incomplete")
+        self.assertEqual(incomplete["incomplete_details"], {"reason": "max_output_tokens"})
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"], {"code": "empty_response", "message": "No output."})
 
 
 if __name__ == "__main__":

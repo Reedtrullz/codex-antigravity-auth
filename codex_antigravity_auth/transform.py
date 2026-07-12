@@ -621,49 +621,17 @@ def transform_gemini_candidate(candidate: dict) -> dict:
     return result
 
 def transform_response(gemini_resp: dict, model: str) -> dict:
-    """Translate Google Antigravity backend response back to Codex Responses API format."""
-    # Official Responses API response schema:
-    # { "id": "resp_...", "object": "response", "created_at": 1234, "model": "...", "output": [ ... ], "usage": { ... }, "status": "completed" }
-    
-    # Handle response wrapping
-    if not isinstance(gemini_resp, dict):
-        gemini_resp = {}
-    if "response" in gemini_resp and isinstance(gemini_resp["response"], dict):
-        gemini_resp = gemini_resp["response"]
+    """Compatibility wrapper around the shared Google terminal contract."""
+    from .google_transport import GoogleTransport
+    from .response_protocol import response_from_result
 
-    candidates = gemini_resp.get("candidates", [])
-    if not isinstance(candidates, list):
-        candidates = []
-    output_items = []
-    
-    for cand in candidates:
-        if not isinstance(cand, dict):
-            continue
-        transformed = transform_gemini_candidate(cand)
-        if "reasoning" in transformed:
-            output_items.append(transformed["reasoning"])
-        if transformed["message"]["content"]:
-            output_items.append(transformed["message"])
-        output_items.extend(transformed.get("function_calls", []))
-        
-    usage = gemini_resp.get("usageMetadata", {})
-    if not isinstance(usage, dict):
-        usage = {}
-    translated_usage = usage_counts(
-        usage.get("promptTokenCount", 0),
-        usage.get("candidatesTokenCount", 0),
-        usage.get("totalTokenCount", 0),
+    result = GoogleTransport(timeout=0).parse_response(gemini_resp)
+    return response_from_result(
+        result,
+        response_id=result.provider_response_id or f"resp_{uuid.uuid4().hex[:12]}",
+        model=model,
+        created_at=int(time.time()),
     )
-    
-    return {
-        "id": f"resp_{uuid.uuid4().hex[:12]}",
-        "object": "response",
-        "created_at": int(time.time()),
-        "model": model,
-        "output": output_items,
-        "usage": translated_usage,
-        "status": "completed"
-    }
 
 
 def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:

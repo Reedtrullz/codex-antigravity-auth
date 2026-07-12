@@ -259,6 +259,38 @@ def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabil
         raise CapabilityError("structured output is not supported by the selected route")
 
 
+def response_from_result(
+    result: ProviderResult,
+    *,
+    response_id: str,
+    model: str,
+    created_at: int,
+) -> dict[str, Any]:
+    response: dict[str, Any] = {
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "model": model,
+        "output": list(result.output),
+        "usage": normalize_usage(
+            result.usage.get("input_tokens"),
+            result.usage.get("output_tokens"),
+            result.usage.get("total_tokens"),
+        ),
+        "status": result.terminal.kind.value,
+    }
+    if result.terminal.kind is TerminalKind.INCOMPLETE:
+        response["incomplete_details"] = {
+            "reason": result.terminal.incomplete_reason or result.terminal.reason
+        }
+    if result.terminal.kind is TerminalKind.FAILED:
+        response["error"] = {
+            "code": result.terminal.error_code or "provider_error",
+            "message": result.terminal.error_message or "The provider request failed.",
+        }
+    return response
+
+
 class ResponseEventBuilder:
     def __init__(self, *, response_id: str, model: str, created_at: int) -> None:
         self.response_id = response_id
@@ -276,23 +308,22 @@ class ResponseEventBuilder:
         return event
 
     def _response(self, result: ProviderResult | None = None) -> dict[str, Any]:
-        response: dict[str, Any] = {
-            "id": self.response_id,
-            "object": "response",
-            "created_at": self.created_at,
-            "model": self.model,
-            "output": list(result.output) if result else [],
-            "usage": result.usage if result else normalize_usage(),
-            "status": result.terminal.kind.value if result else "in_progress",
-        }
-        if result and result.terminal.kind is TerminalKind.INCOMPLETE:
-            response["incomplete_details"] = {"reason": result.terminal.incomplete_reason or result.terminal.reason}
-        if result and result.terminal.kind is TerminalKind.FAILED:
-            response["error"] = {
-                "code": result.terminal.error_code or "provider_error",
-                "message": result.terminal.error_message or "The provider request failed.",
+        if result is None:
+            return {
+                "id": self.response_id,
+                "object": "response",
+                "created_at": self.created_at,
+                "model": self.model,
+                "output": [],
+                "usage": normalize_usage(),
+                "status": "in_progress",
             }
-        return response
+        return response_from_result(
+            result,
+            response_id=self.response_id,
+            model=self.model,
+            created_at=self.created_at,
+        )
 
     def created(self) -> dict[str, Any]:
         if self._created:

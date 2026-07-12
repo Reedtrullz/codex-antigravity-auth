@@ -32,17 +32,22 @@ from .transform import (
     function_call_arguments_string,
     safe_project_id,
     transform_chat_response,
-    transform_request,
     transform_request_to_chat,
-    transform_response,
     usage_counts,
     valid_function_name,
 )
-from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform, is_loopback_host, validate_gateway_token_strength
+from .constants import get_platform, is_loopback_host, validate_gateway_token_strength
 from .models import canonical_model_id, native_model_catalog, native_model_family
 from .observability import request_log_info, write_request_record
 from .redaction import redact_secret_text
-from .response_protocol import CapabilityError, ProviderCapabilities, validate_capabilities
+from .google_transport import AccountLease, GoogleResponseAccumulator, GoogleTransport
+from .response_protocol import (
+    CapabilityError,
+    ProviderCapabilities,
+    TerminalKind,
+    response_from_result,
+    validate_capabilities,
+)
 from .storage import load_accounts
 from .xai_oauth import resolve_xai_oauth_access_token, xai_oauth_status
 
@@ -1332,37 +1337,37 @@ async def create_response(request: Request):
             ),
         )
         
-    def build_google_request(selected_account: dict) -> tuple[dict, dict]:
+    google_transport = GoogleTransport(
+        timeout=google_backend_timeout,
+        platform_name=get_platform(),
+        client_factory=httpx.AsyncClient,
+    )
+
+    def account_lease(selected_account: dict) -> AccountLease:
         project_id = safe_project_id(selected_account.get("projectId")) or safe_project_id(
             selected_account.get("managedProjectId")
         )
-        return transform_request(codex_req, project_id=project_id), build_headers(selected_account)
-    
-    # Route target action based on streaming mode
-    action = "streamGenerateContent" if stream else "generateContent"
-    backend_url = f"{ANTIGRAVITY_ENDPOINT_PROD}/v1internal:{action}"
-    if stream:
-        backend_url += "?alt=sse"
-    
+        fingerprint = selected_account.get("fingerprint")
+        return AccountLease(
+            email=selected_account.get("email", ""),
+            project_id=project_id,
+            access_token=selected_account["accessToken"],
+            fingerprint=fingerprint if isinstance(fingerprint, dict) else None,
+        )
+
     # Perform HTTP POST request to Antigravity endpoint with error recovery & rotation
     async def request_backend(selected_account: dict) -> httpx.Response | None:
-        antigravity_req, headers = build_google_request(selected_account)
-        async with httpx.AsyncClient(timeout=google_backend_timeout) as client:
-            try:
-                # Do NOT stream the response inside this function, we just do normal or stream connection
-                if stream:
-                    # Let the StreamingResponse generator handle actual streaming
-                    return None
-                else:
-                    res = await client.post(backend_url, json=antigravity_req, headers=headers)
-                    return res
-            except Exception as e:
-                await mark_account_failure(
-                    selected_account["email"],
-                    f"Connection error: {safe_error_detail(e)}",
-                    model=model,
-                )
+        try:
+            if stream:
                 return None
+            return await google_transport.post(codex_req, account_lease(selected_account))
+        except Exception as e:
+            await mark_account_failure(
+                selected_account["email"],
+                f"Connection error: {safe_error_detail(e)}",
+                model=model,
+            )
+            return None
 
     # Handle standard non-streaming response path
     if not stream:
@@ -1607,16 +1612,24 @@ async def create_response(request: Request):
                             rotation_attempted=rotation_attempted,
                         ),
                     )
-                codex_resp = transform_response(gemini_resp, model)
+                provider_result = google_transport.parse_response(gemini_resp)
+                codex_resp = response_from_result(
+                    provider_result,
+                    response_id=provider_result.provider_response_id or f"resp_{secrets.token_hex(6)}",
+                    model=model,
+                    created_at=int(time.time()),
+                )
+                request_succeeded = provider_result.terminal.kind is not TerminalKind.FAILED
                 await record_account_request(
                     response_account.get("email", ""),
                     model,
-                    status="success",
+                    status="success" if request_succeeded else "failure",
                     status_code=200,
                     usage=codex_resp.get("usage") if isinstance(codex_resp, dict) else None,
+                    error_class=None if request_succeeded else provider_result.terminal.error_code,
                 )
                 await log_request(
-                    "success",
+                    "success" if request_succeeded else "failed",
                     model=model,
                     route="google",
                     family=family,
@@ -1624,6 +1637,8 @@ async def create_response(request: Request):
                     http_status=200,
                     rotation_attempted=rotation_attempted,
                     usage=codex_resp.get("usage") if isinstance(codex_resp, dict) else None,
+                    error_class=None if request_succeeded else provider_result.terminal.error_code,
+                    error=None if request_succeeded else provider_result.terminal.error_message,
                 )
                 return codex_resp
             except HTTPException:
@@ -1671,6 +1686,7 @@ async def create_response(request: Request):
         last_error_code = "backend_error"
         backend_output_started = False
         stream_retry_requested = False
+        google_stream_accumulator = GoogleResponseAccumulator()
 
         def stream_event(payload: dict) -> str:
             nonlocal sequence_number
@@ -1706,6 +1722,7 @@ async def create_response(request: Request):
                 return
             data_payload = line[5:].strip()
             if data_payload == "[DONE]":
+                google_stream_accumulator.mark_done()
                 return
             try:
                 parsed = json.loads(data_payload)
@@ -1741,6 +1758,7 @@ async def create_response(request: Request):
                 async for event in fail_stream(code, message):
                     yield event
                 return
+            google_stream_accumulator.consume(parsed)
             if isinstance(parsed.get("usageMetadata"), dict):
                 usage_meta = parsed["usageMetadata"]
                 usage = usage_counts(
@@ -1814,40 +1832,38 @@ async def create_response(request: Request):
         while attempt_num < len(attempts):
             stream_retry_requested = False
             stream_account = attempts[attempt_num]
-            stream_req, stream_headers = build_google_request(stream_account)
             try:
-                async with httpx.AsyncClient(timeout=google_backend_timeout) as client:
-                    async with client.stream("POST", backend_url, json=stream_req, headers=stream_headers) as res:
-                        if res.status_code != 200:
-                            if res.status_code in (401, 403, 429):
-                                body_bytes = await res.aread()
-                                body_text = body_bytes.decode("utf-8", errors="ignore")
-                                await mark_account_failure(
-                                    stream_account["email"],
-                                    f"Streaming HTTP {res.status_code}: {safe_error_detail(body_text)}",
-                                    retry_after_seconds_from_response(res),
-                                    model=model,
-                                    status_code=res.status_code,
-                                )
-                            last_error_code = "backend_error"
-                            last_error = f"Google Antigravity returned HTTP {res.status_code}"
-                        else:
-                            buffer = ""
-                            async for chunk in res.aiter_text():
-                                buffer += chunk
-                                while "\n" in buffer:
-                                    line, buffer = buffer.split("\n", 1)
-                                    async for event in parse_stream_line(line):
-                                        yield event
-                                    if stream_failed or stream_retry_requested:
-                                        break
+                async with google_transport.stream(codex_req, account_lease(stream_account)) as res:
+                    if res.status_code != 200:
+                        if res.status_code in (401, 403, 429):
+                            body_bytes = await res.aread()
+                            body_text = body_bytes.decode("utf-8", errors="ignore")
+                            await mark_account_failure(
+                                stream_account["email"],
+                                f"Streaming HTTP {res.status_code}: {safe_error_detail(body_text)}",
+                                retry_after_seconds_from_response(res),
+                                model=model,
+                                status_code=res.status_code,
+                            )
+                        last_error_code = "backend_error"
+                        last_error = f"Google Antigravity returned HTTP {res.status_code}"
+                    else:
+                        buffer = ""
+                        async for chunk in res.aiter_text():
+                            buffer += chunk
+                            while "\n" in buffer:
+                                line, buffer = buffer.split("\n", 1)
+                                async for event in parse_stream_line(line):
+                                    yield event
                                 if stream_failed or stream_retry_requested:
                                     break
-                            if buffer.strip() and not stream_failed and not stream_retry_requested:
-                                async for event in parse_stream_line(buffer):
-                                    yield event
-                            if not stream_failed and not stream_retry_requested:
-                                completed = True
+                            if stream_failed or stream_retry_requested:
+                                break
+                        if buffer.strip() and not stream_failed and not stream_retry_requested:
+                            async for event in parse_stream_line(buffer):
+                                yield event
+                        if not stream_failed and not stream_retry_requested:
+                            completed = True
             except Exception as e:
                 await mark_account_failure(
                     stream_account["email"],
@@ -1924,13 +1940,73 @@ async def create_response(request: Request):
                 yield event
             return
                 
-        # 4. Final completion events
+        provider_result = google_stream_accumulator.finalize()
+        if provider_result.terminal.kind is TerminalKind.FAILED:
+            final_account = attempts[min(attempt_num, len(attempts) - 1)]
+            error_code = provider_result.terminal.error_code or "backend_error"
+            error_message = provider_result.terminal.error_message or "Google Antigravity stream failed"
+            await record_account_request(
+                final_account.get("email", ""),
+                model,
+                status="failure",
+                status_code=200,
+                error_class=error_code,
+            )
+            await log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=True,
+                http_status=200,
+                error_class=error_code,
+                error=error_message,
+                rotation_attempted=len(attempts) > 1,
+                usage=usage,
+            )
+            async for event in fail_stream(error_code, error_message):
+                yield event
+            return
+
+        # 4. Final terminal events
         if text_output_index is not None:
             message_item = {'type': 'message', 'id': msg_id, 'status': 'completed', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': output_text, 'annotations': []}]}
             yield stream_event({'type': 'response.output_text.done', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'text': output_text})
             yield stream_event({'type': 'response.content_part.done', 'response_id': response_id, 'item_id': msg_id, 'output_index': text_output_index, 'content_index': 0, 'part': {'type': 'output_text', 'text': output_text, 'annotations': []}})
             yield stream_event({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': text_output_index, 'item': message_item})
             indexed_output_items.append((text_output_index, message_item))
+        refusal_output = next(
+            (
+                item
+                for item in provider_result.output
+                if item.get("type") == "message"
+                and isinstance(item.get("content"), list)
+                and item["content"]
+                and isinstance(item["content"][0], dict)
+                and item["content"][0].get("type") == "refusal"
+            ),
+            None,
+        )
+        if refusal_output is not None:
+            refusal_index = next_output_index
+            next_output_index += 1
+            yield stream_event(
+                {
+                    "type": "response.output_item.added",
+                    "response_id": response_id,
+                    "output_index": refusal_index,
+                    "item": refusal_output,
+                }
+            )
+            yield stream_event(
+                {
+                    "type": "response.output_item.done",
+                    "response_id": response_id,
+                    "output_index": refusal_index,
+                    "item": refusal_output,
+                }
+            )
+            indexed_output_items.append((refusal_index, refusal_output))
         done_output = []
         if reasoning_text:
             done_output.append({
@@ -1946,8 +2022,12 @@ async def create_response(request: Request):
             'created_at': created_at,
             'model': model,
             'output': done_output,
-            'status': 'completed',
+            'status': provider_result.terminal.kind.value,
         }
+        if provider_result.terminal.kind is TerminalKind.INCOMPLETE:
+            done_response["incomplete_details"] = {
+                "reason": provider_result.terminal.incomplete_reason or provider_result.terminal.reason
+            }
         if usage:
             done_response["usage"] = usage
         final_account = attempts[min(attempt_num, len(attempts) - 1)]
@@ -1968,7 +2048,7 @@ async def create_response(request: Request):
             rotation_attempted=len(attempts) > 1,
             usage=usage,
         )
-        yield stream_event({'type': 'response.completed', 'response': done_response})
+        yield stream_event({'type': f'response.{provider_result.terminal.kind.value}', 'response': done_response})
         yield "data: [DONE]\n\n"
 
     async def managed_sse_generator() -> AsyncGenerator[str, None]:
