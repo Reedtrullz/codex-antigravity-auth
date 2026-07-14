@@ -172,6 +172,10 @@ BYOK panel models such as `openrouter:...` or `xai-oauth:...` only work when the
 - xAI OAuth Grok is for adversarial assumptions, runtime surprises, and product/UX blind spots.
 - BluesMinds Grok/GLM aliases exist but remain unavailable/degraded until the requested route is advertised by `/v1/models` and the provider live-health gate passes. Every BluesMinds example is conditional on both checks.
 
+The normal service intentionally omits BluesMinds. The last bounded live checks returned a billing error for Grok 4.5 and an upstream 429 for GLM-5.2, so neither route is operationally enabled.
+
+A future enablement gate must pass first in a temporary process: catalog identity; non-streaming output and exact model identity; SSE completion and `[DONE]`; structured JSON; tool call and continuation; usage accounting; and bounded retries and no billing/capacity error. Only then may a later authorized task add `BLUESMINDS_API_KEY=op://...` to the durable service reference file and reinstall the service.
+
 Repository context leaves the Google Antigravity lane only after explicit selection and the existing BYOK disclosure. Opus remains the default judge; native Codex remains the acting agent and must verify advisory output locally.
 
 V2 named workflow presets wrap the same advisory engine for common Codex work:

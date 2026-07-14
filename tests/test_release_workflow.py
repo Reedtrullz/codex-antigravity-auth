@@ -103,6 +103,35 @@ class TestReleaseWorkflow(unittest.TestCase):
                 self.assertIn(corrected, text)
                 self.assertNotIn("gpt-5.4", text.lower())
 
+    def test_bluesminds_degradation_and_future_enablement_gate_are_explicit(self):
+        docs = {
+            "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
+            "USAGE.md": (ROOT / "USAGE.md").read_text(encoding="utf-8"),
+            "bundled Anti skill": (
+                ROOT / "codex_antigravity_auth/skills/anti/SKILL.md"
+            ).read_text(encoding="utf-8"),
+        }
+        required = (
+            "normal service intentionally omits",
+            "billing error",
+            "upstream 429",
+            "temporary process",
+            "catalog identity",
+            "non-streaming output and exact model identity",
+            "SSE completion and `[DONE]`",
+            "structured JSON",
+            "tool call and continuation",
+            "usage accounting",
+            "bounded retries and no billing/capacity error",
+            "later authorized task",
+            "BLUESMINDS_API_KEY=op://",
+        )
+
+        for name, text in docs.items():
+            with self.subTest(document=name):
+                for phrase in required:
+                    self.assertIn(phrase, text)
+
 
 if __name__ == "__main__":
     unittest.main()
