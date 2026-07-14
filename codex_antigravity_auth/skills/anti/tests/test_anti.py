@@ -785,6 +785,128 @@ class AntiHelperTests(unittest.TestCase):
             self.assertIn(model, expansion)
         self.assertIn("Claude/Grok collaboration", " ".join(expansion))
 
+    def test_workflow_claude_grok_requires_both_reviewer_families(self) -> None:
+        anti = load_anti()
+
+        def fail_gateway_call(*args, **kwargs):
+            self.fail("print-only workflow validation must not contact the gateway")
+
+        anti.fetch_model_ids = fail_gateway_call
+        anti.request_json = fail_gateway_call
+        cases = [
+            (None, ["claude-3.5-sonnet", "claude-opus-4-6", "xai-oauth:grok-build-0.1"]),
+            (["sonnet", "grok"], ["claude-3.5-sonnet", "xai-oauth:grok-build-0.1"]),
+            (
+                ["sonnet", "opus", "grok-bluesminds"],
+                ["claude-3.5-sonnet", "claude-opus-4-6", "bluesminds:grok-4.5"],
+            ),
+        ]
+
+        for requested_models, expected_models in cases:
+            with self.subTest(requested_models=requested_models):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                argv = [
+                    "workflow",
+                    "claude-grok",
+                    "--panel-mode",
+                    "ask",
+                    "--prompt",
+                    "compare",
+                    "--print-prompt",
+                    "--json",
+                ]
+                for model in requested_models or []:
+                    argv.extend(["--model", model])
+
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    rc = anti.main(argv)
+
+                self.assertEqual(rc, 0, stderr.getvalue())
+                parsed = json.loads(stdout.getvalue())
+                self.assertEqual(parsed["metadata"]["panel_models"], expected_models)
+                self.assertEqual(parsed["metadata"]["judge_model"], "claude-opus-4-6")
+
+    def test_workflow_claude_grok_rejects_single_family_reviewer_sets(self) -> None:
+        anti = load_anti()
+
+        def fail_gateway_call(*args, **kwargs):
+            self.fail("invalid workflow validation must not contact the gateway")
+
+        anti.fetch_model_ids = fail_gateway_call
+        anti.request_json = fail_gateway_call
+        cases = [
+            ["grok-bluesminds"],
+            ["sonnet", "opus"],
+        ]
+
+        for requested_models in cases:
+            with self.subTest(requested_models=requested_models):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                argv = [
+                    "workflow",
+                    "claude-grok",
+                    "--panel-mode",
+                    "ask",
+                    "--prompt",
+                    "compare",
+                    "--print-prompt",
+                    "--json",
+                ]
+                for model in requested_models:
+                    argv.extend(["--model", model])
+
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    rc = anti.main(argv)
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn("requires at least one Claude reviewer and one Grok reviewer", stderr.getvalue())
+                self.assertIn("--model sonnet --model opus --model grok", stderr.getvalue())
+
+    def test_direct_claude_grok_panel_keeps_custom_single_family_behavior(self) -> None:
+        anti = load_anti()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(
+                [
+                    "panel",
+                    "--mode",
+                    "ask",
+                    "--collab",
+                    "claude-grok",
+                    "--model",
+                    "grok-bluesminds",
+                    "--prompt",
+                    "compare",
+                    "--print-prompt",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(parsed["metadata"]["panel_models"], ["bluesminds:grok-4.5"])
+        self.assertEqual(parsed["metadata"]["judge_model"], "claude-opus-4-6")
+
+    def test_claude_grok_reviewer_family_classifier_is_narrow(self) -> None:
+        anti = load_anti()
+        cases = {
+            "claude-3.5-sonnet": "claude",
+            "claude-opus-4-6": "claude",
+            "xai-oauth:grok-build-0.1": "grok",
+            "bluesminds:grok-4.5": "grok",
+            "openrouter:grok-4": None,
+            "xai:grok-4": None,
+            "custom-claude-opus": None,
+        }
+
+        for model_id, expected_family in cases.items():
+            with self.subTest(model_id=model_id):
+                self.assertEqual(anti.claude_grok_reviewer_family(model_id), expected_family)
+
     def test_failed_workflow_run_record_keeps_workflow_identity(self) -> None:
         anti = load_anti()
         with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:

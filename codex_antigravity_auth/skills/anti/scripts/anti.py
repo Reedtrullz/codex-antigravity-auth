@@ -1893,6 +1893,23 @@ def resolve_panel_models(values: list[str] | None, *, collab_profile: str | None
     return resolved
 
 
+def claude_grok_reviewer_family(model_id: str) -> str | None:
+    if model_id.startswith("claude-"):
+        return "claude"
+    if model_id.startswith(("xai-oauth:grok-", "bluesminds:grok-")):
+        return "grok"
+    return None
+
+
+def validate_claude_grok_workflow_reviewers(model_ids: list[str]) -> None:
+    families = {claude_grok_reviewer_family(model_id) for model_id in model_ids}
+    if not {"claude", "grok"}.issubset(families):
+        raise AntiError(
+            "workflow claude-grok requires at least one Claude reviewer and one Grok reviewer; "
+            "example: workflow claude-grok --model sonnet --model opus --model grok"
+        )
+
+
 def ensure_models_available(
     *,
     base_url: str,
@@ -3549,6 +3566,10 @@ def command_workflow(args: argparse.Namespace) -> int:
     progress(args, "workflow expands to: " + workflow_command_for_progress(expanded))
     parser = build_parser()
     expanded_args = parser.parse_args(expanded)
+    if args.name == "claude-grok":
+        validate_claude_grok_workflow_reviewers(
+            resolve_panel_models(expanded_args.model, collab_profile=expanded_args.collab)
+        )
     expanded_args.workflow_name = args.name
     if not getattr(expanded_args, "run_label", None):
         expanded_args.run_label = args.run_label or args.name
