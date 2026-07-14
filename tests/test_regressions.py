@@ -3,6 +3,7 @@ import asyncio
 import time
 import unittest
 import warnings
+from importlib import metadata as importlib_metadata
 from unittest.mock import MagicMock, patch
 import urllib.error
 
@@ -49,7 +50,12 @@ from codex_antigravity_auth.transform import (
 class TestRegressionFixes(unittest.TestCase):
     def test_health_endpoint_is_sanitized_and_loopback_only(self):
         account_state = {
-            "accounts": [{"email": "sensitive@example.com"}],
+            "accounts": [
+                {
+                    "email": "sensitive@example.com",
+                    "accessToken": "sensitive-access-token",
+                }
+            ],
             "accountState": {
                 "cooldowns": {"sensitive@example.com": time.time() + 60},
                 "counters": {
@@ -67,9 +73,28 @@ class TestRegressionFixes(unittest.TestCase):
         payload = response.json()
         serialized = json.dumps(payload)
         self.assertTrue(payload["ok"])
+        self.assertEqual(
+            payload["package_version"],
+            importlib_metadata.version("codex-antigravity-auth"),
+        )
+        self.assertNotIn("/", payload["package_version"])
+        self.assertNotIn(".git", payload["package_version"])
+        self.assertNotIn("refs/", payload["package_version"])
         self.assertIn("request_log", payload)
         self.assertEqual(payload["accounts"]["configured_accounts"], 1)
         self.assertNotIn("sensitive@example.com", serialized)
+        self.assertNotIn("sensitive-access-token", serialized)
+
+    def test_health_package_version_falls_back_to_unknown(self):
+        with patch(
+            "importlib.metadata.version",
+            side_effect=importlib_metadata.PackageNotFoundError,
+        ):
+            with patch("codex_antigravity_auth.server.all_provider_configs_read_only", return_value={}):
+                response = TestClient(app).get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["package_version"], "unknown")
 
     def test_health_endpoint_fails_soft_when_provider_catalog_blocks(self):
         def slow_provider_configs():

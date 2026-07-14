@@ -500,6 +500,23 @@ def fetch_model_ids(base_url: str, *, timeout: float, token_env: str) -> set[str
     return ids
 
 
+def fetch_gateway_package_version(base_url: str, *, timeout: float, token_env: str) -> str:
+    normalized = normalize_base_url(base_url)
+    health_root = normalized[:-3] if normalized.endswith("/v1") else normalized
+    status, payload = request_json(
+        "GET",
+        f"{health_root}/health",
+        timeout=timeout,
+        token_env=token_env,
+    )
+    if status != 200:
+        raise AntiError(f"/health returned HTTP {status}")
+    version = payload.get("package_version")
+    if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}", version):
+        raise AntiError("/health returned no usable package_version")
+    return version
+
+
 def validate_git_rev_range(value: str, *, source: str) -> str:
     value = value.strip()
     if not value:
@@ -2957,6 +2974,7 @@ def command_smoke(args: argparse.Namespace) -> int:
     statuses: dict[str, Any] = {
         "mode": args.mode,
         "cli_available": False,
+        "gateway_package_version": None,
         "models_reachable": False,
         "sidecar_ready": False,
         "codex_backend_ready": None,
@@ -2975,6 +2993,28 @@ def command_smoke(args: argparse.Namespace) -> int:
         statuses["checks"].append({"name": "cli", "status": "fail", "detail": error})
         if not args.json:
             print(f"[FAIL] codex-antigravity CLI: {error}")
+
+    try:
+        package_version = fetch_gateway_package_version(
+            args.base_url,
+            timeout=args.timeout,
+            token_env=args.gateway_token_env,
+        )
+        statuses["gateway_package_version"] = package_version
+        statuses["checks"].append(
+            {
+                "name": "health",
+                "status": "pass",
+                "package_version": package_version,
+            }
+        )
+        if not args.json:
+            print(f"[PASS] Gateway package version: {package_version}")
+    except AntiError as exc:
+        warning = redact_sensitive_text(str(exc))
+        statuses["checks"].append({"name": "health", "status": "warn", "detail": warning})
+        if not args.json:
+            print(f"[WARN] Gateway /health: {warning}")
 
     try:
         ids = fetch_model_ids(args.base_url, timeout=args.timeout, token_env=args.gateway_token_env)

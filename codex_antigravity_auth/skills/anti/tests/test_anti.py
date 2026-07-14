@@ -87,12 +87,14 @@ class AntiHelperTests(unittest.TestCase):
         anti = load_anti()
         anti.find_cli = lambda: (["codex-antigravity"], None)
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+        anti.fetch_gateway_package_version = lambda base_url, *, timeout, token_env: "1.6.3"
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
             rc = anti.main(["smoke", "--skip-doctor", "--model", "sonnet"])
 
         self.assertEqual(rc, 0, output.getvalue())
+        self.assertIn("Gateway package version: 1.6.3", output.getvalue())
         self.assertIn("claude-3.5-sonnet", output.getvalue())
         self.assertNotIn("claude-opus-4-6", output.getvalue())
 
@@ -100,6 +102,7 @@ class AntiHelperTests(unittest.TestCase):
         anti = load_anti()
         anti.find_cli = lambda: (["codex-antigravity"], None)
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+        anti.fetch_gateway_package_version = lambda base_url, *, timeout, token_env: "1.7.0"
         anti.run_cli = lambda args: self.fail("doctor should not run in sidecar mode")
         output = io.StringIO()
 
@@ -113,6 +116,7 @@ class AntiHelperTests(unittest.TestCase):
         anti = load_anti()
         anti.find_cli = lambda: (["codex-antigravity"], None)
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+        anti.fetch_gateway_package_version = lambda base_url, *, timeout, token_env: "1.7.0"
         anti.run_cli = lambda args: 1
         output = io.StringIO()
 
@@ -126,6 +130,7 @@ class AntiHelperTests(unittest.TestCase):
         anti = load_anti()
         anti.find_cli = lambda: (["codex-antigravity"], None)
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+        anti.fetch_gateway_package_version = lambda base_url, *, timeout, token_env: "1.6.3"
         anti.run_cli = lambda args: self.fail("json smoke should use quiet doctor")
         anti.run_cli_quiet = lambda args: 0
         output = io.StringIO()
@@ -138,6 +143,59 @@ class AntiHelperTests(unittest.TestCase):
         self.assertTrue(parsed["cli_available"])
         self.assertTrue(parsed["models_reachable"])
         self.assertTrue(parsed["codex_backend_ready"])
+        self.assertEqual(parsed["gateway_package_version"], "1.6.3")
+
+    def test_gateway_package_version_uses_health_root_and_gateway_token_boundary(self) -> None:
+        anti = load_anti()
+        captured: dict[str, object] = {}
+
+        def fake_request_json(method, url, *, timeout, token_env):
+            captured.update(
+                {
+                    "method": method,
+                    "url": url,
+                    "timeout": timeout,
+                    "token_env": token_env,
+                }
+            )
+            return 200, {"ok": True, "package_version": "1.6.3"}
+
+        anti.request_json = fake_request_json
+
+        version = anti.fetch_gateway_package_version(
+            "http://127.0.0.1:51122/v1",
+            timeout=2.5,
+            token_env="TEST_GATEWAY_TOKEN",
+        )
+
+        self.assertEqual(version, "1.6.3")
+        self.assertEqual(
+            captured,
+            {
+                "method": "GET",
+                "url": "http://127.0.0.1:51122/health",
+                "timeout": 2.5,
+                "token_env": "TEST_GATEWAY_TOKEN",
+            },
+        )
+
+    def test_smoke_warns_on_health_failure_without_overriding_models_readiness(self) -> None:
+        anti = load_anti()
+        anti.find_cli = lambda: (["codex-antigravity"], None)
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+
+        def fail_health(base_url, *, timeout, token_env):
+            raise anti.AntiError("/health returned HTTP 503")
+
+        anti.fetch_gateway_package_version = fail_health
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(["smoke", "--skip-doctor", "--model", "sonnet"])
+
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertIn("[WARN] Gateway /health: /health returned HTTP 503", output.getvalue())
+        self.assertIn("[PASS] Gateway /v1/models", output.getvalue())
 
     def test_consult_truncates_large_prompt_with_caveat(self) -> None:
         anti = load_anti()

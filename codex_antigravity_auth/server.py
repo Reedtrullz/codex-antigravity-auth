@@ -9,6 +9,7 @@ import email.utils
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from importlib import metadata as importlib_metadata
 from urllib.parse import urlparse
 from typing import AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException
@@ -108,6 +109,15 @@ GOOGLE_ACCOUNT_SCOPED_STREAM_ERROR_TERMS = (
     "resource_exhausted",
     "unauthenticated",
 )
+PACKAGE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}$")
+
+
+def local_package_version() -> str:
+    try:
+        version = importlib_metadata.version("codex-antigravity-auth").strip()
+    except Exception:
+        return "unknown"
+    return version if PACKAGE_VERSION_RE.fullmatch(version) else "unknown"
 
 
 def request_origin_matches(request: Request, origin: str) -> bool:
@@ -642,6 +652,7 @@ async def health(request: Request):
     catalog = native_model_catalog()
     return {
         "ok": True,
+        "package_version": local_package_version(),
         "model_count": len(catalog),
         "advertised_native_models": [model["id"] for model in catalog],
         "configured_route_families": {
