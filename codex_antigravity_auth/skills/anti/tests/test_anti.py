@@ -1440,12 +1440,40 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(anti.resolve_panel_models(args.model), ["claude-3.5-sonnet", "claude-opus-4-6"])
         self.assertEqual(anti.resolve_model(args.judge, default=anti.DEFAULT_PANEL_JUDGE_MODEL), "claude-opus-4-6")
 
-    def test_grok_aliases_resolve_to_xai_oauth_models(self) -> None:
+    def test_provider_aliases_resolve_deterministically_without_changing_oauth_defaults(self) -> None:
         anti = load_anti()
 
-        self.assertEqual(anti.resolve_model("grok", default="sonnet"), "xai-oauth:grok-build-0.1")
-        self.assertEqual(anti.resolve_model("supergrok", default="sonnet"), "xai-oauth:grok-build-0.1")
-        self.assertEqual(anti.resolve_model("grok-4.3", default="sonnet"), "xai-oauth:grok-4.3")
+        expected = {
+            "grok": "xai-oauth:grok-build-0.1",
+            "supergrok": "xai-oauth:grok-build-0.1",
+            "xai-grok": "xai-oauth:grok-build-0.1",
+            "grok-oauth": "xai-oauth:grok-build-0.1",
+            "grok-build": "xai-oauth:grok-build-0.1",
+            "grok-build-0.1": "xai-oauth:grok-build-0.1",
+            "grok-4": "xai-oauth:grok-4.3",
+            "grok-4.3": "xai-oauth:grok-4.3",
+            "grok-bluesminds": "bluesminds:grok-4.5",
+            "grok-4.5": "bluesminds:grok-4.5",
+            "deepseek-v4-pro": "deepseek:deepseek-v4-pro",
+            "deepseek-v4-flash": "deepseek:deepseek-v4-flash",
+            "glm-5.2": "bluesminds:z-ai/glm-5.2",
+            "glm52": "bluesminds:z-ai/glm-5.2",
+        }
+        for alias, model_id in expected.items():
+            with self.subTest(alias=alias):
+                self.assertEqual(anti.resolve_model(alias, default="sonnet"), model_id)
+
+    def test_claude_grok_can_explicitly_select_bluesminds_without_changing_default_route(self) -> None:
+        anti = load_anti()
+        default_models = anti.resolve_panel_models(None, collab_profile="claude-grok")
+        explicit_models = anti.resolve_panel_models(
+            ["sonnet", "opus", "grok-bluesminds"],
+            collab_profile="claude-grok",
+        )
+
+        self.assertEqual(default_models[-1], "xai-oauth:grok-build-0.1")
+        self.assertEqual(explicit_models[-1], "bluesminds:grok-4.5")
+        self.assertEqual(anti.DEFAULT_PANEL_JUDGE_MODEL, "claude-opus-4-6")
 
     def test_claude_grok_collab_defaults_models_and_prompt_contract(self) -> None:
         anti = load_anti()
@@ -1640,6 +1668,142 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(ask_rc, 0, ask_output.getvalue())
         self.assertTrue(any("BYOK disclosure" in caveat for caveat in json.loads(repo_output.getvalue())["caveats"]))
         self.assertFalse(any("BYOK disclosure" in caveat for caveat in json.loads(ask_output.getvalue())["caveats"]))
+
+    def test_panel_repo_disclosure_names_resolved_bluesminds_and_deepseek_lanes(self) -> None:
+        anti = load_anti()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(
+                [
+                    "panel",
+                    "--mode",
+                    "review",
+                    "--scope",
+                    "files",
+                    "--file",
+                    "README.md",
+                    "--model",
+                    "grok-bluesminds",
+                    "--model",
+                    "deepseek-v4-pro",
+                    "--judge",
+                    "opus",
+                    "--print-prompt",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        disclosure = next(item for item in parsed["caveats"] if "BYOK disclosure" in item)
+        self.assertIn("bluesminds:grok-4.5", disclosure)
+        self.assertIn("deepseek:deepseek-v4-pro", disclosure)
+        self.assertNotIn("BLUESMINDS_API_KEY", disclosure)
+        self.assertNotIn("DEEPSEEK_API_KEY", disclosure)
+
+    def test_review_repo_disclosure_names_explicit_deepseek_fallback(self) -> None:
+        anti = load_anti()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(
+                [
+                    "review",
+                    "--scope",
+                    "files",
+                    "--file",
+                    "README.md",
+                    "--model",
+                    "opus",
+                    "--fallback-model",
+                    "deepseek-v4-flash",
+                    "--fallback-policy",
+                    "on-retryable",
+                    "--print-prompt",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        disclosure = next(item for item in parsed["caveats"] if "BYOK disclosure" in item)
+        self.assertIn("deepseek:deepseek-v4-flash", disclosure)
+        self.assertNotIn("claude-opus-4-6", disclosure)
+
+    def test_chunked_review_preserves_bluesminds_disclosure(self) -> None:
+        anti = load_anti()
+        anti.post_response = lambda **kwargs: (
+            "review-synthesis"
+            if "synthesizing an Antigravity sidecar code review" in kwargs["prompt"]
+            else "chunk-review"
+        )
+        with tempfile.TemporaryDirectory(prefix="anti-skill-test-") as tmp:
+            root = Path(tmp)
+            (root / "large.py").write_text("VALUE = '" + ("x" * 5000) + "'\n", encoding="utf-8")
+            output = io.StringIO()
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with contextlib.redirect_stdout(output):
+                    rc = anti.main(
+                        [
+                            "review",
+                            "--scope",
+                            "files",
+                            "--file",
+                            "large.py",
+                            "--model",
+                            "grok-bluesminds",
+                            "--max-prompt-chars",
+                            "1000",
+                            "--max-review-chunks",
+                            "2",
+                            "--json",
+                        ]
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertTrue(parsed["metadata"]["chunked"])
+        self.assertTrue(
+            any("bluesminds:grok-4.5" in item for item in parsed["caveats"]),
+            parsed["caveats"],
+        )
+        self.assertTrue(
+            any(
+                "bluesminds:grok-4.5" in item
+                for item in parsed["metadata"]["privacy_disclosures"]
+            )
+        )
+
+    def test_plan_repo_disclosure_names_bluesminds_glm_lane(self) -> None:
+        anti = load_anti()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(
+                [
+                    "plan",
+                    "--scope",
+                    "files",
+                    "--file",
+                    "README.md",
+                    "--model",
+                    "glm-5.2",
+                    "--prompt",
+                    "Plan this change",
+                    "--print-prompt",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        disclosure = next(item for item in parsed["caveats"] if "BYOK disclosure" in item)
+        self.assertIn("bluesminds:z-ai/glm-5.2", disclosure)
 
     def test_panel_successful_two_model_run_calls_judge_once(self) -> None:
         anti = load_anti()
@@ -1929,6 +2093,75 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(parsed["panel_results"][1]["status"], "error")
         self.assertIn("not advertised", parsed["panel_results"][1]["error"])
         self.assertEqual(parsed["output_text"], "judge-output")
+
+    def test_provider_alias_missing_from_catalog_is_explicit_failed_lane(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
+            "claude-3.5-sonnet",
+            "deepseek:deepseek-v4-pro",
+        }
+
+        def fake_post_response(**kwargs):
+            self.assertIn(kwargs["model"], {"claude-3.5-sonnet", "deepseek:deepseek-v4-pro"})
+            if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
+                return "judge-output"
+            return "deepseek-panel-output"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(
+                [
+                    "panel",
+                    "--mode",
+                    "ask",
+                    "--prompt",
+                    "compare",
+                    "--model",
+                    "deepseek-v4-pro",
+                    "--model",
+                    "grok-bluesminds",
+                    "--judge",
+                    "sonnet",
+                    "--min-successes",
+                    "1",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        statuses = {item["model"]: item for item in parsed["panel_results"]}
+        self.assertEqual(statuses["deepseek:deepseek-v4-pro"]["status"], "success")
+        self.assertEqual(statuses["bluesminds:grok-4.5"]["status"], "error")
+        self.assertIn("not advertised by /v1/models", statuses["bluesminds:grok-4.5"]["error"])
+
+    def test_run_record_preserves_provider_identity_but_redacts_credentials(self) -> None:
+        anti = load_anti()
+        secret = "sk-antitest-provider-secret-1234567890"
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            args = anti.build_parser().parse_args(
+                ["consult", "--prompt", "x", "--save-output", "summary"]
+            )
+            anti.write_run_record(
+                args,
+                mode="consult",
+                status="failed",
+                models=["bluesminds:grok-4.5", "deepseek:deepseek-v4-pro"],
+                metadata={"provider_error": f"api_key={secret}"},
+                error=f"Authorization: Bearer {secret}",
+            )
+
+            record_text = next(Path(tmp).glob("*.json")).read_text(encoding="utf-8")
+            record = json.loads(record_text)
+
+        self.assertEqual(
+            record["models"],
+            ["bluesminds:grok-4.5", "deepseek:deepseek-v4-pro"],
+        )
+        self.assertNotIn(secret, record_text)
+        self.assertIn("<redacted>", record_text)
 
     def test_panel_missing_judge_model_still_fails_before_generation(self) -> None:
         anti = load_anti()

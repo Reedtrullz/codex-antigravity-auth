@@ -119,6 +119,47 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(PROVIDER_PRESETS["xai-oauth"]["authModes"], ["oauth"])
         self.assertIn("SuperGrok", PROVIDER_PRESETS["xai-oauth"]["displayName"])
 
+    def test_bluesminds_and_deepseek_v4_presets_are_first_class_chat_routes(self):
+        bluesminds = PROVIDER_PRESETS["bluesminds"]
+        self.assertEqual(bluesminds["displayName"], "BluesMinds")
+        self.assertEqual(bluesminds["kind"], "openai_chat")
+        self.assertEqual(bluesminds["baseUrl"], "https://api.bluesminds.com/v1")
+        self.assertEqual(bluesminds["apiKeyEnv"], "BLUESMINDS_API_KEY")
+        self.assertEqual(bluesminds["authModes"], ["api_key"])
+        self.assertEqual(bluesminds["models"], ["grok-4.5", "z-ai/glm-5.2"])
+
+        deepseek = PROVIDER_PRESETS["deepseek"]
+        self.assertEqual(deepseek["kind"], "openai_chat")
+        self.assertEqual(deepseek["baseUrl"], "https://api.deepseek.com")
+        self.assertEqual(deepseek["apiKeyEnv"], "DEEPSEEK_API_KEY")
+        self.assertEqual(
+            deepseek["models"][:2],
+            ["deepseek-v4-flash", "deepseek-v4-pro"],
+        )
+
+    def test_models_catalog_advertises_only_the_requested_bluesminds_ids(self):
+        provider = {
+            **PROVIDER_PRESETS["bluesminds"],
+            "id": "bluesminds",
+            "apiKey": "synthetic-bluesminds-key-1234567890",
+        }
+        with patch(
+            "codex_antigravity_auth.server.all_provider_configs_read_only",
+            return_value={"bluesminds": provider},
+        ):
+            response = TestClient(app).get("/v1/models")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        bluesminds_ids = {
+            model["id"]
+            for model in response.json()["data"]
+            if model["owned_by"] == "bluesminds"
+        }
+        self.assertEqual(
+            bluesminds_ids,
+            {"bluesminds:grok-4.5", "bluesminds:z-ai/glm-5.2"},
+        )
+
     def test_provider_auth_mode_supports_xai_oauth_only_on_dedicated_provider(self):
         self.assertEqual(validate_provider_auth_mode("api-key"), "api_key")
         self.assertEqual(validate_provider_auth_mode("api_key"), "api_key")

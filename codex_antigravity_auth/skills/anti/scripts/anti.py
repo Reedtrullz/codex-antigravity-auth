@@ -44,10 +44,17 @@ MODEL_ALIASES = {
     "grok": "xai-oauth:grok-build-0.1",
     "supergrok": "xai-oauth:grok-build-0.1",
     "xai-grok": "xai-oauth:grok-build-0.1",
+    "grok-oauth": "xai-oauth:grok-build-0.1",
     "grok-build": "xai-oauth:grok-build-0.1",
     "grok-build-0.1": "xai-oauth:grok-build-0.1",
     "grok-4.3": "xai-oauth:grok-4.3",
     "grok-4": "xai-oauth:grok-4.3",
+    "grok-bluesminds": "bluesminds:grok-4.5",
+    "grok-4.5": "bluesminds:grok-4.5",
+    "deepseek-v4-pro": "deepseek:deepseek-v4-pro",
+    "deepseek-v4-flash": "deepseek:deepseek-v4-flash",
+    "glm-5.2": "bluesminds:z-ai/glm-5.2",
+    "glm52": "bluesminds:z-ai/glm-5.2",
 }
 DEFAULT_REVIEW_MODEL = "claude-opus-4-6"
 DEFAULT_CONSULT_MODEL = "claude-3.5-sonnet"
@@ -1910,6 +1917,21 @@ def model_is_byok(model: str) -> bool:
     return bool(separator and provider and provider_model)
 
 
+def generation_models_for_disclosure(models: list[str], args: argparse.Namespace) -> list[str]:
+    candidates = list(models)
+    fallback_raw = getattr(args, "fallback_model", None)
+    if fallback_raw:
+        candidates.append(resolve_model(fallback_raw, default=fallback_raw))
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for model in candidates:
+        if model in seen:
+            continue
+        seen.add(model)
+        resolved.append(model)
+    return resolved
+
+
 def panel_receives_repo_context(args: argparse.Namespace) -> bool:
     if args.mode == "review":
         return args.scope != "none"
@@ -1918,10 +1940,14 @@ def panel_receives_repo_context(args: argparse.Namespace) -> bool:
     return False
 
 
-def byok_repo_context_disclosure(panel_models: list[str], judge_model: str, args: argparse.Namespace) -> str | None:
-    if not panel_receives_repo_context(args):
+def byok_repo_context_disclosure(
+    models: list[str],
+    *,
+    receives_repo_context: bool,
+) -> str | None:
+    if not receives_repo_context:
         return None
-    provider_models = [model for model in [*panel_models, judge_model] if model_is_byok(model)]
+    provider_models = [model for model in models if model_is_byok(model)]
     if not provider_models:
         return None
     return (
@@ -2531,7 +2557,10 @@ def command_panel(args: argparse.Namespace) -> int:
         raise AntiError("--min-successes cannot exceed the number of panel models")
 
     prompt, caveats, metadata = assemble_panel_source_prompt(args)
-    disclosure = byok_repo_context_disclosure(panel_models, judge_model, args)
+    disclosure = byok_repo_context_disclosure(
+        generation_models_for_disclosure([*panel_models, judge_model], args),
+        receives_repo_context=panel_receives_repo_context(args),
+    )
     if disclosure:
         caveats.append(disclosure)
         metadata.setdefault("privacy_disclosures", []).append(disclosure)
@@ -2766,6 +2795,15 @@ def command_review(args: argparse.Namespace) -> int:
         context,
         max_prompt_chars=prompt_budget,
     )
+    disclosure = byok_repo_context_disclosure(
+        generation_models_for_disclosure([model], args),
+        receives_repo_context=True,
+    )
+    if disclosure:
+        caveats.append(disclosure)
+        metadata.setdefault("privacy_disclosures", []).append(disclosure)
+        if not args.print_prompt:
+            eprint(f"[anti] {redact_sensitive_text(disclosure)}")
     if args.print_prompt:
         if args.json:
             print(json.dumps({"prompt": prompt, "metadata": metadata, "caveats": caveats}, indent=2, sort_keys=True))
@@ -2781,7 +2819,7 @@ def command_review(args: argparse.Namespace) -> int:
     claude_guardrail_used = claude_guardrail_available and chunked_review
     if claude_guardrail_used:
         add_claude_guardrail_caveat(caveats, prompt_budget=prompt_budget)
-        context["caveats"] = list(caveats)
+    context["caveats"] = list(caveats)
     if chunked_review:
         text, caveats, metadata = run_chunked_review(
             args=args,
@@ -2835,6 +2873,14 @@ def command_plan(args: argparse.Namespace) -> int:
     prompt_budget = prompt_budget_for_model(args, model)
     claude_guardrail_available = claude_guardrail_would_apply(args, model, prompt_budget)
     prompt, caveats = assemble_plan_prompt(args, apply_limit=False)
+    disclosure = byok_repo_context_disclosure(
+        generation_models_for_disclosure([model], args),
+        receives_repo_context=args.scope != "none",
+    )
+    if disclosure:
+        caveats.append(disclosure)
+        if not args.print_prompt:
+            eprint(f"[anti] {redact_sensitive_text(disclosure)}")
     recorded_prompt = prompt
     if args.print_prompt:
         printable_caveats = list(caveats)
@@ -2874,6 +2920,8 @@ def command_plan(args: argparse.Namespace) -> int:
         )
         metadata = {"prompt_chars": len(limited_prompt), "chunked": False, "prompt_budget_chars": prompt_budget, **generation_metadata}
     metadata["claude_prompt_guardrail"] = claude_guardrail_used
+    if disclosure:
+        metadata.setdefault("privacy_disclosures", []).append(disclosure)
     if getattr(args, "run_id", None):
         metadata["run_id"] = args.run_id
         metadata["request_log_correlation_id"] = args.run_id

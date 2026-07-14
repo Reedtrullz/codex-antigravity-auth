@@ -65,6 +65,14 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
             "X-Title": "Codex Antigravity Auth",
         },
     },
+    "bluesminds": {
+        "displayName": "BluesMinds",
+        "kind": "openai_chat",
+        "baseUrl": "https://api.bluesminds.com/v1",
+        "apiKeyEnv": "BLUESMINDS_API_KEY",
+        "authModes": [PROVIDER_AUTH_MODE_API_KEY],
+        "models": ["grok-4.5", "z-ai/glm-5.2"],
+    },
     "deepseek": {
         "displayName": "DeepSeek",
         "kind": "openai_chat",

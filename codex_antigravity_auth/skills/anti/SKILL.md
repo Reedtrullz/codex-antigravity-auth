@@ -1,6 +1,6 @@
 ---
 name: anti
-description: Use the optional Anti helper after Antigravity Claude Opus/Sonnet is available in Codex: sidecar review, consult lane, deep autonomous work plan, Claude/Grok collaboration, $anti workflow preset, or $anti panel MoA/Fusion workflow. Trigger when the user writes $anti, @anti, $anti workflow, $anti workflow review-ready, $anti workflow plan-deep, $anti workflow claude-grok, $anti panel, $anti moa, $anti fusion, asks for Antigravity, Opus, Sonnet, Grok, SuperGrok, xAI, Claude/Grok collaboration, a sidecar review, second-opinion model review, multi-model panel, MoA, Fusion, deep work plan, long autonomous session plan, implementation plan, gateway smoke checks, Google Antigravity setup, Codex Antigravity configuration, or codex-antigravity doctor/start workflows.
+description: Use the optional Anti helper after Antigravity Claude Opus/Sonnet is available in Codex: sidecar review, consult lane, deep autonomous work plan, Claude/Grok collaboration, BluesMinds Grok/GLM, official DeepSeek V4, $anti workflow preset, or $anti panel MoA/Fusion workflow. Trigger when the user writes $anti, @anti, $anti workflow, $anti workflow review-ready, $anti workflow plan-deep, $anti workflow claude-grok, $anti panel, $anti moa, $anti fusion, asks for Antigravity, Opus, Sonnet, Grok, SuperGrok, xAI, BluesMinds, GLM-5.2, DeepSeek V4, Claude/Grok collaboration, a sidecar review, second-opinion model review, multi-model panel, MoA, Fusion, deep work plan, long autonomous session plan, implementation plan, gateway smoke checks, Google Antigravity setup, Codex Antigravity configuration, or codex-antigravity doctor/start workflows.
 ---
 
 # Anti
@@ -21,14 +21,19 @@ Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to mu
 
 - Use `opus` for deep review. It maps to `claude-opus-4-6`.
 - Use `sonnet` for faster focused consults. It maps to `claude-3.5-sonnet`.
-- Use `grok`, `supergrok`, or `grok-build` for the xAI OAuth lane. They map to `xai-oauth:grok-build-0.1`.
+- Use `grok`, `supergrok`, `grok-build`, or `grok-oauth` for the xAI OAuth lane. They map to `xai-oauth:grok-build-0.1`.
 - Use `grok-4.3` for `xai-oauth:grok-4.3`.
+- Use `grok-bluesminds` or `grok-4.5` for `bluesminds:grok-4.5`. This is a separate API-key route; never silently fail over to or from xAI OAuth.
+- Use `deepseek-v4-pro` for `deepseek:deepseek-v4-pro` and `deepseek-v4-flash` for `deepseek:deepseek-v4-flash` through the official DeepSeek API key.
+- Use `glm-5.2` or `glm52` for `bluesminds:z-ai/glm-5.2`, especially as a long-context planning or repository-review lane.
 - Default review model: `opus`.
 - Default plan model: `opus`.
 - Default consult/ask model: `sonnet`, unless the user asks for deep review.
 - Default panel models: `sonnet` and `opus`.
 - Default panel judge: `opus`.
 - `panel --collab claude-grok` defaults to `sonnet`, `opus`, and `grok`, with Opus judging. If Grok is not advertised by `/v1/models`, it is recorded as a failed lane unless `--min-successes` requires it.
+
+BluesMinds uses the gateway's OpenAI Chat Completions adapter. Native Responses streaming, structured output, tool-call, usage, and model-identity fidelity are not claimed until successful live probes prove them. Opus remains the default judge for BluesMinds and DeepSeek advisory lanes.
 
 ## Helper
 
@@ -43,25 +48,32 @@ Common commands:
 ```bash
 python3 ~/.codex/skills/anti/scripts/anti.py smoke
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model sonnet --prompt "Review this idea"
+python3 ~/.codex/skills/anti/scripts/anti.py consult --model deepseek-v4-flash --prompt "Give a fast second opinion"
 python3 ~/.codex/skills/anti/scripts/anti.py plan --prompt "Plan a long autonomous hardening pass"
 python3 ~/.codex/skills/anti/scripts/anti.py plan --scope working-tree --prompt "Plan the next PR"
+python3 ~/.codex/skills/anti/scripts/anti.py plan --model glm-5.2 --scope working-tree --prompt "Plan this long-context repository change"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope diff --base origin/main --model sonnet --model opus --judge opus
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode plan --scope working-tree --prompt "Plan this PR"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --model sonnet --model openrouter:deepseek/deepseek-chat --judge opus --prompt "Compare these approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --collab claude-grok --prompt "Compare these approaches"
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --collab claude-grok --model sonnet --model opus --model grok-bluesminds --prompt "Compare these approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py moa --mode review --role correctness --role security --role tests --output findings
+python3 ~/.codex/skills/anti/scripts/anti.py fusion --mode plan --model opus --model glm-5.2 --judge opus --scope working-tree --prompt "Plan this change"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow review-ready --scope staged
 python3 ~/.codex/skills/anti/scripts/anti.py workflow plan-deep --scope working-tree --prompt "Plan V2" --progress
 python3 ~/.codex/skills/anti/scripts/anti.py workflow ship-gate --scope diff --base origin/main --json
 python3 ~/.codex/skills/anti/scripts/anti.py workflow provider-compare --model sonnet --model openrouter:deepseek/deepseek-chat --prompt "Compare these approaches"
+python3 ~/.codex/skills/anti/scripts/anti.py workflow provider-compare --model deepseek-v4-pro --model glm-5.2 --prompt "Compare repository planning approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow security-review --scope staged --output findings
 python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "Intermittent 502s after rotation"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode review --scope staged --output findings
 python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode ask --prompt "Should this UX use route A or B?"
+python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --model grok-bluesminds --panel-mode ask --prompt "Stress-test this design"
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope working-tree
 python3 ~/.codex/skills/anti/scripts/anti.py review --model sonnet --scope staged --file path/to/file.py
+python3 ~/.codex/skills/anti/scripts/anti.py review --model deepseek-v4-pro --scope staged
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope files --timeout 240 --max-prompt-chars 120000 --file src/main.ts --file src/config.ts
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope diff --base origin/main
 git diff -z --name-only origin/main...HEAD > /tmp/anti-files.zlist
@@ -103,6 +115,7 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - `panel --collab claude-grok` sends the same bounded context to Claude and Grok lanes, asks them to lean into complementary strengths, and asks the judge to compare Claude-backed and Grok-backed disagreements. It is still advisory, not automatic collaboration in Codex's native model loop.
 - Broad `panel --mode review` runs summarize oversized review scopes before fan-out instead of silently truncating raw context for every lane. Treat the summary caveat as a scope limitation.
 - Use `--fallback-model sonnet --fallback-policy on-retryable` for long Opus planning/review calls when backend `502`/timeout drift would otherwise block the workflow.
+- A provider fallback is always explicit. For example, `--fallback-model deepseek-v4-flash --fallback-policy on-retryable` may send the same prompt/context to DeepSeek; use it only when that disclosure and trust boundary are acceptable.
 - After retryable generation failures, the helper probes `/v1/models`; if that probe also times out, treat the gateway as wedged and restart it before retrying the same Opus job.
 - Use `--progress` for long `workflow`, `plan`, `review`, or `panel` runs so stderr shows which model/chunk is active.
 - V2 workflow presets default to sanitized run summaries under `~/.codex/anti-runs`; use `runs list`, `runs show <id>`, and `runs clean --older-than N` (add `--dry-run` to preview deletions) to inspect or prune them. Primitive commands default to `--save-output never`; pass `--save-output summary` or `--save-output full` only when useful.

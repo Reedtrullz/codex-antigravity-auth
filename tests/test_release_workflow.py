@@ -44,6 +44,32 @@ class TestReleaseWorkflow(unittest.TestCase):
         self.assertIn("Verify tag matches package version", self.workflow_text)
         self.assertIn('expected = f"v{version}"', self.workflow_text)
 
+    def test_provider_and_anti_docs_cover_explicit_bluesminds_deepseek_and_grok_routes(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        usage = (ROOT / "USAGE.md").read_text(encoding="utf-8")
+        skill = (ROOT / "codex_antigravity_auth/skills/anti/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        combined = "\n".join([readme, usage, skill])
+
+        for required in (
+            "bluesminds:grok-4.5",
+            "bluesminds:z-ai/glm-5.2",
+            "deepseek:deepseek-v4-pro",
+            "deepseek:deepseek-v4-flash",
+            "grok-oauth",
+            "grok-bluesminds",
+            "glm-5.2",
+            "workflow claude-grok --model grok-bluesminds",
+            "workflow provider-compare",
+            "--fallback-model deepseek-v4-flash",
+            "Chat Completions adapter",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, combined)
+
+        self.assertNotIn("gpt-5.4", combined.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

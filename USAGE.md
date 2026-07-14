@@ -94,12 +94,13 @@ python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope diff --
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode plan --scope working-tree --prompt "Plan this PR"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --model sonnet --model openrouter:deepseek/deepseek-chat --judge opus --prompt "Compare these approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --collab claude-grok --prompt "Compare these approaches"
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --collab claude-grok --model sonnet --model opus --model grok-bluesminds --prompt "Compare these approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged --output findings
 ```
 
 Panel mode validates requested judge/fallback models against `/v1/models` before generation and records missing panel lanes as failed metadata when `--min-successes` can still be met. BYOK models only appear there when the gateway process has usable provider credentials or a key-optional local provider setup. Treat panel consensus as a prioritization hint, not proof; verify actionable findings locally before editing.
 
-Use `--collab claude-grok` when you explicitly want a Claude/Grok cross-check. It defaults to Sonnet, Opus, and `xai-oauth:grok-build-0.1`, asks the lanes to lean into complementary strengths, and asks the judge to compare Claude-backed and Grok-backed disagreements. This is not automatic model-loop blending; it is a bounded advisory panel. If Grok is not visible in `/v1/models`, the lane is recorded as failed unless you set `--min-successes 3` to require it.
+Use `--collab claude-grok` when you explicitly want a Claude/Grok cross-check. It defaults to Sonnet, Opus, and `grok-oauth` (`xai-oauth:grok-build-0.1`). Pass `--model sonnet --model opus --model grok-bluesminds` to choose `bluesminds:grok-4.5` instead. This is not automatic model-loop blending, and Anti never silently fails over between the two Grok providers. If a requested Grok model is not visible in `/v1/models`, the lane is recorded as failed unless `--min-successes` requires the whole panel to fail.
 
 The panel judge returns a structured findings contract with `id`, `claim`, `severity`, `lanes`, and `verify`. Default prose output renders disagreements first, then findings, unverifiable observations, and caveats. `--output findings` emits just the sanitized findings JSON, while `--json` includes panel results, usage/latency metadata, caveats, findings, and the rendered output. Broad `panel --mode review` scopes reuse the review chunking path to create one bounded summary before fan-out rather than silently truncating full context for every lane.
 
@@ -116,6 +117,7 @@ python3 ~/.codex/skills/anti/scripts/anti.py workflow security-review --scope st
 python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "Intermittent 502s after rotation"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode review --scope staged --output findings
 python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode ask --prompt "Should this UX use route A or B?"
+python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --model grok-bluesminds --panel-mode ask --prompt "Stress-test this design"
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
 ```
 
@@ -133,11 +135,16 @@ This first verifies that Google OAuth client credentials are configured, then ru
 For BYOK-only use, replace `codex-antigravity login` with a provider setup command such as:
 
 ```bash
-codex-antigravity provider set deepseek --api-key-env DEEPSEEK_API_KEY --model deepseek-chat
-codex-antigravity configure-codex --write --model deepseek:deepseek-chat
+codex-antigravity provider set bluesminds --api-key-env BLUESMINDS_API_KEY --model grok-4.5 --model z-ai/glm-5.2
+codex-antigravity provider set deepseek --api-key-env DEEPSEEK_API_KEY --model deepseek-v4-pro --model deepseek-v4-flash
+codex-antigravity configure-codex --write --model deepseek:deepseek-v4-pro
 # Add --activate only if you want DeepSeek to become the active Codex default.
 codex-antigravity doctor --byok-only
 ```
+
+The BluesMinds preset advertises only `bluesminds:grok-4.5` and `bluesminds:z-ai/glm-5.2`. You can keep an existing 1Password Developer Environment variable name with `provider set bluesminds --api-key-env api_bluesminds_com`; no key value is placed in config or argv. BluesMinds uses the OpenAI Chat Completions adapter because successful native Responses streaming, structured output, tool calls, usage, and identity fidelity have not been proven. Use `glm-5.2` as a long-context planning/repository-review alias and keep Opus as the default judge.
+
+The official DeepSeek route advertises `deepseek:deepseek-v4-pro` and `deepseek:deepseek-v4-flash`. Anti aliases `deepseek-v4-pro` and `deepseek-v4-flash` resolve directly to those IDs and never through BluesMinds.
 
 For SuperGrok/X Premium xAI access without an API key, use the dedicated OAuth lane:
 

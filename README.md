@@ -32,7 +32,7 @@ Use `$anti` only as an optional sidecar reviewer/planner after the gateway is wo
 - **OS-Native Keyring Encryption**: Encrypts Google account tokens and stored BYOK provider config at rest via macOS Keychain, Windows Credential Manager, Linux Secret Service, or a private local fallback key.
 - **Transaction-Safe Cooldown Rotations**: Automatically rotates accounts on backend failures (such as `401`, `403`, or `429` rate limiters) with clean exponential backoff.
 - **High-Fidelity SSE Translation**: Translates stream candidate envelopes, role alignments, reasoning-text deltas, function-call items, and VALIDATED tool parameter modes into Responses API events.
-- **BYOK Provider Routing**: Route model IDs like `deepseek:deepseek-chat`, `xai:grok-code-fast-1`, `kimi:kimi-k2-0711-preview`, `openrouter:deepseek/deepseek-chat`, and custom OpenAI-compatible endpoints through encrypted API-key config.
+- **BYOK Provider Routing**: Route model IDs like `deepseek:deepseek-v4-pro`, `bluesminds:grok-4.5`, `bluesminds:z-ai/glm-5.2`, `xai:grok-code-fast-1`, and custom OpenAI-compatible endpoints through encrypted API-key config.
 
 ## Installation
 
@@ -153,12 +153,15 @@ python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode plan --scope working-tree --prompt "Plan this PR"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --model sonnet --model openrouter:deepseek/deepseek-chat --judge opus --prompt "Compare these approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --collab claude-grok --prompt "Compare these approaches"
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --collab claude-grok --model sonnet --model opus --model grok-bluesminds --prompt "Compare these approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged --output findings
+python3 ~/.codex/skills/anti/scripts/anti.py moa --mode review --model deepseek-v4-pro --model glm-5.2 --judge opus --scope staged
+python3 ~/.codex/skills/anti/scripts/anti.py fusion --mode plan --model opus --model glm-5.2 --judge opus --scope working-tree --prompt "Plan this repository change"
 ```
 
 Panel consensus is not proof and should not patch code directly. Structured findings include `id`, `claim`, `severity`, `lanes`, and `verify`; run the `verify` hint locally before acting. Text and JSON outputs include per-lane/judge usage and latency when the gateway/provider returns it. Broad review panels summarize oversized scopes once before fan-out instead of silently truncating raw context for every lane.
 
-`--collab claude-grok` is an explicit collaboration profile for Claude plus Grok panels. It defaults to Sonnet, Opus, and `xai-oauth:grok-build-0.1`, gives Claude and Grok complementary review instructions, and asks the Opus judge to compare Claude-backed and Grok-backed disagreements before recommending verification steps. It still uses normal gateway-advertised models; if the Grok lane is not visible in `/v1/models`, it is recorded as a failed lane unless you require it with `--min-successes 3`.
+`--collab claude-grok` is an explicit collaboration profile for Claude plus Grok panels. It defaults to Sonnet, Opus, and `grok` (`xai-oauth:grok-build-0.1`), gives Claude and Grok complementary review instructions, and asks the Opus judge to compare Claude-backed and Grok-backed disagreements before recommending verification steps. `grok-oauth` selects that same OAuth route explicitly. To use BluesMinds deliberately, pass `--model sonnet --model opus --model grok-bluesminds`; `grok-bluesminds` and `grok-4.5` resolve to `bluesminds:grok-4.5`. The helper never silently fails over between the routes. If a requested Grok lane is not visible in `/v1/models`, it is recorded as a failed lane unless `--min-successes` makes the whole panel fail.
 
 BYOK panel models such as `openrouter:...` or `xai-oauth:...` only work when the running gateway advertises them in `/v1/models`, which requires usable provider keys, key-optional local provider setup, or a refreshable OAuth login. When a BYOK lane receives repository, diff, or file context, the helper prints and records a disclosure naming the provider lanes. Virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not supported; MoA/Fusion remains a helper workflow, not gateway-side orchestration.
 
@@ -169,10 +172,12 @@ python3 ~/.codex/skills/anti/scripts/anti.py workflow review-ready --scope stage
 python3 ~/.codex/skills/anti/scripts/anti.py workflow plan-deep --scope working-tree --prompt "Plan this PR" --progress
 python3 ~/.codex/skills/anti/scripts/anti.py workflow ship-gate --scope diff --base origin/main --json
 python3 ~/.codex/skills/anti/scripts/anti.py workflow provider-compare --model sonnet --model openrouter:deepseek/deepseek-chat --prompt "Compare these approaches"
+python3 ~/.codex/skills/anti/scripts/anti.py workflow provider-compare --model deepseek-v4-pro --model glm-5.2 --prompt "Compare long-context planning approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow security-review --scope staged --output findings
 python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "Intermittent 502s after rotation"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode review --scope staged --output findings
 python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode ask --prompt "Should this UX use route A or B?"
+python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --model grok-bluesminds --panel-mode ask --prompt "Stress-test this design"
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
 ```
 
@@ -270,11 +275,12 @@ Overlay ids must be simple printable model ids, cannot shadow built-in ids, back
 
 ### BYOK providers
 
-Built-in presets are available for OpenRouter, DeepSeek, xAI, Kimi/Moonshot, Ollama, OpenCode-compatible local servers, and custom OpenAI-compatible APIs:
+Built-in presets are available for OpenRouter, BluesMinds, DeepSeek, xAI, Kimi/Moonshot, Ollama, OpenCode-compatible local servers, and custom OpenAI-compatible APIs:
 
 ```bash
 codex-antigravity provider presets
-codex-antigravity provider set deepseek --api-key-env DEEPSEEK_API_KEY --model deepseek-chat --model deepseek-reasoner
+codex-antigravity provider set bluesminds --api-key-env BLUESMINDS_API_KEY --model grok-4.5 --model z-ai/glm-5.2
+codex-antigravity provider set deepseek --api-key-env DEEPSEEK_API_KEY --model deepseek-v4-pro --model deepseek-v4-flash
 codex-antigravity provider set openrouter --api-key-env OPENROUTER_API_KEY --model deepseek/deepseek-chat
 codex-antigravity provider set xai --api-key-env XAI_API_KEY --model grok-build-0.1
 codex-antigravity provider login xai-oauth
@@ -283,7 +289,9 @@ codex-antigravity provider set ollama --base-url http://localhost:11434/v1 --mod
 codex-antigravity provider list
 ```
 
-Provider presets show their supported auth modes. For xAI/Grok there are two lanes: `xai:*` uses normal xAI console API-key billing through `XAI_API_KEY`, while `xai-oauth:*` uses a SuperGrok/X Premium OAuth login and stores refreshable tokens encrypted in `~/.codex/antigravity-xai-oauth.json`. Use `codex-antigravity provider login xai-oauth` for the browser callback flow, or `codex-antigravity provider login xai-oauth --device` for a headless/device-code flow. `codex-antigravity provider set xai --auth-mode oauth ...` fails with a pointer to `xai-oauth` so the API-key and subscription-backed routes do not get mixed.
+Provider presets show their supported auth modes. Grok has two explicit subscription/provider routes: `xai-oauth:grok-build-0.1` and `xai-oauth:grok-4.3` use the SuperGrok/X Premium OAuth store, while `bluesminds:grok-4.5` uses a BluesMinds API key. The existing `grok` and `supergrok` Anti aliases remain OAuth-backed; no automatic cross-provider failover occurs. Use `codex-antigravity provider login xai-oauth` for the browser callback flow, or `codex-antigravity provider login xai-oauth --device` for a headless/device-code flow.
+
+BluesMinds uses the gateway's mature OpenAI Chat Completions adapter, not the native Responses transport. Its authenticated model catalog advertised `grok-4.5` and `z-ai/glm-5.2`, but successful Responses streaming, structured output, tool calls, usage, and identity fidelity have not been proven. GLM-5.2 is therefore documented as an advisory long-context planning/repository-review lane, with Opus remaining the default Anti judge. DeepSeek V4 uses the official DeepSeek Chat Completions API as `deepseek:deepseek-v4-pro` and `deepseek:deepseek-v4-flash`.
 
 For BYOK-only use, point Codex at a BYOK model when writing the provider block:
 
@@ -293,7 +301,7 @@ codex-antigravity configure-codex --write --model deepseek:deepseek-chat
 codex-antigravity doctor --byok-only
 ```
 
-`--api-key-env` avoids persisting provider keys and reads them from the gateway process environment. If you intentionally want a provider key stored locally, pass `--api-key`; stored provider keys are encrypted in `~/.codex/antigravity-providers.json`. Use `--auth-mode api-key` explicitly only when you want an API-key provider config to record that mode. Built-in provider env vars include `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `MOONSHOT_API_KEY`, `OLLAMA_API_KEY`, and `OPENCODE_API_KEY`.
+`--api-key-env` avoids persisting provider keys and reads them from the gateway process environment. It may name an existing environment variable instead of the preset default, for example `codex-antigravity provider set bluesminds --api-key-env api_bluesminds_com`. If you intentionally want a provider key stored locally, pass `--api-key`; stored provider keys are encrypted in `~/.codex/antigravity-providers.json`. Use `--auth-mode api-key` explicitly only when you want an API-key provider config to record that mode. Built-in provider env vars include `OPENROUTER_API_KEY`, `BLUESMINDS_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `MOONSHOT_API_KEY`, `OLLAMA_API_KEY`, and `OPENCODE_API_KEY`.
 The `/v1/models` catalog only advertises BYOK models when the provider has a usable stored/env key, a refreshable OAuth login, or explicitly supports key-optional loopback/local use. The generic `custom` preset is not auto-enabled; run `codex-antigravity provider set custom --base-url ... --model ...` before routing `custom:model`.
 When `provider set` is given `--api-key-env`, models are configured but remain hidden from `/v1/models` until that environment variable is available to the running gateway.
 Provider ids reserve model-name separators and may only contain letters, numbers, underscores, and hyphens; model ids themselves may still contain `/` or `:`, but not whitespace or control characters. Unknown `provider:model` prefixes are rejected as BYOK routing errors before any Google account selection.
