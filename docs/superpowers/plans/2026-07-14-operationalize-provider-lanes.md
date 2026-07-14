@@ -208,11 +208,9 @@ The current implementation may be called complete for this follow-up only at **S
 
 **Decision:** Use the stable supported `--op-env-file` path. Do not use the existing FIFO and do not upgrade 1Password CLI as part of this work.
 
-- [ ] Require a regular mode-600 dotenv containing only:
-
-  ```dotenv
-  DEEPSEEK_API_KEY=op://<operator-supplied-reference>
-  ```
+- [ ] Require a regular mode-600 dotenv containing exactly two variables, each mapped to an operator-supplied `op://` reference:
+  - `DEEPSEEK_API_KEY` supplies the official DeepSeek route.
+  - `ANTIGRAVITY_STORAGE_KEY` supplies the gateway's encryption key so this operator's service never needs Apple Keychain.
 
 - [ ] Do not add `BLUESMINDS_API_KEY` while BluesMinds is degraded.
 - [ ] Validate names and permissions without resolving or printing the value:
@@ -220,11 +218,13 @@ The current implementation may be called complete for this follow-up only at **S
   ```bash
   test -f ~/.codex/antigravity-provider.env
   test "$(stat -f '%Lp' ~/.codex/antigravity-provider.env)" = 600
-  rg -q '^DEEPSEEK_API_KEY=op://' ~/.codex/antigravity-provider.env
+  test "$(wc -l < ~/.codex/antigravity-provider.env | tr -d ' ')" = 2
+  rg -q '^DEEPSEEK_API_KEY=op://[^[:space:]]+$' ~/.codex/antigravity-provider.env
+  rg -q '^ANTIGRAVITY_STORAGE_KEY=op://[^[:space:]]+$' ~/.codex/antigravity-provider.env
   ! rg -q '^BLUESMINDS_API_KEY=' ~/.codex/antigravity-provider.env
   ```
 
-- [ ] Run a bounded `op run --env-file ...` check that prints only variable presence/length class, never the value.
+- [ ] Run a bounded `op run --env-file ...` check that prints only presence/length classes for `DEEPSEEK_API_KEY` and `ANTIGRAVITY_STORAGE_KEY`, never either value.
 - [ ] If a regular `op://` reference file cannot be supplied, stop. Do not fall back to plaintext, the FIFO, argv keys, LaunchAgent environment values, or `provider set --api-key`.
 
 ### Task 7: Upgrade the exact launchd runtime and reinstall the service
