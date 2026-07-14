@@ -1142,21 +1142,22 @@ class TestBYOKProviders(unittest.TestCase):
         )
 
         with patch("codex_antigravity_auth.byok.load_provider_config", return_value={"providers": {}}):
-            for bad_env_key in ("bad\nkey", "bad\u00e9key"):
-                with self.subTest(bad_env_key=repr(bad_env_key)):
-                    with patch.dict("os.environ", {"DEEPSEEK_API_KEY": bad_env_key}, clear=True):
-                        providers = all_provider_configs(include_env_enabled=True)
-                        self.assertNotIn("deepseek", providers)
-                        response = TestClient(app).get("/v1/models")
-                        model_ids = [model["id"] for model in response.json()["data"]]
-                        self.assertFalse([model_id for model_id in model_ids if model_id.startswith("deepseek:")])
+            with patch("codex_antigravity_auth.byok.load_provider_config_read_only", return_value={"providers": {}}):
+                for bad_env_key in ("bad\nkey", "bad\u00e9key"):
+                    with self.subTest(bad_env_key=repr(bad_env_key)):
+                        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": bad_env_key}, clear=True):
+                            providers = all_provider_configs(include_env_enabled=True)
+                            self.assertNotIn("deepseek", providers)
+                            response = TestClient(app).get("/v1/models")
+                            model_ids = [model["id"] for model in response.json()["data"]]
+                            self.assertFalse([model_id for model_id in model_ids if model_id.startswith("deepseek:")])
 
-            with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "valid-key"}, clear=True):
-                providers = all_provider_configs(include_env_enabled=True)
-                self.assertIn("deepseek", providers)
-                response = TestClient(app).get("/v1/models")
-                model_ids = [model["id"] for model in response.json()["data"]]
-                self.assertIn("deepseek:deepseek-chat", model_ids)
+                with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "valid-key"}, clear=True):
+                    providers = all_provider_configs(include_env_enabled=True)
+                    self.assertIn("deepseek", providers)
+                    response = TestClient(app).get("/v1/models")
+                    model_ids = [model["id"] for model in response.json()["data"]]
+                    self.assertIn("deepseek:deepseek-chat", model_ids)
 
     def test_non_streaming_byok_route_posts_chat_completion(self):
         provider = {

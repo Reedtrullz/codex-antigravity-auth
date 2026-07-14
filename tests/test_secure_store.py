@@ -14,6 +14,22 @@ from codex_antigravity_auth.storage import _get_encryption_key
 
 
 class TestKeyInitialization(unittest.TestCase):
+    def test_pytest_storage_key_bypasses_system_keyring(self):
+        blocked = AssertionError("tests must not access the system keyring")
+        with patch(
+            "codex_antigravity_auth.storage.keyring.get_password",
+            side_effect=blocked,
+        ) as get_password:
+            with patch(
+                "codex_antigravity_auth.storage.keyring.set_password",
+                side_effect=blocked,
+            ) as set_password:
+                key = _get_encryption_key()
+
+        Fernet(key.encode("utf-8"))
+        get_password.assert_not_called()
+        set_password.assert_not_called()
+
     def test_concurrent_first_initialization_returns_persisted_winner(self):
         stored = {"key": None}
         lock = threading.Lock()
@@ -30,12 +46,13 @@ class TestKeyInitialization(unittest.TestCase):
                 stored["key"] = value
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("codex_antigravity_auth.storage.get_codex_home", return_value=Path(tmp)):
-                with patch("codex_antigravity_auth.secure_store.fcntl", None):
-                    with patch("codex_antigravity_auth.storage.keyring.get_password", side_effect=get_password):
-                        with patch("codex_antigravity_auth.storage.keyring.set_password", side_effect=set_password):
-                            with ThreadPoolExecutor(max_workers=2) as pool:
-                                keys = list(pool.map(lambda _index: _get_encryption_key(), range(2)))
+            with patch.dict(os.environ, {"ANTIGRAVITY_STORAGE_KEY": ""}):
+                with patch("codex_antigravity_auth.storage.get_codex_home", return_value=Path(tmp)):
+                    with patch("codex_antigravity_auth.secure_store.fcntl", None):
+                        with patch("codex_antigravity_auth.storage.keyring.get_password", side_effect=get_password):
+                            with patch("codex_antigravity_auth.storage.keyring.set_password", side_effect=set_password):
+                                with ThreadPoolExecutor(max_workers=2) as pool:
+                                    keys = list(pool.map(lambda _index: _get_encryption_key(), range(2)))
 
         self.assertEqual(keys[0], keys[1])
         self.assertEqual(keys[0], stored["key"])
