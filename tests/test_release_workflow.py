@@ -60,7 +60,7 @@ class TestReleaseWorkflow(unittest.TestCase):
             "grok-oauth",
             "grok-bluesminds",
             "glm-5.2",
-            "workflow claude-grok --model grok-bluesminds",
+            "workflow claude-grok --model sonnet --model opus --model grok-bluesminds",
             "workflow provider-compare",
             "--fallback-model deepseek-v4-flash",
             "Chat Completions adapter",
@@ -69,6 +69,39 @@ class TestReleaseWorkflow(unittest.TestCase):
                 self.assertIn(required, combined)
 
         self.assertNotIn("gpt-5.4", combined.lower())
+
+    def test_provider_lane_selection_guidance_is_explicit_and_truthful(self):
+        docs = {
+            "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
+            "USAGE.md": (ROOT / "USAGE.md").read_text(encoding="utf-8"),
+            "bundled Anti skill": (
+                ROOT / "codex_antigravity_auth/skills/anti/SKILL.md"
+            ).read_text(encoding="utf-8"),
+        }
+        required_guidance = (
+            "fast code second opinion",
+            "correctness, security, architecture, and deep code review",
+            "unproven until",
+            "adversarial assumptions, runtime surprises, and product/UX blind spots",
+            "unavailable/degraded until",
+            "explicit selection",
+            "BYOK disclosure",
+            "/v1/models",
+            "Opus remains the default judge",
+        )
+        misleading = "workflow claude-grok --model grok-bluesminds"
+        corrected = (
+            "workflow claude-grok --model sonnet --model opus "
+            "--model grok-bluesminds"
+        )
+
+        for name, text in docs.items():
+            with self.subTest(document=name):
+                for phrase in required_guidance:
+                    self.assertIn(phrase, text)
+                self.assertNotIn(misleading, text)
+                self.assertIn(corrected, text)
+                self.assertNotIn("gpt-5.4", text.lower())
 
 
 if __name__ == "__main__":

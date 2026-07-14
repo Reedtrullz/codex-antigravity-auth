@@ -35,6 +35,15 @@ Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to mu
 
 BluesMinds uses the gateway's OpenAI Chat Completions adapter. Native Responses streaming, structured output, tool-call, usage, and model-identity fidelity are not claimed until successful live probes prove them. Opus remains the default judge for BluesMinds and DeepSeek advisory lanes.
 
+### Choosing complementary reviewer lanes
+
+- DeepSeek V4 Flash is for a fast code second opinion, debugging, and an explicitly selected retryable fallback. It is never an automatic cross-provider fallback.
+- DeepSeek V4 Pro is for correctness, security, architecture, and deep code review. Treat it as unproven until the live V4 Pro generation, structured-output, and tool-loop gate passes.
+- xAI OAuth Grok is for adversarial assumptions, runtime surprises, and product/UX blind spots.
+- BluesMinds Grok/GLM aliases exist but remain unavailable/degraded until the requested route is advertised by `/v1/models` and the provider live-health gate passes. Every BluesMinds example is conditional on both checks.
+
+Repository context leaves the Google Antigravity lane only after explicit selection and the existing BYOK disclosure. Opus remains the default judge; native Codex remains the acting agent and must verify advisory output locally.
+
 ## Helper
 
 Use `scripts/anti.py` from this skill:
@@ -69,7 +78,7 @@ python3 ~/.codex/skills/anti/scripts/anti.py workflow security-review --scope st
 python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "Intermittent 502s after rotation"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode review --scope staged --output findings
 python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode ask --prompt "Should this UX use route A or B?"
-python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --model grok-bluesminds --panel-mode ask --prompt "Stress-test this design"
+python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --model sonnet --model opus --model grok-bluesminds --panel-mode ask --prompt "Stress-test this design"
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope working-tree
 python3 ~/.codex/skills/anti/scripts/anti.py review --model sonnet --scope staged --file path/to/file.py

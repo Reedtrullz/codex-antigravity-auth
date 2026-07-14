@@ -165,6 +165,15 @@ Panel consensus is not proof and should not patch code directly. Structured find
 
 BYOK panel models such as `openrouter:...` or `xai-oauth:...` only work when the running gateway advertises them in `/v1/models`, which requires usable provider keys, key-optional local provider setup, or a refreshable OAuth login. When a BYOK lane receives repository, diff, or file context, the helper prints and records a disclosure naming the provider lanes. Virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not supported; MoA/Fusion remains a helper workflow, not gateway-side orchestration.
 
+### Choosing complementary reviewer lanes
+
+- DeepSeek V4 Flash is for a fast code second opinion, debugging, and an explicitly selected retryable fallback. It is never an automatic cross-provider fallback.
+- DeepSeek V4 Pro is for correctness, security, architecture, and deep code review. Treat it as unproven until the live V4 Pro generation, structured-output, and tool-loop gate passes.
+- xAI OAuth Grok is for adversarial assumptions, runtime surprises, and product/UX blind spots.
+- BluesMinds Grok/GLM aliases exist but remain unavailable/degraded until the requested route is advertised by `/v1/models` and the provider live-health gate passes. Every BluesMinds example is conditional on both checks.
+
+Repository context leaves the Google Antigravity lane only after explicit selection and the existing BYOK disclosure. Opus remains the default judge; native Codex remains the acting agent and must verify advisory output locally.
+
 V2 named workflow presets wrap the same advisory engine for common Codex work:
 
 ```bash
@@ -177,7 +186,7 @@ python3 ~/.codex/skills/anti/scripts/anti.py workflow security-review --scope st
 python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "Intermittent 502s after rotation"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode review --scope staged --output findings
 python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --panel-mode ask --prompt "Should this UX use route A or B?"
-python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --model grok-bluesminds --panel-mode ask --prompt "Stress-test this design"
+python3 ~/.codex/skills/anti/scripts/anti.py workflow claude-grok --model sonnet --model opus --model grok-bluesminds --panel-mode ask --prompt "Stress-test this design"
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
 ```
 
