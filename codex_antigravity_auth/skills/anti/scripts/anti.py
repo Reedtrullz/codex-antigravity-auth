@@ -55,7 +55,93 @@ MODEL_ALIASES = {
     "deepseek-v4-flash": "deepseek:deepseek-v4-flash",
     "glm-5.2": "bluesminds:z-ai/glm-5.2",
     "glm52": "bluesminds:z-ai/glm-5.2",
+    # Gemini Antigravity (free, fast, 1M context)
+    "flash-high": "gemini-3.5-flash-high",
+    "flash": "gemini-3.5-flash-medium",
+    "flash-medium": "gemini-3.5-flash-medium",
+    "gemini-flash": "gemini-3.5-flash-medium",
+    "gemini-pro": "gemini-3.1-pro-high",
+    "gemini-3.1-pro": "gemini-3.1-pro-high",
+    # Gemini 3.6 Flash (newer, more efficient)
+    "flash-3.6": "gemini-3.6-flash-high",
+    "flash-3.6-high": "gemini-3.6-flash-high",
+    "flash-3.6-medium": "gemini-3.6-flash-medium",
+    "gemini-3.6-flash": "gemini-3.6-flash-medium",
+    # OpenRouter free tier (BYOK)
+    "nemotron-super": "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
+    "nemotron-ultra": "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free",
+    "poolside": "openrouter:poolside/laguna-s-2.1:free",
+    "gemma-4": "openrouter:google/gemma-4-31b-it:free",
+    # Ollama local inference
+    "gpt-oss": "ollama:gpt-oss:20b",
+    "qwen3": "ollama:qwen3:8b",
 }
+
+# Model capabilities: what each model supports
+MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
+    # Gemini Antigravity (Google backend)
+    "gemini-3.5-flash-high": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
+    "gemini-3.5-flash-medium": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
+    "gemini-3.6-flash-high": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
+    "gemini-3.6-flash-medium": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
+    "gemini-3.1-pro-high": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
+    # Claude Antigravity (Google backend)
+    "claude-3.5-sonnet": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "claude-opus-4-6": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    # OpenRouter free tier (BYOK)
+    "openrouter:nvidia/nemotron-3-super-120b-a12b:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "openrouter:poolside/laguna-s-2.1:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "openrouter:google/gemma-4-31b-it:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    # xAI OAuth
+    "xai-oauth:grok-build-0.1": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "xai-oauth:grok-4.3": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    # Ollama local
+    "ollama:gpt-oss:20b": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "ollama:qwen3:8b": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+}
+
+# Cost tiers: free < quota < paid
+# free = no metering (OpenRouter free tier, Ollama local, SuperGrok OAuth)
+# quota = Google Antigravity quota (shared across accounts)
+# paid = metered billing (not currently in rotation)
+MODEL_COST_TIER: dict[str, str] = {
+    "gemini-3.5-flash-high": "quota",
+    "gemini-3.5-flash-medium": "quota",
+    "gemini-3.6-flash-high": "quota",
+    "gemini-3.6-flash-medium": "quota",
+    "gemini-3.1-pro-high": "quota",
+    "claude-3.5-sonnet": "quota",
+    "claude-opus-4-6": "quota",
+    "openrouter:nvidia/nemotron-3-super-120b-a12b:free": "free",
+    "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": "free",
+    "openrouter:poolside/laguna-s-2.1:free": "free",
+    "openrouter:google/gemma-4-31b-it:free": "free",
+    "xai-oauth:grok-build-0.1": "free",
+    "xai-oauth:grok-4.3": "free",
+    "ollama:gpt-oss:20b": "free",
+    "ollama:qwen3:8b": "free",
+}
+
+# Relative quality ranking for cost-aware selection (higher = better for code tasks)
+MODEL_QUALITY_RANK: dict[str, int] = {
+    "claude-opus-4-6": 100,
+    "gemini-3.1-pro-high": 90,
+    "claude-3.5-sonnet": 85,
+    "gemini-3.6-flash-high": 82,
+    "gemini-3.6-flash-medium": 70,
+    "gemini-3.5-flash-high": 80,
+    "xai-oauth:grok-4.3": 78,
+    "xai-oauth:grok-build-0.1": 75,
+    "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": 70,
+    "gemini-3.5-flash-medium": 68,
+    "openrouter:nvidia/nemotron-3-super-120b-a12b:free": 65,
+    "openrouter:poolside/laguna-s-2.1:free": 60,
+    "ollama:gpt-oss:20b": 50,
+    "openrouter:google/gemma-4-31b-it:free": 45,
+    "ollama:qwen3:8b": 40,
+}
+
 DEFAULT_REVIEW_MODEL = "claude-opus-4-6"
 DEFAULT_CONSULT_MODEL = "claude-3.5-sonnet"
 DEFAULT_PLAN_MODEL = "claude-opus-4-6"
@@ -406,6 +492,93 @@ def normalize_base_url(value: str) -> str:
 def resolve_model(value: str | None, *, default: str) -> str:
     raw = (value or default).strip()
     return MODEL_ALIASES.get(raw.lower(), raw)
+
+
+def model_cost_tier(model_id: str) -> str:
+    """Return cost tier: 'free', 'quota', or 'paid'."""
+    return MODEL_COST_TIER.get(model_id, "paid")
+
+
+def model_supports(model_id: str, feature: str) -> bool:
+    """Check if a model supports a feature (images, video, audio, tools, streaming, json_mode)."""
+    caps = MODEL_CAPABILITIES.get(model_id, {})
+    return caps.get(feature, False)
+
+
+def cheapest_models_for_task(
+    *,
+    available: list[str],
+    require_images: bool = False,
+    require_video: bool = False,
+    require_audio: bool = False,
+    min_quality: int = 0,
+    prefer_free: bool = True,
+) -> list[str]:
+    """Return models sorted by cost (free first) then quality (highest first).
+
+    Filters by capability requirements and minimum quality threshold.
+    When prefer_free=True, free models are listed before quota/paid models
+    regardless of quality rank, so callers can burn free quota first.
+    """
+    candidates: list[tuple[str, int, int]] = []
+    for model_id in available:
+        if require_images and not model_supports(model_id, "images"):
+            continue
+        if require_video and not model_supports(model_id, "video"):
+            continue
+        if require_audio and not model_supports(model_id, "audio"):
+            continue
+        quality = MODEL_QUALITY_RANK.get(model_id, 0)
+        if quality < min_quality:
+            continue
+        tier = model_cost_tier(model_id)
+        tier_order = {"free": 0, "quota": 1, "paid": 2}.get(tier, 3)
+        candidates.append((model_id, tier_order, quality))
+    # Sort: free first, then by quality descending
+    candidates.sort(key=lambda x: (x[1] if prefer_free else 2, -x[2]))
+    return [m[0] for m in candidates]
+
+
+def suggest_default_for_task(
+    *,
+    task_type: str,
+    available: list[str],
+    require_images: bool = False,
+) -> str | None:
+    """Suggest a cost-optimal default model for a task type.
+
+    Returns None when no suitable model is found (caller should use hardcoded default).
+    Task types: 'review', 'plan', 'consult', 'code', 'quick'.
+    """
+    if require_images:
+        # Need multimodal: prefer Gemini (free, multimodal) over Claude (quota)
+        candidates = cheapest_models_for_task(
+            available=available, require_images=True, prefer_free=True
+        )
+        return candidates[0] if candidates else None
+
+    if task_type == "quick":
+        # Quick consults: prefer free models
+        candidates = cheapest_models_for_task(available=available, prefer_free=True)
+        return candidates[0] if candidates else None
+
+    if task_type == "code":
+        # Code review/generation: prefer coding-focused free models, then quality
+        candidates = cheapest_models_for_task(available=available, prefer_free=True)
+        # Prefer poolside for code if available
+        for c in candidates:
+            if "poolside" in c:
+                return c
+        return candidates[0] if candidates else None
+
+    if task_type in ("review", "plan"):
+        # Deep tasks: prefer free high-quality, fall back to quota
+        candidates = cheapest_models_for_task(
+            available=available, min_quality=60, prefer_free=True
+        )
+        return candidates[0] if candidates else None
+
+    return None
 
 
 def positive_int(value: str) -> int:
@@ -3226,6 +3399,42 @@ def workflow_command_for_progress(argv: list[str]) -> str:
     return shlex.join(["anti.py", *redacted])
 
 
+def _panel_argv(
+    *,
+    mode: str,
+    scope: str | None,
+    common: list[str],
+    args: argparse.Namespace,
+    roles: list[str],
+    models: list[str],
+    prompt: str | None = None,
+    extra: list[str] | None = None,
+) -> list[str]:
+    argv = ["panel", "--mode", mode]
+    if scope is not None:
+        argv.extend(["--scope", scope])
+    argv.extend(["--judge", args.judge,
+            "--judge-output-tokens", str(args.judge_output_tokens),
+            "--max-synthesis-chars", str(args.max_synthesis_chars),
+            "--max-parallel", str(args.max_parallel),
+            "--output", args.output, *common])
+    if mode == "review":
+        argv.extend(["--chunked", args.chunked,
+                      "--max-review-chunks", str(args.max_review_chunks),
+                      "--chunk-output-tokens", str(args.chunk_output_tokens)])
+    if extra:
+        argv.extend(extra)
+    if args.min_successes is not None:
+        argv.extend(["--min-successes", str(args.min_successes)])
+    for role in args.role or roles:
+        argv.extend(["--role", role])
+    for model in args.model or models:
+        argv.extend(["--model", model])
+    if prompt:
+        argv.extend(["--prompt", prompt])
+    return argv
+
+
 def workflow_expansion(args: argparse.Namespace) -> list[str]:
     common = [
         "--base-url",
@@ -3258,36 +3467,11 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
 
     if args.name == "review-ready":
         scope = workflow_scope(args, default="staged")
-        argv = [
-            "panel",
-            "--mode",
-            "review",
-            "--scope",
-            scope,
-            "--judge",
-            args.judge,
-            "--judge-output-tokens",
-            str(args.judge_output_tokens),
-            "--max-synthesis-chars",
-            str(args.max_synthesis_chars),
-            "--chunked",
-            args.chunked,
-            "--max-review-chunks",
-            str(args.max_review_chunks),
-            "--chunk-output-tokens",
-            str(args.chunk_output_tokens),
-            "--max-parallel",
-            str(args.max_parallel),
-            "--output",
-            args.output,
-            *common,
-        ]
-        if args.min_successes is not None:
-            argv.extend(["--min-successes", str(args.min_successes)])
-        for role in args.role or ["correctness", "security", "tests", "install-docs"]:
-            argv.extend(["--role", role])
-        for model in args.model or []:
-            argv.extend(["--model", model])
+        argv = _panel_argv(
+            mode="review", scope=scope, common=common, args=args,
+            roles=["correctness", "security", "tests", "install-docs"],
+            models=args.model or [],
+        )
     elif args.name == "plan-deep":
         scope = workflow_scope(args, default="working-tree")
         if scope == "diff":
@@ -3318,73 +3502,20 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             argv.extend(["--fallback-model", "sonnet", "--fallback-policy", "on-retryable"])
     elif args.name == "ship-gate":
         scope = workflow_scope(args, default="staged")
-        argv = [
-            "panel",
-            "--mode",
-            "review",
-            "--scope",
-            scope,
-            "--judge",
-            args.judge,
-            "--judge-output-tokens",
-            str(args.judge_output_tokens),
-            "--max-synthesis-chars",
-            str(args.max_synthesis_chars),
-            "--chunked",
-            args.chunked,
-            "--max-review-chunks",
-            str(args.max_review_chunks),
-            "--chunk-output-tokens",
-            str(args.chunk_output_tokens),
-            "--max-parallel",
-            str(args.max_parallel),
-            "--output",
-            args.output,
-            *common,
-            "--prompt",
-            "Assess merge readiness. Focus on concrete blockers, install/use regressions, missing tests, "
-            "release caveats, and what native Codex must verify locally before commit or merge.",
-        ]
-        if args.min_successes is not None:
-            argv.extend(["--min-successes", str(args.min_successes)])
-        for role in args.role or ["correctness", "security", "tests", "install", "release"]:
-            argv.extend(["--role", role])
-        for model in args.model or []:
-            argv.extend(["--model", model])
+        argv = _panel_argv(
+            mode="review", scope=scope, common=common, args=args,
+            roles=["correctness", "security", "tests", "install", "release"],
+            models=args.model or [],
+            prompt="Assess merge readiness. Focus on concrete blockers, install/use regressions, missing tests, release caveats, and what native Codex must verify locally before commit or merge.",
+        )
     elif args.name == "security-review":
         scope = workflow_scope(args, default="staged")
-        argv = [
-            "panel",
-            "--mode",
-            "review",
-            "--scope",
-            scope,
-            "--judge",
-            args.judge,
-            "--judge-output-tokens",
-            str(args.judge_output_tokens),
-            "--max-synthesis-chars",
-            str(args.max_synthesis_chars),
-            "--chunked",
-            args.chunked,
-            "--max-review-chunks",
-            str(args.max_review_chunks),
-            "--chunk-output-tokens",
-            str(args.chunk_output_tokens),
-            "--max-parallel",
-            str(args.max_parallel),
-            "--output",
-            args.output,
-            *common,
-            "--prompt",
-            "Run a security-focused review. Prioritize prompt-injection surfaces, secret handling, authorization and trust boundaries, dependency/config exposure, and concrete local verification steps.",
-        ]
-        if args.min_successes is not None:
-            argv.extend(["--min-successes", str(args.min_successes)])
-        for role in args.role or ["injection", "secrets-handling", "authz", "dependency-surface"]:
-            argv.extend(["--role", role])
-        for model in args.model or []:
-            argv.extend(["--model", model])
+        argv = _panel_argv(
+            mode="review", scope=scope, common=common, args=args,
+            roles=["injection", "secrets-handling", "authz", "dependency-surface"],
+            models=args.model or [],
+            prompt="Run a security-focused review. Prioritize prompt-injection surfaces, secret handling, authorization and trust boundaries, dependency/config exposure, and concrete local verification steps.",
+        )
     elif args.name == "provider-compare":
         if (
             args.base
@@ -3396,26 +3527,11 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             raise AntiError(
                 "workflow provider-compare is prompt-only; omit --scope/--base/--changed-files/--file/--files-from"
             )
-        argv = [
-            "panel",
-            "--mode",
-            "ask",
-            "--judge",
-            args.judge,
-            "--judge-output-tokens",
-            str(args.judge_output_tokens),
-            "--max-synthesis-chars",
-            str(args.max_synthesis_chars),
-            "--max-parallel",
-            str(args.max_parallel),
-            "--output",
-            args.output,
-            *common,
-        ]
-        if args.min_successes is not None:
-            argv.extend(["--min-successes", str(args.min_successes)])
-        for model in args.model or ["sonnet", "opus"]:
-            argv.extend(["--model", model])
+        argv = _panel_argv(
+            mode="ask", scope=None, common=common, args=args,
+            roles=args.role or [],
+            models=args.model or ["sonnet", "opus"],
+        )
     elif args.name == "debug-consensus":
         if (
             args.base
@@ -3475,48 +3591,17 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
                 raise AntiError(
                     "workflow claude-grok --panel-mode ask is prompt-only; omit --scope/--base/--changed-files/--file/--files-from"
                 )
-        argv = [
-            "panel",
-            "--mode",
-            panel_mode,
-            "--collab",
-            "claude-grok",
-            "--judge",
-            args.judge,
-            "--judge-output-tokens",
-            str(args.judge_output_tokens),
-            "--max-synthesis-chars",
-            str(args.max_synthesis_chars),
-            "--max-parallel",
-            str(args.max_parallel),
-            "--output",
-            args.output,
-            *common,
-        ]
-        if panel_mode in {"review", "plan"}:
-            argv.extend(["--scope", scope])
-        if panel_mode == "review":
-            argv.extend(
-                [
-                    "--chunked",
-                    args.chunked,
-                    "--max-review-chunks",
-                    str(args.max_review_chunks),
-                    "--chunk-output-tokens",
-                    str(args.chunk_output_tokens),
-                ]
-            )
-        if args.min_successes is not None:
-            argv.extend(["--min-successes", str(args.min_successes)])
         default_roles = {
             "review": ["Claude/Grok collaboration", "code-correctness", "runtime-surprises", "verification-tests"],
             "plan": ["Claude/Grok collaboration", "architecture", "execution-risk", "checkpoint-verification"],
             "ask": ["Claude/Grok collaboration", "tradeoffs", "adversarial-cross-check", "verification"],
         }[panel_mode]
-        for role in args.role or default_roles:
-            argv.extend(["--role", role])
-        for model in args.model or CLAUDE_GROK_PANEL_MODELS:
-            argv.extend(["--model", model])
+        argv = _panel_argv(
+            mode=panel_mode, scope=scope if panel_mode in {"review", "plan"} else None,
+            common=common, args=args, roles=default_roles,
+            models=args.model or CLAUDE_GROK_PANEL_MODELS,
+            extra=["--collab", "claude-grok"],
+        )
     else:
         raise AntiError(f"unknown workflow: {args.name}")
 

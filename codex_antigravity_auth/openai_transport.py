@@ -610,10 +610,6 @@ class NativeResponsesStreamAdapter:
     def visible_output_started(self) -> bool:
         return self._visible_output_started
 
-    @property
-    def terminal_seen(self) -> bool:
-        return self._terminal_event is not None
-
     def _failure(self, code: str, message: str) -> dict[str, Any]:
         return {
             "type": "response.failed",

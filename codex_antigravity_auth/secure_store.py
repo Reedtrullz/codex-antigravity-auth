@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -22,7 +22,6 @@ try:
 except ImportError:  # pragma: no cover - only available on Windows.
     msvcrt = None
 
-T = TypeVar("T")
 _file_lock_registry_guard = threading.Lock()
 _file_lock_thread_locks: dict[str, threading.RLock] = {}
 
@@ -31,19 +30,11 @@ class StoreError(RuntimeError):
     pass
 
 
-class StoreNotFound(StoreError):
-    pass
-
-
 class StoreInvalidData(StoreError):
     pass
 
 
 class StoreDecryptionError(StoreError):
-    pass
-
-
-class StorePermissionError(StoreError):
     pass
 
 
@@ -169,26 +160,3 @@ class SecureStore:
     def load_json(self, path: Path, *, default: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         with self._thread_lock, file_lock(path):
             return self._load_json_unlocked(path, default)
-
-    def save_json(self, path: Path, data: dict[str, Any]) -> None:
-        with self._thread_lock, file_lock(path):
-            encrypted = Fernet(self._key().encode("utf-8")).encrypt(
-                json.dumps(data, indent=2).encode("utf-8")
-            )
-            self._atomic_write_bytes_unlocked(path, encrypted)
-
-    def update_json(
-        self,
-        path: Path,
-        mutator: Callable[[dict[str, Any]], T],
-        *,
-        default: Callable[[], dict[str, Any]],
-    ) -> T:
-        with self._thread_lock, file_lock(path):
-            data = self._load_json_unlocked(path, default)
-            result = mutator(data)
-            encrypted = Fernet(self._key().encode("utf-8")).encrypt(
-                json.dumps(data, indent=2).encode("utf-8")
-            )
-            self._atomic_write_bytes_unlocked(path, encrypted)
-            return result

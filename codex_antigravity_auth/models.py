@@ -52,6 +52,21 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         aliases=("gemini-3.5-flash", "gemini-3.5-flash-low"),
     ),
     NativeModel(
+        id="gemini-3.6-flash-high",
+        backend_id="gemini-3.6-flash-high",
+        display_name="Gemini 3.6 Flash (Agent High)",
+        context_window=1_000_000,
+        family="gemini",
+    ),
+    NativeModel(
+        id="gemini-3.6-flash-medium",
+        backend_id="gemini-3.6-flash-low",
+        display_name="Gemini 3.6 Flash (General)",
+        context_window=1_000_000,
+        family="gemini",
+        aliases=("gemini-3.6-flash", "gemini-3.6-flash-low"),
+    ),
+    NativeModel(
         id="gemini-3.1-pro-high",
         backend_id="gemini-3.1-pro-high",
         display_name="Gemini 3.1 Pro (Reasoning)",
@@ -88,11 +103,70 @@ MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 MODEL_FAMILY_VALUES = {"claude", "gemini"}
 REASONING_LEVEL_VALUES = {"low", "medium", "high", "xhigh"}
 MODEL_OVERLAY_FILE = "~/.codex/antigravity-models.toml"
-_OVERLAY_CACHE_LOCK = threading.RLock()
-_OVERLAY_CACHE_KEY: tuple[str, int, int] | None = None
-_OVERLAY_CACHE_MODELS: tuple[NativeModel, ...] = ()
-_OVERLAY_CACHE_ERROR: ValueError | None = None
-_OVERLAY_CACHE_WARNED_KEY: tuple[str, int, int] | None = None
+class _OverlayCache:
+    """File-state keyed cache for the model overlay TOML."""
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.key: tuple[str, int, int] | None = None
+        self.models: tuple[NativeModel, ...] = ()
+        self.error: ValueError | None = None
+        self.warned_key: tuple[str, int, int] | None = None
+
+    def reset(self) -> None:
+        with self.lock:
+            self.key = None
+            self.models = ()
+            self.error = None
+            self.warned_key = None
+
+    def warn_error_once(self, cache_key: tuple[str, int, int], error: ValueError) -> None:
+        if self.warned_key == cache_key:
+            return
+        self.warned_key = cache_key
+        warnings.warn(
+            f"Ignoring invalid Codex Antigravity model overlay; built-in models remain available: {error}",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    def load(self, path: Path, *, strict: bool) -> list[NativeModel]:
+        with self.lock:
+            try:
+                cache_key = _overlay_cache_key(path)
+            except ValueError as exc:
+                if strict:
+                    raise
+                cache_key = (str(path), -1, -1)
+                self.warn_error_once(cache_key, exc)
+                return []
+            if self.key == cache_key:
+                if self.error is not None:
+                    if strict:
+                        raise ValueError(str(self.error))
+                    self.warn_error_once(cache_key, self.error)
+                    return []
+                return list(self.models)
+
+            error: ValueError | None = None
+            models: tuple[NativeModel, ...] = ()
+            if cache_key[1] != 0 or cache_key[2] != 0:
+                try:
+                    models = tuple(parse_model_overlay_toml(path.read_text(encoding="utf-8")))
+                except (OSError, ValueError) as exc:
+                    error = ValueError(str(exc))
+            self.key = cache_key
+            self.models = models
+            self.error = error
+            if error is not None:
+                if strict:
+                    raise ValueError(str(error))
+                self.warn_error_once(cache_key, error)
+                return []
+            return list(models)
+
+
+_OVERLAY_CACHE = _OverlayCache()
 
 
 def _slug_variants(value: str) -> set[str]:
@@ -286,63 +360,12 @@ def _overlay_cache_key(path: Path) -> tuple[str, int, int]:
     return (str(path), int(stat_result.st_mtime_ns), int(stat_result.st_size))
 
 
-def _warn_overlay_error_once(cache_key: tuple[str, int, int], error: ValueError) -> None:
-    global _OVERLAY_CACHE_WARNED_KEY
-    if _OVERLAY_CACHE_WARNED_KEY == cache_key:
-        return
-    _OVERLAY_CACHE_WARNED_KEY = cache_key
-    warnings.warn(
-        f"Ignoring invalid Codex Antigravity model overlay; built-in models remain available: {error}",
-        RuntimeWarning,
-        stacklevel=3,
-    )
-
-
 def invalidate_model_overlay_cache() -> None:
-    global _OVERLAY_CACHE_KEY, _OVERLAY_CACHE_MODELS, _OVERLAY_CACHE_ERROR, _OVERLAY_CACHE_WARNED_KEY
-    with _OVERLAY_CACHE_LOCK:
-        _OVERLAY_CACHE_KEY = None
-        _OVERLAY_CACHE_MODELS = ()
-        _OVERLAY_CACHE_ERROR = None
-        _OVERLAY_CACHE_WARNED_KEY = None
+    _OVERLAY_CACHE.reset()
 
 
 def load_model_overlays(*, strict: bool = True) -> list[NativeModel]:
-    path = model_overlay_path()
-    with _OVERLAY_CACHE_LOCK:
-        try:
-            cache_key = _overlay_cache_key(path)
-        except ValueError as exc:
-            if strict:
-                raise
-            cache_key = (str(path), -1, -1)
-            _warn_overlay_error_once(cache_key, exc)
-            return []
-        global _OVERLAY_CACHE_KEY, _OVERLAY_CACHE_MODELS, _OVERLAY_CACHE_ERROR
-        if _OVERLAY_CACHE_KEY == cache_key:
-            if _OVERLAY_CACHE_ERROR is not None:
-                if strict:
-                    raise ValueError(str(_OVERLAY_CACHE_ERROR))
-                _warn_overlay_error_once(cache_key, _OVERLAY_CACHE_ERROR)
-                return []
-            return list(_OVERLAY_CACHE_MODELS)
-
-        error: ValueError | None = None
-        models: tuple[NativeModel, ...] = ()
-        if cache_key[1] != 0 or cache_key[2] != 0:
-            try:
-                models = tuple(parse_model_overlay_toml(path.read_text(encoding="utf-8")))
-            except (OSError, ValueError) as exc:
-                error = ValueError(str(exc))
-        _OVERLAY_CACHE_KEY = cache_key
-        _OVERLAY_CACHE_MODELS = models
-        _OVERLAY_CACHE_ERROR = error
-        if error is not None:
-            if strict:
-                raise ValueError(str(error))
-            _warn_overlay_error_once(cache_key, error)
-            return []
-        return list(models)
+    return _OVERLAY_CACHE.load(model_overlay_path(), strict=strict)
 
 
 def save_model_overlays(models: list[NativeModel]) -> None:

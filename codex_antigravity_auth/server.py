@@ -97,18 +97,6 @@ REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
     reasoning=True,
     streaming_usage=True,
 )
-GOOGLE_ACCOUNT_SCOPED_STREAM_ERROR_TERMS = (
-    "401",
-    "403",
-    "429",
-    "auth",
-    "permission_denied",
-    "quota",
-    "rate limit",
-    "rate_limit",
-    "resource_exhausted",
-    "unauthenticated",
-)
 PACKAGE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}$")
 
 
@@ -677,13 +665,6 @@ def build_headers(account: dict) -> dict:
     )
 
 
-def build_openai_compatible_headers(provider: dict) -> dict:
-    try:
-        return OpenAICompatibleTransport(timeout=120.0).build_headers(provider)
-    except TransportConfigError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-
 def chat_completions_url(provider: dict) -> str:
     try:
         return OpenAICompatibleTransport(timeout=120.0).chat_completions_url(provider)
@@ -911,11 +892,6 @@ def status_code_from_backend_error(code: str, message: str) -> int:
     if "resource_exhausted" in combined or "rate" in combined or "quota" in combined:
         return 429
     return 502
-
-
-def google_stream_error_is_account_scoped(code: str, message: str) -> bool:
-    combined = f"{code} {message}".lower()
-    return any(term in combined for term in GOOGLE_ACCOUNT_SCOPED_STREAM_ERROR_TERMS)
 
 
 def prepare_openai_compatible_request(

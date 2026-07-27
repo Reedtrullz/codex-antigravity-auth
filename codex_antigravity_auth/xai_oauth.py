@@ -15,7 +15,6 @@ from .redaction import redact_secret_text
 from .storage import (
     load_secure_json_file,
     load_secure_json_file_read_only,
-    save_secure_json_file,
     update_secure_json_file,
 )
 
@@ -121,16 +120,6 @@ def load_xai_oauth_data_read_only() -> dict[str, Any]:
         default_xai_oauth_data,
         normalize=normalize_xai_oauth_data,
         error_label="xAI OAuth tokens",
-    )
-
-
-def save_xai_oauth_data(data: dict[str, Any]) -> None:
-    save_secure_json_file(
-        get_xai_oauth_json_path(),
-        normalize_xai_oauth_data(data),
-        error_label="xAI OAuth tokens",
-        default_factory=default_xai_oauth_data,
-        normalize=normalize_xai_oauth_data,
     )
 
 

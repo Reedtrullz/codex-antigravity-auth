@@ -26,6 +26,15 @@ Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to mu
 - Use `grok-bluesminds` or `grok-4.5` for `bluesminds:grok-4.5`. This is a separate API-key route; never silently fail over to or from xAI OAuth.
 - Use `deepseek-v4-pro` for `deepseek:deepseek-v4-pro` and `deepseek-v4-flash` for `deepseek:deepseek-v4-flash` through the official DeepSeek API key.
 - Use `glm-5.2` or `glm52` for `bluesminds:z-ai/glm-5.2`, especially as a long-context planning or repository-review lane.
+- Use `flash-high` for `gemini-3.5-flash-high` (Gemini Flash Agent). Fast agent-tuned reasoning, 1M context.
+- Use `flash` or `flash-medium` for `gemini-3.5-flash-medium` (Gemini Flash General). Balanced speed and quality, 1M context.
+- Use `gemini-pro` for `gemini-3.1-pro-high` (Gemini Pro). Deep reasoning and analysis, 1M context.
+- Use `nemotron-super` for `openrouter:nvidia/nemotron-3-super-120b-a12b:free` (120B MoE, 262K ctx). Fast, good for second opinions.
+- Use `nemotron-ultra` for `openrouter:nvidia/nemotron-3-ultra-550b-a55b:free` (550B, 1M ctx). Large-context analysis and planning.
+- Use `poolside` for `openrouter:poolside/laguna-s-2.1:free`. Coding-focused model for code generation and refactoring.
+- Use `gemma-4` for `openrouter:google/gemma-4-31b-it:free` (30.7B dense). Lightweight, fast for simple consults.
+- Use `gpt-oss` for `ollama:gpt-oss:20b` (local). Private, offline inference.
+- Use `qwen3` for `ollama:qwen3:8b` (local). Private, offline inference.
 - Default review model: `opus`.
 - Default plan model: `opus`.
 - Default consult/ask model: `sonnet`, unless the user asks for deep review.
@@ -35,11 +44,53 @@ Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to mu
 
 BluesMinds uses the gateway's OpenAI Chat Completions adapter. Native Responses streaming, structured output, tool-call, usage, and model-identity fidelity are not claimed until successful live probes prove them. Opus remains the default judge for BluesMinds and DeepSeek advisory lanes.
 
+### Model capabilities and cost tiers
+
+The helper tracks per-model capabilities and cost tiers to make cost-aware decisions. When Opus/Sonnet quota is limited, prefer free models for simple tasks.
+
+| Model | Alias | Cost | Context | Images | Video | Audio | Tools | Quality |
+|---|---|---|---|---|---|---|---|---|
+| `claude-opus-4-6` | `opus` | quota | 200K | yes | no | no | yes | 100 |
+| `gemini-3.6-flash-high` | `flash-3.6` | quota | 1M | yes | yes | yes | yes | 82 |
+| `gemini-3.1-pro-high` | `gemini-pro` | quota | 1M | yes | yes | yes | yes | 90 |
+| `claude-3.5-sonnet` | `sonnet` | quota | 200K | yes | no | no | yes | 85 |
+| `gemini-3.5-flash-high` | `flash-high` | quota | 1M | yes | yes | yes | yes | 80 |
+| `xai-oauth:grok-4.3` | `grok-4.3` | free | 128K | yes | no | no | yes | 78 |
+| `xai-oauth:grok-build-0.1` | `grok` | free | 128K | yes | no | no | yes | 75 |
+| `gemini-3.6-flash-medium` | `flash-3.6-medium` | quota | 1M | yes | yes | yes | yes | 70 |
+| `nemotron-3-ultra-550b` | `nemotron-ultra` | free | 128K | no | no | no | yes | 70 |
+| `gemini-3.5-flash-medium` | `flash` | quota | 1M | yes | yes | yes | yes | 68 |
+| `nemotron-3-super-120b` | `nemotron-super` | free | 128K | no | no | no | yes | 65 |
+| `poolside/laguna-s-2.1` | `poolside` | free | 128K | no | no | no | yes | 60 |
+| `gpt-oss:20b` | `gpt-oss` | free | 128K | yes | no | no | yes | 50 |
+| `gemma-4-31b-it` | `gemma-4` | free | 128K | no | no | no | yes | 45 |
+| `qwen3:8b` | `qwen3` | free | 128K | yes | no | no | yes | 40 |
+
+**Cost tiers:**
+- `free` — No metering. OpenRouter free tier, Ollama local, xAI OAuth (SuperGrok subscription).
+- `quota` — Google Antigravity quota, shared across 4 accounts. Opus and Sonnet share this pool.
+- `paid` — Metered billing (not currently in rotation).
+
+**Cost-aware selection strategy:**
+- When Opus quota is low, use `nemotron-ultra` (70 quality, free, 128K) for broad scans and planning.
+- For quick consults, prefer `flash-3.6` (82 quality, quota, 1M, more efficient than 3.5) or `grok` (75 quality, free).
+- For code review, prefer `poolside` (60 quality, free, coding-focused) first, then fall back to quota models.
+- For image/video/audio tasks, only Gemini and Claude families support multimodal — no free multimodal models exist.
+- Gemini 3.6 Flash is more token-efficient than 3.5 Flash (17% fewer output tokens) at a lower cost. Prefer it over 3.5 Flash for new workflows.
+- The helper's `cheapest_models_for_task()` function automates this: it filters by capability requirements, then sorts free models first, then by quality.
+
 ### Choosing complementary reviewer lanes
 
 - DeepSeek V4 Flash is for a fast code second opinion, debugging, and an explicitly selected retryable fallback. It is never an automatic cross-provider fallback.
 - DeepSeek V4 Pro is for correctness, security, architecture, and deep code review. Treat it as unproven until the live V4 Pro generation, structured-output, and tool-loop gate passes.
 - xAI OAuth Grok is for adversarial assumptions, runtime surprises, and product/UX blind spots.
+- Gemini Flash models are free, fast, and good for quick sanity checks and lightweight consults. They use the same Google Antigravity backend as Claude.
+- Gemini Pro is for deep reasoning when you want a Gemini perspective on architecture or complex logic.
+- Nemotron Ultra (550B, 1M context) is the largest free model available; use it for broad codebase scans and long-document analysis.
+- Nemotron Super (120B MoE) is a fast second opinion when you want a non-Claude, non-Grok perspective.
+- Poolside is coding-focused; use it for code generation, refactoring suggestions, and implementation alternatives.
+- Gemma 4 is lightweight and fast; use it for simple consults where latency matters more than depth.
+- Ollama models run locally; use them when you need privacy or offline inference, but expect lower quality than cloud models.
 - BluesMinds Grok/GLM aliases exist but remain unavailable/degraded until the requested route is advertised by `/v1/models` and the provider live-health gate passes. Every BluesMinds example is conditional on both checks.
 
 The normal service intentionally omits BluesMinds. The last bounded live checks returned a billing error for Grok 4.5 and an upstream 429 for GLM-5.2, so neither route is operationally enabled.
@@ -62,6 +113,11 @@ Common commands:
 python3 ~/.codex/skills/anti/scripts/anti.py smoke
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model sonnet --prompt "Review this idea"
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model deepseek-v4-flash --prompt "Give a fast second opinion"
+python3 ~/.codex/skills/anti/scripts/anti.py consult --model flash-high --prompt "Quick sanity check on this approach"
+python3 ~/.codex/skills/anti/scripts/anti.py consult --model gemini-pro --prompt "Deep analysis of this architecture"
+python3 ~/.codex/skills/anti/scripts/anti.py consult --model nemotron-ultra --prompt "Review this large codebase change"
+python3 ~/.codex/skills/anti/scripts/anti.py consult --model poolside --prompt "Suggest refactoring for this function"
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged --model sonnet --model opus --model flash-high --judge opus
 python3 ~/.codex/skills/anti/scripts/anti.py plan --prompt "Plan a long autonomous hardening pass"
 python3 ~/.codex/skills/anti/scripts/anti.py plan --scope working-tree --prompt "Plan the next PR"
 python3 ~/.codex/skills/anti/scripts/anti.py plan --model glm-5.2 --scope working-tree --prompt "Plan this long-context repository change"

@@ -170,31 +170,6 @@ def _first_stream_text(*values: Any) -> str | None:
     return None
 
 
-def token_count(value: Any) -> int:
-    if isinstance(value, bool):
-        return 0
-    try:
-        count = float(value)
-    except (TypeError, ValueError):
-        return 0
-    if not math.isfinite(count) or count < 0:
-        return 0
-    return int(count)
-
-
-def usage_counts(input_value: Any, output_value: Any, total_value: Any) -> dict[str, int]:
-    input_tokens = token_count(input_value)
-    output_tokens = token_count(output_value)
-    total_tokens = token_count(total_value)
-    if total_tokens <= 0 and (input_tokens or output_tokens):
-        total_tokens = input_tokens + output_tokens
-    return {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens": total_tokens,
-    }
-
-
 def positive_int_value(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
