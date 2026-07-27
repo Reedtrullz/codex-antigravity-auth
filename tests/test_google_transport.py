@@ -14,7 +14,7 @@ from codex_antigravity_auth.google_transport import (
     outcome_for_backend_error,
 )
 from codex_antigravity_auth.response_protocol import TerminalKind
-from codex_antigravity_auth.transform import transform_response
+from tests.conftest import _legacy_transform_response as transform_response
 
 
 class TestGoogleResponseTranslation(unittest.TestCase):

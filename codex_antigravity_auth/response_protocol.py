@@ -133,31 +133,7 @@ def refusal_item(safety_block: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def _has_meaningful_output(output: Sequence[dict[str, Any]]) -> bool:
-    for item in output:
-        if not isinstance(item, dict):
-            continue
-        item_type = item.get("type")
-        if item_type == "function_call" and isinstance(item.get("name"), str) and item["name"]:
-            return True
-        if item_type == "reasoning":
-            summary = item.get("step_by_step_summary") or item.get("summary")
-            if isinstance(summary, str) and summary:
-                return True
-            if isinstance(summary, list) and summary:
-                return True
-        if item_type != "message":
-            continue
-        content = item.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            if part.get("type") == "output_text" and isinstance(part.get("text"), str) and part["text"]:
-                return True
-            if part.get("type") == "refusal" and isinstance(part.get("refusal"), str) and part["refusal"]:
-                return True
-    return False
+    return bool(meaningful_output_items(output))
 
 
 def meaningful_output_items(output: Sequence[dict[str, Any]]) -> tuple[dict[str, Any], ...]:

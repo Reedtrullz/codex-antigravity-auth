@@ -7,11 +7,11 @@ from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
+from codex_antigravity_auth.oauth import post_form
 from codex_antigravity_auth.xai_oauth import (
     XAI_OAUTH_CLIENT_ID,
     XAI_OAUTH_REDIRECT_URI,
     XAI_OAUTH_SCOPE,
-    _post_form,
     build_xai_authorize_url,
     get_xai_oauth_json_path,
     poll_xai_device_code_token,
@@ -77,7 +77,7 @@ class TestXaiOAuth(unittest.TestCase):
 
     def test_post_form_normalizes_network_failures(self):
         with patch("codex_antigravity_auth.xai_oauth.urllib.request.urlopen", side_effect=urllib.error.URLError("network down api_key=sk-secret")):
-            status, payload = _post_form("https://auth.x.ai/oauth2/token", {"client_id": XAI_OAUTH_CLIENT_ID})
+            status, payload = post_form("https://auth.x.ai/oauth2/token", {"client_id": XAI_OAUTH_CLIENT_ID})
 
         self.assertEqual(status, 0)
         self.assertEqual(payload["error"], "network_error")

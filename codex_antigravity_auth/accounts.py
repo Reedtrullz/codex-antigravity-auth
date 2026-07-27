@@ -5,7 +5,6 @@ import time
 from typing import Any, Callable
 
 from .account_state import AccountState
-from .fingerprint import generate_fingerprint
 from .oauth import refresh_access_token, token_expires_in_seconds
 from .redaction import redact_secret_text
 from .response_protocol import AttemptOutcome
@@ -15,6 +14,32 @@ from .storage import (
     load_accounts,
     update_accounts,
 )
+
+
+_CACHED_FINGERPRINT: dict | None = None
+
+
+def generate_fingerprint() -> dict:
+    global _CACHED_FINGERPRINT
+    if _CACHED_FINGERPRINT is not None:
+        return _CACHED_FINGERPRINT
+    _CACHED_FINGERPRINT = {
+        "deviceId": "generated-fingerprint-000000000000",
+        "sessionToken": "00000000000000000000000000000000",
+        "userAgent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Antigravity/2.0.0 "
+            "Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36"
+        ),
+        "apiClient": "google-cloud-sdk vscode_cloudshelleditor/0.1",
+        "clientMetadata": {
+            "ideType": "ANTIGRAVITY",
+            "platform": "MACOS",
+            "pluginType": "GEMINI",
+        },
+        "createdAt": int(time.time() * 1000),
+    }
+    return _CACHED_FINGERPRINT
 
 
 class AccountManager:

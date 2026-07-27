@@ -22,8 +22,7 @@ HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 RESERVED_SLASH_PROVIDER_PREFIXES = {"openai", "openai-responses"}
 PROVIDER_AUTH_MODE_API_KEY = "api_key"
 PROVIDER_AUTH_MODE_OAUTH = "oauth"
-KNOWN_PROVIDER_AUTH_MODES = {PROVIDER_AUTH_MODE_API_KEY, PROVIDER_AUTH_MODE_OAUTH}
-SUPPORTED_PROVIDER_AUTH_MODES = {PROVIDER_AUTH_MODE_API_KEY, PROVIDER_AUTH_MODE_OAUTH}
+KNOWN_PROVIDER_AUTH_MODES = SUPPORTED_PROVIDER_AUTH_MODES = {PROVIDER_AUTH_MODE_API_KEY, PROVIDER_AUTH_MODE_OAUTH}
 PROVIDER_CAPABILITY_FIELDS = frozenset(
     {
         "native_responses",
@@ -164,8 +163,7 @@ def validate_provider_id(provider_id: str) -> str:
     return provider_id
 
 
-def valid_provider_id(provider_id: str) -> bool:
-    return bool(PROVIDER_ID_RE.fullmatch(str(provider_id)))
+
 
 
 def validate_http_base_url(base_url: Any, *, label: str = "base URL") -> str:
@@ -585,7 +583,7 @@ def normalize_provider_config(data: dict[str, Any]) -> dict[str, Any]:
         normalized_providers = {}
         for provider_id, provider in providers.items():
             provider_id = str(provider_id)
-            if not valid_provider_id(provider_id) or not isinstance(provider, dict):
+            if not isinstance(provider, dict) or not PROVIDER_ID_RE.fullmatch(str(provider_id)):
                 continue
             normalized = normalize_provider_entry(provider)
             if provider_id not in PROVIDER_PRESETS and not _non_empty_string(normalized.get("baseUrl")):

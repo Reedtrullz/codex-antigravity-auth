@@ -191,9 +191,9 @@ def install_service(
         )
         os.chmod(path, 0o600)
         uid = _launchd_uid()
-        bootout = _run(["launchctl", "bootout", f"gui/{uid}", str(path)], allow_failure=True)
-        bootstrap = _run(["launchctl", "bootstrap", f"gui/{uid}", str(path)], allow_failure=True)
-        enable = _run(["launchctl", "enable", f"gui/{uid}/{service_label(port)}"], allow_failure=True)
+        bootout = _run(["launchctl", "bootout", f"gui/{uid}", str(path)])
+        bootstrap = _run(["launchctl", "bootstrap", f"gui/{uid}", str(path)])
+        enable = _run(["launchctl", "enable", f"gui/{uid}/{service_label(port)}"])
         status = service_status(port, platform_name=platform_name)
         error = None
         if bootstrap.returncode != 0 or enable.returncode != 0 or not status.get("installed") or not status.get("active"):
@@ -209,8 +209,8 @@ def install_service(
             encoding="utf-8",
         )
         os.chmod(path, 0o600)
-        reload_result = _run(["systemctl", "--user", "daemon-reload"], allow_failure=True)
-        enable_result = _run(["systemctl", "--user", "enable", "--now", path.name], allow_failure=True)
+        reload_result = _run(["systemctl", "--user", "daemon-reload"])
+        enable_result = _run(["systemctl", "--user", "enable", "--now", path.name])
         status = service_status(port, platform_name=platform_name)
         error = None
         if reload_result.returncode != 0 or enable_result.returncode != 0 or not status.get("installed") or not status.get("active"):
@@ -238,14 +238,14 @@ def install_service(
         status = service_status(port, platform_name=platform_name)
         error = None if status.get("installed") and status.get("active") else "scheduled task was not observed as active"
         return _service_result(status, action="install", changed=True, error=error, commands=(_command_evidence(create_result),))
-    raise RuntimeError(f"Unsupported service platform: {platform_name or platform.system()}")
+    raise RuntimeError(f"Unsupported service platform: {platform_name}")
 
 
 def uninstall_service(port: int, *, platform_name: str | None = None) -> dict[str, Any]:
     platform_name = platform_name or service_platform()
     if platform_name == "macos":
         path = macos_launch_agent_path(port)
-        bootout = _run(["launchctl", "bootout", f"gui/{_launchd_uid()}", str(path)], allow_failure=True)
+        bootout = _run(["launchctl", "bootout", f"gui/{_launchd_uid()}", str(path)])
         if path.exists() and not path.is_symlink():
             path.unlink()
         status = service_status(port, platform_name=platform_name)
@@ -258,10 +258,10 @@ def uninstall_service(port: int, *, platform_name: str | None = None) -> dict[st
         )
     if platform_name == "linux":
         path = linux_systemd_unit_path(port)
-        disable = _run(["systemctl", "--user", "disable", "--now", path.name], allow_failure=True)
+        disable = _run(["systemctl", "--user", "disable", "--now", path.name])
         if path.exists() and not path.is_symlink():
             path.unlink()
-        reload_result = _run(["systemctl", "--user", "daemon-reload"], allow_failure=True)
+        reload_result = _run(["systemctl", "--user", "daemon-reload"])
         status = service_status(port, platform_name=platform_name)
         return _service_result(
             status,
@@ -271,7 +271,7 @@ def uninstall_service(port: int, *, platform_name: str | None = None) -> dict[st
             commands=tuple(map(_command_evidence, (disable, reload_result))),
         )
     if platform_name == "windows":
-        delete = _run(["schtasks", "/Delete", "/F", "/TN", service_task_name(port)], allow_failure=True)
+        delete = _run(["schtasks", "/Delete", "/F", "/TN", service_task_name(port)])
         status = service_status(port, platform_name=platform_name)
         return _service_result(
             status,
@@ -280,14 +280,14 @@ def uninstall_service(port: int, *, platform_name: str | None = None) -> dict[st
             error="scheduled task is still installed" if status.get("installed") else None,
             commands=(_command_evidence(delete),),
         )
-    raise RuntimeError(f"Unsupported service platform: {platform_name or platform.system()}")
+    raise RuntimeError(f"Unsupported service platform: {platform_name}")
 
 
 def service_status(port: int, *, platform_name: str | None = None) -> dict[str, Any]:
     platform_name = platform_name or service_platform()
     if platform_name == "macos":
         path = macos_launch_agent_path(port)
-        loaded = _run(["launchctl", "print", f"gui/{_launchd_uid()}/{service_label(port)}"], allow_failure=True).returncode == 0
+        loaded = _run(["launchctl", "print", f"gui/{_launchd_uid()}/{service_label(port)}"]).returncode == 0
         return _service_result(
             {"platform": platform_name, "installed": path.is_file(), "active": loaded, "reachable": False, "path": str(path)},
             action="status",
@@ -295,15 +295,15 @@ def service_status(port: int, *, platform_name: str | None = None) -> dict[str, 
         )
     if platform_name == "linux":
         path = linux_systemd_unit_path(port)
-        active = _run(["systemctl", "--user", "is-active", "--quiet", path.name], allow_failure=True).returncode == 0
-        enabled = _run(["systemctl", "--user", "is-enabled", "--quiet", path.name], allow_failure=True).returncode == 0
+        active = _run(["systemctl", "--user", "is-active", "--quiet", path.name]).returncode == 0
+        enabled = _run(["systemctl", "--user", "is-enabled", "--quiet", path.name]).returncode == 0
         return _service_result(
             {"platform": platform_name, "installed": path.is_file() or enabled, "active": active, "reachable": False, "path": str(path)},
             action="status",
             changed=False,
         )
     if platform_name == "windows":
-        query = _run(["schtasks", "/Query", "/TN", service_task_name(port)], allow_failure=True)
+        query = _run(["schtasks", "/Query", "/TN", service_task_name(port)])
         installed = query.returncode == 0
         return _service_result(
             {"platform": platform_name, "installed": installed, "active": installed, "reachable": False, "task_name": service_task_name(port)},
@@ -318,7 +318,7 @@ def service_status(port: int, *, platform_name: str | None = None) -> dict[str, 
     )
 
 
-def _run(cmd: list[str], *, allow_failure: bool) -> subprocess.CompletedProcess:
+def _run(cmd: list[str], *, allow_failure: bool = True) -> subprocess.CompletedProcess:
     try:
         result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5.0, check=False)
     except FileNotFoundError as exc:

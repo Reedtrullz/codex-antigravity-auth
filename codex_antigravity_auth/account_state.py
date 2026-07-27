@@ -59,31 +59,21 @@ def _counter(value: object) -> dict[str, Any]:
     return result
 
 
-def _scoped_numbers(value: object, *, legacy: bool) -> dict[str, int]:
+def _scoped(value: object, *, legacy: bool, now: float | None = None, use_epoch: bool = False) -> dict[str, int | float]:
+    converter = _epoch if use_epoch else _number
     if legacy:
-        count = int(_number(value))
-        return {"account": count} if count else {}
+        count = converter(value, now if now else 0.0) if use_epoch else int(_number(value))
+        if not count:
+            return {}
+        return {"account": count}
     if not isinstance(value, dict):
         return {}
     result = {}
     for scope in ("account", *FAMILIES):
-        count = int(_number(value.get(scope)))
-        if count:
-            result[scope] = count
-    return result
-
-
-def _scoped_cooldowns(value: object, *, legacy: bool, now: float) -> dict[str, float]:
-    if legacy:
-        expiry = _epoch(value, now)
-        return {"account": expiry} if expiry else {}
-    if not isinstance(value, dict):
-        return {}
-    result = {}
-    for scope in ("account", *FAMILIES):
-        expiry = _epoch(value.get(scope), now)
-        if expiry:
-            result[scope] = expiry
+        v = value.get(scope)
+        c = converter(v, now) if use_epoch else int(_number(v))
+        if c:
+            result[scope] = c
     return result
 
 
@@ -106,7 +96,7 @@ def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str
     if isinstance(raw_failures, dict):
         for email, value in raw_failures.items():
             email = str(email)
-            scoped = _scoped_numbers(value, legacy=legacy)
+            scoped = _scoped(value, legacy=legacy, use_epoch=False)
             if email in emails and scoped:
                 failures[email] = scoped
 
@@ -115,7 +105,7 @@ def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str
     if isinstance(raw_cooldowns, dict):
         for email, value in raw_cooldowns.items():
             email = str(email)
-            scoped = _scoped_cooldowns(value, legacy=legacy, now=now)
+            scoped = _scoped(value, legacy=legacy, now=now, use_epoch=True)
             if email in emails and scoped:
                 cooldowns[email] = scoped
 

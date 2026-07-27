@@ -10,7 +10,7 @@ from typing import Any, Callable, Iterable
 from urllib.parse import urlencode
 
 from .constants import get_codex_home
-from .oauth import OAUTH_HTTP_TIMEOUT_SECONDS, token_expires_in_seconds
+from .oauth import OAUTH_HTTP_TIMEOUT_SECONDS, post_form, token_expires_in_seconds
 from .redaction import redact_secret_text
 from .storage import (
     load_secure_json_file,
@@ -134,37 +134,6 @@ def _positive_seconds(value: Any, default: float) -> float:
         return default
     return parsed
 
-
-def _post_form(url: str, payload: dict[str, Any], timeout: float = OAUTH_HTTP_TIMEOUT_SECONDS) -> tuple[int, dict[str, Any]]:
-    req = urllib.request.Request(
-        url,
-        data=urlencode(payload).encode("utf-8"),
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "codex-antigravity-auth",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            status = int(getattr(resp, "status", 200))
-    except urllib.error.HTTPError as exc:
-        status = int(exc.code)
-        raw = exc.read().decode("utf-8", errors="replace")
-    except urllib.error.URLError as exc:
-        reason = getattr(exc, "reason", exc)
-        return 0, {"error": "network_error", "error_description": redact_secret_text(str(reason))}
-    try:
-        parsed = json.loads(raw) if raw else {}
-    except json.JSONDecodeError:
-        parsed = {"error": "invalid_json", "error_description": raw[:500]}
-    if not isinstance(parsed, dict):
-        parsed = {"error": "invalid_response", "value": parsed}
-    return status, parsed
-
-
 def _oauth_error(prefix: str, status: int, payload: dict[str, Any]) -> RuntimeError:
     error = payload.get("error") or "oauth_error"
     description = payload.get("error_description") or payload.get("message") or ""
@@ -198,7 +167,7 @@ def exchange_xai_authorization_code(
     code: str,
     verifier: str,
     *,
-    post_form: Callable[[str, dict[str, Any], float], tuple[int, dict[str, Any]]] = _post_form,
+    post_form: Callable[[str, dict[str, Any], float], tuple[int, dict[str, Any]]] = post_form,
     timeout: float = OAUTH_HTTP_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     status, payload = post_form(
@@ -219,7 +188,7 @@ def exchange_xai_authorization_code(
 
 def request_xai_device_code(
     *,
-    post_form: Callable[[str, dict[str, Any], float], tuple[int, dict[str, Any]]] = _post_form,
+    post_form: Callable[[str, dict[str, Any], float], tuple[int, dict[str, Any]]] = post_form,
     timeout: float = OAUTH_HTTP_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     status, payload = post_form(
@@ -238,7 +207,7 @@ def request_xai_device_code(
 def poll_xai_device_code_token(
     device: dict[str, Any],
     *,
-    post_form: Callable[[str, dict[str, Any], float], tuple[int, dict[str, Any]]] = _post_form,
+    post_form: Callable[[str, dict[str, Any], float], tuple[int, dict[str, Any]]] = post_form,
     sleep: Callable[[float], None] = time.sleep,
     now_values: Iterable[float] | None = None,
     timeout: float = OAUTH_HTTP_TIMEOUT_SECONDS,
@@ -387,7 +356,7 @@ def xai_token_is_expiring(tokens: dict[str, Any], *, now: float | None = None, s
 def refresh_xai_oauth_access_token(
     refresh_token: str,
     *,
-    post_form: Callable[[str, dict[str, Any], float], tuple[int, dict[str, Any]]] = _post_form,
+    post_form: Callable[[str, dict[str, Any], float], tuple[int, dict[str, Any]]] = post_form,
     timeout: float = OAUTH_HTTP_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     status, payload = post_form(
@@ -408,7 +377,7 @@ def resolve_xai_oauth_access_token(
     *,
     force_refresh: bool = False,
     now: float | None = None,
-    post_form: Callable[[str, dict[str, Any], float], tuple[int, dict[str, Any]]] = _post_form,
+    post_form: Callable[[str, dict[str, Any], float], tuple[int, dict[str, Any]]] = post_form,
 ) -> str:
     timestamp = time.time() if now is None else float(now)
     data = load_xai_oauth_data()

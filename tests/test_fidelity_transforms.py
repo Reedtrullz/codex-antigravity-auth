@@ -1,6 +1,7 @@
 import unittest
 import json
-from codex_antigravity_auth.transform import transform_response, transform_gemini_candidate
+from codex_antigravity_auth.transform import transform_gemini_candidate
+from tests.conftest import _legacy_transform_response as transform_response
 
 class TestFidelityTransforms(unittest.TestCase):
     def test_fidelity_response_with_model_role_mapped_to_assistant(self):

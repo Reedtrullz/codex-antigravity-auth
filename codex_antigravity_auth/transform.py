@@ -78,7 +78,7 @@ def valid_function_name(value: Any) -> bool:
     return isinstance(value, str) and bool(FUNCTION_NAME_PATTERN.fullmatch(value))
 
 
-def valid_tool_call_id(value: Any) -> bool:
+def _valid_tool_call_id(value: Any) -> bool:
     return isinstance(value, str) and bool(value) and not any(
         ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value
     )
@@ -595,20 +595,6 @@ def transform_gemini_candidate(candidate: dict) -> dict:
         }
     return result
 
-def transform_response(gemini_resp: dict, model: str) -> dict:
-    """Compatibility wrapper around the shared Google terminal contract."""
-    from .google_transport import GoogleTransport
-    from .response_protocol import response_from_result
-
-    result = GoogleTransport(timeout=0).parse_response(gemini_resp)
-    return response_from_result(
-        result,
-        response_id=result.provider_response_id or f"resp_{uuid.uuid4().hex[:12]}",
-        model=model,
-        created_at=int(time.time()),
-    )
-
-
 def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
     """Translate Responses API input into OpenAI-compatible Chat Completions."""
     messages = []
@@ -642,7 +628,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
 
     def tool_output_part_to_chat_message(part: dict) -> dict | None:
         call_id = part.get("tool_use_id") or part.get("call_id")
-        if not valid_tool_call_id(call_id):
+        if not _valid_tool_call_id(call_id):
             return None
         explicit_name = part.get("name")
         name = explicit_name if valid_function_name(explicit_name) else function_names_by_call_id.get(call_id)
@@ -734,7 +720,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 continue
             if item_type == "function_call_output":
                 call_id = item.get("call_id")
-                if not valid_tool_call_id(call_id):
+                if not _valid_tool_call_id(call_id):
                     continue
                 message = {
                     "role": "tool",
