@@ -161,6 +161,24 @@ class AccountManager:
                         return dirty
 
                     refresh_token = account.get("refreshToken")
+                    # If current token is valid for immediate use (>10s), attempt refresh outside lock or fallback
+                    if account.get("accessToken") and expires_at > time.time() + 10:
+                        try:
+                            if refresh_token:
+                                refreshed = refresh_access_token(refresh_token)
+                                account["accessToken"] = refreshed["access_token"]
+                                account["expiresAt"] = time.time() + token_expires_in_seconds(refreshed)
+                                if refreshed.get("refresh_token"):
+                                    account["refreshToken"] = refreshed["refresh_token"]
+                                dirty = True
+                        except Exception as exc:
+                            print(
+                                f"[*] Soft refresh failed for {email}, using current token. Reason: "
+                                f"{redact_secret_text(str(exc))}"
+                            )
+                        selected = account
+                        return dirty
+
                     try:
                         if not refresh_token:
                             raise RuntimeError("Token expired and no refresh token is available")

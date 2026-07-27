@@ -30,6 +30,14 @@ _SECRET_KEY_FRAGMENTS = (
     "cookie",
     "set_cookie",
     "setcookie",
+    "auth_token",
+    "authtoken",
+    "password",
+    "private_key",
+    "privatekey",
+    "credential",
+    "secret_key",
+    "client_key",
 )
 
 _EXACT_SECRET_KEYS = {
@@ -41,6 +49,9 @@ _EXACT_SECRET_KEYS = {
     "cookie",
     "set_cookie",
     "setcookie",
+    "password",
+    "credential",
+    "credentials",
 }
 
 _BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)

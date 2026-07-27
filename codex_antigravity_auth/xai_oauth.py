@@ -1,4 +1,5 @@
 from __future__ import annotations
+import threading
 
 import json
 import math
@@ -6,8 +7,11 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
 from typing import Any, Callable, Iterable
 from urllib.parse import urlencode
+
+_xai_token_lock = threading.RLock()
 
 from .constants import get_codex_home
 from .oauth import OAUTH_HTTP_TIMEOUT_SECONDS, post_form, token_expires_in_seconds
@@ -373,7 +377,12 @@ def refresh_xai_oauth_access_token(
     return payload
 
 
-def resolve_xai_oauth_access_token(
+def resolve_xai_oauth_access_token(*args, **kwargs) -> str:
+    with _xai_token_lock:
+        return resolve_xai_oauth_access_token_unlocked(*args, **kwargs)
+
+
+def resolve_xai_oauth_access_token_unlocked(
     *,
     force_refresh: bool = False,
     now: float | None = None,

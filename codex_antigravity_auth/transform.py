@@ -201,11 +201,13 @@ def thinking_budget_for_request(codex_req: dict[str, Any], backend_model: str) -
 
 
 def _created_at(value: Any) -> int:
+    if value is None or value == "":
+        return int(time.time())
     try:
-        created_at = float(value or time.time())
+        created_at = float(value)
     except (TypeError, ValueError):
         return int(time.time())
-    if not math.isfinite(created_at):
+    if not math.isfinite(created_at) or created_at < 0:
         return int(time.time())
     return int(created_at)
 
@@ -272,6 +274,7 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
         if not isinstance(url, str) or not url.startswith("data:"):
             return None
         header, _, payload = url.partition(",")
+        payload = "".join(payload.split())
         if not payload:
             return None
         mime_type = header[5:].split(";", 1)[0] or "application/octet-stream"
@@ -293,7 +296,7 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
             inline_data = data_url_to_inline_data(image_url)
             if inline_data:
                 return [inline_data]
-            if isinstance(image_url, str) and image_url:
+            if isinstance(image_url, str) and image_url and not image_url.startswith("data:"):
                 return [{"fileData": {"mimeType": part.get("mime_type", "image/*"), "fileUri": image_url}}]
         if part_type in ("input_file", "file"):
             file_url = part.get("file_url") or part.get("url")
@@ -569,7 +572,7 @@ def transform_gemini_candidate(candidate: dict) -> dict:
                 "id": f"fc_{uuid.uuid4().hex[:8]}",
                 "call_id": call_id,
                 "name": name,
-                "arguments": function_call_arguments_json(fc.get("args", {})),
+                "arguments": function_call_arguments_string(fc.get("args", {})),
             })
             
     # Assemble structured Responses API message output

@@ -589,7 +589,16 @@ def stop_gateway(args) -> dict:
     while time.time() < deadline and _cli.process_is_running(int(pid)):
         time.sleep(0.1)
     if _cli.process_is_running(int(pid)):
-        raise SystemExit(f"Gateway pid {pid} did not stop within 5s. Log: {info['log_file']}")
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/PID", str(int(pid)), "/T"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5.0, check=False)
+            else:
+                os.kill(int(pid), signal.SIGKILL)
+            time.sleep(0.5)
+        except OSError:
+            pass
+        if _cli.process_is_running(int(pid)):
+            raise SystemExit(f"Gateway pid {pid} did not stop within 5s. Log: {info['log_file']}")
     pid_path.unlink(missing_ok=True)
     print(f"[+] Gateway stopped on port {args.port} (pid {pid})")
     return _cli.gateway_status_info(args.port)

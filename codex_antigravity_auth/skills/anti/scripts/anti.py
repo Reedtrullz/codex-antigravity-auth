@@ -280,10 +280,26 @@ def ensure_run_id(args: argparse.Namespace) -> str | None:
     args.run_id = run_id
     return run_id
 
+_MODEL_SHORT = {
+    "claude-opus-4-6": "opus", "claude-3.5-sonnet": "sonnet",
+    "gemini-3.5-flash-high": "flash", "gemini-3.5-flash-medium": "flash-m",
+    "gemini-3.1-pro-high": "pro", "gemini-3.6-flash-high": "flash-3.6",
+    "xai-oauth:grok-build-0.1": "grok", "xai-oauth:grok-4.3": "grok-4.3",
+    "deepseek:deepseek-v4-pro": "ds-v4", "deepseek:deepseek-v4-flash": "ds-flash",
+    "bluesminds:grok-4.5": "grok-bm", "bluesminds:z-ai/glm-5.2": "glm-5.2",
+}
+
+def _compact(msg: str) -> str:
+    for full, short in _MODEL_SHORT.items():
+        msg = msg.replace(full, short)
+    while "  " in msg:
+        msg = msg.replace("  ", " ")
+    return msg
 
 def progress(args: argparse.Namespace, message: str) -> None:
-    if getattr(args, "progress", False):
-        eprint(f"[anti] {redact_sensitive_text(message)}")
+    if getattr(args, "progress", True):
+        t = time.strftime("%H:%M:%S", time.localtime())
+        eprint(f"[anti {t}] {redact_sensitive_text(_compact(message))}")
 
 
 def save_output_mode(args: argparse.Namespace) -> str:

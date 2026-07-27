@@ -256,6 +256,13 @@ class AccountState:
             if outcome.category == "success":
                 counter["successes"] += 1
                 counter["last_success"] = timestamp
+                if email in self.state["failures"]:
+                    scoped_failures = self.state["failures"][email]
+                    if isinstance(scoped_failures, dict):
+                        if family is not None:
+                            scoped_failures.pop(family, None)
+                        if not scoped_failures:
+                            self.state["failures"].pop(email, None)
             else:
                 counter["failures"] += 1
                 counter["last_failure"] = timestamp

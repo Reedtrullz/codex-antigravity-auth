@@ -146,7 +146,7 @@ def render_linux_systemd_unit(
 ) -> str:
     stdout, stderr = service_log_paths(port)
     command = " ".join(
-        shlex.quote(part)
+        shlex.quote(part).replace('%', '%%')
         for part in service_command(port, host, op_env_file=op_env_file, op_environment=op_environment)
     )
     return f"""[Unit]
@@ -167,6 +167,10 @@ WantedBy=default.target
 
 
 def _launchd_uid() -> int:
+    sudo_uid = os.environ.get("SUDO_UID")
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_uid and sudo_user and sudo_uid.isdigit() and 0 < int(sudo_uid) < 4294967295:
+        return int(sudo_uid)
     getuid = getattr(os, "getuid", None)
     return getuid() if callable(getuid) else 0
 
@@ -337,7 +341,13 @@ def _run(cmd: list[str], *, allow_failure: bool = True) -> subprocess.CompletedP
 
 
 def _xml_escape(value: str) -> str:
-    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
 
 
 def _windows_quote(value: str) -> str:

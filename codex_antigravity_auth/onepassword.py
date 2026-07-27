@@ -12,6 +12,8 @@ def normalize_op_env_file(path: str | None) -> str | None:
     if not path:
         return None
     expanded = Path(path).expanduser()
+    if expanded.is_symlink():
+        raise ValueError(f"1Password env file must not be a symlink: {expanded}")
     if not expanded.is_file():
         raise ValueError(f"1Password env file does not exist or is not a regular file: {expanded}")
     return str(expanded)

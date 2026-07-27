@@ -48,7 +48,14 @@ async def iter_sse_data(response, *, label: str = "provider") -> AsyncIterator[s
                 continue
             yield stripped[5:].strip()
     if buffer.strip():
-        raise SSELineError(f"The {label} stream ended with an incomplete SSE frame.")
+        stripped = buffer.strip()
+        if stripped.startswith("data:"):
+            payload = stripped[5:].strip()
+            if payload == "[DONE]":
+                return
+            yield payload
+        else:
+            raise SSELineError(f"The {label} stream ended with an incomplete SSE frame.")
 
 
 def parse_sse_payload(data: str, *, label: str = "provider") -> dict[str, Any]:
