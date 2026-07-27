@@ -1518,6 +1518,7 @@ class AntiHelperTests(unittest.TestCase):
             rc = anti.main(
                 [
                     "plan",
+                    "--model", "opus",
                     "--scope",
                     "none",
                     "--prompt",
@@ -1562,7 +1563,7 @@ class AntiHelperTests(unittest.TestCase):
             try:
                 os.chdir(root)
                 with contextlib.redirect_stdout(output):
-                    rc = anti.main(["review", "--scope", "files", "--file", "big.py", "--json"])
+                    rc = anti.main(["review", "--model", "opus", "--scope", "files", "--file", "big.py", "--json"])
             finally:
                 os.chdir(old_cwd)
 

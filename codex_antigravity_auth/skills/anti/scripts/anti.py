@@ -296,6 +296,13 @@ def _compact(msg: str) -> str:
         msg = msg.replace("  ", " ")
     return msg
 
+
+def _warn_quota(args, model: str) -> None:
+    tier = model_cost_tier(model)
+    if tier == "quota":
+        quality = MODEL_QUALITY_RANK.get(model, 0)
+        progress(args, f"note: using quota model {_compact(model)} (quality {quality}). Pass --prefer-free to use free models instead.")
+
 def progress(args: argparse.Namespace, message: str) -> None:
     if getattr(args, "progress", True):
         t = time.strftime("%H:%M:%S", time.localtime())
@@ -2968,6 +2975,16 @@ def command_panel(args: argparse.Namespace) -> int:
 
 def command_consult(args: argparse.Namespace) -> int:
     model = resolve_model(args.model, default=DEFAULT_CONSULT_MODEL)
+    if args.model is None and getattr(args, "prefer_free", True):
+        try:
+            model_ids = ensure_models_available(base_url=args.base_url, models=[DEFAULT_CONSULT_MODEL], timeout=args.timeout, token_env=args.gateway_token_env)
+            cheap = suggest_default_for_task(task_type="quick", available=list(model_ids))
+            if cheap and cheap != model:
+                progress(args, f"prefer-free: {_compact(model)} -> {_compact(cheap)} ({model_cost_tier(cheap)})")
+                model = cheap
+        except Exception:
+            pass
+    _warn_quota(args, model)
     prompt = read_prompt(args)
     caveats: list[str] = []
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
@@ -3011,6 +3028,16 @@ def command_consult(args: argparse.Namespace) -> int:
 
 def command_review(args: argparse.Namespace) -> int:
     model = resolve_model(args.model, default=DEFAULT_REVIEW_MODEL)
+    if args.model is None and getattr(args, "prefer_free", True):
+        try:
+            model_ids = ensure_models_available(base_url=args.base_url, models=[model], timeout=args.timeout, token_env=args.gateway_token_env)
+            cheap = suggest_default_for_task(task_type="review", available=list(model_ids))
+            if cheap and cheap != model:
+                progress(args, f"prefer-free: defaulting to {_compact(model)} -> {_compact(cheap)} ({model_cost_tier(cheap)})")
+                model = cheap
+        except Exception:
+            pass
+    _warn_quota(args, model)
     prompt_budget = prompt_budget_for_model(args, model)
     claude_guardrail_available = claude_guardrail_would_apply(args, model, prompt_budget)
     context = collect_review_context(args)
@@ -3093,6 +3120,16 @@ def command_review(args: argparse.Namespace) -> int:
 
 def command_plan(args: argparse.Namespace) -> int:
     model = resolve_model(args.model, default=DEFAULT_PLAN_MODEL)
+    if args.model is None and getattr(args, "prefer_free", True):
+        try:
+            model_ids = ensure_models_available(base_url=args.base_url, models=[model], timeout=args.timeout, token_env=args.gateway_token_env)
+            cheap = suggest_default_for_task(task_type="plan", available=list(model_ids))
+            if cheap and cheap != model:
+                progress(args, f"prefer-free: defaulting to {_compact(model)} -> {_compact(cheap)} ({model_cost_tier(cheap)})")
+                model = cheap
+        except Exception:
+            pass
+    _warn_quota(args, model)
     prompt_budget = prompt_budget_for_model(args, model)
     claude_guardrail_available = claude_guardrail_would_apply(args, model, prompt_budget)
     prompt, caveats = assemble_plan_prompt(args, apply_limit=False)
@@ -3807,6 +3844,8 @@ def add_generation_control_args(
         help="When to use --fallback-model",
     )
     parser.add_argument("--progress", action="store_true", help="Print long-call progress to stderr")
+    parser.add_argument("--prefer-free", action="store_true", default=True, help="Prefer free-tier models over quota models (default: true)")
+    parser.add_argument("--no-prefer-free", dest="prefer_free", action="store_false", help="Allow quota models as defaults")
     parser.add_argument("--run-label", help="Optional label for saved Anti run metadata")
     parser.add_argument("--run-id", help="Stable run/correlation id for saved and gateway records")
     parser.add_argument(
@@ -3870,7 +3909,7 @@ def build_parser() -> argparse.ArgumentParser:
     consult = sub.add_parser("consult", aliases=["ask"], help="Ask Antigravity an explicit prompt")
     add_gateway_args(consult, default_timeout=120.0)
     add_generation_control_args(consult)
-    consult.add_argument("--model", default="sonnet", help="opus, sonnet, or full model id")
+    consult.add_argument("--model", default=None, help="Model alias/id; auto-picks cheapest available when unset")
     consult.add_argument("--prompt", help="Prompt text")
     consult.add_argument("--prompt-file", help="Read prompt text from file")
     consult.add_argument("--max-output-tokens", type=positive_int, default=2048)
@@ -3887,7 +3926,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_gateway_args(plan, default_timeout=120.0)
     add_generation_control_args(plan)
-    plan.add_argument("--model", default="opus", help="opus, sonnet, or full model id")
+    plan.add_argument("--model", default=None, help="Model alias/id; auto-picks cheapest available when unset")
     plan.add_argument("--prompt", help="Planning goal text")
     plan.add_argument("--prompt-file", help="Read planning goal from file")
     plan.add_argument("--scope", choices=["none", "working-tree", "staged", "files"], default="none")
@@ -3907,7 +3946,7 @@ def build_parser() -> argparse.ArgumentParser:
     review = sub.add_parser("review", help="Review git diffs or selected files with Antigravity")
     add_gateway_args(review, default_timeout=120.0)
     add_generation_control_args(review)
-    review.add_argument("--model", default="opus", help="opus, sonnet, or full model id")
+    review.add_argument("--model", default=None, help="Model alias/id; auto-picks cheapest available when unset")
     review.add_argument("--scope", choices=["working-tree", "staged", "files", "diff"], default="working-tree")
     review.add_argument("--base", help="Base ref for --scope diff; uses <base>...HEAD")
     review.add_argument("--changed-files", dest="changed_files_range", help="Git revision range for --scope diff")
