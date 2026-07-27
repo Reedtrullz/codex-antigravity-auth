@@ -101,8 +101,9 @@ MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
     "ollama:qwen3:8b": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
 }
 
-# Cost tiers: free < quota < paid
-# free = no metering (OpenRouter free tier, Ollama local, SuperGrok OAuth)
+# Cost tiers: free < subscription < quota < paid
+# free = no metering (OpenRouter free tier, Ollama local)
+# subscription = paid subscription with usage quotas (xAI SuperGrok)
 # quota = Google Antigravity quota (shared across accounts)
 # paid = metered billing (not currently in rotation)
 MODEL_COST_TIER: dict[str, str] = {
@@ -117,8 +118,8 @@ MODEL_COST_TIER: dict[str, str] = {
     "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": "free",
     "openrouter:poolside/laguna-s-2.1:free": "free",
     "openrouter:google/gemma-4-31b-it:free": "free",
-    "xai-oauth:grok-build-0.1": "free",
-    "xai-oauth:grok-4.3": "free",
+    "xai-oauth:grok-build-0.1": "subscription",
+    "xai-oauth:grok-4.3": "subscription",
     "ollama:gpt-oss:20b": "free",
     "ollama:qwen3:8b": "free",
 }
@@ -555,7 +556,7 @@ def cheapest_models_for_task(
         if quality < min_quality:
             continue
         tier = model_cost_tier(model_id)
-        tier_order = {"free": 0, "quota": 1, "paid": 2}.get(tier, 3)
+        tier_order = {"free": 0, "subscription": 1, "quota": 2, "paid": 3}.get(tier, 3)
         candidates.append((model_id, tier_order, quality))
     # Sort: free first, then by quality descending
     candidates.sort(key=lambda x: (x[1] if prefer_free else 2, -x[2]))

@@ -55,8 +55,8 @@ The helper tracks per-model capabilities and cost tiers to make cost-aware decis
 | `gemini-3.1-pro-high` | `gemini-pro` | quota | 1M | yes | yes | yes | yes | 90 |
 | `claude-3.5-sonnet` | `sonnet` | quota | 200K | yes | no | no | yes | 85 |
 | `gemini-3.5-flash-high` | `flash-high` | quota | 1M | yes | yes | yes | yes | 80 |
-| `xai-oauth:grok-4.3` | `grok-4.3` | free | 128K | yes | no | no | yes | 78 |
-| `xai-oauth:grok-build-0.1` | `grok` | free | 128K | yes | no | no | yes | 75 |
+| `xai-oauth:grok-4.3` | `grok-4.3` | subscription | 128K | yes | no | no | yes | 78 |
+| `xai-oauth:grok-build-0.1` | `grok` | subscription | 128K | yes | no | no | yes | 75 |
 | `gemini-3.6-flash-medium` | `flash-3.6-medium` | quota | 1M | yes | yes | yes | yes | 70 |
 | `nemotron-3-ultra-550b` | `nemotron-ultra` | free | 128K | no | no | no | yes | 70 |
 | `gemini-3.5-flash-medium` | `flash` | quota | 1M | yes | yes | yes | yes | 68 |
@@ -67,7 +67,8 @@ The helper tracks per-model capabilities and cost tiers to make cost-aware decis
 | `qwen3:8b` | `qwen3` | free | 128K | yes | no | no | yes | 40 |
 
 **Cost tiers:**
-- `free` — No metering. OpenRouter free tier, Ollama local, xAI OAuth (SuperGrok subscription).
+- `free` — No metering. OpenRouter free tier, Ollama local.
+- `subscription` — Paid subscription with usage quotas. xAI SuperGrok (grok, grok-4.3).
 - `quota` — Google Antigravity quota, shared across 4 accounts. Opus and Sonnet share this pool.
 - `paid` — Metered billing (not currently in rotation).
 
