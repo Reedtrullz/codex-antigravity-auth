@@ -1386,6 +1386,10 @@ def extract_file_paths_from_prompt(prompt: str) -> list[str]:
     for match in re.finditer(r'`(/[\w./@-]+\.\w+)`', prompt):
         add_path(match.group(1))
     
+    # Pattern 5: Windows drive-letter paths (C:\Users\...\file.py)
+    for match in re.finditer(r'(?<![~\w\\])([A-Za-z]:\\(?:[~\w.@-]+\\)*[~\w.@-]+\.\w+)', prompt):
+        add_path(match.group(1))
+    
     return paths
 
 
