@@ -64,15 +64,8 @@ def get_pkce_verifier(state_id: str) -> dict[str, str] | None:
         return None
     return verifier_info
 
-def _purge_expired_pkce_verifiers() -> None:
-    now = time.time()
-    expired = [k for k, v in list(_pkce_verifier_store.items()) if now - float(v.get("createdAt", 0)) > _PKCE_VERIFIER_TTL_SECONDS]
-    for k in expired:
-        _pkce_verifier_store.pop(k, None)
-
-
 def authorize_antigravity(*, select_account: bool = False) -> dict:
-    _purge_expired_pkce_verifiers()
+    [_pkce_verifier_store.pop(k, None) for k, v in list(_pkce_verifier_store.items()) if time.time() - float(v.get("createdAt", 0)) > _PKCE_VERIFIER_TTL_SECONDS]
     cid, csec = require_credentials()
     pkce = generate_pkce()
     

@@ -270,19 +270,6 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     def response_role_to_gemini(role: str) -> str:
         return "model" if role == "assistant" else "user"
 
-    def data_url_to_inline_data(url: str) -> dict | None:
-        if not isinstance(url, str) or not url.startswith("data:"):
-            return None
-        header, _, payload = url.partition(",")
-        payload = "".join(payload.split())
-        if not payload:
-            return None
-        mime_type = header[5:].split(";", 1)[0] or "application/octet-stream"
-        try:
-            base64.b64decode(payload, validate=True)
-        except Exception:
-            return None
-        return {"inlineData": {"mimeType": mime_type, "data": payload}}
 
     def content_part_to_gemini(part: dict) -> list[dict]:
         part_type = part.get("type")
@@ -293,9 +280,16 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
             image_url = part.get("image_url") or part.get("url")
             if isinstance(image_url, dict):
                 image_url = image_url.get("url")
-            inline_data = data_url_to_inline_data(image_url)
-            if inline_data:
-                return [inline_data]
+            if isinstance(image_url, str) and image_url.startswith("data:"):
+                header, _, payload = image_url.partition(",")
+                payload = "".join(payload.split())
+                if payload:
+                    mime_type = header[5:].split(";", 1)[0] or "application/octet-stream"
+                    try:
+                        base64.b64decode(payload, validate=True)
+                        return [{"inlineData": {"mimeType": mime_type, "data": payload}}]
+                    except Exception:
+                        pass
             if isinstance(image_url, str) and image_url and not image_url.startswith("data:"):
                 return [{"fileData": {"mimeType": part.get("mime_type", "image/*"), "fileUri": image_url}}]
         if part_type in ("input_file", "file"):

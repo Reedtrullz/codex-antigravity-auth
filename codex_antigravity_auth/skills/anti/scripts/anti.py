@@ -541,47 +541,6 @@ def cheapest_models_for_task(
     return [m[0] for m in candidates]
 
 
-def suggest_default_for_task(
-    *,
-    task_type: str,
-    available: list[str],
-    require_images: bool = False,
-) -> str | None:
-    """Suggest a cost-optimal default model for a task type.
-
-    Returns None when no suitable model is found (caller should use hardcoded default).
-    Task types: 'review', 'plan', 'consult', 'code', 'quick'.
-    """
-    if require_images:
-        # Need multimodal: prefer Gemini (free, multimodal) over Claude (quota)
-        candidates = cheapest_models_for_task(
-            available=available, require_images=True, prefer_free=True
-        )
-        return candidates[0] if candidates else None
-
-    if task_type == "quick":
-        # Quick consults: prefer free models
-        candidates = cheapest_models_for_task(available=available, prefer_free=True)
-        return candidates[0] if candidates else None
-
-    if task_type == "code":
-        # Code review/generation: prefer coding-focused free models, then quality
-        candidates = cheapest_models_for_task(available=available, prefer_free=True)
-        # Prefer poolside for code if available
-        for c in candidates:
-            if "poolside" in c:
-                return c
-        return candidates[0] if candidates else None
-
-    if task_type in ("review", "plan"):
-        # Deep tasks: prefer free high-quality, fall back to quota
-        candidates = cheapest_models_for_task(
-            available=available, min_quality=60, prefer_free=True
-        )
-        return candidates[0] if candidates else None
-
-    return None
-
 
 def positive_int(value: str) -> int:
     try:
