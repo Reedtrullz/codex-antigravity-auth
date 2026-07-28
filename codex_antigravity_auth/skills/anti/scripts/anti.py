@@ -150,6 +150,7 @@ DEFAULT_PANEL_JUDGE_MODEL = "claude-opus-4-6"
 COLLAB_PROFILES = {"none", "claude-grok"}
 CLAUDE_GROK_PANEL_MODELS = ["sonnet", "opus", "grok"]
 MAX_FILE_BYTES = 180_000
+CONSULT_MAX_FILES = 24  # ponytail: prevents DoS from prompts mentioning hundreds of files
 DEFAULT_MAX_PROMPT_CHARS = 120_000
 DEFAULT_MAX_SYNTHESIS_CHARS = DEFAULT_MAX_PROMPT_CHARS
 CLAUDE_SAFE_PROMPT_CHARS = 30_000
@@ -1381,6 +1382,10 @@ def extract_file_paths_from_prompt(prompt: str) -> list[str]:
     for match in re.finditer(r'(?:(?<=\s)|(?<=\())(\./[\w.@-]+(?:/[\w.@-]+)*\.\w+)', prompt):
         add_path(match.group(1))
     
+    # Pattern 4: Paths in backticks (common in Codex prompts)
+    for match in re.finditer(r'`(/[\w./@-]+\.\w+)`', prompt):
+        add_path(match.group(1))
+    
     return paths
 
 
@@ -1403,6 +1408,15 @@ def build_consult_file_context(
     file_blocks: list[str] = []
     read_files: list[str] = []
     
+    # ponytail: prevent DoS from prompts mentioning hundreds of files
+    if len(file_paths) > CONSULT_MAX_FILES:
+        caveats.append(
+            f"Too many file paths detected ({len(file_paths)}). "
+            f"Reading first {CONSULT_MAX_FILES} only."
+        )
+        file_paths = file_paths[:CONSULT_MAX_FILES]
+    
+    total_bytes = 0
     for file_path_str in file_paths:
         # Check for symlinks BEFORE resolving to prevent following them
         raw_path = Path(file_path_str).expanduser()
@@ -1415,6 +1429,20 @@ def build_consult_file_context(
         if not file_path.is_file():
             caveats.append(f"File not found: {file_path_str}")
             continue
+        
+        # ponytail: per-file size guard — cap each file and track total
+        try:
+            file_size = min(file_path.stat().st_size, MAX_FILE_BYTES)
+        except OSError:
+            caveats.append(f"Cannot stat file: {file_path_str}")
+            continue
+        
+        if total_bytes + file_size > max_prompt_chars // 2 and total_bytes > 0:
+            caveats.append(
+                f"Skipped {file_path_str}: combined file size would dominate the prompt budget"
+            )
+            continue
+        total_bytes += file_size
         
         text, note = read_text_file(file_path.parent, file_path.name)
         if note:
@@ -3168,10 +3196,14 @@ def command_consult(args: argparse.Namespace) -> int:
     caveats: list[str] = []
     
     # Pre-read files mentioned in the prompt to prevent hallucination
-    prompt, file_caveats, read_files = build_consult_file_context(
-        prompt, args.max_prompt_chars
-    )
-    caveats.extend(file_caveats)
+    read_files: list[str] = []
+    if not getattr(args, "no_pre_read", False):
+        prompt, file_caveats, read_files = build_consult_file_context(
+            prompt, args.max_prompt_chars
+        )
+        caveats.extend(file_caveats)
+    else:
+        file_caveats: list[str] = []
     if read_files:
         progress(args, f"consult: pre-read {len(read_files)} file(s) for context")
     
@@ -4082,6 +4114,7 @@ def build_parser() -> argparse.ArgumentParser:
     consult.add_argument("--model", default="sonnet", help="opus, sonnet, or full model id")
     consult.add_argument("--prompt", help="Prompt text")
     consult.add_argument("--prompt-file", help="Read prompt text from file")
+    consult.add_argument("--no-pre-read", action="store_true", dest="no_pre_read", help="Disable automatic file pre-reading for consult prompts")
     consult.add_argument("--max-output-tokens", type=positive_int, default=2048)
     consult.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help="Maximum prompt chars before truncation; use 0 for unlimited")
     consult.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")

@@ -1,8 +1,6 @@
 import base64
 import uuid
 import time
-import uuid
-import time
 
 import pytest
 
@@ -30,9 +28,6 @@ def _disable_gateway_refresh_ahead(monkeypatch):
         raising=False,
     )
 
-import uuid
-import time
-
 
 def _legacy_transform_response(gemini_resp: dict, model: str) -> dict:
     """Test-only compatibility wrapper for tests that used transform_response."""
@@ -46,22 +41,3 @@ def _legacy_transform_response(gemini_resp: dict, model: str) -> dict:
         model=model,
         created_at=int(time.time()),
     )
-
-
-import uuid
-import time
-
-
-def _legacy_transform_response(gemini_resp: dict, model: str) -> dict:
-    """Test-only compatibility wrapper for tests that used transform_response."""
-    from codex_antigravity_auth.google_transport import GoogleTransport
-    from codex_antigravity_auth.response_protocol import response_from_result
-
-    result = GoogleTransport(timeout=0).parse_response(gemini_resp)
-    return response_from_result(
-        result,
-        response_id=result.provider_response_id or f"resp_{uuid.uuid4().hex[:12]}",
-        model=model,
-        created_at=int(time.time()),
-    )
-

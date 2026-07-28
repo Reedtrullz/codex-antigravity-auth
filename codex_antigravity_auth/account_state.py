@@ -60,9 +60,9 @@ def _counter(value: object) -> dict[str, Any]:
 
 
 def _scoped(value: object, *, legacy: bool, now: float | None = None, use_epoch: bool = False) -> dict[str, int | float]:
-    converter = _epoch if use_epoch else _number
+    convert = _epoch if use_epoch else (lambda v, _now=None: int(_number(v)))
     if legacy:
-        count = converter(value, now if now else 0.0) if use_epoch else int(_number(value))
+        count = convert(value, now if now else 0.0)
         if not count:
             return {}
         return {"account": count}
@@ -70,10 +70,8 @@ def _scoped(value: object, *, legacy: bool, now: float | None = None, use_epoch:
         return {}
     result = {}
     for scope in ("account", *FAMILIES):
-        v = value.get(scope)
-        c = converter(v, now) if use_epoch else int(_number(v))
-        if c:
-            result[scope] = c
+        if count := convert(value.get(scope), now):
+            result[scope] = count
     return result
 
 

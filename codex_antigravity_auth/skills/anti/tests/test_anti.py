@@ -2614,3 +2614,25 @@ class ConsultFileContextTests(unittest.TestCase):
             self.assertEqual(read_files, [])
             self.assertEqual(enhanced, prompt)
             self.assertTrue(any("exceeds max" in c for c in caveats))
+
+    def test_build_consult_file_context_rejects_symlink(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-test-") as tmp:
+            root = Path(tmp)
+            target = root / "real.py"
+            target.write_text("print('real')", encoding="utf-8")
+            link = root / "link.py"
+            link.symlink_to(target)
+            
+            prompt = f'Review {link}'
+            enhanced, caveats, read_files = anti.build_consult_file_context(prompt, 120_000)
+            
+            self.assertEqual(read_files, [])
+            self.assertTrue(any("Skipped symlink" in c for c in caveats))
+
+    def test_extract_file_paths_from_prompt_backtick_paths(self) -> None:
+        anti = load_anti()
+        prompt = 'Review `/path/to/file.py` and check `/other/config.toml`'
+        paths = anti.extract_file_paths_from_prompt(prompt)
+        self.assertIn('/path/to/file.py', paths)
+        self.assertIn('/other/config.toml', paths)
