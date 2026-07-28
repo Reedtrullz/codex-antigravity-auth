@@ -95,14 +95,11 @@ from .xai_oauth import (
     xai_oauth_status,
 )
 
-_DEFAULT_LOAD_ACCOUNTS = load_accounts
-_DEFAULT_ALL_PROVIDER_CONFIGS = all_provider_configs
 _DEFAULT_GET_CODEX_HOME = get_codex_home
 
 
 DEFAULT_CODEX_PROVIDER_ID = "antigravity"
 DEFAULT_CODEX_PROVIDER_NAME = "Google Antigravity"
-DEFAULT_CODEX_MODEL = DEFAULT_CODEX_MODEL_ID
 DEFAULT_CODEX_BASE_URL = "http://localhost:51122/v1"
 DEFAULT_CODEX_SKILLS_DIR = "~/.codex/skills"
 BUNDLED_CODEX_SKILL_NAME = "anti"
@@ -797,7 +794,7 @@ def render_codex_provider_table(
 
 def render_codex_config_snippet(
     *,
-    model: str = DEFAULT_CODEX_MODEL,
+    model: str = DEFAULT_CODEX_MODEL_ID,
     provider_id: str = DEFAULT_CODEX_PROVIDER_ID,
     provider_name: str = DEFAULT_CODEX_PROVIDER_NAME,
     base_url: str = DEFAULT_CODEX_BASE_URL,
@@ -902,7 +899,7 @@ def _upsert_table(lines: list[str], section_name: str, values: dict[str, str]) -
 def merge_codex_config(
     existing: str,
     *,
-    model: str = DEFAULT_CODEX_MODEL,
+    model: str = DEFAULT_CODEX_MODEL_ID,
     provider_id: str = DEFAULT_CODEX_PROVIDER_ID,
     provider_name: str = DEFAULT_CODEX_PROVIDER_NAME,
     base_url: str = DEFAULT_CODEX_BASE_URL,
@@ -1098,7 +1095,7 @@ def _codex_config_backup_path(config_path: Path) -> Path:
 def write_codex_config(
     config_path: Path,
     *,
-    model: str = DEFAULT_CODEX_MODEL,
+    model: str = DEFAULT_CODEX_MODEL_ID,
     provider_id: str = DEFAULT_CODEX_PROVIDER_ID,
     provider_name: str = DEFAULT_CODEX_PROVIDER_NAME,
     base_url: str = DEFAULT_CODEX_BASE_URL,
@@ -1135,7 +1132,7 @@ def configure_codex_write_command(args) -> str:
         parts.append("--activate")
     if args.config != "~/.codex/config.toml":
         parts.extend(["--config", args.config])
-    if args.model != DEFAULT_CODEX_MODEL:
+    if args.model != DEFAULT_CODEX_MODEL_ID:
         parts.extend(["--model", args.model])
     if args.provider != DEFAULT_CODEX_PROVIDER_ID:
         parts.extend(["--provider", args.provider])
@@ -1332,7 +1329,7 @@ def main():
     setup_parser.add_argument("--no-input", action="store_true", help="Fail instead of prompting when OAuth credentials are missing")
     setup_parser.add_argument("--accounts", type=positive_int, default=1, help="Number of Google login flows when --write is used")
     setup_parser.add_argument("--no-browser", action="store_true", help="Use device-code login for xai-oauth setup instead of opening a browser")
-    setup_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Default Codex model to select")
+    setup_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL_ID, help="Default Codex model to select")
     setup_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id")
     setup_parser.add_argument("--provider-name", default=DEFAULT_CODEX_PROVIDER_NAME, help="Provider display name")
     setup_parser.add_argument("--base-url", default=None, help="Gateway base URL ending in /v1; defaults to --port")
@@ -1380,7 +1377,7 @@ def main():
     )
     setup_google_parser.add_argument("--skip-doctor", action="store_true", help="Do not run doctor after login")
     setup_google_parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path")
-    setup_google_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Default Codex model to select")
+    setup_google_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL_ID, help="Default Codex model to select")
     setup_google_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id")
     setup_google_parser.add_argument("--provider-name", default=DEFAULT_CODEX_PROVIDER_NAME, help="Provider display name")
     setup_google_parser.add_argument("--base-url", default=None, help="Gateway base URL; defaults to --port")
@@ -1445,7 +1442,7 @@ def main():
         help="Also make this provider/model the active Codex default",
     )
     configure_parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path")
-    configure_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Default Codex model to select")
+    configure_parser.add_argument("--model", default=DEFAULT_CODEX_MODEL_ID, help="Default Codex model to select")
     configure_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id")
     configure_parser.add_argument("--provider-name", default=DEFAULT_CODEX_PROVIDER_NAME, help="Provider display name")
     configure_parser.add_argument("--base-url", default=DEFAULT_CODEX_BASE_URL, help="Gateway base URL")

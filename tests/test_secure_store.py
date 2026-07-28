@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 
-from codex_antigravity_auth.secure_store import SecureStore, StoreDecryptionError, file_lock
+from codex_antigravity_auth.secure_store import SecureStore, file_lock
 from codex_antigravity_auth.storage import _get_encryption_key
 
 
@@ -125,7 +125,7 @@ class TestSecureStore(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "secure.json"
             path.write_bytes(other)
-            with self.assertRaises(StoreDecryptionError):
+            with self.assertRaises(RuntimeError):
                 store.load_json(path, default=lambda: {})
 
     def test_explicit_plaintext_json_is_migrated_immediately(self):

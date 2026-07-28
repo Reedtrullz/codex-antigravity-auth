@@ -22,7 +22,7 @@ HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 RESERVED_SLASH_PROVIDER_PREFIXES = {"openai", "openai-responses"}
 PROVIDER_AUTH_MODE_API_KEY = "api_key"
 PROVIDER_AUTH_MODE_OAUTH = "oauth"
-KNOWN_PROVIDER_AUTH_MODES = SUPPORTED_PROVIDER_AUTH_MODES = {PROVIDER_AUTH_MODE_API_KEY, PROVIDER_AUTH_MODE_OAUTH}
+SUPPORTED_PROVIDER_AUTH_MODES = {PROVIDER_AUTH_MODE_API_KEY, PROVIDER_AUTH_MODE_OAUTH}
 PROVIDER_CAPABILITY_FIELDS = frozenset(
     {
         "native_responses",
@@ -249,7 +249,7 @@ def normalize_provider_auth_mode(auth_mode: Any) -> str | None:
     value = auth_mode.strip().lower().replace("-", "_")
     if not value:
         return ""
-    if value in KNOWN_PROVIDER_AUTH_MODES:
+    if value in SUPPORTED_PROVIDER_AUTH_MODES:
         return value
     return None
 
@@ -262,8 +262,8 @@ def validate_provider_auth_mode(auth_mode: Any) -> str | None:
     value = auth_mode.strip().lower().replace("-", "_")
     if not value:
         return ""
-    if value not in KNOWN_PROVIDER_AUTH_MODES:
-        allowed = ", ".join(sorted(mode.replace("_", "-") for mode in KNOWN_PROVIDER_AUTH_MODES))
+    if value not in SUPPORTED_PROVIDER_AUTH_MODES:
+        allowed = ", ".join(sorted(mode.replace("_", "-") for mode in SUPPORTED_PROVIDER_AUTH_MODES))
         raise ValueError(f"BYOK provider auth mode must be one of: {allowed}")
     return value
 

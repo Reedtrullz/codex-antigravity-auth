@@ -15,15 +15,20 @@ from urllib.parse import urlparse
 from . import cli as _cli
 
 
+_orig_load_accounts = _cli.load_accounts
+
+
 def _diagnostic_load_accounts() -> dict:
-    # Preserve test/plugin monkeypatch seams while keeping production diagnostics read-only.
-    if _cli.load_accounts is not _cli._DEFAULT_LOAD_ACCOUNTS:
+    if _cli.load_accounts is not _orig_load_accounts:
         return _cli.load_accounts()
     return _cli.load_accounts_read_only()
 
 
+_orig_all_provider_configs = _cli.all_provider_configs
+
+
 def _diagnostic_all_provider_configs() -> dict[str, dict]:
-    if _cli.all_provider_configs is not _cli._DEFAULT_ALL_PROVIDER_CONFIGS:
+    if _cli.all_provider_configs is not _orig_all_provider_configs:
         return _cli.all_provider_configs()
     return _cli.all_provider_configs_read_only()
 
@@ -485,10 +490,10 @@ def codex_ready_report(
                 add("google_rotation", "fail", f"No Google accounts configured for {family}", **rotation)
 
     if live:
-        probe_model = live_model or selected_for_catalog or _cli.DEFAULT_CODEX_MODEL
+        probe_model = live_model or selected_for_catalog or _cli.DEFAULT_CODEX_MODEL_ID
         probe_model, live_model_error = _cli._validate_google_live_model(probe_model)
         if live_model_error:
-            add("live_generation", "fail", live_model_error, probe={"ok": False, "model": live_model or selected_for_catalog or _cli.DEFAULT_CODEX_MODEL})
+            add("live_generation", "fail", live_model_error, probe={"ok": False, "model": live_model or selected_for_catalog or _cli.DEFAULT_CODEX_MODEL_ID})
         else:
             probe = _cli.gateway_generate_probe(
                 expected_base_url,
@@ -553,7 +558,7 @@ def codex_ready_report(
         if first == "codex_config" and config_path.exists():
             next_command = "codex-antigravity setup --repair"
         elif first in {"codex_config", "selected_model"}:
-            next_command = f"codex-antigravity setup --write --accounts 1 --model {_cli.DEFAULT_CODEX_MODEL}"
+            next_command = f"codex-antigravity setup --write --accounts 1 --model {_cli.DEFAULT_CODEX_MODEL_ID}"
         elif first == "gateway_models":
             next_command = f"codex-antigravity start --background --port {gateway_port}"
         elif first == "model_catalog":
@@ -797,7 +802,7 @@ def run_doctor(
         print("       Run `codex-antigravity configure-codex --write` to install the gateway provider block.")
 
     if live:
-        probe_model = live_model or codex_config_model or _cli.DEFAULT_CODEX_MODEL
+        probe_model = live_model or codex_config_model or _cli.DEFAULT_CODEX_MODEL_ID
         probe_model, live_model_error = _cli._validate_google_live_model(probe_model)
         if live_model_error:
             healthy = False

@@ -26,16 +26,7 @@ _file_lock_registry_guard = threading.Lock()
 _file_lock_thread_locks: dict[str, threading.RLock] = {}
 
 
-class StoreError(RuntimeError):
-    pass
 
-
-class StoreInvalidData(StoreError):
-    pass
-
-
-class StoreDecryptionError(StoreError):
-    pass
 
 
 @contextmanager
@@ -138,18 +129,18 @@ class SecureStore:
         except InvalidToken as exc:
             stripped = raw.lstrip()
             if not stripped.startswith(b"{"):
-                raise StoreDecryptionError(f"Unable to decrypt secure store {path}") from exc
+                raise RuntimeError(f"Unable to decrypt secure store {path}") from exc
             try:
                 decoded = raw.decode("utf-8")
                 plaintext = True
             except UnicodeDecodeError as decode_exc:
-                raise StoreDecryptionError(f"Unable to decrypt secure store {path}") from decode_exc
+                raise RuntimeError(f"Unable to decrypt secure store {path}") from decode_exc
         try:
             data = json.loads(decoded)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise StoreInvalidData(f"Store {path} does not contain valid JSON") from exc
+            raise ValueError(f"Store {path} does not contain valid JSON") from exc
         if not isinstance(data, dict):
-            raise StoreInvalidData(f"Store {path} top-level JSON value is not an object")
+            raise ValueError(f"Store {path} top-level JSON value is not an object")
         if plaintext:
             encrypted = Fernet(self._key().encode("utf-8")).encrypt(
                 json.dumps(data, indent=2).encode("utf-8")
