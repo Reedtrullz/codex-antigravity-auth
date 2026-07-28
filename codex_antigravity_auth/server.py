@@ -123,9 +123,12 @@ def request_origin_matches(request: Request, origin: str) -> bool:
         origin_port = 443 if parsed_origin.scheme == "https" else 80
     if request_port is None:
         request_port = 443 if request_url.scheme == "https" else 80
+    host_matches = parsed_origin.hostname.lower() == (request_url.hostname or "").lower()
+    if not host_matches and is_loopback_host(parsed_origin.hostname) and is_loopback_host(request_url.hostname):
+        host_matches = True
     return (
         parsed_origin.scheme == request_url.scheme
-        and parsed_origin.hostname.lower() == (request_url.hostname or "").lower()
+        and host_matches
         and origin_port == request_port
     )
 
@@ -1432,7 +1435,7 @@ async def create_response(request: Request):
                     retry_after_source=retry_after_source,
                     rotation_attempted=rotation_attempted,
                     error_class="auth_failure",
-                    error=res.text,
+                    error=safe_error_detail(res.text),
                 )
                 raise HTTPException(
                     status_code=res.status_code,
@@ -1496,7 +1499,7 @@ async def create_response(request: Request):
                     retry_after_source=retry_after_source_from_response(res),
                     rotation_attempted=rotation_attempted,
                     error_class="backend_http_error",
-                    error=res.text,
+                    error=safe_error_detail(res.text),
                 )
                 raise HTTPException(
                     status_code=res.status_code,
@@ -1783,7 +1786,7 @@ async def create_response(request: Request):
                     stream_attempts.append(rotated)
                     attempt_num += 1
                     continue
-                if rotated:
+                if rotated and rotated.get("email") not in {acc.get("email") for acc in stream_attempts if acc.get("email")}:
                     await release_account_for_request(rotated.get("email"))
             if not adapter.created_emitted:
                 yield serialize_transport_event(adapter.created())
@@ -1827,13 +1830,17 @@ async def create_response(request: Request):
                     cancelled=True,
                     error_class="cancelled",
                 )
+            released_emails = set()
             for used_account in stream_attempts:
                 await record_stream_attempt(
                     used_account,
                     AttemptOutcome(scope="none", category="cancelled"),
                     error_class="cancelled",
                 )
-                await release_account_for_request(used_account.get("email"))
+                email = used_account.get("email")
+                if email and email not in released_emails:
+                    released_emails.add(email)
+                    await release_account_for_request(email)
 
     return StreamingResponse(managed_sse_generator(), media_type="text/event-stream")
 

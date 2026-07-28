@@ -506,8 +506,6 @@ class GoogleTransport:
             response_id=response_id,
             display_model=display_model,
         )
-        if not adapter.created_emitted:
-            yield adapter.created()
         async with self.stream(request, lease) as response:
             if response.status_code != 200:
                 raise GoogleHTTPError(
@@ -515,6 +513,8 @@ class GoogleTransport:
                     outcome_for_http_status(response.status_code),
                     response,
                 )
+            if not adapter.created_emitted:
+                yield adapter.created()
             buffer = ""
             async for chunk in response.aiter_text():
                 buffer += chunk

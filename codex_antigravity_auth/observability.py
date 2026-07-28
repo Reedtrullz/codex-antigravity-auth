@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .constants import get_codex_home
-from .redaction import redact_secret_text
+from .redaction import redact_secret_text, redact_secrets
 
 _DEFAULT_GET_CODEX_HOME = get_codex_home
 
@@ -60,27 +60,6 @@ def request_log_info() -> dict[str, Any]:
     }
 
 
-def _redact_json(value: Any) -> Any:
-    if isinstance(value, dict):
-        redacted: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            if key_text in REQUEST_LOG_SECRET_KEYS or key_text.lower() in REQUEST_LOG_SECRET_KEYS:
-                redacted[key_text] = "[redacted]"
-            else:
-                redacted[key_text] = _redact_json(item)
-        return redacted
-    if isinstance(value, list):
-        return [_redact_json(item) for item in value]
-    if isinstance(value, str):
-        return REQUEST_LOG_PROVIDER_KEY_RE.sub("[REDACTED]", redact_secret_text(value))
-    if value is None or isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value
-    return redact_secret_text(str(value))
-
-
 def sanitize_request_record(record: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "timestamp",
@@ -108,7 +87,7 @@ def sanitize_request_record(record: dict[str, Any]) -> dict[str, Any]:
         "outcome_category",
         "cancelled",
     }
-    sanitized = {key: _redact_json(value) for key, value in record.items() if key in allowed}
+    sanitized = {key: redact_secrets(value) for key, value in record.items() if key in allowed}
     sanitized.setdefault("timestamp", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     return sanitized
 
@@ -172,7 +151,7 @@ def iter_request_records(*, tail: int | None = None) -> Iterable[dict[str, Any]]
         except json.JSONDecodeError:
             records.append({"status": "malformed", "error": "malformed JSONL request-log entry"})
             continue
-        records.append(_redact_json(parsed if isinstance(parsed, dict) else {"value": parsed}))
+        records.append(redact_secrets(parsed if isinstance(parsed, dict) else {"value": parsed}))
     return records
 
 

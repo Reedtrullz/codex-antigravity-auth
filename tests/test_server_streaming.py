@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 import json
 import asyncio
 import time
@@ -281,11 +282,22 @@ class TestServerStreaming(unittest.TestCase):
             await iterator.aclose()
             return first_event
 
-        with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account):
-            with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
-                with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
-                    with patch("codex_antigravity_auth.server.write_request_record") as request_log:
-                        first_event = asyncio.run(scenario())
+        class MockResponse:
+            status_code = 200
+            async def aiter_text(self):
+                yield "data: {\"type\": \"response.created\", \"response\": {\"id\": \"resp-1\"}}\n\n"
+                await asyncio.sleep(10)
+
+        @asynccontextmanager
+        async def mock_stream(request, lease):
+            yield MockResponse()
+
+        with patch("codex_antigravity_auth.google_transport.GoogleTransport.stream", side_effect=mock_stream):
+            with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account):
+                with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
+                    with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
+                        with patch("codex_antigravity_auth.server.write_request_record") as request_log:
+                            first_event = asyncio.run(scenario())
 
         self.assertIn("response.created", first_event)
         release.assert_called_once_with("cancelled@gmail.com")

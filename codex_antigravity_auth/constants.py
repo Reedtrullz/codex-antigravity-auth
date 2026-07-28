@@ -86,30 +86,8 @@ def save_oauth_credentials(client_id: str, client_secret: str) -> Path:
         indent=2,
         sort_keys=True,
     ) + "\n"
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            delete=False,
-            dir=cred_path.parent,
-            prefix=f".{cred_path.name}.",
-            suffix=".tmp",
-        ) as handle:
-            temp_path = Path(handle.name)
-            os.chmod(temp_path, 0o600)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, cred_path)
-        os.chmod(cred_path, 0o600)
-    except Exception:
-        if temp_path and temp_path.exists():
-            try:
-                temp_path.unlink()
-            except Exception:
-                pass
-        raise
+    from .secure_store import SecureStore
+    SecureStore().atomic_write_text(cred_path, payload, mode=0o600)
     return cred_path
 
 

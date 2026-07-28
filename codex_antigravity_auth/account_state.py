@@ -59,31 +59,17 @@ def _counter(value: object) -> dict[str, Any]:
     return result
 
 
-def _scoped_numbers(value: object, *, legacy: bool) -> dict[str, int]:
+def _scoped(value: object, *, legacy: bool, now: float = 0.0, use_epoch: bool = False) -> dict[str, int | float]:
     if legacy:
-        count = int(_number(value))
+        count = _epoch(value, now) if use_epoch else int(_number(value))
         return {"account": count} if count else {}
     if not isinstance(value, dict):
         return {}
     result = {}
     for scope in ("account", *FAMILIES):
-        count = int(_number(value.get(scope)))
+        count = _epoch(value.get(scope), now) if use_epoch else int(_number(value.get(scope)))
         if count:
             result[scope] = count
-    return result
-
-
-def _scoped_cooldowns(value: object, *, legacy: bool, now: float) -> dict[str, float]:
-    if legacy:
-        expiry = _epoch(value, now)
-        return {"account": expiry} if expiry else {}
-    if not isinstance(value, dict):
-        return {}
-    result = {}
-    for scope in ("account", *FAMILIES):
-        expiry = _epoch(value.get(scope), now)
-        if expiry:
-            result[scope] = expiry
     return result
 
 
@@ -106,7 +92,7 @@ def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str
     if isinstance(raw_failures, dict):
         for email, value in raw_failures.items():
             email = str(email)
-            scoped = _scoped_numbers(value, legacy=legacy)
+            scoped = _scoped(value, legacy=legacy, use_epoch=False)
             if email in emails and scoped:
                 failures[email] = scoped
 
@@ -115,7 +101,7 @@ def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str
     if isinstance(raw_cooldowns, dict):
         for email, value in raw_cooldowns.items():
             email = str(email)
-            scoped = _scoped_cooldowns(value, legacy=legacy, now=now)
+            scoped = _scoped(value, legacy=legacy, now=now, use_epoch=True)
             if email in emails and scoped:
                 cooldowns[email] = scoped
 
@@ -266,6 +252,13 @@ class AccountState:
             if outcome.category == "success":
                 counter["successes"] += 1
                 counter["last_success"] = timestamp
+                if email in self.state["failures"]:
+                    scoped_failures = self.state["failures"][email]
+                    if isinstance(scoped_failures, dict):
+                        if family is not None:
+                            scoped_failures.pop(family, None)
+                        if not scoped_failures:
+                            self.state["failures"].pop(email, None)
             else:
                 counter["failures"] += 1
                 counter["last_failure"] = timestamp

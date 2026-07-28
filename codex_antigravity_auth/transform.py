@@ -78,7 +78,7 @@ def valid_function_name(value: Any) -> bool:
     return isinstance(value, str) and bool(FUNCTION_NAME_PATTERN.fullmatch(value))
 
 
-def valid_tool_call_id(value: Any) -> bool:
+def _valid_tool_call_id(value: Any) -> bool:
     return isinstance(value, str) and bool(value) and not any(
         ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value
     )
@@ -201,11 +201,13 @@ def thinking_budget_for_request(codex_req: dict[str, Any], backend_model: str) -
 
 
 def _created_at(value: Any) -> int:
+    if value is None or value == "":
+        return int(time.time())
     try:
-        created_at = float(value or time.time())
+        created_at = float(value)
     except (TypeError, ValueError):
         return int(time.time())
-    if not math.isfinite(created_at):
+    if not math.isfinite(created_at) or created_at < 0:
         return int(time.time())
     return int(created_at)
 
@@ -268,18 +270,6 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     def response_role_to_gemini(role: str) -> str:
         return "model" if role == "assistant" else "user"
 
-    def data_url_to_inline_data(url: str) -> dict | None:
-        if not isinstance(url, str) or not url.startswith("data:"):
-            return None
-        header, _, payload = url.partition(",")
-        if not payload:
-            return None
-        mime_type = header[5:].split(";", 1)[0] or "application/octet-stream"
-        try:
-            base64.b64decode(payload, validate=True)
-        except Exception:
-            return None
-        return {"inlineData": {"mimeType": mime_type, "data": payload}}
 
     def content_part_to_gemini(part: dict) -> list[dict]:
         part_type = part.get("type")
@@ -290,10 +280,17 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
             image_url = part.get("image_url") or part.get("url")
             if isinstance(image_url, dict):
                 image_url = image_url.get("url")
-            inline_data = data_url_to_inline_data(image_url)
-            if inline_data:
-                return [inline_data]
-            if isinstance(image_url, str) and image_url:
+            if isinstance(image_url, str) and image_url.startswith("data:"):
+                header, _, payload = image_url.partition(",")
+                payload = "".join(payload.split())
+                if payload:
+                    mime_type = header[5:].split(";", 1)[0] or "application/octet-stream"
+                    try:
+                        base64.b64decode(payload, validate=True)
+                        return [{"inlineData": {"mimeType": mime_type, "data": payload}}]
+                    except Exception:
+                        pass
+            if isinstance(image_url, str) and image_url and not image_url.startswith("data:"):
                 return [{"fileData": {"mimeType": part.get("mime_type", "image/*"), "fileUri": image_url}}]
         if part_type in ("input_file", "file"):
             file_url = part.get("file_url") or part.get("url")
@@ -569,7 +566,7 @@ def transform_gemini_candidate(candidate: dict) -> dict:
                 "id": f"fc_{uuid.uuid4().hex[:8]}",
                 "call_id": call_id,
                 "name": name,
-                "arguments": function_call_arguments_json(fc.get("args", {})),
+                "arguments": function_call_arguments_string(fc.get("args", {})),
             })
             
     # Assemble structured Responses API message output
@@ -594,20 +591,6 @@ def transform_gemini_candidate(candidate: dict) -> dict:
             "step_by_step_summary": reasoning_text
         }
     return result
-
-def transform_response(gemini_resp: dict, model: str) -> dict:
-    """Compatibility wrapper around the shared Google terminal contract."""
-    from .google_transport import GoogleTransport
-    from .response_protocol import response_from_result
-
-    result = GoogleTransport(timeout=0).parse_response(gemini_resp)
-    return response_from_result(
-        result,
-        response_id=result.provider_response_id or f"resp_{uuid.uuid4().hex[:12]}",
-        model=model,
-        created_at=int(time.time()),
-    )
-
 
 def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
     """Translate Responses API input into OpenAI-compatible Chat Completions."""
@@ -642,7 +625,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
 
     def tool_output_part_to_chat_message(part: dict) -> dict | None:
         call_id = part.get("tool_use_id") or part.get("call_id")
-        if not valid_tool_call_id(call_id):
+        if not _valid_tool_call_id(call_id):
             return None
         explicit_name = part.get("name")
         name = explicit_name if valid_function_name(explicit_name) else function_names_by_call_id.get(call_id)
@@ -734,7 +717,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 continue
             if item_type == "function_call_output":
                 call_id = item.get("call_id")
-                if not valid_tool_call_id(call_id):
+                if not _valid_tool_call_id(call_id):
                     continue
                 message = {
                     "role": "tool",

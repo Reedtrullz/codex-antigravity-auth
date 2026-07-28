@@ -43,8 +43,8 @@ from codex_antigravity_auth.transform import (
     transform_chat_response,
     transform_request,
     transform_request_to_chat,
-    transform_response,
 )
+from tests.conftest import _legacy_transform_response as transform_response
 
 
 class TestRegressionFixes(unittest.TestCase):
@@ -966,6 +966,7 @@ class TestRegressionFixes(unittest.TestCase):
     @patch("urllib.request.urlopen")
     def test_oauth_exchange_and_refresh_use_timeout(self, mock_urlopen, mock_creds):
         mock_resp = MagicMock()
+        mock_resp.status = 200
         mock_resp.read.return_value = b'{"access_token":"access","expires_in":3600}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 

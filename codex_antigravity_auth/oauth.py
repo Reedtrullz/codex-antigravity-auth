@@ -6,6 +6,7 @@ import math
 import time
 import urllib.request
 import urllib.error
+from typing import Any
 from urllib.parse import urlencode
 from .constants import (
     require_credentials,
@@ -64,6 +65,7 @@ def get_pkce_verifier(state_id: str) -> dict[str, str] | None:
     return verifier_info
 
 def authorize_antigravity(*, select_account: bool = False) -> dict:
+    [_pkce_verifier_store.pop(k, None) for k, v in list(_pkce_verifier_store.items()) if time.time() - float(v.get("createdAt", 0)) > _PKCE_VERIFIER_TTL_SECONDS]
     cid, csec = require_credentials()
     pkce = generate_pkce()
     
@@ -91,52 +93,69 @@ def authorize_antigravity(*, select_account: bool = False) -> dict:
     url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
     return {"url": url, "state_id": state_id}
 
+
+def post_form(url: str, payload: dict[str, Any], timeout: float = OAUTH_HTTP_TIMEOUT_SECONDS) -> tuple[int, dict[str, Any]]:
+    """POST URL-encoded form data and return (status, parsed_json)."""
+    req = urllib.request.Request(
+        url,
+        data=urlencode(payload).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "codex-antigravity-auth",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            status = int(getattr(resp, "status", 200))
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        raw = exc.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        return 0, {"error": "network_error", "error_description": redact_secret_text(str(reason))}
+    try:
+        parsed = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        parsed = {"error": "invalid_json", "error_description": raw[:500]}
+    if not isinstance(parsed, dict):
+        parsed = {"error": "invalid_response", "value": parsed}
+    return status, parsed
+
+
+
 def exchange_antigravity(code: str, verifier: str) -> dict:
     cid, csec = require_credentials()
-    payload = {
-        "client_id": cid,
-        "client_secret": csec,
-        "code": code,
-        "code_verifier": verifier,
-        "grant_type": "authorization_code",
-        "redirect_uri": "http://localhost:51121/oauth-callback",
-    }
-    
-    req = urllib.request.Request(
+    status, payload = post_form(
         "https://oauth2.googleapis.com/token",
-        data=urlencode(payload).encode("utf-8"),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        {
+            "client_id": cid,
+            "client_secret": csec,
+            "code": code,
+            "code_verifier": verifier,
+            "grant_type": "authorization_code",
+            "redirect_uri": "http://localhost:51121/oauth-callback",
+        },
     )
-    
-    try:
-        with urllib.request.urlopen(req, timeout=OAUTH_HTTP_TIMEOUT_SECONDS) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"OAuth exchange failed ({e.code}): {redact_secret_text(error_body)}")
-    except Exception as e:
-        raise RuntimeError(f"OAuth exchange failed: {redact_secret_text(str(e))}")
+    if status < 200 or status >= 300:
+        error = payload.get("error") or payload.get("error_description") or f"HTTP {status}"
+        raise RuntimeError(f"OAuth exchange failed: {redact_secret_text(str(error))}")
+    return payload
 
 def refresh_access_token(refresh_token: str) -> dict:
     cid, csec = require_credentials()
-    payload = {
-        "client_id": cid,
-        "client_secret": csec,
-        "refresh_token": refresh_token,
-        "grant_type": "refresh_token",
-    }
-    req = urllib.request.Request(
+    status, payload = post_form(
         "https://oauth2.googleapis.com/token",
-        data=urlencode(payload).encode("utf-8"),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        {
+            "client_id": cid,
+            "client_secret": csec,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        },
     )
-    try:
-        with urllib.request.urlopen(req, timeout=OAUTH_HTTP_TIMEOUT_SECONDS) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"Token refresh failed ({e.code}): {redact_secret_text(error_body)}")
-    except Exception as e:
-        raise RuntimeError(f"Token refresh failed: {redact_secret_text(str(e))}")
+    if status < 200 or status >= 300:
+        error = payload.get("error") or payload.get("error_description") or f"HTTP {status}"
+        raise RuntimeError(f"Token refresh failed: {redact_secret_text(str(error))}")
+    return payload

@@ -281,9 +281,11 @@ def ensure_run_id(args: argparse.Namespace) -> str | None:
     return run_id
 
 
+
 def progress(args: argparse.Namespace, message: str) -> None:
-    if getattr(args, "progress", False):
-        eprint(f"[anti] {redact_sensitive_text(message)}")
+    if getattr(args, "progress", True):
+        t = time.strftime("%H:%M:%S", time.localtime())
+        eprint(f"[anti {t}] {redact_sensitive_text(message)}")
 
 
 def save_output_mode(args: argparse.Namespace) -> str:
@@ -538,47 +540,6 @@ def cheapest_models_for_task(
     candidates.sort(key=lambda x: (x[1] if prefer_free else 2, -x[2]))
     return [m[0] for m in candidates]
 
-
-def suggest_default_for_task(
-    *,
-    task_type: str,
-    available: list[str],
-    require_images: bool = False,
-) -> str | None:
-    """Suggest a cost-optimal default model for a task type.
-
-    Returns None when no suitable model is found (caller should use hardcoded default).
-    Task types: 'review', 'plan', 'consult', 'code', 'quick'.
-    """
-    if require_images:
-        # Need multimodal: prefer Gemini (free, multimodal) over Claude (quota)
-        candidates = cheapest_models_for_task(
-            available=available, require_images=True, prefer_free=True
-        )
-        return candidates[0] if candidates else None
-
-    if task_type == "quick":
-        # Quick consults: prefer free models
-        candidates = cheapest_models_for_task(available=available, prefer_free=True)
-        return candidates[0] if candidates else None
-
-    if task_type == "code":
-        # Code review/generation: prefer coding-focused free models, then quality
-        candidates = cheapest_models_for_task(available=available, prefer_free=True)
-        # Prefer poolside for code if available
-        for c in candidates:
-            if "poolside" in c:
-                return c
-        return candidates[0] if candidates else None
-
-    if task_type in ("review", "plan"):
-        # Deep tasks: prefer free high-quality, fall back to quota
-        candidates = cheapest_models_for_task(
-            available=available, min_quality=60, prefer_free=True
-        )
-        return candidates[0] if candidates else None
-
-    return None
 
 
 def positive_int(value: str) -> int:
@@ -1236,6 +1197,94 @@ def review_prompt_parts(
     return parts
 
 
+
+def extract_file_paths_from_prompt(prompt: str) -> list[str]:
+    """Extract file paths from a prompt string."""
+    paths: list[str] = []
+    seen: set[str] = set()
+    
+    def add_path(path: str) -> None:
+        """Add path after normalizing to avoid duplicates."""
+        # Normalize: remove ./ prefix, expand ~
+        normalized = path
+        if normalized.startswith("./"):
+            normalized = normalized[2:]
+        if normalized not in seen:
+            seen.add(normalized)
+            paths.append(path)  # Keep original form for display
+    
+    # Pattern 1: Absolute or home-relative paths to files
+    # Matches /path/to/file.py or ~/path/to/file.py
+    for match in re.finditer(r'(?<![.~\w/])([~]?/(?:[\w.@-]+/)*[\w.@-]+\.\w+)', prompt):
+        add_path(match.group(1))
+    
+    # Pattern 2: Directory path followed by filenames in parentheses
+    # Matches /path/to/dir/ (file1.py, file2.py)
+    dir_paren_match = re.search(r'([~]?/(?:[\w.@-]+/)+)\s*\(([^)]+)\)', prompt)
+    if dir_paren_match:
+        dir_path = dir_paren_match.group(1)
+        filenames = dir_paren_match.group(2)
+        for item in filenames.split(','):
+            item = item.strip()
+            if item and '.' in item:
+                add_path(dir_path + item)
+    
+    # Pattern 3: Relative paths like ./file.py (must start with ./)
+    for match in re.finditer(r'(?:(?<=\s)|(?<=\())(\./[\w.@-]+(?:/[\w.@-]+)*\.\w+)', prompt):
+        add_path(match.group(1))
+    
+    # Pattern 4: Paths in backticks (common in Codex prompts)
+    for match in re.finditer(r'`(/[\w./@-]+\.\w+)`', prompt):
+        add_path(match.group(1))
+    
+    # Pattern 5: Windows drive-letter paths (C:\Users\...\file.py)
+    for match in re.finditer(r'(?<![~\w\\])([A-Za-z]:\\(?:[~\w.@-]+\\)*[~\w.@-]+\.\w+)', prompt):
+        add_path(match.group(1))
+    
+    return paths
+
+
+def build_consult_file_context(
+    prompt: str,
+    max_prompt_chars: int,
+) -> tuple[str, list[str], list[str]]:
+    """Read files mentioned in the prompt, inject contents to prevent hallucination."""
+    file_paths = extract_file_paths_from_prompt(prompt)
+    if not file_paths:
+        return prompt, [], []
+    
+    caveats: list[str] = []
+    file_blocks: list[str] = []
+    read_files: list[str] = []
+    
+    for file_path_str in file_paths:
+        raw_path = Path(file_path_str).expanduser()
+        if raw_path.is_symlink():
+            caveats.append(f"Skipped symlink: {file_path_str}")
+            continue
+        
+        file_path = raw_path.resolve()
+        if not file_path.is_file():
+            caveats.append(f"File not found: {file_path_str}")
+            continue
+        
+        text, note = read_text_file(file_path.parent, file_path.name)
+        if note:
+            caveats.append(note)
+        if text:
+            file_blocks.append(f"### {file_path_str}\n```text\n{text}\n```")
+            read_files.append(file_path_str)
+    
+    if not file_blocks:
+        return prompt, caveats, []
+    
+    file_context = "## File Contents\n" + "\n\n".join(file_blocks)
+    enhanced_prompt = f"{file_context}\n\n## User Request\n{prompt}"
+    if max_prompt_chars > 0 and len(enhanced_prompt) > max_prompt_chars:
+        caveats.append(f"File contents omitted: combined prompt ({len(enhanced_prompt)} chars) exceeds max ({max_prompt_chars} chars)")
+        return prompt, caveats, []
+    
+    return enhanced_prompt, caveats, read_files
 def build_review_prompt(
     *,
     scope_line: str,
@@ -2803,6 +2852,7 @@ def command_panel(args: argparse.Namespace) -> int:
     if getattr(args, "run_id", None):
         metadata["run_id"] = args.run_id
         metadata["request_log_correlation_id"] = args.run_id
+    progress(args, f"panel {args.mode}: starting fan-out across {len(panel_models)} model(s) [{', '.join(panel_models)}], judge={judge_model}")
 
     required_models = [judge_model]
     if getattr(args, "fallback_model", None):
@@ -2951,9 +3001,23 @@ def command_panel(args: argparse.Namespace) -> int:
 
 
 def command_consult(args: argparse.Namespace) -> int:
+    progress(args, f"consult: querying model {getattr(args, 'model', 'sonnet')}")
     model = resolve_model(args.model, default=DEFAULT_CONSULT_MODEL)
     prompt = read_prompt(args)
     caveats: list[str] = []
+    
+    # Pre-read files mentioned in the prompt to prevent hallucination
+    read_files: list[str] = []
+    if not getattr(args, "no_pre_read", False):
+        prompt, file_caveats, read_files = build_consult_file_context(
+            prompt, args.max_prompt_chars
+        )
+        caveats.extend(file_caveats)
+    else:
+        file_caveats: list[str] = []
+    if read_files:
+        progress(args, f"consult: pre-read {len(read_files)} file(s) for context")
+    
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
     ensure_run_id(args)
     text, model_used, generation_metadata = generate_with_fallback(
@@ -2964,6 +3028,8 @@ def command_consult(args: argparse.Namespace) -> int:
         purpose="consult",
     )
     metadata = {"prompt_chars": len(prompt), **generation_metadata}
+    if read_files:
+        metadata["pre_read_files"] = read_files
     if getattr(args, "run_id", None):
         metadata["run_id"] = args.run_id
         metadata["request_log_correlation_id"] = args.run_id
@@ -2994,6 +3060,7 @@ def command_consult(args: argparse.Namespace) -> int:
 
 
 def command_review(args: argparse.Namespace) -> int:
+    progress(args, f"review: analyzing scope '{getattr(args, 'scope', 'working-tree')}' with {getattr(args, 'model', 'opus')}")
     model = resolve_model(args.model, default=DEFAULT_REVIEW_MODEL)
     prompt_budget = prompt_budget_for_model(args, model)
     claude_guardrail_available = claude_guardrail_would_apply(args, model, prompt_budget)
@@ -3076,6 +3143,7 @@ def command_review(args: argparse.Namespace) -> int:
 
 
 def command_plan(args: argparse.Namespace) -> int:
+    progress(args, f"plan: generating plan for scope '{getattr(args, 'scope', 'none')}' with {getattr(args, 'model', 'opus')}")
     model = resolve_model(args.model, default=DEFAULT_PLAN_MODEL)
     prompt_budget = prompt_budget_for_model(args, model)
     claude_guardrail_available = claude_guardrail_would_apply(args, model, prompt_budget)
@@ -3790,7 +3858,7 @@ def add_generation_control_args(
         default="never",
         help="When to use --fallback-model",
     )
-    parser.add_argument("--progress", action="store_true", help="Print long-call progress to stderr")
+    parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True, help="Print long-call progress to stderr (default: true; use --no-progress to disable)")
     parser.add_argument("--run-label", help="Optional label for saved Anti run metadata")
     parser.add_argument("--run-id", help="Stable run/correlation id for saved and gateway records")
     parser.add_argument(
@@ -3857,6 +3925,7 @@ def build_parser() -> argparse.ArgumentParser:
     consult.add_argument("--model", default="sonnet", help="opus, sonnet, or full model id")
     consult.add_argument("--prompt", help="Prompt text")
     consult.add_argument("--prompt-file", help="Read prompt text from file")
+    consult.add_argument("--no-pre-read", action="store_true", dest="no_pre_read", help="Disable automatic file pre-reading for consult prompts")
     consult.add_argument("--max-output-tokens", type=positive_int, default=2048)
     consult.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help="Maximum prompt chars before truncation; use 0 for unlimited")
     consult.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
@@ -4014,6 +4083,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_gateway_args(configure)
     add_codex_config_args(configure)
     configure.set_defaults(func=command_configure_codex)
+
 
     doctor = sub.add_parser("doctor", help="Run codex-antigravity doctor")
     add_gateway_args(doctor)

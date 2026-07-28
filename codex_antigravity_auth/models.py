@@ -103,70 +103,59 @@ MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 MODEL_FAMILY_VALUES = {"claude", "gemini"}
 REASONING_LEVEL_VALUES = {"low", "medium", "high", "xhigh"}
 MODEL_OVERLAY_FILE = "~/.codex/antigravity-models.toml"
-class _OverlayCache:
-    """File-state keyed cache for the model overlay TOML."""
+_overlay_lock = threading.RLock()
+_overlay_key: tuple[str, int, int] | None = None
+_overlay_models: tuple[NativeModel, ...] = ()
+_overlay_error: ValueError | None = None
+_overlay_warned_key: tuple[str, int, int] | None = None
 
-    def __init__(self) -> None:
-        self.lock = threading.RLock()
-        self.key: tuple[str, int, int] | None = None
-        self.models: tuple[NativeModel, ...] = ()
-        self.error: ValueError | None = None
-        self.warned_key: tuple[str, int, int] | None = None
 
-    def reset(self) -> None:
-        with self.lock:
-            self.key = None
-            self.models = ()
-            self.error = None
-            self.warned_key = None
+def _warn_overlay_error_once(cache_key: tuple[str, int, int], error: ValueError) -> None:
+    global _overlay_warned_key
+    if _overlay_warned_key == cache_key:
+        return
+    _overlay_warned_key = cache_key
+    warnings.warn(
+        f"Ignoring invalid Codex Antigravity model overlay; built-in models remain available: {error}",
+        RuntimeWarning,
+        stacklevel=3,
+    )
 
-    def warn_error_once(self, cache_key: tuple[str, int, int], error: ValueError) -> None:
-        if self.warned_key == cache_key:
-            return
-        self.warned_key = cache_key
-        warnings.warn(
-            f"Ignoring invalid Codex Antigravity model overlay; built-in models remain available: {error}",
-            RuntimeWarning,
-            stacklevel=3,
-        )
 
-    def load(self, path: Path, *, strict: bool) -> list[NativeModel]:
-        with self.lock:
+def _load_overlay_models(path: Path, *, strict: bool) -> list[NativeModel]:
+    global _overlay_key, _overlay_models, _overlay_error
+    with _overlay_lock:
+        try:
+            cache_key = _overlay_cache_key(path)
+        except ValueError as exc:
+            if strict:
+                raise
+            _warn_overlay_error_once((str(path), -1, -1), exc)
+            return []
+        if _overlay_key == cache_key:
+            if _overlay_error is not None:
+                if strict:
+                    raise ValueError(str(_overlay_error))
+                _warn_overlay_error_once(cache_key, _overlay_error)
+                return []
+            return list(_overlay_models)
+
+        error: ValueError | None = None
+        models: tuple[NativeModel, ...] = ()
+        if cache_key[1] != 0 or cache_key[2] != 0:
             try:
-                cache_key = _overlay_cache_key(path)
-            except ValueError as exc:
-                if strict:
-                    raise
-                cache_key = (str(path), -1, -1)
-                self.warn_error_once(cache_key, exc)
-                return []
-            if self.key == cache_key:
-                if self.error is not None:
-                    if strict:
-                        raise ValueError(str(self.error))
-                    self.warn_error_once(cache_key, self.error)
-                    return []
-                return list(self.models)
-
-            error: ValueError | None = None
-            models: tuple[NativeModel, ...] = ()
-            if cache_key[1] != 0 or cache_key[2] != 0:
-                try:
-                    models = tuple(parse_model_overlay_toml(path.read_text(encoding="utf-8")))
-                except (OSError, ValueError) as exc:
-                    error = ValueError(str(exc))
-            self.key = cache_key
-            self.models = models
-            self.error = error
-            if error is not None:
-                if strict:
-                    raise ValueError(str(error))
-                self.warn_error_once(cache_key, error)
-                return []
-            return list(models)
-
-
-_OVERLAY_CACHE = _OverlayCache()
+                models = tuple(parse_model_overlay_toml(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError) as exc:
+                error = ValueError(str(exc))
+        _overlay_key = cache_key
+        _overlay_models = models
+        _overlay_error = error
+        if error is not None:
+            if strict:
+                raise ValueError(str(error))
+            _warn_overlay_error_once(cache_key, error)
+            return []
+        return list(models)
 
 
 def _slug_variants(value: str) -> set[str]:
@@ -361,11 +350,16 @@ def _overlay_cache_key(path: Path) -> tuple[str, int, int]:
 
 
 def invalidate_model_overlay_cache() -> None:
-    _OVERLAY_CACHE.reset()
+    global _overlay_key, _overlay_models, _overlay_error, _overlay_warned_key
+    with _overlay_lock:
+        _overlay_key = None
+        _overlay_models = ()
+        _overlay_error = None
+        _overlay_warned_key = None
 
 
 def load_model_overlays(*, strict: bool = True) -> list[NativeModel]:
-    return _OVERLAY_CACHE.load(model_overlay_path(), strict=strict)
+    return _load_overlay_models(model_overlay_path(), strict=strict)
 
 
 def save_model_overlays(models: list[NativeModel]) -> None:

@@ -5,7 +5,6 @@ import time
 from typing import Any, Callable
 
 from .account_state import AccountState
-from .fingerprint import generate_fingerprint
 from .oauth import refresh_access_token, token_expires_in_seconds
 from .redaction import redact_secret_text
 from .response_protocol import AttemptOutcome
@@ -17,6 +16,32 @@ from .storage import (
 )
 
 
+FINGERPRINT: dict = {
+    "deviceId": "generated-fingerprint-000000000000",
+    "sessionToken": "00000000000000000000000000000000",
+    "userAgent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Antigravity/2.0.0 "
+        "Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36"
+    ),
+    "apiClient": "google-cloud-sdk vscode_cloudshelleditor/0.1",
+    "clientMetadata": {
+        "ideType": "ANTIGRAVITY",
+        "platform": "MACOS",
+        "pluginType": "GEMINI",
+    },
+    "createdAt": int(time.time() * 1000),
+}
+
+
+
+
+def _apply_token_refresh(account: dict, refresh_token: str) -> None:
+    refreshed = refresh_access_token(refresh_token)
+    account["accessToken"] = refreshed["access_token"]
+    account["expiresAt"] = time.time() + token_expires_in_seconds(refreshed)
+    if refreshed.get("refresh_token"):
+        account["refreshToken"] = refreshed["refresh_token"]
 class AccountManager:
     """Compatibility facade over the production AccountState owner."""
 
@@ -124,7 +149,7 @@ class AccountManager:
                     account = lease.account
                     email = str(account.get("email", ""))
                     if not account.get("fingerprint"):
-                        account["fingerprint"] = generate_fingerprint()
+                        account["fingerprint"] = FINGERPRINT
                         dirty = True
                     raw_expires_at = account.get("expiresAt", 0)
                     expires_at = self._normalize_expires_at(raw_expires_at)
@@ -136,14 +161,23 @@ class AccountManager:
                         return dirty
 
                     refresh_token = account.get("refreshToken")
+                    if account.get("accessToken") and expires_at > time.time() + 10:
+                        try:
+                            if refresh_token:
+                                _apply_token_refresh(account, refresh_token)
+                                dirty = True
+                        except Exception as exc:
+                            print(
+                                f"[*] Soft refresh failed for {email}, using current token. Reason: "
+                                f"{redact_secret_text(str(exc))}"
+                            )
+                        selected = account
+                        return dirty
+
                     try:
                         if not refresh_token:
                             raise RuntimeError("Token expired and no refresh token is available")
-                        refreshed = refresh_access_token(refresh_token)
-                        account["accessToken"] = refreshed["access_token"]
-                        account["expiresAt"] = time.time() + token_expires_in_seconds(refreshed)
-                        if refreshed.get("refresh_token"):
-                            account["refreshToken"] = refreshed["refresh_token"]
+                        _apply_token_refresh(account, refresh_token)
                         selected = account
                         return True
                     except Exception as exc:

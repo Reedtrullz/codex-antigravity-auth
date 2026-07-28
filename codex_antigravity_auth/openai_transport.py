@@ -33,6 +33,42 @@ from .transform import function_call_arguments_string, valid_function_name
 from .transform import transform_request_to_chat
 
 
+class SSELineError(RuntimeError):
+    """Raised when an SSE stream produces a malformed or truncated line."""
+
+
+async def iter_sse_data(response, *, label: str = "provider") -> AsyncIterator[str]:
+    buffer = ""
+    async for chunk in response.aiter_text():
+        buffer += chunk
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            stripped = line.strip()
+            if not stripped or not stripped.startswith("data:"):
+                continue
+            yield stripped[5:].strip()
+    if buffer.strip():
+        stripped = buffer.strip()
+        if stripped.startswith("data:"):
+            payload = stripped[5:].strip()
+            if payload == "[DONE]":
+                return
+            yield payload
+        else:
+            raise SSELineError(f"The {label} stream ended with an incomplete SSE frame.")
+
+
+def parse_sse_payload(data: str, *, label: str = "provider") -> dict[str, Any]:
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise SSELineError(f"The {label} stream returned malformed JSON: {exc}") from exc
+    if isinstance(payload, list):
+        payload = payload[0] if payload else {}
+    if not isinstance(payload, dict):
+        raise SSELineError(f"The {label} stream returned a non-object JSON value")
+    return payload
+
 class TransportConfigError(ValueError):
     def __init__(self, status_code: int, message: str) -> None:
         super().__init__(message)
@@ -389,7 +425,6 @@ class OpenAICompatibleTransport:
             terminal_emitted = True
             yield builder.done_marker()
 
-        buffer = ""
         try:
             async with self.client_factory(timeout=prepared.timeout) as client:
                 async with client.stream(
@@ -405,50 +440,30 @@ class OpenAICompatibleTransport:
                         ):
                             yield event
                         return
-                    async for chunk in response.aiter_text():
-                        buffer += chunk
-                        while "\n" in buffer:
-                            line, buffer = buffer.split("\n", 1)
-                            stripped = line.strip()
-                            if not stripped or not stripped.startswith("data:"):
-                                continue
-                            data = stripped[5:].strip()
+                    try:
+                        async for data in iter_sse_data(response, label="OpenAI"):
                             if data == "[DONE]":
                                 if provider_done:
-                                    async for event in fail(
-                                        "duplicate_done",
-                                        "The provider emitted [DONE] more than once.",
-                                    ):
+                                    async for event in fail("duplicate_done", "The provider emitted [DONE] more than once."):
                                         yield event
                                     return
                                 provider_done = True
                                 accumulator.mark_done()
                                 continue
                             if provider_done:
-                                async for event in fail(
-                                    "output_after_done",
-                                    "The provider emitted output after [DONE].",
-                                ):
+                                async for event in fail("output_after_done", "The provider emitted output after [DONE]."):
                                     yield event
                                 return
                             try:
-                                payload = json.loads(data)
-                            except json.JSONDecodeError:
-                                async for event in fail(
-                                    "invalid_stream_chunk",
-                                    "The provider returned malformed stream JSON.",
-                                ):
+                                payload = parse_sse_payload(data, label="OpenAI")
+                            except SSELineError:
+                                async for event in fail("invalid_stream_chunk", "The provider returned malformed stream JSON."):
                                     yield event
                                 return
-                            if not isinstance(payload, dict):
-                                continue
                             provider_error = payload.get("error")
                             if isinstance(provider_error, dict):
                                 code = provider_error.get("code")
-                                async for event in fail(
-                                    code if isinstance(code, str) and code else "provider_error",
-                                    "The provider stream failed.",
-                                ):
+                                async for event in fail(code if isinstance(code, str) and code else "provider_error", "The provider stream failed."):
                                     yield event
                                 return
                             accumulator.consume(payload)
@@ -466,10 +481,10 @@ class OpenAICompatibleTransport:
                                     reasoning_active = True
                                     for event in builder.add_reasoning_delta(reasoning):
                                         yield event
-                                content = delta.get("content")
-                                if isinstance(content, str) and content:
+                                content_str = delta.get("content")
+                                if isinstance(content_str, str) and content_str:
                                     text_active = True
-                                    for event in builder.add_text_delta(content):
+                                    for event in builder.add_text_delta(content_str):
                                         yield event
                                 raw_calls = delta.get("tool_calls")
                                 if not isinstance(raw_calls, list):
@@ -488,10 +503,7 @@ class OpenAICompatibleTransport:
                                         continue
                                     if index not in tool_calls:
                                         tool_seen_order.append(index)
-                                    state = tool_calls.setdefault(
-                                        index,
-                                        {"call_id": "", "name": "", "arguments": ""},
-                                    )
+                                    state = tool_calls.setdefault(index, {"call_id": "", "name": "", "arguments": ""})
                                     call_id = raw_call.get("id")
                                     if isinstance(call_id, str) and call_id:
                                         state["call_id"] = call_id
@@ -502,13 +514,10 @@ class OpenAICompatibleTransport:
                                         fragment = function.get(field)
                                         if isinstance(fragment, str):
                                             state[field] += fragment
-            if buffer.strip():
-                async for event in fail(
-                    "invalid_stream_chunk",
-                    "The provider stream ended with an incomplete SSE frame.",
-                ):
-                    yield event
-                return
+                    except SSELineError as exc:
+                        async for event in fail("invalid_stream_chunk", str(exc)):
+                            yield event
+                        return
         except Exception:
             if not terminal_emitted:
                 async for event in fail("connection_error", "The provider connection failed."):
