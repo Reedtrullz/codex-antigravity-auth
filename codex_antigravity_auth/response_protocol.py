@@ -132,10 +132,6 @@ def refusal_item(safety_block: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
-def _has_meaningful_output(output: Sequence[dict[str, Any]]) -> bool:
-    return bool(meaningful_output_items(output))
-
-
 def meaningful_output_items(output: Sequence[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
     """Return supported output items that contain enough data to be actionable."""
 
@@ -201,7 +197,7 @@ def classify_terminal(
             incomplete_reason="max_output_tokens",
         )
 
-    if _has_meaningful_output(output):
+    if bool(meaningful_output_items(output)):
         return ProviderTerminal(TerminalKind.COMPLETED, normalized_reason or "completed")
 
     if safety_block:

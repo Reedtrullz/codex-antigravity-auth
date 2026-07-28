@@ -59,18 +59,16 @@ def _counter(value: object) -> dict[str, Any]:
     return result
 
 
-def _scoped(value: object, *, legacy: bool, now: float | None = None, use_epoch: bool = False) -> dict[str, int | float]:
-    convert = _epoch if use_epoch else (lambda v, _now=None: int(_number(v)))
+def _scoped(value: object, *, legacy: bool, now: float = 0.0, use_epoch: bool = False) -> dict[str, int | float]:
     if legacy:
-        count = convert(value, now if now else 0.0)
-        if not count:
-            return {}
-        return {"account": count}
+        count = _epoch(value, now) if use_epoch else int(_number(value))
+        return {"account": count} if count else {}
     if not isinstance(value, dict):
         return {}
     result = {}
     for scope in ("account", *FAMILIES):
-        if count := convert(value.get(scope), now):
+        count = _epoch(value.get(scope), now) if use_epoch else int(_number(value.get(scope)))
+        if count:
             result[scope] = count
     return result
 
