@@ -1518,7 +1518,6 @@ class AntiHelperTests(unittest.TestCase):
             rc = anti.main(
                 [
                     "plan",
-                    "--model", "opus",
                     "--scope",
                     "none",
                     "--prompt",
@@ -1563,7 +1562,7 @@ class AntiHelperTests(unittest.TestCase):
             try:
                 os.chdir(root)
                 with contextlib.redirect_stdout(output):
-                    rc = anti.main(["review", "--model", "opus", "--scope", "files", "--file", "big.py", "--json"])
+                    rc = anti.main(["review", "--scope", "files", "--file", "big.py", "--json"])
             finally:
                 os.chdir(old_cwd)
 
@@ -2538,7 +2537,80 @@ class AntiHelperTests(unittest.TestCase):
         self.assertTrue(any("Claude safety budget" in caveat for caveat in parsed["caveats"]))
 
 
-
-
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConsultFileContextTests(unittest.TestCase):
+    """Tests for consult file context pre-reading functionality."""
+
+    def test_extract_file_paths_from_prompt_absolute_paths(self) -> None:
+        anti = load_anti()
+        prompt = 'Review /Users/reidar/Documents/RSHelper/src/rshelper/ (api.py, models.py)'
+        paths = anti.extract_file_paths_from_prompt(prompt)
+        self.assertEqual(paths, [
+            '/Users/reidar/Documents/RSHelper/src/rshelper/api.py',
+            '/Users/reidar/Documents/RSHelper/src/rshelper/models.py',
+        ])
+
+    def test_extract_file_paths_from_prompt_no_paths(self) -> None:
+        anti = load_anti()
+        prompt = 'What is the best way to implement a cache?'
+        paths = anti.extract_file_paths_from_prompt(prompt)
+        self.assertEqual(paths, [])
+
+    def test_extract_file_paths_from_prompt_home_relative(self) -> None:
+        anti = load_anti()
+        prompt = 'Check ~/project/main.py'
+        paths = anti.extract_file_paths_from_prompt(prompt)
+        self.assertEqual(paths, ['~/project/main.py'])
+
+    def test_build_consult_file_context_reads_file(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-test-") as tmp:
+            root = Path(tmp)
+            test_file = root / "test.py"
+            test_file.write_text("print('hello')\n", encoding="utf-8")
+            
+            prompt = f'Review {test_file}'
+            enhanced, caveats, read_files = anti.build_consult_file_context(prompt, 120_000)
+            
+            self.assertEqual(read_files, [str(test_file)])
+            self.assertEqual(caveats, [])
+            self.assertIn("print('hello')", enhanced)
+            self.assertIn("## File Contents", enhanced)
+            self.assertIn("## User Request", enhanced)
+
+    def test_build_consult_file_context_missing_file(self) -> None:
+        anti = load_anti()
+        prompt = 'Review /nonexistent/file.py'
+        enhanced, caveats, read_files = anti.build_consult_file_context(prompt, 120_000)
+        
+        self.assertEqual(read_files, [])
+        self.assertEqual(enhanced, prompt)
+        self.assertTrue(any("File not found" in c for c in caveats))
+
+    def test_build_consult_file_context_no_files(self) -> None:
+        anti = load_anti()
+        prompt = 'What is the best way to implement a cache?'
+        enhanced, caveats, read_files = anti.build_consult_file_context(prompt, 120_000)
+        
+        self.assertEqual(read_files, [])
+        self.assertEqual(caveats, [])
+        self.assertEqual(enhanced, prompt)
+
+    def test_build_consult_file_context_budget_exceeded(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-test-") as tmp:
+            root = Path(tmp)
+            test_file = root / "large.py"
+            # Create a file that's too large for the budget
+            test_file.write_text("x = 1\n" * 30_000, encoding="utf-8")
+            
+            prompt = f'Review {test_file}'
+            # Use a very small budget
+            enhanced, caveats, read_files = anti.build_consult_file_context(prompt, 100)
+            
+            self.assertEqual(read_files, [])
+            self.assertEqual(enhanced, prompt)
+            self.assertTrue(any("exceeds max" in c for c in caveats))

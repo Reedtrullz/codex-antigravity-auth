@@ -101,9 +101,8 @@ MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
     "ollama:qwen3:8b": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
 }
 
-# Cost tiers: free < subscription < quota < paid
-# free = no metering (OpenRouter free tier, Ollama local)
-# subscription = paid subscription with usage quotas (xAI SuperGrok)
+# Cost tiers: free < quota < paid
+# free = no metering (OpenRouter free tier, Ollama local, SuperGrok OAuth)
 # quota = Google Antigravity quota (shared across accounts)
 # paid = metered billing (not currently in rotation)
 MODEL_COST_TIER: dict[str, str] = {
@@ -118,8 +117,8 @@ MODEL_COST_TIER: dict[str, str] = {
     "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": "free",
     "openrouter:poolside/laguna-s-2.1:free": "free",
     "openrouter:google/gemma-4-31b-it:free": "free",
-    "xai-oauth:grok-build-0.1": "subscription",
-    "xai-oauth:grok-4.3": "subscription",
+    "xai-oauth:grok-build-0.1": "free",
+    "xai-oauth:grok-4.3": "free",
     "ollama:gpt-oss:20b": "free",
     "ollama:qwen3:8b": "free",
 }
@@ -281,33 +280,108 @@ def ensure_run_id(args: argparse.Namespace) -> str | None:
     args.run_id = run_id
     return run_id
 
-_MODEL_SHORT = {
-    "claude-opus-4-6": "opus", "claude-3.5-sonnet": "sonnet",
-    "gemini-3.5-flash-high": "flash", "gemini-3.5-flash-medium": "flash-m",
-    "gemini-3.1-pro-high": "pro", "gemini-3.6-flash-high": "flash-3.6",
-    "xai-oauth:grok-build-0.1": "grok", "xai-oauth:grok-4.3": "grok-4.3",
-    "deepseek:deepseek-v4-pro": "ds-v4", "deepseek:deepseek-v4-flash": "ds-flash",
-    "bluesminds:grok-4.5": "grok-bm", "bluesminds:z-ai/glm-5.2": "glm-5.2",
-}
-
-def _compact(msg: str) -> str:
-    for full, short in _MODEL_SHORT.items():
-        msg = msg.replace(full, short)
-    while "  " in msg:
-        msg = msg.replace("  ", " ")
-    return msg
 
 
-def _warn_quota(args, model: str) -> None:
-    tier = model_cost_tier(model)
-    if tier == "quota":
-        quality = MODEL_QUALITY_RANK.get(model, 0)
-        progress(args, f"note: using quota model {_compact(model)} (quality {quality}). Pass --prefer-free to use free models instead.")
+LIVE_STATUS_PATHS = [
+    Path("/tmp/anti-live-status.json"),
+    Path(os.path.expanduser("~/.codex/anti-live-status.json")),
+]
+_LIVE_STATUS: dict[str, Any] = {}
+
+
+def update_live_status(
+    args: argparse.Namespace | None = None,
+    message: str | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    global _LIVE_STATUS
+    if message and args:
+        progress(args, message)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if message:
+        _LIVE_STATUS["message"] = redact_sensitive_text(message)
+    _LIVE_STATUS["updated_at"] = now
+    for k, v in kwargs.items():
+        if v is not None:
+            _LIVE_STATUS[k] = v
+
+    if args:
+        run_id = getattr(args, "run_id", None)
+        if run_id:
+            _LIVE_STATUS["run_id"] = run_id
+
+    for path in LIVE_STATUS_PATHS:
+        try:
+            parent = path.parent
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+            tmp_path = path.with_suffix(".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(_LIVE_STATUS, f, indent=2)
+            os.replace(tmp_path, path)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+        except Exception:
+            pass
+    return _LIVE_STATUS
+
+
+def command_status(args: argparse.Namespace) -> int:
+    status_data: dict[str, Any] | None = None
+    for path in LIVE_STATUS_PATHS:
+        if path.is_file():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    status_data = json.load(f)
+                    if status_data:
+                        break
+            except Exception:
+                pass
+    if not status_data:
+        if getattr(args, "json", False):
+            print(json.dumps({"active": False, "status": "idle", "message": "No active Anti run"}, indent=2))
+        else:
+            print("[anti] No active Anti run currently executing.")
+        return 0
+
+    if getattr(args, "json", False):
+        print(json.dumps(status_data, indent=2))
+        return 0
+
+    run_id = status_data.get("run_id", "unknown")
+    command = status_data.get("command", "unknown")
+    mode = status_data.get("mode", "unknown")
+    status = status_data.get("status", "unknown").upper()
+    current_step = status_data.get("current_step", "unknown")
+    msg = status_data.get("message", "")
+    active_model = status_data.get("active_model")
+    completed = status_data.get("completed_models", [])
+    pending = status_data.get("pending_models", [])
+    judge = status_data.get("judge_model")
+    updated_at = status_data.get("updated_at", "")
+
+    print(f"=== [Anti Live Status: {status}] ===")
+    print(f"Run ID:        {run_id}")
+    print(f"Command:       {command} (mode: {mode})")
+    print(f"Active Step:   {current_step}")
+    if active_model:
+        print(f"Active Model:  {active_model}")
+    if completed:
+        print(f"Completed:     {', '.join(completed)}")
+    if pending:
+        print(f"Pending:       {', '.join(pending)}")
+    if judge:
+        print(f"Judge:         {judge}")
+    print(f"Message:       {msg}")
+    print(f"Last Updated:  {updated_at}")
+    return 0
+
 
 def progress(args: argparse.Namespace, message: str) -> None:
     if getattr(args, "progress", True):
         t = time.strftime("%H:%M:%S", time.localtime())
-        eprint(f"[anti {t}] {redact_sensitive_text(_compact(message))}")
+        eprint(f"[anti {t}] {redact_sensitive_text(message)}")
 
 
 def save_output_mode(args: argparse.Namespace) -> str:
@@ -556,7 +630,7 @@ def cheapest_models_for_task(
         if quality < min_quality:
             continue
         tier = model_cost_tier(model_id)
-        tier_order = {"free": 0, "subscription": 1, "quota": 2, "paid": 3}.get(tier, 3)
+        tier_order = {"free": 0, "quota": 1, "paid": 2}.get(tier, 3)
         candidates.append((model_id, tier_order, quality))
     # Sort: free first, then by quality descending
     candidates.sort(key=lambda x: (x[1] if prefer_free else 2, -x[2]))
@@ -1260,6 +1334,110 @@ def review_prompt_parts(
     return parts
 
 
+
+
+
+
+
+def extract_file_paths_from_prompt(prompt: str) -> list[str]:
+    """Extract file paths mentioned in a prompt string.
+    
+    Detects common path patterns:
+    - Absolute paths: /path/to/file.py
+    - Relative paths: ./path/to/file.py or src/file.py
+    - Home-relative paths: ~/path/to/file.py
+    - Directory paths with filenames: /path/to/dir/ (file1.py, file2.py)
+    """
+    paths: list[str] = []
+    seen: set[str] = set()
+    
+    def add_path(path: str) -> None:
+        """Add path after normalizing to avoid duplicates."""
+        # Normalize: remove ./ prefix, expand ~
+        normalized = path
+        if normalized.startswith("./"):
+            normalized = normalized[2:]
+        if normalized not in seen:
+            seen.add(normalized)
+            paths.append(path)  # Keep original form for display
+    
+    # Pattern 1: Absolute or home-relative paths to files
+    # Matches /path/to/file.py or ~/path/to/file.py
+    for match in re.finditer(r'(?<![.~\w/])([~]?/(?:[\w.@-]+/)*[\w.@-]+\.\w+)', prompt):
+        add_path(match.group(1))
+    
+    # Pattern 2: Directory path followed by filenames in parentheses
+    # Matches /path/to/dir/ (file1.py, file2.py)
+    dir_paren_match = re.search(r'([~]?/(?:[\w.@-]+/)+)\s*\(([^)]+)\)', prompt)
+    if dir_paren_match:
+        dir_path = dir_paren_match.group(1)
+        filenames = dir_paren_match.group(2)
+        for item in filenames.split(','):
+            item = item.strip()
+            if item and '.' in item:
+                add_path(dir_path + item)
+    
+    # Pattern 3: Relative paths like ./file.py (must start with ./)
+    for match in re.finditer(r'(?:(?<=\s)|(?<=\())(\./[\w.@-]+(?:/[\w.@-]+)*\.\w+)', prompt):
+        add_path(match.group(1))
+    
+    return paths
+
+
+def build_consult_file_context(
+    prompt: str,
+    max_prompt_chars: int,
+) -> tuple[str, list[str], list[str]]:
+    """Read files mentioned in the prompt and build context.
+    
+    Returns:
+        - Modified prompt with file contents prepended
+        - List of caveats about file reading
+        - List of successfully read file paths
+    """
+    file_paths = extract_file_paths_from_prompt(prompt)
+    if not file_paths:
+        return prompt, [], []
+    
+    caveats: list[str] = []
+    file_blocks: list[str] = []
+    read_files: list[str] = []
+    
+    for file_path_str in file_paths:
+        # Check for symlinks BEFORE resolving to prevent following them
+        raw_path = Path(file_path_str).expanduser()
+        if raw_path.is_symlink():
+            caveats.append(f"Skipped symlink: {file_path_str}")
+            continue
+        
+        file_path = raw_path.resolve()
+        
+        if not file_path.is_file():
+            caveats.append(f"File not found: {file_path_str}")
+            continue
+        
+        text, note = read_text_file(file_path.parent, file_path.name)
+        if note:
+            caveats.append(note)
+        if text:
+            file_blocks.append(f"### {file_path_str}\n```text\n{text}\n```")
+            read_files.append(file_path_str)
+    
+    if not file_blocks:
+        return prompt, caveats, []
+    
+    file_context = "## File Contents\n" + "\n\n".join(file_blocks)
+    enhanced_prompt = f"{file_context}\n\n## User Request\n{prompt}"
+    
+    # Check if we exceeded the prompt budget
+    if max_prompt_chars > 0 and len(enhanced_prompt) > max_prompt_chars:
+        # Fall back to just the prompt with a caveat
+        caveats.append(
+            f"File contents omitted: combined prompt ({len(enhanced_prompt)} chars) exceeds max ({max_prompt_chars} chars)"
+        )
+        return prompt, caveats, []
+    
+    return enhanced_prompt, caveats, read_files
 def build_review_prompt(
     *,
     scope_line: str,
@@ -2775,6 +2953,14 @@ def maybe_summarize_panel_review(
 
 
 def command_panel(args: argparse.Namespace) -> int:
+    update_live_status(
+        args,
+        message=f"panel {getattr(args, 'mode', 'review')}: initializing fan-out",
+        command="panel",
+        mode=getattr(args, "mode", "review"),
+        status="running",
+        current_step="initializing",
+    )
     if args.output not in PANEL_OUTPUT_MODES:
         raise AntiError(f"unsupported panel output mode: {args.output}")
     collab_profile = normalize_collab_profile(getattr(args, "collab", "none"))
@@ -2827,6 +3013,7 @@ def command_panel(args: argparse.Namespace) -> int:
     if getattr(args, "run_id", None):
         metadata["run_id"] = args.run_id
         metadata["request_log_correlation_id"] = args.run_id
+    progress(args, f"panel {args.mode}: starting fan-out across {len(panel_models)} model(s) [{', '.join(panel_models)}], judge={judge_model}")
 
     required_models = [judge_model]
     if getattr(args, "fallback_model", None):
@@ -2975,19 +3162,19 @@ def command_panel(args: argparse.Namespace) -> int:
 
 
 def command_consult(args: argparse.Namespace) -> int:
+    progress(args, f"consult: querying model {getattr(args, 'model', 'sonnet')}")
     model = resolve_model(args.model, default=DEFAULT_CONSULT_MODEL)
-    if args.model is None and getattr(args, "prefer_free", True):
-        try:
-            model_ids = ensure_models_available(base_url=args.base_url, models=[DEFAULT_CONSULT_MODEL], timeout=args.timeout, token_env=args.gateway_token_env)
-            cheap = suggest_default_for_task(task_type="quick", available=list(model_ids))
-            if cheap and cheap != model:
-                progress(args, f"prefer-free: {_compact(model)} -> {_compact(cheap)} ({model_cost_tier(cheap)})")
-                model = cheap
-        except Exception:
-            pass
-    _warn_quota(args, model)
     prompt = read_prompt(args)
     caveats: list[str] = []
+    
+    # Pre-read files mentioned in the prompt to prevent hallucination
+    prompt, file_caveats, read_files = build_consult_file_context(
+        prompt, args.max_prompt_chars
+    )
+    caveats.extend(file_caveats)
+    if read_files:
+        progress(args, f"consult: pre-read {len(read_files)} file(s) for context")
+    
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
     ensure_run_id(args)
     text, model_used, generation_metadata = generate_with_fallback(
@@ -2998,6 +3185,8 @@ def command_consult(args: argparse.Namespace) -> int:
         purpose="consult",
     )
     metadata = {"prompt_chars": len(prompt), **generation_metadata}
+    if read_files:
+        metadata["pre_read_files"] = read_files
     if getattr(args, "run_id", None):
         metadata["run_id"] = args.run_id
         metadata["request_log_correlation_id"] = args.run_id
@@ -3028,17 +3217,8 @@ def command_consult(args: argparse.Namespace) -> int:
 
 
 def command_review(args: argparse.Namespace) -> int:
+    progress(args, f"review: analyzing scope '{getattr(args, 'scope', 'working-tree')}' with {getattr(args, 'model', 'opus')}")
     model = resolve_model(args.model, default=DEFAULT_REVIEW_MODEL)
-    if args.model is None and getattr(args, "prefer_free", True):
-        try:
-            model_ids = ensure_models_available(base_url=args.base_url, models=[model], timeout=args.timeout, token_env=args.gateway_token_env)
-            cheap = suggest_default_for_task(task_type="review", available=list(model_ids))
-            if cheap and cheap != model:
-                progress(args, f"prefer-free: defaulting to {_compact(model)} -> {_compact(cheap)} ({model_cost_tier(cheap)})")
-                model = cheap
-        except Exception:
-            pass
-    _warn_quota(args, model)
     prompt_budget = prompt_budget_for_model(args, model)
     claude_guardrail_available = claude_guardrail_would_apply(args, model, prompt_budget)
     context = collect_review_context(args)
@@ -3120,17 +3300,8 @@ def command_review(args: argparse.Namespace) -> int:
 
 
 def command_plan(args: argparse.Namespace) -> int:
+    progress(args, f"plan: generating plan for scope '{getattr(args, 'scope', 'none')}' with {getattr(args, 'model', 'opus')}")
     model = resolve_model(args.model, default=DEFAULT_PLAN_MODEL)
-    if args.model is None and getattr(args, "prefer_free", True):
-        try:
-            model_ids = ensure_models_available(base_url=args.base_url, models=[model], timeout=args.timeout, token_env=args.gateway_token_env)
-            cheap = suggest_default_for_task(task_type="plan", available=list(model_ids))
-            if cheap and cheap != model:
-                progress(args, f"prefer-free: defaulting to {_compact(model)} -> {_compact(cheap)} ({model_cost_tier(cheap)})")
-                model = cheap
-        except Exception:
-            pass
-    _warn_quota(args, model)
     prompt_budget = prompt_budget_for_model(args, model)
     claude_guardrail_available = claude_guardrail_would_apply(args, model, prompt_budget)
     prompt, caveats = assemble_plan_prompt(args, apply_limit=False)
@@ -3844,9 +4015,7 @@ def add_generation_control_args(
         default="never",
         help="When to use --fallback-model",
     )
-    parser.add_argument("--progress", action="store_true", help="Print long-call progress to stderr")
-    parser.add_argument("--prefer-free", action="store_true", default=True, help="Prefer free-tier models over quota models (default: true)")
-    parser.add_argument("--no-prefer-free", dest="prefer_free", action="store_false", help="Allow quota models as defaults")
+    parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True, help="Print long-call progress to stderr (default: true; use --no-progress to disable)")
     parser.add_argument("--run-label", help="Optional label for saved Anti run metadata")
     parser.add_argument("--run-id", help="Stable run/correlation id for saved and gateway records")
     parser.add_argument(
@@ -3910,7 +4079,7 @@ def build_parser() -> argparse.ArgumentParser:
     consult = sub.add_parser("consult", aliases=["ask"], help="Ask Antigravity an explicit prompt")
     add_gateway_args(consult, default_timeout=120.0)
     add_generation_control_args(consult)
-    consult.add_argument("--model", default=None, help="Model alias/id; auto-picks cheapest available when unset")
+    consult.add_argument("--model", default="sonnet", help="opus, sonnet, or full model id")
     consult.add_argument("--prompt", help="Prompt text")
     consult.add_argument("--prompt-file", help="Read prompt text from file")
     consult.add_argument("--max-output-tokens", type=positive_int, default=2048)
@@ -3927,7 +4096,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_gateway_args(plan, default_timeout=120.0)
     add_generation_control_args(plan)
-    plan.add_argument("--model", default=None, help="Model alias/id; auto-picks cheapest available when unset")
+    plan.add_argument("--model", default="opus", help="opus, sonnet, or full model id")
     plan.add_argument("--prompt", help="Planning goal text")
     plan.add_argument("--prompt-file", help="Read planning goal from file")
     plan.add_argument("--scope", choices=["none", "working-tree", "staged", "files"], default="none")
@@ -3947,7 +4116,7 @@ def build_parser() -> argparse.ArgumentParser:
     review = sub.add_parser("review", help="Review git diffs or selected files with Antigravity")
     add_gateway_args(review, default_timeout=120.0)
     add_generation_control_args(review)
-    review.add_argument("--model", default=None, help="Model alias/id; auto-picks cheapest available when unset")
+    review.add_argument("--model", default="opus", help="opus, sonnet, or full model id")
     review.add_argument("--scope", choices=["working-tree", "staged", "files", "diff"], default="working-tree")
     review.add_argument("--base", help="Base ref for --scope diff; uses <base>...HEAD")
     review.add_argument("--changed-files", dest="changed_files_range", help="Git revision range for --scope diff")
@@ -4070,6 +4239,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_gateway_args(configure)
     add_codex_config_args(configure)
     configure.set_defaults(func=command_configure_codex)
+
+    status_parser = sub.add_parser("status", aliases=["live"], help="Show active or recent live Anti run status")
+    status_parser.add_argument("--json", action="store_true", help="Emit live status in JSON format")
+    status_parser.set_defaults(func=command_status)
 
     doctor = sub.add_parser("doctor", help="Run codex-antigravity doctor")
     add_gateway_args(doctor)
