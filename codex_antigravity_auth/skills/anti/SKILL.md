@@ -55,8 +55,8 @@ The helper tracks per-model capabilities and cost tiers to make cost-aware decis
 | `gemini-3.1-pro-high` | `gemini-pro` | quota | 1M | yes | yes | yes | yes | 90 |
 | `claude-3.5-sonnet` | `sonnet` | quota | 200K | yes | no | no | yes | 85 |
 | `gemini-3.5-flash-high` | `flash-high` | quota | 1M | yes | yes | yes | yes | 80 |
-| `xai-oauth:grok-4.3` | `grok-4.3` | subscription | 128K | yes | no | no | yes | 78 |
-| `xai-oauth:grok-build-0.1` | `grok` | subscription | 128K | yes | no | no | yes | 75 |
+| `xai-oauth:grok-4.3` | `grok-4.3` | free | 128K | yes | no | no | yes | 78 |
+| `xai-oauth:grok-build-0.1` | `grok` | free | 128K | yes | no | no | yes | 75 |
 | `gemini-3.6-flash-medium` | `flash-3.6-medium` | quota | 1M | yes | yes | yes | yes | 70 |
 | `nemotron-3-ultra-550b` | `nemotron-ultra` | free | 128K | no | no | no | yes | 70 |
 | `gemini-3.5-flash-medium` | `flash` | quota | 1M | yes | yes | yes | yes | 68 |
@@ -67,8 +67,7 @@ The helper tracks per-model capabilities and cost tiers to make cost-aware decis
 | `qwen3:8b` | `qwen3` | free | 128K | yes | no | no | yes | 40 |
 
 **Cost tiers:**
-- `free` — No metering. OpenRouter free tier, Ollama local.
-- `subscription` — Paid subscription with usage quotas. xAI SuperGrok (grok, grok-4.3).
+- `free` — No metering. OpenRouter free tier, Ollama local, xAI OAuth (SuperGrok subscription).
 - `quota` — Google Antigravity quota, shared across 4 accounts. Opus and Sonnet share this pool.
 - `paid` — Metered billing (not currently in rotation).
 
@@ -112,7 +111,7 @@ Common commands:
 
 ```bash
 python3 ~/.codex/skills/anti/scripts/anti.py smoke
-python3 ~/.codex/skills/anti/scripts/anti.py consult --model sonnet --prompt "Review this idea"
+python3 ~/.codex/skills/anti/scripts/anti.py consult --model sonnet --prompt "Review this idea" --dry-run --model sonnet --prompt "Review this idea"
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model deepseek-v4-flash --prompt "Give a fast second opinion"
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model flash-high --prompt "Quick sanity check on this approach"
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model gemini-pro --prompt "Deep analysis of this architecture"
@@ -187,9 +186,10 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - Use `--fallback-model sonnet --fallback-policy on-retryable` for long Opus planning/review calls when backend `502`/timeout drift would otherwise block the workflow.
 - A provider fallback is always explicit. For example, `--fallback-model deepseek-v4-flash --fallback-policy on-retryable` may send the same prompt/context to DeepSeek; use it only when that disclosure and trust boundary are acceptable.
 - After retryable generation failures, the helper probes `/v1/models`; if that probe also times out, treat the gateway as wedged and restart it before retrying the same Opus job.
-- `--prefer-free` is enabled by default for all `workflow`, `plan`, `review`, `consult`, `panel`, `moa`, and `fusion` runs. When no `--model` is explicitly passed, the helper probes `/v1/models` and automatically selects the cheapest available model (free tier first, then by quality). Use `--no-prefer-free` to use hardcoded defaults (opus for review/plan, sonnet for consult). Quota models display a brief `[anti] note:` warning when selected.
 - `--progress` is enabled by default for all `workflow`, `plan`, `review`, `consult`, `panel`, `moa`, and `fusion` runs, streaming real-time `[anti]` step milestones (model call starts, completed prompt/output char counts, elapsed time, chunk progress, and judge synthesis) directly to stderr for live visibility in Codex. Use `--no-progress` to suppress stderr progress logging if quiet output is explicitly required.
 - V2 workflow presets default to sanitized run summaries under `~/.codex/anti-runs`; use `runs list`, `runs show <id>`, and `runs clean --older-than N` (add `--dry-run` to preview deletions) to inspect or prune them. Primitive commands default to `--save-output never`; pass `--save-output summary` or `--save-output full` only when useful.
+- The helper emits a cost-awareness hint to stderr when a quota-tier model is selected and free alternatives of similar quality are available. Use `--model <free-alias>` to switch.
+- `--dry-run` prints token estimates and cost tiers without contacting the gateway. Available on `consult`, `review`, `plan`, `panel`, and `workflow` commands.
 - Treat sidecar and panel findings as leads. Consensus is not proof. Before editing, verify actionable claims with local source inspection, official docs when relevant, typecheck/tests, or a small reproducer; record dubious or unverified claims as caveats instead of patching them blindly.
 
 ## Safety
