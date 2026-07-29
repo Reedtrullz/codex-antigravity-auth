@@ -900,7 +900,7 @@ def post_response(
                        f"(status={decoded.get('status', 'unknown')}); "
                        f"the response may be malformed or empty")
             return ResponseText(
-                extract_response_text(decoded),
+                text,
                 usage=extract_usage(decoded),
                 elapsed_ms=int((time.monotonic() - started) * 1000),
                 response_metadata={"attempts": attempt},
@@ -1044,14 +1044,17 @@ def find_repo_root(start: Path) -> Path | None:
 
 
 def run_git(root: Path, args: list[str], *, check: bool = True) -> str:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=root,
-        timeout=60,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            timeout=60,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.TimeoutExpired:
+        raise AntiError(f"git {' '.join(args)} timed out after 60s")
     if check and proc.returncode != 0:
         raise AntiError(proc.stderr.strip() or f"git {' '.join(args)} failed")
     return proc.stdout
@@ -1188,14 +1191,17 @@ def diff_for_paths(root: Path, scope: str, paths: list[str], *, rev_range: str |
 
 
 def file_is_tracked(root: Path, rel_path: str) -> bool:
-    proc = subprocess.run(
-        ["git", "ls-files", "--error-unmatch", "--", rel_path],
-        cwd=root,
-        timeout=60,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", rel_path],
+            cwd=root,
+            timeout=60,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.TimeoutExpired:
+        raise AntiError(f"git ls-files timed out after 60s")
     return proc.returncode == 0
 
 
