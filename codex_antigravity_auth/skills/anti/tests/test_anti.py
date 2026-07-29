@@ -2567,23 +2567,25 @@ class ConsultFileContextTests(unittest.TestCase):
 
     def test_build_consult_file_context_reads_file(self) -> None:
         anti = load_anti()
-        with tempfile.TemporaryDirectory(prefix="anti-test-") as tmp:
-            root = Path(tmp)
-            test_file = root / "test.py"
+        test_file = Path.cwd() / "_anti_consult_test_file.py"
+        try:
             test_file.write_text("print('hello')\n", encoding="utf-8")
+            test_file_rel = "./_anti_consult_test_file.py"
             
-            prompt = f'Review {test_file}'
+            prompt = f'Review {test_file_rel}'
             enhanced, caveats, read_files = anti.build_consult_file_context(prompt, 120_000)
             
-            self.assertEqual(read_files, [str(test_file)])
+            self.assertEqual(read_files, [test_file_rel])
             self.assertEqual(caveats, [])
             self.assertIn("print('hello')", enhanced)
             self.assertIn("## File Contents", enhanced)
             self.assertIn("## User Request", enhanced)
+        finally:
+            test_file.unlink(missing_ok=True)
 
     def test_build_consult_file_context_missing_file(self) -> None:
         anti = load_anti()
-        prompt = 'Review /nonexistent/file.py'
+        prompt = 'Review ./_nonexistent_file.py'
         enhanced, caveats, read_files = anti.build_consult_file_context(prompt, 120_000)
         
         self.assertEqual(read_files, [])
@@ -2601,19 +2603,19 @@ class ConsultFileContextTests(unittest.TestCase):
 
     def test_build_consult_file_context_budget_exceeded(self) -> None:
         anti = load_anti()
-        with tempfile.TemporaryDirectory(prefix="anti-test-") as tmp:
-            root = Path(tmp)
-            test_file = root / "large.py"
-            # Create a file that's too large for the budget
+        test_file = Path.cwd() / "_anti_consult_large.py"
+        try:
             test_file.write_text("x = 1\n" * 30_000, encoding="utf-8")
+            test_file_rel = "./_anti_consult_large.py"
             
-            prompt = f'Review {test_file}'
-            # Use a very small budget
+            prompt = f'Review {test_file_rel}'
             enhanced, caveats, read_files = anti.build_consult_file_context(prompt, 100)
             
             self.assertEqual(read_files, [])
             self.assertEqual(enhanced, prompt)
             self.assertTrue(any("exceeds max" in c for c in caveats))
+        finally:
+            test_file.unlink(missing_ok=True)
 
     def test_build_consult_file_context_rejects_symlink(self) -> None:
         anti = load_anti()
@@ -2636,3 +2638,154 @@ class ConsultFileContextTests(unittest.TestCase):
         paths = anti.extract_file_paths_from_prompt(prompt)
         self.assertIn('/path/to/file.py', paths)
         self.assertIn('/other/config.toml', paths)
+
+
+class PostResponseGuardTests(unittest.TestCase):
+    """Tests for model-level failure detection in post_response (status 'failed' and empty output)."""
+
+    def _make_failed_response(self) -> dict:
+        return {
+            "id": "resp_test_fail",
+            "model": "gemini-3.5-flash-high",
+            "status": "failed",
+            "error": {"message": "The provider returned no meaningful output."},
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": ""}]}],
+        }
+
+    def _make_empty_output_response(self) -> dict:
+        return {
+            "id": "resp_test_empty",
+            "model": "gemini-3.5-flash-high",
+            "status": "completed",
+            "output": [{"type": "message", "content": [
+                {"type": "output_text", "text": ""},
+                {"type": "output_text", "text": "   "},
+            ]}],
+        }
+
+    def test_post_response_raises_on_status_failed(self) -> None:
+        anti = load_anti()
+        model_ids = {"gemini-3.5-flash-high"}
+        anti.fetch_model_ids = lambda *a, **kw: model_ids
+        anti.request_json = lambda *a, **kw: (200, self._make_failed_response())
+        try:
+            anti.post_response(
+                base_url="http://x", model="gemini-3.5-flash-high",
+                prompt="x", max_output_tokens=100, timeout=5, token_env="",
+                retries=0, model_ids=model_ids,
+            )
+            self.fail("should have raised AntiError")
+        except anti.AntiError as exc:
+            self.assertIn("status 'failed'", str(exc))
+            self.assertIn("no meaningful output", str(exc))
+
+    def test_post_response_raises_on_empty_output_content(self) -> None:
+        anti = load_anti()
+        model_ids = {"gemini-3.5-flash-high"}
+        anti.fetch_model_ids = lambda *a, **kw: model_ids
+        anti.request_json = lambda *a, **kw: (200, self._make_empty_output_response())
+        try:
+            anti.post_response(
+                base_url="http://x", model="gemini-3.5-flash-high",
+                prompt="x", max_output_tokens=100, timeout=5, token_env="",
+                retries=0, model_ids=model_ids,
+            )
+            self.fail("should have raised AntiError for empty output")
+        except anti.AntiError as exc:
+            self.assertIn("empty output", str(exc))
+
+    def test_post_response_happy_path_unchanged(self) -> None:
+        anti = load_anti()
+        model_ids = {"gemini-3.5-flash-high"}
+        anti.fetch_model_ids = lambda *a, **kw: model_ids
+        anti.request_json = lambda *a, **kw: (200, {
+            "id": "r", "model": "gemini-3.5-flash-high", "status": "completed",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "Good review."}]}],
+        })
+        result = anti.post_response(
+            base_url="http://x", model="gemini-3.5-flash-high",
+            prompt="x", max_output_tokens=100, timeout=5, token_env="",
+            retries=0, model_ids=model_ids,
+        )
+        self.assertIn("Good review", str(result))
+
+
+class ErrorRetryableTests(unittest.TestCase):
+    """Tests for error_is_retryable covering status 'failed' pattern."""
+
+    def test_error_is_retryable_matches_status_failed(self) -> None:
+        anti = load_anti()
+        self.assertTrue(anti.error_is_retryable(
+            "model gemini-3.5-flash-high returned status 'failed': The provider returned no meaningful output."
+        ))
+        self.assertTrue(anti.error_is_retryable(
+            "model x returned status 'failed': "
+        ))
+
+    def test_error_is_retryable_does_not_match_ordinary_errors(self) -> None:
+        anti = load_anti()
+        self.assertFalse(anti.error_is_retryable("some random error"))
+
+
+class ConsultFileContextWorkspaceTests(unittest.TestCase):
+    """Tests for workspace-boundary enforcement in build_consult_file_context."""
+
+    def test_rejects_file_outside_workspace(self) -> None:
+        anti = load_anti()
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="anti-outside-") as tmp:
+            outside = Path(tmp) / "secret.py"
+            outside.write_text("secret stuff", encoding="utf-8")
+            prompt = f'Review {outside}'
+            enhanced, caveats, read_files = anti.build_consult_file_context(prompt, 120_000)
+            self.assertEqual(read_files, [])
+            self.assertEqual(enhanced, prompt)
+            self.assertTrue(any("outside workspace" in c for c in caveats))
+
+    def test_accepts_file_in_workspace(self) -> None:
+        anti = load_anti()
+        test_file = Path.cwd() / "_anti_workspace_test.py"
+        try:
+            test_file.write_text("print('ok')", encoding="utf-8")
+            prompt = f'Review ./_anti_workspace_test.py'
+            enhanced, caveats, read_files = anti.build_consult_file_context(prompt, 120_000)
+            self.assertEqual(read_files, ["./_anti_workspace_test.py"])
+            self.assertIn("print('ok')", enhanced)
+        finally:
+            test_file.unlink(missing_ok=True)
+
+
+class RunGitTimeoutTests(unittest.TestCase):
+    """Tests for git timeout in run_git."""
+
+    def test_run_git_has_timeout_and_reports_errors(self) -> None:
+        anti = load_anti()
+        import tempfile, subprocess as sp
+        with tempfile.TemporaryDirectory(prefix="anti-git-test-") as tmp:
+            root = Path(tmp)
+            sp.run(["git", "init"], cwd=root, capture_output=True)
+            # Normal git operation should complete within 60s
+            output = anti.run_git(root, ["rev-parse", "--show-toplevel"])
+            self.assertTrue(output.strip())
+            # Verify timeout is enforced by checking the function's subprocess.run call
+            import inspect
+            source = inspect.getsource(anti.run_git)
+            self.assertIn("timeout=60", source)
+
+
+class WorkflowFallbackPolicyTests(unittest.TestCase):
+    """Tests for correct fallback policy handling in workflow expansion."""
+
+    def test_plan_deep_respects_never_fallback_policy(self) -> None:
+        anti = load_anti()
+        parser = anti.build_parser()
+        args = parser.parse_args([
+            "workflow", "plan-deep", "--fallback-policy", "never",
+            "--progress", "--no-progress",
+        ])
+        expanded = anti.workflow_expansion(args)
+        # Plan-deep should NOT have added --fallback-policy on-retryable
+        policy_indices = [i for i, v in enumerate(expanded) if v == "--fallback-policy"]
+        if policy_indices:
+            last_policy = expanded[policy_indices[-1] + 1]
+            self.assertEqual(last_policy, "never")

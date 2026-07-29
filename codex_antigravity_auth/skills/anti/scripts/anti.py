@@ -369,6 +369,8 @@ def write_run_record(
 
 def error_is_retryable(error: str) -> bool:
     lowered = error.lower()
+    if "status 'failed'" in lowered:
+        return True
     if "retryable=true" in lowered:
         return True
     return any(f"http {status}" in lowered for status in ("408", "409", "425", "429", "500", "502", "503", "504"))
@@ -540,6 +542,33 @@ def cheapest_models_for_task(
     candidates.sort(key=lambda x: (x[1] if prefer_free else 2, -x[2]))
     return [m[0] for m in candidates]
 
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token count: ~4 chars per token for English text."""
+    return max(1, len(text) // 4)
+
+
+def estimate_cost(
+    *,
+    model: str,
+    prompt_chars: int,
+    estimated_output_tokens: int = 0,
+) -> dict[str, Any]:
+    """Estimate token usage and cost tier for a model call without contacting gateway."""
+    input_tokens = estimate_tokens("x" * prompt_chars) if prompt_chars > 0 else 0
+    total_tokens = input_tokens + estimated_output_tokens
+    tier = model_cost_tier(model)
+    quality = MODEL_QUALITY_RANK.get(model, 0)
+    return {
+        "model": model,
+        "cost_tier": tier,
+        "quality_rank": quality,
+        "estimated_input_tokens": input_tokens,
+        "estimated_output_tokens": estimated_output_tokens,
+        "estimated_total_tokens": total_tokens,
+        "prompt_chars": prompt_chars,
+    }
 
 
 def positive_int(value: str) -> int:
@@ -846,6 +875,30 @@ def post_response(
             ) from exc
 
         if status == 200:
+            text = extract_response_text(decoded)
+            # Guard: model-level failure signalled via status field
+            if isinstance(decoded, dict) and decoded.get("status") == "failed":
+                error_msg = (
+                    decoded.get("error", {}).get("message", "")
+                    if isinstance(decoded.get("error"), dict)
+                    else ""
+                )
+                raise AntiError(f"model {model} returned status 'failed': {error_msg}".rstrip(": "))
+            # Guard: no meaningful text in output content blocks
+            if isinstance(decoded, dict) and isinstance(decoded.get("output"), list):
+                all_text: list[str] = []
+                for item in decoded["output"]:
+                    if isinstance(item, dict):
+                        for ci in item.get("content", []):
+                            if isinstance(ci, dict) and isinstance(ci.get("text"), str):
+                                all_text.append(ci["text"])
+                if all_text and not any(t.strip() for t in all_text):
+                    raise AntiError(f"model {model} returned empty output with no meaningful content")
+            # Guard: warn when extract_response_text fell back to JSON dump
+            if text and text[0] == "{" and isinstance(decoded, dict):
+                eprint(f"[anti] extract_response_text fell back to JSON dump for model {model} "
+                       f"(status={decoded.get('status', 'unknown')}); "
+                       f"the response may be malformed or empty")
             return ResponseText(
                 extract_response_text(decoded),
                 usage=extract_usage(decoded),
@@ -867,6 +920,34 @@ def post_response(
     raise AssertionError("post_response retry loop should have returned or raised")
 
 
+def _pre_flight_cost_suggestion(
+    args: Any,
+    model: str,
+    model_ids: set[str] | None,
+    prompt: str,
+) -> None:
+    """Emit a cost-awareness suggestion if a free model could handle this task."""
+    tier = model_cost_tier(model)
+    if tier == "free":
+        return
+    if not model_ids:
+        return
+    quality = MODEL_QUALITY_RANK.get(model, 0)
+    alternatives = [
+        m for m in model_ids
+        if model_cost_tier(m) == "free" and MODEL_QUALITY_RANK.get(m, 0) >= quality - 15
+    ]
+    if not alternatives:
+        return
+    alternatives.sort(key=lambda m: -MODEL_QUALITY_RANK.get(m, 0))
+    top = alternatives[:3]
+    eprint(
+        f"[anti] cost hint: {model} is {tier}-tier. "
+        f"Free alternative(s) available: {', '.join(top)}. "
+        f"Use --model <alias> to switch."
+    )
+
+
 def generate_with_fallback(
     args: argparse.Namespace,
     *,
@@ -882,6 +963,7 @@ def generate_with_fallback(
     if fallback_policy not in FALLBACK_POLICIES:
         raise AntiError(f"unsupported fallback policy: {fallback_policy}")
 
+    _pre_flight_cost_suggestion(args, model, model_ids, prompt)
     failures: list[dict[str, str]] = []
     progress(args, f"{purpose}: calling {model} ({len(prompt)} prompt chars)")
     try:
@@ -965,6 +1047,7 @@ def run_git(root: Path, args: list[str], *, check: bool = True) -> str:
     proc = subprocess.run(
         ["git", *args],
         cwd=root,
+        timeout=60,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1108,6 +1191,7 @@ def file_is_tracked(root: Path, rel_path: str) -> bool:
     proc = subprocess.run(
         ["git", "ls-files", "--error-unmatch", "--", rel_path],
         cwd=root,
+        timeout=60,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1241,6 +1325,21 @@ def extract_file_paths_from_prompt(prompt: str) -> list[str]:
     for match in re.finditer(r'(?<![~\w\\])([A-Za-z]:\\(?:[~\w.@-]+\\)*[~\w.@-]+\.\w+)', prompt):
         add_path(match.group(1))
     
+    # Pattern 6: Common extensionless files (Dockerfile, Makefile, etc.)
+    _EXTENSIONLESS_NAMES = (
+        'Dockerfile', 'Containerfile', 'Makefile', 'Gemfile', 'Rakefile',
+        'Procfile', 'Vagrantfile', 'Brewfile', 'Justfile', 'Taskfile', 'Earthfile',
+        'LICENSE', 'CHANGELOG', 'README', 'CONTRIBUTING', 'NOTICE',
+        '.dockerignore', '.gitignore', '.gitattributes', '.editorconfig',
+    )
+    _escaped = '|'.join(_EXTENSIONLESS_NAMES)
+    for match in re.finditer(
+        rf'(?:(?<=\\s)|(?<=\()|(?<=`))(\.?/?(?:[\w.@-]+/)*)({_escaped})(?=\s|\)|`|$)', prompt
+    ):
+        add_path(match.group(1) + match.group(2))
+    for match in re.finditer(rf'`([~]?/(?:[\w.@-]+/)*({_escaped}))`', prompt):
+        add_path(match.group(1))
+    
     return paths
 
 
@@ -1257,6 +1356,7 @@ def build_consult_file_context(
     file_blocks: list[str] = []
     read_files: list[str] = []
     
+    workspace_root = find_repo_root(Path.cwd()) or Path.cwd().resolve()
     for file_path_str in file_paths:
         raw_path = Path(file_path_str).expanduser()
         if raw_path.is_symlink():
@@ -1264,8 +1364,17 @@ def build_consult_file_context(
             continue
         
         file_path = raw_path.resolve()
+        # Safety: constrain pre-reads to the workspace
+        try:
+            rel = relative_safe_path(workspace_root, str(file_path))
+        except AntiError:
+            caveats.append(f"Skipped file outside workspace: {file_path_str}")
+            continue
         if not file_path.is_file():
             caveats.append(f"File not found: {file_path_str}")
+            continue
+        if path_is_excluded(rel):
+            caveats.append(f"Skipped excluded path: {file_path_str}")
             continue
         
         text, note = read_text_file(file_path.parent, file_path.name)
@@ -2002,6 +2111,35 @@ def read_optional_prompt(args: argparse.Namespace) -> str:
     if args.prompt_file or args.prompt or getattr(args, "prompt_parts", None):
         return read_prompt(args)
     return ""
+
+
+def format_dry_run(
+    *,
+    mode: str,
+    model: str,
+    prompt_chars: int,
+    max_output_tokens: int,
+    extra_models: list[str] | None = None,
+    output_json: bool = False,
+) -> str:
+    """Format a dry-run summary with token and cost estimates."""
+    estimates = [estimate_cost(model=model, prompt_chars=prompt_chars,
+                               estimated_output_tokens=max_output_tokens)]
+    for m in (extra_models or []):
+        estimates.append(estimate_cost(model=m, prompt_chars=prompt_chars,
+                                       estimated_output_tokens=max_output_tokens))
+    if output_json:
+        return json.dumps({"mode": mode, "estimates": estimates}, indent=2, sort_keys=True)
+    lines = [
+        f"[dry-run] {mode} with model(s): {', '.join(e['model'] for e in estimates)}",
+        f"  prompt: {prompt_chars} chars (~{estimates[0]['estimated_input_tokens']} tokens)",
+    ]
+    for e in estimates:
+        lines.append(
+            f"  {e['model']}: ~{e['estimated_total_tokens']} total tokens "
+            f"({e['cost_tier']} tier, quality {e['quality_rank']})"
+        )
+    return "\n".join(lines)
 
 
 def print_result(
@@ -2846,6 +2984,10 @@ def command_panel(args: argparse.Namespace) -> int:
                 print("\n## Assembly Caveats")
                 for caveat in caveats:
                     print(f"- {caveat}")
+        if args.dry_run:
+            eprint(format_dry_run(mode=f"panel {args.mode}", model=panel_models[0],
+                prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
+                extra_models=panel_models[1:] + [judge_model], output_json=args.json))
         return 0
 
     ensure_run_id(args)
@@ -2865,6 +3007,8 @@ def command_panel(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         token_env=args.gateway_token_env,
     )
+    if judge_model not in model_ids:
+        raise AntiError(f"judge model {judge_model} is not advertised by /v1/models")
     missing_panel_models = [model for model in panel_models if model not in model_ids]
     available_panel_models = [model for model in panel_models if model in model_ids]
     if len(available_panel_models) < min_successes:
@@ -3019,6 +3163,14 @@ def command_consult(args: argparse.Namespace) -> int:
         progress(args, f"consult: pre-read {len(read_files)} file(s) for context")
     
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+    if args.dry_run:
+        print(format_dry_run(mode="consult", model=model,
+            prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
+            output_json=args.json))
+        if not read_files:
+            print()
+            print(prompt)
+        return 0
     ensure_run_id(args)
     text, model_used, generation_metadata = generate_with_fallback(
         args,
@@ -3081,6 +3233,11 @@ def command_review(args: argparse.Namespace) -> int:
     if args.print_prompt:
         if args.json:
             print(json.dumps({"prompt": prompt, "metadata": metadata, "caveats": caveats}, indent=2, sort_keys=True))
+            return 0
+        if args.dry_run:
+            eprint(format_dry_run(mode="review", model=model,
+                prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
+                output_json=args.json))
             return 0
         print(prompt)
         if caveats:
@@ -3162,6 +3319,11 @@ def command_plan(args: argparse.Namespace) -> int:
         printable_prompt = apply_prompt_limit(prompt, prompt_budget, printable_caveats)
         if args.json:
             print(json.dumps({"prompt": printable_prompt, "caveats": printable_caveats}, indent=2, sort_keys=True))
+            return 0
+        if args.dry_run:
+            eprint(format_dry_run(mode="plan", model=model,
+                prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
+                output_json=args.json))
             return 0
         print(printable_prompt)
         if printable_caveats:
@@ -3532,6 +3694,9 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         common.append("--json")
     if args.print_prompt:
         common.append("--print-prompt")
+    if args.dry_run:
+        common.append("--dry-run")
+        common.append("--print-prompt")
 
     if args.name == "review-ready":
         scope = workflow_scope(args, default="staged")
@@ -3567,7 +3732,9 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             *common,
         ]
         if not args.fallback_model:
-            argv.extend(["--fallback-model", "sonnet", "--fallback-policy", "on-retryable"])
+            argv.extend(["--fallback-model", "sonnet"])
+            if args.fallback_policy != "never":
+                argv.extend(["--fallback-policy", "on-retryable"])
     elif args.name == "ship-gate":
         scope = workflow_scope(args, default="staged")
         argv = _panel_argv(
@@ -3916,6 +4083,7 @@ def build_parser() -> argparse.ArgumentParser:
     panel.add_argument("--output", choices=sorted(PANEL_OUTPUT_MODES), default="prose", help="Render prose or findings JSON")
     panel.add_argument("--json", action="store_true", help="Emit structured JSON output")
     panel.add_argument("--print-prompt", action="store_true", help="Print assembled source prompt without contacting gateway")
+    panel.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
     panel.add_argument("prompt_parts", nargs="*", help="Positional ask/planning prompt text")
     panel.set_defaults(func=command_panel)
 
@@ -3929,6 +4097,7 @@ def build_parser() -> argparse.ArgumentParser:
     consult.add_argument("--max-output-tokens", type=positive_int, default=2048)
     consult.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help="Maximum prompt chars before truncation; use 0 for unlimited")
     consult.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
+    consult.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
     consult.add_argument("--json", action="store_true", help="Emit structured JSON output")
     consult.add_argument("prompt_parts", nargs="*", help="Positional prompt text")
     consult.set_defaults(func=command_consult)
@@ -3954,6 +4123,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
     plan.add_argument("--json", action="store_true", help="Emit structured JSON output")
     plan.add_argument("--print-prompt", action="store_true", help="Print assembled prompt without contacting gateway")
+    plan.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
     plan.add_argument("prompt_parts", nargs="*", help="Positional planning goal text")
     plan.set_defaults(func=command_plan)
 
@@ -3985,6 +4155,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review.add_argument("--json", action="store_true", help="Emit structured JSON output")
     review.add_argument("--print-prompt", action="store_true", help="Print assembled prompt without contacting gateway")
+    review.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
     review.set_defaults(func=command_review)
 
     workflow = sub.add_parser("workflow", help="Run a named V2 Anti workflow preset")
@@ -4032,6 +4203,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--output", choices=sorted(PANEL_OUTPUT_MODES), default="prose")
     workflow.add_argument("--json", action="store_true")
     workflow.add_argument("--print-prompt", action="store_true")
+    workflow.add_argument("--dry-run", action="store_true")
     workflow.add_argument("prompt_parts", nargs="*")
     workflow.set_defaults(func=command_workflow)
 
