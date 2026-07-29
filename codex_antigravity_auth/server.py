@@ -480,6 +480,7 @@ def codex_model_metadata(
     *,
     default_reasoning_level: str = "high",
     supports_parallel_tool_calls: bool = True,
+    input_modalities: list[str] | None = None,
 ) -> dict:
     reasoning_levels = [
         {"effort": "low", "description": "Fast responses with lighter reasoning"},
@@ -487,6 +488,7 @@ def codex_model_metadata(
         {"effort": "high", "description": "Greater reasoning depth for complex problems"},
         {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
     ]
+    modalities = input_modalities if input_modalities is not None else ["text"]
     return {
         "id": model_id,
         "slug": model_id,
@@ -508,6 +510,7 @@ def codex_model_metadata(
         "default_verbosity": "medium",
         "truncation_policy": {"mode": "tokens", "limit": 10000},
         "experimental_supported_tools": [],
+        "input_modalities": modalities,
         "shell_type": "shell_command",
         "visibility": "list",
         "minimal_client_version": "0.124.0",
@@ -518,6 +521,15 @@ def codex_model_metadata(
         "base_instructions": "Follow the instructions supplied by the Codex client for each request.",
         "instructions_variables": {},
     }
+
+
+def native_model_catalog_with_input_modalities() -> list[dict]:
+    """Return Google Antigravity models with accurate input_modalities."""
+    models = []
+    for m in native_model_catalog():
+        modalities = ["text", "image"]
+        models.append({**m, "input_modalities": modalities})
+    return models
 
 
 def provider_model_catalog(created: int) -> list[dict]:
@@ -550,16 +562,14 @@ def provider_model_catalog(created: int) -> list[dict]:
             except ValueError:
                 continue
             byok_models.append(
-                {
-                    **codex_model_metadata(
-                        model_id,
-                        f"{provider.get('displayName', provider_id)}: {display_name}",
-                        context_window,
-                        provider_id,
-                        created,
-                        supports_parallel_tool_calls=capabilities.parallel_tool_calls,
-                    )
-                }
+                codex_model_metadata(
+                    model_id,
+                    f"{provider.get('displayName', provider_id)}: {display_name}",
+                    context_window,
+                    provider_id,
+                    created,
+                    supports_parallel_tool_calls=capabilities.parallel_tool_calls,
+                )
             )
     return byok_models
 
@@ -624,8 +634,9 @@ async def list_models():
             created,
             default_reasoning_level=m.get("default_reasoning_level", "high"),
             supports_parallel_tool_calls=bool(m.get("supports_parallel_tool_calls", True)),
+            input_modalities=m.get("input_modalities", ["text"]),
         )
-        for m in native_model_catalog()
+        for m in native_model_catalog_with_input_modalities()
     ] + byok_models
     return {
         "object": "list",
