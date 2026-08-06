@@ -1522,7 +1522,6 @@ def extract_file_paths_from_prompt(prompt: str) -> list[str]:
         add_path(match.group(1) + match.group(2))
     for match in re.finditer(rf'`([~]?/(?:[\w.@-]+/)*({_escaped}))`', prompt):
         add_path(match.group(1))
-
     return paths
 
 
@@ -3514,6 +3513,10 @@ def command_panel(args: argparse.Namespace) -> int:
                 print("\n## Assembly Caveats")
                 for caveat in caveats:
                     print(f"- {caveat}")
+        if args.dry_run:
+            eprint(format_dry_run(mode=f"panel {args.mode}", model=panel_models[0],
+                prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
+                extra_models=panel_models[1:] + [judge_model], output_json=args.json))
         return 0
 
     ensure_run_id(args)
@@ -3884,6 +3887,11 @@ def command_review(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps({"prompt": prompt, "metadata": metadata, "caveats": caveats}, indent=2, sort_keys=True))
             return 0
+        if args.dry_run:
+            eprint(format_dry_run(mode="review", model=model,
+                prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
+                output_json=args.json))
+            return 0
         print(prompt)
         if caveats:
             print("\n## Assembly Caveats")
@@ -3990,6 +3998,11 @@ def command_plan(args: argparse.Namespace) -> int:
         printable_prompt = apply_prompt_limit(prompt, prompt_budget, printable_caveats)
         if args.json:
             print(json.dumps({"prompt": printable_prompt, "caveats": printable_caveats}, indent=2, sort_keys=True))
+            return 0
+        if args.dry_run:
+            eprint(format_dry_run(mode="plan", model=model,
+                prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
+                output_json=args.json))
             return 0
         print(printable_prompt)
         if printable_caveats:

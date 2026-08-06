@@ -1123,7 +1123,8 @@ class AntiHelperTests(unittest.TestCase):
         message = str(raised.exception)
         self.assertIn("Gateway health check after this retryable failure also timed out", message)
         self.assertIn("gateway appears wedged; restart recommended", message)
-        self.assertIn("--port 51122", message)
+        default_port = anti.DEFAULT_BASE_URL.rsplit(":", 1)[-1].split("/", 1)[0]
+        self.assertIn(f"--port {default_port}", message)
         self.assertEqual(probes, [8.0])
 
     def test_retryable_generation_failure_reports_healthy_gateway_probe(self) -> None:
@@ -3282,8 +3283,6 @@ class WorkflowFallbackPolicyTests(unittest.TestCase):
         if policy_indices:
             last_policy = expanded[policy_indices[-1] + 1]
             self.assertEqual(last_policy, "never")
-
-
 class BugfixRegressionTests(unittest.TestCase):
     """Regression tests for the 2026-08-05 anti bug report (B1-B10)."""
 
@@ -3844,6 +3843,12 @@ class BugfixRegressionTests(unittest.TestCase):
 
     def test_panel_review_summary_keeps_existing_caveats(self) -> None:
         anti = load_anti()
+        # CI has no live gateway: without this mock the panel preflight would
+        # probe http://127.0.0.1:51122/v1/models and fail with connection
+        # refused, so the test must be hermetic like the other panel tests.
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
+            "claude-3.5-sonnet", "claude-opus-4-6",
+        }
         anti.generate_with_fallback = lambda args, **kwargs: (
             ("summary", "claude-3.5-sonnet", {"usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}})
             if "synthesizing" in kwargs["prompt"]
