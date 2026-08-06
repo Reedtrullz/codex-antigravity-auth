@@ -3,6 +3,7 @@ import asyncio
 import math
 import os
 import secrets
+import sys
 import time
 import httpx
 import email.utils
@@ -22,6 +23,7 @@ from .byok import (
     PROVIDER_AUTH_MODE_OAUTH,
     all_provider_configs,
     all_provider_configs_read_only,
+    normalize_byok_model_id,
     provider_capabilities,
     provider_auth_mode,
     resolve_api_key,
@@ -32,6 +34,7 @@ from .byok import (
 from .transform import safe_project_id, transform_chat_response, valid_function_name
 from .constants import get_platform, is_loopback_host, validate_gateway_token_strength
 from .models import (
+    NATIVE_MODELS,
     canonical_model_id,
     native_model_capabilities,
     native_model_catalog,
@@ -525,15 +528,20 @@ def codex_model_metadata(
 
 def native_model_catalog_with_input_modalities() -> list[dict]:
     """Return Google Antigravity models with accurate input_modalities."""
+    builtin_ids = {model.id for model in NATIVE_MODELS}
     models = []
     for m in native_model_catalog():
-        modalities = ["text", "image"]
+        # Only the built-in Google models are known multimodal; user-defined
+        # overlay models keep the conservative ['text'] default so a text-only
+        # overlay is never advertised as image-capable.
+        modalities = ["text", "image"] if m.get("id") in builtin_ids else ["text"]
         models.append({**m, "input_modalities": modalities})
     return models
 
 
 def provider_model_catalog(created: int) -> list[dict]:
     byok_models = []
+    seen_model_ids: set[str] = set()
     try:
         providers = all_provider_configs_read_only()
     except Exception:
@@ -556,11 +564,16 @@ def provider_model_catalog(created: int) -> list[dict]:
                 context_window = 128000
             if not provider_model:
                 continue
-            model_id = f"{provider_id}:{provider_model}"
+            catalog_model_id = normalize_byok_model_id(provider_model, provider_id)
+            model_id = f"{provider_id}:{catalog_model_id}"
+            if model_id in seen_model_ids:
+                continue
+            seen_model_ids.add(model_id)
             try:
                 capabilities = provider_capabilities(provider, provider_model)
             except ValueError:
                 continue
+            display_name = display_name if display_name != provider_model else catalog_model_id
             byok_models.append(
                 codex_model_metadata(
                     model_id,
@@ -1032,6 +1045,10 @@ async def create_response(request: Request):
     provider_id, provider_model = split_provider_model(model)
     validate_provider_model_id(provider_id, provider_model)
     if provider_id is not None:
+        # Normalize self-referential prefixes (openrouter:openrouter/x ->
+        # openrouter:x) so catalog ids, capability lookup, and the upstream
+        # payload all agree on the API-level model id.
+        provider_model = normalize_byok_model_id(provider_model, provider_id)
         providers = all_provider_configs()
         provider = providers.get(provider_id)
         if not provider:
@@ -1060,7 +1077,7 @@ async def create_response(request: Request):
                 stream=stream,
                 http_status=400,
                 error_class="unsupported_route_capability",
-                error=exc,
+                error=safe_error_detail(exc),
             )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         provider_kind = provider.get("kind")
@@ -1076,7 +1093,10 @@ async def create_response(request: Request):
                     error_class="unsupported_provider_auth",
                     error=f"Unsupported Responses provider auth mode: {provider_auth_mode(provider)}",
                 )
-                raise HTTPException(status_code=500, detail=f"Unsupported Responses provider auth mode: {provider_auth_mode(provider)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Unsupported Responses provider auth mode for this route",
+                )
             if stream:
                 payload, url, headers, timeout = await prepare_xai_oauth_responses_request(
                     codex_req,
@@ -1193,20 +1213,26 @@ async def create_response(request: Request):
                                 event = json.loads(line[6:])
                             except json.JSONDecodeError:
                                 continue
-                            event_type = event.get("type")
-                            if event_type == "response.completed":
-                                terminal_status = "success"
-                                terminal_http_status = 200
-                                response_payload = event.get("response", {})
-                                if isinstance(response_payload, dict):
-                                    terminal_usage = response_payload.get("usage")
-                            elif event_type == "response.failed":
+                            if not isinstance(event, dict):
+                                continue
+                            # This lane streams OpenAI chat-completions events,
+                            # not Responses-API events: completion is signaled
+                            # by finish_reason, failure by an "error" object.
+                            error_payload = event.get("error")
+                            if isinstance(error_payload, dict):
                                 terminal_status = "failed"
-                                response_payload = event.get("response", {})
-                                error_payload = response_payload.get("error", {}) if isinstance(response_payload, dict) else {}
-                                if isinstance(error_payload, dict):
-                                    terminal_error_class = error_payload.get("code")
-                                    terminal_error = error_payload.get("message")
+                                terminal_error_class = error_payload.get("code") or "stream_error"
+                                terminal_error = error_payload.get("message")
+                                continue
+                            choices = event.get("choices")
+                            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                                finish_reason = choices[0].get("finish_reason")
+                                if finish_reason:
+                                    terminal_status = "success"
+                                    terminal_http_status = 200
+                            usage = event.get("usage")
+                            if isinstance(usage, dict):
+                                terminal_usage = usage
                         yield chunk
                 except Exception as exc:
                     terminal_status = "failed"
@@ -1317,8 +1343,18 @@ async def create_response(request: Request):
             if stream:
                 return None
             return await google_transport.post(codex_req, account_lease(selected_account))
-        except Exception:
+        except (httpx.HTTPError, OSError, GoogleHTTPError, GoogleStreamPayloadError):
             return None
+        except Exception as exc:
+            # Transport failures are expected; anything else is a bug that must
+            # surface as a 500 (not be silently masked as an account-rotation
+            # trigger and turned into a misleading 502).
+            print(
+                f"[gateway] request_backend unexpected error: "
+                f"{type(exc).__name__}: {redact_secret_text(str(exc))[:300]}",
+                file=sys.stderr,
+            )
+            raise
 
     # Handle standard non-streaming response path
     if not stream:
@@ -1614,7 +1650,7 @@ async def create_response(request: Request):
                     http_status=500,
                     rotation_attempted=rotation_attempted,
                     error_class="translation_error",
-                    error=e,
+                    error=safe_error_detail(e),
                 )
                 raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
         finally:
@@ -1797,7 +1833,10 @@ async def create_response(request: Request):
                     stream_attempts.append(rotated)
                     attempt_num += 1
                     continue
-                if rotated and rotated.get("email") not in {acc.get("email") for acc in stream_attempts if acc.get("email")}:
+                if rotated:
+                    # Same-email rotation (single-account configs) or an
+                    # already-tracked account: the extra lease must still be
+                    # released, otherwise in-flight accounting leaks.
                     await release_account_for_request(rotated.get("email"))
             if not adapter.created_emitted:
                 yield serialize_transport_event(adapter.created())
@@ -2063,13 +2102,39 @@ async def openai_compatible_sse_generator(
         headers=headers,
         timeout=timeout,
     )
-    async for event in transport.stream_chat_events(
-        prepared,
-        response_id=response_id,
-        display_model=display_model,
-    ):
-        if event == "[DONE]":
+    done_sent = False
+    try:
+        async for event in transport.stream_chat_events(
+            prepared,
+            response_id=response_id,
+            display_model=display_model,
+        ):
+            if event == "[DONE]":
+                yield "data: [DONE]\n\n"
+                done_sent = True
+            else:
+                yield f"data: {json.dumps(event)}\n\n"
+    except Exception as exc:
+        # Parity with the xAI OAuth SSE generator: surface a client-visible
+        # error event plus [DONE] instead of dropping the stream mid-flight.
+        # The error shape is the OpenAI chat-completions convention ({"error": ...}),
+        # not the Responses-style {"type": "response.failed", ...} the xAI lane
+        # emits; chat-format clients parse the former. Callers detect the
+        # error event for telemetry, so no re-raise is needed (and re-raising
+        # after [DONE] would add framework-level noise).
+        if not done_sent:
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "error": {
+                            "message": safe_error_detail(exc),
+                            "type": "stream_error",
+                            "code": "connection_error",
+                        }
+                    }
+                )
+                + "\n\n"
+            )
             yield "data: [DONE]\n\n"
-        else:
-            yield f"data: {json.dumps(event)}\n\n"
     return

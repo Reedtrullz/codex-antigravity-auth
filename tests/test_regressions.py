@@ -214,8 +214,8 @@ class TestRegressionFixes(unittest.TestCase):
 
         async def fake_sse_generator(*args, **kwargs):
             yield (
-                'data: {"type":"response.completed","response":{"usage":'
-                '{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'
+                'data: {"id":"chatcmpl-1","choices":[{"finish_reason":"stop","delta":{}}],'
+                '"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}\n\n'
             )
             yield "data: [DONE]\n\n"
 
@@ -228,7 +228,7 @@ class TestRegressionFixes(unittest.TestCase):
                     )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("response.completed", response.text)
+        self.assertIn("finish_reason", response.text)
         self.assertEqual([record["status"] for record in records], ["stream_started", "success"])
         self.assertEqual(records[-1]["usage"], {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3})
 

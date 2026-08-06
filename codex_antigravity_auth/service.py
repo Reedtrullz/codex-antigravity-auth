@@ -19,7 +19,20 @@ _DEFAULT_GET_CODEX_HOME = get_codex_home
 def _codex_home_read_only() -> Path:
     if get_codex_home is not _DEFAULT_GET_CODEX_HOME:
         return get_codex_home()
-    return Path(os.path.expanduser("~/.codex"))
+    return _service_home() / ".codex"
+
+
+def _service_home() -> Path:
+    """Home of the launchd/systemd target user, not root's home under sudo."""
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        import pwd
+
+        try:
+            return Path(pwd.getpwnam(sudo_user).pw_dir)
+        except KeyError:
+            pass
+    return Path.home()
 
 
 def _service_result(
@@ -92,11 +105,11 @@ def service_command(
 
 
 def macos_launch_agent_path(port: int) -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / f"{service_label(port)}.plist"
+    return _service_home() / "Library" / "LaunchAgents" / f"{service_label(port)}.plist"
 
 
 def linux_systemd_unit_path(port: int) -> Path:
-    return Path.home() / ".config" / "systemd" / "user" / f"codex-antigravity-gateway-{int(port)}.service"
+    return _service_home() / ".config" / "systemd" / "user" / f"codex-antigravity-gateway-{int(port)}.service"
 
 
 def render_macos_launch_agent(

@@ -16,6 +16,7 @@ _xai_token_lock = threading.RLock()
 from .constants import get_codex_home
 from .oauth import OAUTH_HTTP_TIMEOUT_SECONDS, post_form, token_expires_in_seconds
 from .redaction import redact_secret_text
+from .secure_store import file_lock
 from .storage import (
     load_secure_json_file,
     load_secure_json_file_read_only,
@@ -379,7 +380,15 @@ def refresh_xai_oauth_access_token(
 
 def resolve_xai_oauth_access_token(*args, **kwargs) -> str:
     with _xai_token_lock:
-        return resolve_xai_oauth_access_token_unlocked(*args, **kwargs)
+        # Serialize the refresh+save across processes too (gateway and CLI can
+        # refresh concurrently with the same refresh token; if the provider
+        # rotates refresh tokens, last-write-wins could persist a dead token).
+        # A distinct lock file avoids nesting secure_store.file_lock, which
+        # would deadlock on the store's own flock. The store is re-loaded
+        # inside the lock, so a process that lost the race sees the fresh
+        # token and skips the refresh entirely.
+        with file_lock(get_xai_oauth_json_path().with_suffix(".refresh")):
+            return resolve_xai_oauth_access_token_unlocked(*args, **kwargs)
 
 
 def resolve_xai_oauth_access_token_unlocked(

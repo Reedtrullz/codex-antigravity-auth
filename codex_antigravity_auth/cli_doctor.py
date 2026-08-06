@@ -149,8 +149,6 @@ _FREE_OPENROUTER_VISION_MODELS = frozenset({
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "google/gemma-4-31b-it:free",
     "google/gemma-4-26b-a4b-it:free",
-    "nvidia/nemotron-3.5-content-safety:free",
-    "openrouter/free",
 })
 
 
@@ -211,8 +209,11 @@ def vision_sidecar_readiness() -> dict:
             result["checks"].append({"name": "sidecar_model", "status": "warn", "detail": f"vision sidecar model {model} is not in the known free vision model list"})
         else:
             result["checks"].append({"name": "sidecar_model", "status": "fail", "detail": "no vision sidecar model configured"})
-    all_pass = all(c["status"] == "pass" for c in result["checks"] if c["status"] != "warn")
-    result["ok"] = all_pass
+    non_warn_checks = [c for c in result["checks"] if c["status"] != "warn"]
+    # An all-warn (or empty) check list must not report ok: all() over an
+    # empty sequence is vacuously True, which would mask a future warn-only
+    # configuration as ready.
+    result["ok"] = bool(non_warn_checks) and all(c["status"] == "pass" for c in non_warn_checks)
     return result
 
 
@@ -630,7 +631,10 @@ def codex_ready_report(
             add(f"vision_sidecar_{check['name']}", check["status"], check["detail"])
         if sidecar.get("ok") and sidecar.get("backend") == "openrouter":
             or_reachability = _cli.openrouter_reachability_check()
-            status = "pass" if or_reachability["ok"] else "fail"
+            # Third-party reachability is advisory for the gateway's own
+            # readiness: a transient openrouter.ai blip (or offline dev
+            # machine) must not flip the whole codex-ready gate to failed.
+            status = "pass" if or_reachability["ok"] else "warn"
             add(
                 "openrouter_reachability",
                 status,
@@ -935,4 +939,3 @@ def run_doctor(
 
     print("=" * 60)
     return healthy
-

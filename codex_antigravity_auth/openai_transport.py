@@ -18,6 +18,8 @@ from .byok import (
     validate_provider_headers,
 )
 
+from .redaction import redact_secret_text
+
 from .response_protocol import (
     ProviderCapabilities,
     ProviderResult,
@@ -39,23 +41,68 @@ class SSELineError(RuntimeError):
 
 async def iter_sse_data(response, *, label: str = "provider") -> AsyncIterator[str]:
     buffer = ""
+    pending: list[str] = []
+
     async for chunk in response.aiter_text():
         buffer += chunk
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
             stripped = line.strip()
-            if not stripped or not stripped.startswith("data:"):
+            if not stripped:
+                # SSE event boundary: flush any accumulated data lines.
+                if pending:
+                    payload = "\n".join(pending)
+                    pending = []
+                    yield payload
                 continue
-            yield stripped[5:].strip()
+            if not stripped.startswith("data:"):
+                # Non-data metadata lines (event:, id:, retry:) are ignored;
+                # a pending frame is flushed at the next event boundary.
+                continue
+            payload = stripped[5:].strip()
+            # SSE continuation lines join with "\n". Parse-or-accumulate:
+            # a standalone line is emitted immediately, and a fragment that
+            # does not yet parse as JSON waits for its continuation lines so
+            # both blank-line-separated and bare-\n frames work.
+            if pending:
+                if payload == "[DONE]":
+                    # A [DONE] marker is never a JSON continuation: flush the
+                    # incomplete fragment (the caller reports it as malformed)
+                    # and deliver the marker on its own.
+                    yield "\n".join(pending)
+                    pending = []
+                    yield payload
+                    continue
+                candidate = "\n".join([*pending, payload])
+                try:
+                    json.loads(candidate)
+                except json.JSONDecodeError:
+                    pending.append(payload)
+                    continue
+                pending = []
+                yield candidate
+                continue
+            if payload == "[DONE]":
+                yield payload
+                continue
+            try:
+                json.loads(payload)
+            except json.JSONDecodeError:
+                pending.append(payload)
+                continue
+            yield payload
     if buffer.strip():
         stripped = buffer.strip()
         if stripped.startswith("data:"):
             payload = stripped[5:].strip()
-            if payload == "[DONE]":
-                return
-            yield payload
+            if pending:
+                yield "\n".join([*pending, payload])
+            else:
+                yield payload
         else:
             raise SSELineError(f"The {label} stream ended with an incomplete SSE frame.")
+    elif pending:
+        yield "\n".join(pending)
 
 
 def parse_sse_payload(data: str, *, label: str = "provider") -> dict[str, Any]:
@@ -149,6 +196,7 @@ class ChatResponseAccumulator:
         self._done = False
         self._refusal = False
         self._tool_names: dict[int, str] = {}
+        self._tool_arguments: dict[int, str] = {}
 
     def mark_done(self) -> None:
         self._done = True
@@ -199,6 +247,9 @@ class ChatResponseAccumulator:
                     name = function.get("name")
                     if isinstance(name, str):
                         self._tool_names[index] = self._tool_names.get(index, "") + name
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        self._tool_arguments[index] = self._tool_arguments.get(index, "") + arguments
 
     def finalize(self) -> ProviderResult:
         output: list[dict[str, Any]] = []
@@ -226,13 +277,14 @@ class ChatResponseAccumulator:
         for index in sorted(self._tool_names):
             name = self._tool_names[index]
             if valid_function_name(name):
+                arguments = self._tool_arguments.get(index, "")
                 output.append(
                     {
                         "type": "function_call",
                         "id": f"fc_{uuid.uuid4().hex[:8]}",
                         "call_id": f"call_{uuid.uuid4().hex[:8]}",
                         "name": name,
-                        "arguments": "{}",
+                        "arguments": arguments if arguments else "{}",
                     }
                 )
         terminal = classify_terminal(
@@ -434,9 +486,16 @@ class OpenAICompatibleTransport:
                     headers=prepared.headers,
                 ) as response:
                     if response.status_code != 200:
+                        detail = f"Provider returned HTTP {response.status_code}."
+                        try:
+                            body = (await response.aread()).decode("utf-8", errors="replace")
+                        except Exception:
+                            body = ""
+                        if body:
+                            detail += f" {redact_secret_text(body)[:300]}"
                         async for event in fail(
                             "backend_error",
-                            f"Provider returned HTTP {response.status_code}.",
+                            detail,
                         ):
                             yield event
                         return

@@ -841,7 +841,10 @@ def _toml_section_name(line: str) -> str | None:
     stripped = line.split("#", 1)[0].strip()
     if not stripped.startswith("[") or not stripped.endswith("]"):
         return None
-    return stripped.strip("[]").strip()
+    # Normalize quoted sub-table names ([model_providers."antigravity"] and
+    # [model_providers.antigravity] are the same TOML table) so upserts and
+    # parse match each other instead of emitting a duplicate table header.
+    return stripped.strip("[]").replace('"', "").strip()
 
 
 def _upsert_root_keys(lines: list[str], values: dict[str, str]) -> list[str]:
@@ -1305,6 +1308,7 @@ def run_xai_oauth_logout(args) -> bool:
 
 
 def main():
+    _ensure_split_modules()
     parser = argparse.ArgumentParser(description="Codex Antigravity Auth CLI Utility")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1665,6 +1669,12 @@ def main():
                 if not sep or not name.strip():
                     raise SystemExit(f"Invalid --header value {header!r}; use Name:Value")
                 headers[name.strip()] = value.strip()
+            if args.api_key:
+                print(
+                    "[!] --api-key puts the provider key in shell history and the process list; "
+                    "prefer --api-key-env <VARNAME> to reference a key from the environment.",
+                    file=sys.stderr,
+                )
             try:
                 provider = set_provider_config(
                     provider_id,
@@ -1714,65 +1724,79 @@ def main():
     elif args.command == "status":
         run_gateway_status(args)
 
+
+# The cli_* modules below import `cli` themselves (`from . import cli as _cli`),
+# so importing them at module level here creates a circular import: under
+# `python -m codex_antigravity_auth.cli`, Python 3.10's runpy does not register
+# the running module in sys.modules, the split module starts a second
+# execution of this file, and any module-level re-export of split-module names
+# fails on the partially initialized module. The split modules are therefore
+# imported lazily (from main() and from module __getattr__), and their
+# re-exports are bound on demand.
+_cli_split_modules_loaded = False
+_SERVICE_REEXPORTS = (
+    "_codex_home_read_only", "add_gateway_reachability", "gateway_base_url_for_port",
+    "gateway_model_ids", "gateway_pid_matches", "gateway_process_command",
+    "gateway_runtime_paths", "gateway_status_info", "local_gateway_base_url",
+    "process_is_running", "reachable_gateway_status_info", "read_pid_file",
+    "run_gateway_status", "run_logs_command", "run_service_command",
+    "start_gateway_background", "stop_gateway", "wait_for_gateway_model_ids",
+)
+_DOCTOR_REEXPORTS = (
+    "_diagnostic_all_provider_configs", "_diagnostic_load_accounts",
+    "_installed_package_version", "_read_codex_config_for_readiness",
+    "_read_version_cache", "_responses_output_preview", "_source_checkout_version",
+    "_validate_google_live_model", "_version_cache_path", "_version_tuple",
+    "_write_version_cache", "codex_ready_report", "gateway_generate_probe",
+    "google_family_rotation_status", "latest_pypi_version",
+    "openrouter_reachability_check", "provider_capability_mismatches",
+    "readiness_storage_diagnostics", "run_codex_ready_doctor", "run_doctor",
+    "version_check_result", "vision_sidecar_readiness",
+)
+_SETUP_REEXPORTS = (
+    "_print_setup_report", "_setup_check", "byok_setup_next_command",
+    "maybe_prompt_and_save_oauth_credentials", "run_local_oauth_flow",
+    "run_login", "run_setup", "run_setup_google", "run_setup_v2",
+    "setup_byok_preflight", "setup_effective_base_url",
+    "setup_service_followup_command", "validate_oauth_credentials_with_google",
+)
+
+
+def _ensure_split_modules() -> None:
+    """Import the cli_* split modules and bind their re-exported names."""
+    global _cli_split_modules_loaded
+    if _cli_split_modules_loaded:
+        return
+    from . import cli_doctor, cli_service, cli_setup  # noqa: E402
+
+    module_globals = globals()
+    module_globals["cli_doctor"] = cli_doctor
+    module_globals["cli_service"] = cli_service
+    module_globals["cli_setup"] = cli_setup
+    for name in _SERVICE_REEXPORTS:
+        module_globals[name] = getattr(cli_service, name)
+    for name in _DOCTOR_REEXPORTS:
+        module_globals[name] = getattr(cli_doctor, name)
+    for name in _SETUP_REEXPORTS:
+        module_globals[name] = getattr(cli_setup, name)
+    _cli_split_modules_loaded = True
+
+
+def __getattr__(name: str):
+    """Lazily resolve re-exported split-module names on demand."""
+    if (
+        name in _SERVICE_REEXPORTS
+        or name in _DOCTOR_REEXPORTS
+        or name in _SETUP_REEXPORTS
+        or name in {"cli_doctor", "cli_service", "cli_setup"}
+    ):
+        _ensure_split_modules()
+        try:
+            return globals()[name]
+        except KeyError:
+            pass
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 if __name__ == "__main__":
     main()
-
-
-from . import cli_doctor, cli_service, cli_setup  # noqa: E402
-
-
-# Re-export moved helpers so `codex_antigravity_auth.cli.<name>` imports and
-# test patch targets keep working after the cli_* module split.
-_codex_home_read_only = cli_service._codex_home_read_only
-add_gateway_reachability = cli_service.add_gateway_reachability
-gateway_base_url_for_port = cli_service.gateway_base_url_for_port
-gateway_model_ids = cli_service.gateway_model_ids
-gateway_pid_matches = cli_service.gateway_pid_matches
-gateway_process_command = cli_service.gateway_process_command
-gateway_runtime_paths = cli_service.gateway_runtime_paths
-gateway_status_info = cli_service.gateway_status_info
-local_gateway_base_url = cli_service.local_gateway_base_url
-process_is_running = cli_service.process_is_running
-reachable_gateway_status_info = cli_service.reachable_gateway_status_info
-read_pid_file = cli_service.read_pid_file
-run_gateway_status = cli_service.run_gateway_status
-run_logs_command = cli_service.run_logs_command
-run_service_command = cli_service.run_service_command
-start_gateway_background = cli_service.start_gateway_background
-stop_gateway = cli_service.stop_gateway
-wait_for_gateway_model_ids = cli_service.wait_for_gateway_model_ids
-_diagnostic_all_provider_configs = cli_doctor._diagnostic_all_provider_configs
-_diagnostic_load_accounts = cli_doctor._diagnostic_load_accounts
-_installed_package_version = cli_doctor._installed_package_version
-_read_codex_config_for_readiness = cli_doctor._read_codex_config_for_readiness
-_read_version_cache = cli_doctor._read_version_cache
-_responses_output_preview = cli_doctor._responses_output_preview
-_source_checkout_version = cli_doctor._source_checkout_version
-_validate_google_live_model = cli_doctor._validate_google_live_model
-_version_cache_path = cli_doctor._version_cache_path
-_version_tuple = cli_doctor._version_tuple
-_write_version_cache = cli_doctor._write_version_cache
-codex_ready_report = cli_doctor.codex_ready_report
-gateway_generate_probe = cli_doctor.gateway_generate_probe
-google_family_rotation_status = cli_doctor.google_family_rotation_status
-latest_pypi_version = cli_doctor.latest_pypi_version
-provider_capability_mismatches = cli_doctor.provider_capability_mismatches
-readiness_storage_diagnostics = cli_doctor.readiness_storage_diagnostics
-run_codex_ready_doctor = cli_doctor.run_codex_ready_doctor
-run_doctor = cli_doctor.run_doctor
-version_check_result = cli_doctor.version_check_result
-openrouter_reachability_check = cli_doctor.openrouter_reachability_check
-vision_sidecar_readiness = cli_doctor.vision_sidecar_readiness
-_print_setup_report = cli_setup._print_setup_report
-_setup_check = cli_setup._setup_check
-byok_setup_next_command = cli_setup.byok_setup_next_command
-maybe_prompt_and_save_oauth_credentials = cli_setup.maybe_prompt_and_save_oauth_credentials
-run_local_oauth_flow = cli_setup.run_local_oauth_flow
-run_login = cli_setup.run_login
-run_setup = cli_setup.run_setup
-run_setup_google = cli_setup.run_setup_google
-run_setup_v2 = cli_setup.run_setup_v2
-setup_byok_preflight = cli_setup.setup_byok_preflight
-setup_effective_base_url = cli_setup.setup_effective_base_url
-setup_service_followup_command = cli_setup.setup_service_followup_command
-validate_oauth_credentials_with_google = cli_setup.validate_oauth_credentials_with_google

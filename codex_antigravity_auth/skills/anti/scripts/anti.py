@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -72,6 +73,11 @@ MODEL_ALIASES = {
     "nemotron-ultra": "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free",
     "poolside": "openrouter:poolside/laguna-s-2.1:free",
     "gemma-4": "openrouter:google/gemma-4-31b-it:free",
+    # OpenRouter free vision models (for vision sidecar / direct image tasks)
+    "nemotron-vl": "openrouter:nvidia/nemotron-nano-12b-v2-vl:free",
+    "nemotron-nano-vl": "openrouter:nvidia/nemotron-nano-12b-v2-vl:free",
+    "nemotron-omni": "openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "gemma-4-vision": "openrouter:google/gemma-4-31b-it:free",
     # Ollama local inference
     "gpt-oss": "ollama:gpt-oss:20b",
     "qwen3": "ollama:qwen3:8b",
@@ -92,13 +98,22 @@ MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
     "openrouter:nvidia/nemotron-3-super-120b-a12b:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "openrouter:poolside/laguna-s-2.1:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "openrouter:google/gemma-4-31b-it:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "openrouter:google/gemma-4-31b-it:free": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     # xAI OAuth
     "xai-oauth:grok-build-0.1": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "xai-oauth:grok-4.3": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    # Official DeepSeek API (metered, API-key route)
+    "deepseek:deepseek-v4-pro": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "deepseek:deepseek-v4-flash": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    # BluesMinds API-key routes (metered; currently fail closed until live-health gate passes)
+    "bluesminds:grok-4.5": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "bluesminds:z-ai/glm-5.2": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    # OpenRouter free vision models (verified: support image input)
+    "openrouter:nvidia/nemotron-nano-12b-v2-vl:free": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     # Ollama local
-    "ollama:gpt-oss:20b": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "ollama:qwen3:8b": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "ollama:gpt-oss:20b": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "ollama:qwen3:8b": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
 }
 
 # Cost tiers: free < quota < paid
@@ -117,8 +132,14 @@ MODEL_COST_TIER: dict[str, str] = {
     "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": "free",
     "openrouter:poolside/laguna-s-2.1:free": "free",
     "openrouter:google/gemma-4-31b-it:free": "free",
+    "openrouter:nvidia/nemotron-nano-12b-v2-vl:free": "free",
+    "openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": "free",
     "xai-oauth:grok-build-0.1": "free",
     "xai-oauth:grok-4.3": "free",
+    "deepseek:deepseek-v4-pro": "paid",
+    "deepseek:deepseek-v4-flash": "paid",
+    "bluesminds:grok-4.5": "paid",
+    "bluesminds:z-ai/glm-5.2": "paid",
     "ollama:gpt-oss:20b": "free",
     "ollama:qwen3:8b": "free",
 }
@@ -138,7 +159,13 @@ MODEL_QUALITY_RANK: dict[str, int] = {
     "openrouter:nvidia/nemotron-3-super-120b-a12b:free": 65,
     "openrouter:poolside/laguna-s-2.1:free": 60,
     "ollama:gpt-oss:20b": 50,
-    "openrouter:google/gemma-4-31b-it:free": 45,
+    "openrouter:google/gemma-4-31b-it:free": 55,
+    "openrouter:nvidia/nemotron-nano-12b-v2-vl:free": 60,
+    "openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": 65,
+    "deepseek:deepseek-v4-pro": 88,
+    "deepseek:deepseek-v4-flash": 74,
+    "bluesminds:z-ai/glm-5.2": 80,
+    "bluesminds:grok-4.5": 78,
     "ollama:qwen3:8b": 40,
 }
 
@@ -152,6 +179,7 @@ CLAUDE_GROK_PANEL_MODELS = ["sonnet", "opus", "grok"]
 MAX_FILE_BYTES = 180_000
 DEFAULT_MAX_PROMPT_CHARS = 120_000
 DEFAULT_MAX_SYNTHESIS_CHARS = DEFAULT_MAX_PROMPT_CHARS
+GIT_DIFF_TRUNCATION_CAVEAT = "Git diff truncated to fit max prompt budget"
 CLAUDE_SAFE_PROMPT_CHARS = 30_000
 MAX_PROMPT_CHARS_HELP = (
     "Maximum prompt chars before truncation/chunking; use 0 for unlimited. "
@@ -165,6 +193,40 @@ RUN_OUTPUT_PREVIEW_CHARS = 1600
 POST_FAILURE_MODEL_PROBE_TIMEOUT = 8.0
 FALLBACK_POLICIES = {"never", "on-retryable", "on-timeout"}
 SAVE_OUTPUT_MODES = {"never", "summary", "full"}
+# Deep review/panel lanes truncate at the output-token cap; the default used to
+# be 2048, which cut Opus lanes mid-sentence. Raised defaults plus the retry
+# logic below keep structured findings and lane coverage from silently dropping.
+PANEL_LANE_RETRY_CEILING_TOKENS = 16_384
+JUDGE_RETRY_CEILING_TOKENS = 16_384
+PANEL_LANE_INSTRUCTION = (
+    "You are one lane of an advisory panel. The task below is complete and self-contained: "
+    "produce your independent review or answer directly from the supplied context. "
+    "Do not ask for direction, restate the task, or ask clarifying questions."
+)
+NON_ANSWER_PHRASES = (
+    "what would you like",
+    "please provide",
+    "could you provide",
+    "can you provide",
+    "no task",
+    "no review",
+    "nothing to review",
+    "no specific task",
+    "no goal",
+)
+NON_ANSWER_STRONG_PHRASES = (
+    # These read as "the task is absent / tell me what to do" at any output
+    # length; a real review does not phrase itself this way.
+    "what would you like",
+    "which direction",
+    "how would you like",
+    "no explicit task",
+    "no task attached",
+    "should i just",
+    "let me know what",
+    "is there anything else",
+    "please let me know",
+)
 PANEL_OUTPUT_MODES = {"prose", "findings"}
 BACKEND_TIMEOUT_METADATA_KEY = "antigravity_backend_timeout_seconds"
 BACKEND_TIMEOUT_HINT_THRESHOLD_SECONDS = 120.0
@@ -269,16 +331,38 @@ def new_run_id() -> str:
 
 
 def ensure_run_id(args: argparse.Namespace) -> str | None:
-    if save_output_mode(args) == "never":
-        return None
     run_id = getattr(args, "run_id", None)
     if run_id:
         if not RUN_ID_RE.fullmatch(str(run_id)):
             raise AntiError("run id must contain only letters, numbers, '_' or '-'")
+    if save_output_mode(args) == "never":
+        return None
+    if run_id:
+        # Mirror the auto-generated branch: downstream record writes and
+        # metadata read args.run_id, so the explicit id must land there too.
+        args.run_id = str(run_id)
+        write_start_record(args, run_id=str(run_id))
         return str(run_id)
     run_id = new_run_id()
     args.run_id = run_id
+    write_start_record(args, run_id=run_id)
     return run_id
+
+
+def write_start_record(args: argparse.Namespace, *, run_id: str) -> None:
+    """Durable heartbeat: a 'running' placeholder written before any model call.
+
+    If the process dies before the final record, the placeholder remains and
+    ``runs list`` flags it instead of showing nothing (B5).
+    """
+    write_run_record(
+        args,
+        mode=getattr(args, "command", "unknown"),
+        status="running",
+        models=[],
+        base_url=getattr(args, "base_url", None),
+        metadata={"request_log_correlation_id": run_id},
+    )
 
 
 
@@ -308,6 +392,7 @@ def write_run_record(
     metadata: dict[str, Any] | None = None,
     error: str | None = None,
     execution_ledger: list[dict[str, Any]] | None = None,
+    force_full_output: bool = False,
 ) -> Path | None:
     output_mode = save_output_mode(args)
     if output_mode == "never":
@@ -343,10 +428,30 @@ def write_run_record(
         "metadata": metadata or {},
         "save_output": output_mode,
     }
+    # B7: split run lifecycle from scope coverage so consumers never confuse
+    # "the command ran" with "the requested scope was fully reviewed".
+    record["runStatus"] = status
+    scope_status: str | None = None
+    if isinstance(metadata, dict):
+        metadata_status = metadata.get("status")
+        if metadata_status == "incomplete":
+            scope_status = "partial"
+        elif metadata_status == "complete":
+            scope_status = "complete"
+        omitted_items = metadata.get("omitted_files") or metadata.get("chunk_omitted_items") or []
+        manifest_file_count = metadata.get("omitted_file_count")
+        record["omittedFileCount"] = int(
+            manifest_file_count if manifest_file_count is not None else len(omitted_items)
+        )
+        record["omittedChunkCount"] = int(metadata.get("omitted_chunk_count") or 0)
+    if scope_status:
+        record["scopeStatus"] = scope_status
     if error:
         record["error"] = error
     if output_mode == "summary" and output_text:
         record["output_preview"] = output_text[:RUN_OUTPUT_PREVIEW_CHARS]
+        if force_full_output:
+            record["output_text"] = output_text
     elif output_mode == "full":
         if prompt_text is not None:
             record["prompt_text"] = prompt_text
@@ -356,19 +461,39 @@ def write_run_record(
             record["execution_ledger"] = execution_ledger
 
     record = sanitize_json(record)
+    # The record id is generated by us or validated by RUN_ID_RE; never let
+    # value redaction mangle it (e.g. a run id shaped like user_12345678).
+    record["id"] = str(record_id)
+    if record.get("metadata", {}).get("request_log_correlation_id") is not None:
+        record["metadata"]["request_log_correlation_id"] = str(record_id)
     path = RUNS_DIR / f"{record['id']}.json"
+    if path.exists() and path.is_symlink():
+        raise AntiError(f"refusing to overwrite symlinked run record: {path}")
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
+    try:
+        fd = os.open(tmp_path, flags, 0o600)
+    except FileExistsError:
+        if tmp_path.is_symlink():
+            raise
+        tmp_path.unlink()
+        fd = os.open(tmp_path, flags, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+    # A 'running' placeholder is not a final record; lifecycle handlers may
+    # still overwrite it with interrupted/error/failed status.
+    args.run_record_written = status != "running"
+    os.replace(tmp_path, path)
     progress(args, f"saved sanitized run record: {path}")
     return path
 
 
 def error_is_retryable(error: str) -> bool:
     lowered = error.lower()
+    if "status 'failed'" in lowered:
+        return True
     if "retryable=true" in lowered:
         return True
     return any(f"http {status}" in lowered for status in ("408", "409", "425", "429", "500", "502", "503", "504"))
@@ -488,6 +613,10 @@ def normalize_base_url(value: str) -> str:
         raise AntiError("base URL must not contain username or password")
     if parsed.query or parsed.fragment:
         raise AntiError("base URL must not contain query strings or fragments")
+    if parsed.scheme not in {"http", "https"}:
+        raise AntiError(f"base URL scheme must be http or https, not {parsed.scheme!r}")
+    if not parsed.netloc:
+        raise AntiError("base URL must include a host")
     return value.rstrip("/")
 
 
@@ -523,7 +652,8 @@ def cheapest_models_for_task(
     regardless of quality rank, so callers can burn free quota first.
     """
     candidates: list[tuple[str, int, int]] = []
-    for model_id in available:
+    for raw_model_id in available:
+        model_id = resolve_model(raw_model_id, default=raw_model_id)
         if require_images and not model_supports(model_id, "images"):
             continue
         if require_video and not model_supports(model_id, "video"):
@@ -540,6 +670,33 @@ def cheapest_models_for_task(
     candidates.sort(key=lambda x: (x[1] if prefer_free else 2, -x[2]))
     return [m[0] for m in candidates]
 
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token count: ~4 chars per token for English text."""
+    return max(1, len(text) // 4)
+
+
+def estimate_cost(
+    *,
+    model: str,
+    prompt_chars: int,
+    estimated_output_tokens: int = 0,
+) -> dict[str, Any]:
+    """Estimate token usage and cost tier for a model call without contacting gateway."""
+    input_tokens = max(1, prompt_chars // 4) if prompt_chars > 0 else 0
+    total_tokens = input_tokens + estimated_output_tokens
+    tier = model_cost_tier(model)
+    quality = MODEL_QUALITY_RANK.get(model, 0)
+    return {
+        "model": model,
+        "cost_tier": tier,
+        "quality_rank": quality,
+        "estimated_input_tokens": input_tokens,
+        "estimated_output_tokens": estimated_output_tokens,
+        "estimated_total_tokens": total_tokens,
+        "prompt_chars": prompt_chars,
+    }
 
 
 def positive_int(value: str) -> int:
@@ -581,9 +738,13 @@ def request_json(
         headers["Content-Type"] = "application/json"
     token = token_from_env(token_env)
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        req_headers = dict(headers)
+        req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
+        # Authorization must not follow HTTP redirects to a different host.
+        req.add_unredirected_header("Authorization", f"Bearer {token}")
+    else:
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
 
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as res:
             raw = res.read()
@@ -616,6 +777,43 @@ def model_ids_from_catalog(payload: dict[str, Any]) -> set[str]:
         if isinstance(entry, dict) and isinstance(entry.get("id"), str):
             ids.add(entry["id"])
     return ids
+
+
+def normalize_catalog_model_id(model_id: str) -> str:
+    """Fold provider-prefix drift such as ``openrouter:openrouter/x`` -> ``openrouter:x``.
+
+    Mirrors the gateway's normalize rule: strip repeated self-referential
+    ``openrouter/`` segments while a vendor path remains, so
+    ``openrouter:openrouter/auto`` and ``openrouter:openrouter/openrouter/x``
+    fold the same way the gateway canonicalizes them.
+    """
+    model_id = str(model_id)
+    if model_id.startswith("openrouter:"):
+        model = model_id[len("openrouter:") :]
+        while model.startswith("openrouter/") and "/" in model[len("openrouter/") :]:
+            model = model[len("openrouter/") :]
+        return "openrouter:" + model
+    return model_id
+
+
+def catalog_model_matches(requested: str, advertised: str) -> bool:
+    return normalize_catalog_model_id(requested) == normalize_catalog_model_id(advertised)
+
+
+def closest_catalog_models(requested: str, advertised: set[str], *, limit: int = 5) -> list[str]:
+    """Suggest advertised ids ranked by shared prefix with the requested id."""
+    normalized_requested = normalize_catalog_model_id(requested)
+
+    def rank(model_id: str) -> tuple[int, str]:
+        normalized = normalize_catalog_model_id(model_id)
+        shared = 0
+        for left, right in zip(normalized, normalized_requested):
+            if left != right:
+                break
+            shared += 1
+        return (-shared, normalized)
+
+    return sorted(advertised, key=rank)[:limit]
 
 
 def fetch_model_ids(base_url: str, *, timeout: float, token_env: str) -> set[str]:
@@ -803,9 +1001,18 @@ def post_response(
     available_model_ids = model_ids
     if available_model_ids is None:
         available_model_ids = fetch_model_ids(base_url, timeout=timeout, token_env=token_env)
-    if model not in available_model_ids:
+    matched_model = next(
+        (candidate for candidate in available_model_ids if catalog_model_matches(model, candidate)),
+        None,
+    )
+    if matched_model is None:
         sample = ", ".join(sorted(available_model_ids)[:12])
-        raise AntiError(f"model {model!r} is not advertised by /v1/models. Available sample: {sample}")
+        suggestions = closest_catalog_models(model, available_model_ids)
+        suggestion_note = f" Closest advertised: {', '.join(suggestions)}." if suggestions else ""
+        raise AntiError(f"model {model!r} is not advertised by /v1/models.{suggestion_note} Available sample: {sample}")
+    if matched_model != model:
+        eprint(f"[anti] model alias {model!r} matched catalog id {matched_model!r}; forwarding the catalog id")
+        model = matched_model
     payload = {
         "model": model,
         "input": prompt,
@@ -846,8 +1053,32 @@ def post_response(
             ) from exc
 
         if status == 200:
+            text = extract_response_text(decoded)
+            # Guard: model-level failure signalled via status field
+            if isinstance(decoded, dict) and decoded.get("status") == "failed":
+                error_msg = (
+                    decoded.get("error", {}).get("message", "")
+                    if isinstance(decoded.get("error"), dict)
+                    else ""
+                )
+                raise AntiError(f"model {model} returned status 'failed': {error_msg}".rstrip(": "))
+            # Guard: no meaningful text in output content blocks
+            if isinstance(decoded, dict) and isinstance(decoded.get("output"), list):
+                all_text: list[str] = []
+                for item in decoded["output"]:
+                    if isinstance(item, dict):
+                        for ci in item.get("content", []):
+                            if isinstance(ci, dict) and isinstance(ci.get("text"), str):
+                                all_text.append(ci["text"])
+                if all_text and not any(t.strip() for t in all_text):
+                    raise AntiError(f"model {model} returned empty output with no meaningful content")
+            # Guard: warn when extract_response_text fell back to JSON dump
+            if text and text[0] == "{" and isinstance(decoded, dict):
+                eprint(f"[anti] extract_response_text fell back to JSON dump for model {model} "
+                       f"(status={decoded.get('status', 'unknown')}); "
+                       f"the response may be malformed or empty")
             return ResponseText(
-                extract_response_text(decoded),
+                text,
                 usage=extract_usage(decoded),
                 elapsed_ms=int((time.monotonic() - started) * 1000),
                 response_metadata={"attempts": attempt},
@@ -867,6 +1098,34 @@ def post_response(
     raise AssertionError("post_response retry loop should have returned or raised")
 
 
+def _pre_flight_cost_suggestion(
+    args: Any,
+    model: str,
+    model_ids: set[str] | None,
+    prompt: str,
+) -> None:
+    """Emit a cost-awareness suggestion if a free model could handle this task."""
+    tier = model_cost_tier(model)
+    if tier == "free":
+        return
+    if not model_ids:
+        return
+    quality = MODEL_QUALITY_RANK.get(model, 0)
+    alternatives = [
+        m for m in model_ids
+        if model_cost_tier(m) == "free" and MODEL_QUALITY_RANK.get(m, 0) >= quality - 15
+    ]
+    if not alternatives:
+        return
+    alternatives.sort(key=lambda m: -MODEL_QUALITY_RANK.get(m, 0))
+    top = alternatives[:3]
+    eprint(
+        f"[anti] cost hint: {model} is {tier}-tier. "
+        f"Free alternative(s) available: {', '.join(top)}. "
+        f"Use --model <alias> to switch."
+    )
+
+
 def generate_with_fallback(
     args: argparse.Namespace,
     *,
@@ -882,6 +1141,7 @@ def generate_with_fallback(
     if fallback_policy not in FALLBACK_POLICIES:
         raise AntiError(f"unsupported fallback policy: {fallback_policy}")
 
+    _pre_flight_cost_suggestion(args, model, model_ids, prompt)
     failures: list[dict[str, str]] = []
     progress(args, f"{purpose}: calling {model} ({len(prompt)} prompt chars)")
     try:
@@ -962,13 +1222,17 @@ def find_repo_root(start: Path) -> Path | None:
 
 
 def run_git(root: Path, args: list[str], *, check: bool = True) -> str:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=root,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            timeout=60,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.TimeoutExpired:
+        raise AntiError(f"git {' '.join(args)} timed out after 60s")
     if check and proc.returncode != 0:
         raise AntiError(proc.stderr.strip() or f"git {' '.join(args)} failed")
     return proc.stdout
@@ -1105,13 +1369,17 @@ def diff_for_paths(root: Path, scope: str, paths: list[str], *, rev_range: str |
 
 
 def file_is_tracked(root: Path, rel_path: str) -> bool:
-    proc = subprocess.run(
-        ["git", "ls-files", "--error-unmatch", "--", rel_path],
-        cwd=root,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", rel_path],
+            cwd=root,
+            timeout=60,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.TimeoutExpired:
+        raise AntiError(f"git ls-files timed out after 60s")
     return proc.returncode == 0
 
 
@@ -1220,8 +1488,7 @@ def extract_file_paths_from_prompt(prompt: str) -> list[str]:
     
     # Pattern 2: Directory path followed by filenames in parentheses
     # Matches /path/to/dir/ (file1.py, file2.py)
-    dir_paren_match = re.search(r'([~]?/(?:[\w.@-]+/)+)\s*\(([^)]+)\)', prompt)
-    if dir_paren_match:
+    for dir_paren_match in re.finditer(r'([~]?/(?:[\w.@-]+/)+)\s*\(([^)]+)\)', prompt):
         dir_path = dir_paren_match.group(1)
         filenames = dir_paren_match.group(2)
         for item in filenames.split(','):
@@ -1241,6 +1508,21 @@ def extract_file_paths_from_prompt(prompt: str) -> list[str]:
     for match in re.finditer(r'(?<![~\w\\])([A-Za-z]:\\(?:[~\w.@-]+\\)*[~\w.@-]+\.\w+)', prompt):
         add_path(match.group(1))
     
+    # Pattern 6: Common extensionless files (Dockerfile, Makefile, etc.)
+    _EXTENSIONLESS_NAMES = (
+        'Dockerfile', 'Containerfile', 'Makefile', 'Gemfile', 'Rakefile',
+        'Procfile', 'Vagrantfile', 'Brewfile', 'Justfile', 'Taskfile', 'Earthfile',
+        'LICENSE', 'CHANGELOG', 'README', 'CONTRIBUTING', 'NOTICE',
+        '.dockerignore', '.gitignore', '.gitattributes', '.editorconfig',
+    )
+    _escaped = '|'.join(_EXTENSIONLESS_NAMES)
+    for match in re.finditer(
+        rf'(?:(?<=\s)|(?<=\()|(?<=`))(\.?/?(?:[\w.@-]+/)*)({_escaped})(?=\s|\)|`|$)', prompt
+    ):
+        add_path(match.group(1) + match.group(2))
+    for match in re.finditer(rf'`([~]?/(?:[\w.@-]+/)*({_escaped}))`', prompt):
+        add_path(match.group(1))
+
     return paths
 
 
@@ -1257,6 +1539,7 @@ def build_consult_file_context(
     file_blocks: list[str] = []
     read_files: list[str] = []
     
+    workspace_root = find_repo_root(Path.cwd()) or Path.cwd().resolve()
     for file_path_str in file_paths:
         raw_path = Path(file_path_str).expanduser()
         if raw_path.is_symlink():
@@ -1264,8 +1547,17 @@ def build_consult_file_context(
             continue
         
         file_path = raw_path.resolve()
+        # Safety: constrain pre-reads to the workspace
+        try:
+            rel = relative_safe_path(workspace_root, str(file_path))
+        except AntiError:
+            caveats.append(f"Skipped file outside workspace: {file_path_str}")
+            continue
         if not file_path.is_file():
             caveats.append(f"File not found: {file_path_str}")
+            continue
+        if path_is_excluded(rel):
+            caveats.append(f"Skipped excluded path: {file_path_str}")
             continue
         
         text, note = read_text_file(file_path.parent, file_path.name)
@@ -1324,7 +1616,7 @@ def build_review_prompt(
             available = max(0, max_prompt_chars - base_len - len("\n\n## Git Diff\n```diff\n\n```"))
             diff_for_prompt = truncate_at_line_boundary(diff_for_prompt, available)
             caveats.append(
-                f"Git diff truncated to fit max prompt budget ({len(diff)} original chars, {len(diff_for_prompt)} included)"
+                f"{GIT_DIFF_TRUNCATION_CAVEAT} ({len(diff)} original chars, {len(diff_for_prompt)} included)"
             )
 
     for index, (rel, text) in enumerate(candidates):
@@ -1360,6 +1652,7 @@ def build_review_prompt(
         "status": "incomplete" if omitted_files or any("truncated" in item.lower() for item in caveats) else "complete",
         "prompt_chars": len(prompt),
         "diff_chars": len(diff_for_prompt),
+        "diff_original_chars": len(diff),
         "diff_truncated": diff_for_prompt != diff,
         "included_files": [rel for rel, _text in included],
         "omitted_files": omitted_files,
@@ -1418,6 +1711,18 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def empty_review_scope_error(scope: str) -> AntiError:
+    if scope == "staged":
+        message = "no staged changes to review; stage files with git add, or use --scope working-tree, --scope files, or --scope diff"
+    elif scope == "diff":
+        message = "no diff found for the requested revision range; check --base/--changed-files"
+    elif scope == "files":
+        message = "no readable file content in the requested file set; check --file/--files-from paths"
+    else:
+        message = "no working-tree changes to review; the tree is clean or the selected paths are unchanged"
+    return AntiError(message + " (nothing was sent to the model)")
+
+
 def assemble_review_prompt_from_context(
     context: dict[str, Any],
     *,
@@ -1460,21 +1765,59 @@ def prompt_fits(prompt: str, max_prompt_chars: int) -> bool:
     return max_prompt_chars <= 0 or len(prompt) <= max_prompt_chars
 
 
+def diff_part_prompt_budget(
+    *,
+    scope_line: str,
+    excluded: list[str],
+    caveats: list[str],
+    max_prompt_chars: int,
+) -> int:
+    """Per-diff-part char budget that leaves room for prompt scaffolding.
+
+    Splitting against this budget means each part fits a bounded prompt without
+    being silently re-truncated inside build_review_prompt (B2).
+    """
+    if max_prompt_chars <= 0:
+        return 0
+    base_parts = review_prompt_parts(
+        scope_line=scope_line,
+        diff="",
+        included_files=[],
+        omitted_files=[],
+        excluded=excluded,
+        caveats=caveats,
+    )
+    overhead = len("\n\n".join(base_parts)) + len("## Git Diff\n```diff\n\n```")
+    budget = max_prompt_chars - overhead - 200
+    if budget < 500:
+        # Tiny budgets cannot hold even a small diff part next to the
+        # scaffolding; keep the whole diff as one part and let the caller
+        # record the truncation as an omission instead of silently splitting
+        # into 1-char parts or silently cutting the diff inside a chunk.
+        return 0
+    return budget
+
+
 def build_review_chunk_prompts(
     context: dict[str, Any],
     *,
     max_prompt_chars: int,
     max_chunks: int,
+    priority_paths: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    chunk_budget = max(1200, max_prompt_chars - 1800) if max_prompt_chars > 0 else 0
-    chunks: list[dict[str, Any]] = []
+    """Build the full chunk plan first, then apply the chunk cap.
+
+    ``max_chunks <= 0`` means unlimited: review everything, however many chunks
+    it takes. Omitted items are only recorded for scope that did not fit the
+    cap, never for silent truncation, so the manifest's ``status`` is honest.
+    """
+    unlimited = max_chunks <= 0
+    file_chunk_budget = max(1200, max_prompt_chars - 1800) if max_prompt_chars > 0 else 0
+    all_chunks: list[dict[str, Any]] = []
     omitted_items: list[str] = []
 
-    def add_chunk(kind: str, label: str, prompt: str, metadata: dict[str, Any]) -> None:
-        if len(chunks) >= max_chunks:
-            omitted_items.append(label)
-            return
-        chunks.append(
+    def append_chunk(kind: str, label: str, prompt: str, metadata: dict[str, Any]) -> None:
+        all_chunks.append(
             {
                 "kind": kind,
                 "label": label,
@@ -1486,7 +1829,13 @@ def build_review_chunk_prompts(
 
     diff = str(context["diff"])
     if diff.strip():
-        diff_parts = split_text_by_budget(diff, chunk_budget)
+        diff_budget = diff_part_prompt_budget(
+            scope_line=context["scope_line"],
+            excluded=context["excluded"],
+            caveats=context["caveats"],
+            max_prompt_chars=max_prompt_chars,
+        )
+        diff_parts = split_text_by_budget(diff, diff_budget)
         for index, diff_part in enumerate(diff_parts, start=1):
             label = f"diff part {index}/{len(diff_parts)}"
             scope_line = f"{context['scope_line']} ({label})"
@@ -1503,10 +1852,11 @@ def build_review_chunk_prompts(
             )
             metadata["chunk_kind"] = "diff"
             metadata["chunk_label"] = label
-            if not prompt_fits(prompt, max_prompt_chars):
-                omitted_items.append(f"{label} (prompt still exceeds {max_prompt_chars} chars)")
+            if not prompt_fits(prompt, max_prompt_chars) or metadata.get("diff_truncated"):
+                metadata["diff_truncated"] = True
+                omitted_items.append(f"{label} (diff part exceeds {max_prompt_chars} chars)")
                 continue
-            add_chunk("diff", label, prompt, metadata)
+            append_chunk("diff", label, prompt, metadata)
 
     file_items: list[tuple[str, str]] = []
     for rel, text in context["file_texts"]:
@@ -1524,10 +1874,19 @@ def build_review_chunk_prompts(
         if prompt_fits(whole_prompt, max_prompt_chars) and whole_metadata.get("included_files") == [rel]:
             file_items.append((rel, text))
             continue
-        text_parts = split_text_by_budget(text, chunk_budget)
+        text_parts = split_text_by_budget(text, file_chunk_budget)
         for index, text_part in enumerate(text_parts, start=1):
             label = f"{rel} part {index}/{len(text_parts)}"
             file_items.append((label, text_part))
+
+    priority = [str(path) for path in (priority_paths or [])]
+    if priority:
+        def _item_matches_priority(item_label: str) -> bool:
+            return any(item_label == rel or item_label.startswith(rel + " part ") for rel in priority)
+
+        ordered_items = [item for item in file_items if _item_matches_priority(item[0])]
+        ordered_items.extend(item for item in file_items if not _item_matches_priority(item[0]))
+        file_items = ordered_items
 
     current: list[tuple[str, str]] = []
     for rel, text in file_items:
@@ -1561,7 +1920,10 @@ def build_review_chunk_prompts(
             label = ", ".join(path for path, _item_text in current)
             current_metadata["chunk_kind"] = "files"
             current_metadata["chunk_label"] = label
-            add_chunk("files", label, current_prompt, current_metadata)
+            if prompt_fits(current_prompt, max_prompt_chars):
+                append_chunk("files", label, current_prompt, current_metadata)
+            else:
+                omitted_items.append(f"{label} (prompt still exceeds {max_prompt_chars} chars)")
         current = [(rel, text)]
 
     if current:
@@ -1580,11 +1942,22 @@ def build_review_chunk_prompts(
         current_metadata["chunk_kind"] = "files"
         current_metadata["chunk_label"] = label
         if prompt_fits(current_prompt, max_prompt_chars):
-            add_chunk("files", label, current_prompt, current_metadata)
+            append_chunk("files", label, current_prompt, current_metadata)
         else:
             omitted_items.append(f"{label} (prompt still exceeds {max_prompt_chars} chars)")
 
-    metadata = chunk_manifest(chunks, omitted_items, max_chunks=max_chunks)
+    planned_chunk_count = len(all_chunks)
+    if not unlimited and len(all_chunks) > max_chunks:
+        chunks = all_chunks[:max_chunks]
+        omitted_items.extend(chunk["label"] for chunk in all_chunks[max_chunks:])
+    else:
+        chunks = all_chunks
+    metadata = chunk_manifest(
+        chunks,
+        omitted_items,
+        max_chunks=max_chunks,
+        planned_chunk_count=planned_chunk_count,
+    )
     return chunks, metadata
 
 
@@ -1697,14 +2070,41 @@ def run_chunked_review(
     model: str,
     base_metadata: dict[str, Any],
     max_prompt_chars: int,
+    chunks: list[dict[str, Any]] | None = None,
+    chunk_metadata: dict[str, Any] | None = None,
 ) -> tuple[str, list[str], dict[str, Any]]:
-    chunks, chunk_metadata = build_review_chunk_prompts(
-        context,
-        max_prompt_chars=max_prompt_chars,
-        max_chunks=args.max_review_chunks,
-    )
+    if chunks is None or chunk_metadata is None:
+        chunks, chunk_metadata = build_review_chunk_prompts(
+            context,
+            max_prompt_chars=max_prompt_chars,
+            max_chunks=args.max_review_chunks,
+            priority_paths=getattr(args, "priority_file", None),
+        )
     if not chunks:
-        raise AntiError("chunked review produced no reviewable chunks; narrow the file set or raise --max-prompt-chars")
+        omitted_count = len(chunk_metadata.get("omitted_items", []))
+        raise AntiError(
+            "chunked review produced no reviewable chunks"
+            + (f"; {omitted_count} item(s) would be omitted" if omitted_count else "")
+            + "; narrow the file set or raise --max-prompt-chars"
+        )
+    planned_chunk_count = int(chunk_metadata.get("planned_chunk_count") or len(chunks))
+    omitted_items = chunk_metadata.get("omitted_items", [])
+    if omitted_items and not getattr(args, "allow_partial", False):
+        raise AntiError(
+            "review scope needs "
+            f"{planned_chunk_count} chunk(s) but --max-review-chunks={args.max_review_chunks}; "
+            f"{len(omitted_items)} item(s) would be omitted "
+            f"({chunk_metadata.get('omitted_file_count', 0)} file(s)). "
+            "Pass --allow-partial to continue with a partial review, "
+            "raise --max-review-chunks, or narrow the file set."
+        )
+    plan_labels = ", ".join(chunk["label"] for chunk in chunks[:10])
+    if len(chunks) > 10:
+        plan_labels += ", ..."
+    plan_message = f"review chunk plan: {len(chunks)}/{planned_chunk_count} chunk(s)"
+    if omitted_items:
+        plan_message += f"; {len(omitted_items)} item(s) omitted"
+    progress(args, plan_message + f"; labels: {plan_labels}")
 
     chunk_outputs: list[str] = []
     chunk_generation: list[dict[str, Any]] = []
@@ -1736,7 +2136,13 @@ def run_chunked_review(
         chunk_metadata=chunk_metadata,
         max_chars=args.max_synthesis_chars,
     )
-    caveats = list(context["caveats"])
+    # The single-prompt assembly truncates the diff to fit one prompt; chunked
+    # mode re-budgets the FULL diff across chunks, so that caveat is stale here.
+    caveats = [
+        caveat
+        for caveat in context["caveats"]
+        if not caveat.startswith(GIT_DIFF_TRUNCATION_CAVEAT)
+    ]
     caveats.extend(synthesis_caveats)
     synthesis, synthesis_model, synthesis_generation = generate_with_fallback(
         args,
@@ -1762,8 +2168,12 @@ def run_chunked_review(
         "chunked": True,
         "single_prompt_status": base_metadata.get("status"),
         "single_prompt_omitted_files": base_metadata.get("omitted_files", []),
+        "diff_original_chars": base_metadata.get("diff_original_chars"),
         "omitted_files": chunk_metadata["omitted_items"],
         "chunk_count": len(chunks),
+        "planned_chunk_count": chunk_metadata.get("planned_chunk_count", len(chunks)),
+        "omitted_chunk_count": chunk_metadata.get("omitted_chunk_count", 0),
+        "omitted_file_count": chunk_metadata.get("omitted_file_count", 0),
         "chunk_prompts": [
             {
                 "index": index,
@@ -1987,7 +2397,11 @@ def read_prompt(args: argparse.Namespace) -> str:
         raw = path.read_bytes()
         if b"\0" in raw:
             raise AntiError("prompt file looks binary")
-        pieces.append(raw.decode("utf-8"))
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise AntiError(f"prompt file {path!s} is not valid UTF-8") from exc
+        pieces.append(decoded)
     if args.prompt:
         pieces.append(args.prompt)
     if getattr(args, "prompt_parts", None):
@@ -2002,6 +2416,35 @@ def read_optional_prompt(args: argparse.Namespace) -> str:
     if args.prompt_file or args.prompt or getattr(args, "prompt_parts", None):
         return read_prompt(args)
     return ""
+
+
+def format_dry_run(
+    *,
+    mode: str,
+    model: str,
+    prompt_chars: int,
+    max_output_tokens: int,
+    extra_models: list[str] | None = None,
+    output_json: bool = False,
+) -> str:
+    """Format a dry-run summary with token and cost estimates."""
+    estimates = [estimate_cost(model=model, prompt_chars=prompt_chars,
+                               estimated_output_tokens=max_output_tokens)]
+    for m in (extra_models or []):
+        estimates.append(estimate_cost(model=m, prompt_chars=prompt_chars,
+                                       estimated_output_tokens=max_output_tokens))
+    if output_json:
+        return json.dumps({"mode": mode, "estimates": estimates}, indent=2, sort_keys=True)
+    lines = [
+        f"[dry-run] {mode} with model(s): {', '.join(e['model'] for e in estimates)}",
+        f"  prompt: {prompt_chars} chars (~{estimates[0]['estimated_input_tokens']} tokens)",
+    ]
+    for e in estimates:
+        lines.append(
+            f"  {e['model']}: ~{e['estimated_total_tokens']} total tokens "
+            f"({e['cost_tier']} tier, quality {e['quality_rank']})"
+        )
+    return "\n".join(lines)
 
 
 def print_result(
@@ -2023,6 +2466,20 @@ def print_result(
         sanitizer=sanitize_json,
     )
     if output_json:
+        scope_status = None
+        if metadata.get("status") == "incomplete":
+            scope_status = "partial"
+        elif metadata.get("status") == "complete":
+            scope_status = "complete"
+        omitted_items = metadata.get("omitted_files") or metadata.get("chunk_omitted_items") or []
+        derived_metadata = dict(metadata)
+        if scope_status:
+            derived_metadata["scopeStatus"] = scope_status
+        manifest_file_count = metadata.get("omitted_file_count")
+        derived_metadata["omittedFileCount"] = int(
+            manifest_file_count if manifest_file_count is not None else len(omitted_items)
+        )
+        derived_metadata["omittedChunkCount"] = int(metadata.get("omitted_chunk_count") or 0)
         print(
             json.dumps(
                 {
@@ -2030,7 +2487,7 @@ def print_result(
                     "model": model,
                     "gateway": safe_gateway,
                     "caveats": caveats,
-                    "metadata": metadata,
+                    "metadata": derived_metadata,
                     "output_text": text.strip(),
                 },
                 indent=2,
@@ -2042,6 +2499,9 @@ def print_result(
     print(f"- Gateway: {safe_gateway}")
     if metadata.get("status"):
         print(f"- Status: {metadata['status']}")
+    if metadata.get("status") == "incomplete":
+        omitted_items = metadata.get("omitted_files") or []
+        print(f"- Scope: PARTIAL ({len(omitted_items)} item(s) not reviewed; see metadata.omitted_items)")
     if caveats:
         for caveat in caveats:
             print(f"- Caveat: {caveat}")
@@ -2140,13 +2600,21 @@ def ensure_models_available(
     token_env: str,
 ) -> set[str]:
     model_ids = fetch_model_ids(base_url, timeout=timeout, token_env=token_env)
-    missing = [model for model in models if model not in model_ids]
+    missing = [
+        model
+        for model in models
+        if not any(catalog_model_matches(model, candidate) for candidate in model_ids)
+    ]
     if missing:
         sample = ", ".join(sorted(model_ids)[:12])
+        suggestions = closest_catalog_models(missing[0], model_ids)
+        suggestion_note = (
+            f" Closest advertised for {missing[0]!r}: {', '.join(suggestions)}." if suggestions else ""
+        )
         raise AntiError(
             "model(s) not advertised by /v1/models: "
             + ", ".join(missing)
-            + f". Available sample: {sample}"
+            + f".{suggestion_note} Available sample: {sample}"
         )
     return model_ids
 
@@ -2275,6 +2743,70 @@ def extract_json_object(text: str) -> Any:
         raise
 
 
+def _balance_json_prefix(prefix: str) -> str:
+    """Close the unclosed brackets of a JSON prefix, ignoring brackets inside strings."""
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for char in prefix:
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            stack.append(char)
+        elif char in "]}":
+            if stack:
+                stack.pop()
+    closers = {"[": "]", "{": "}"}
+    return prefix + "".join(closers[opener] for opener in reversed(stack))
+
+
+def repair_truncated_json(text: str) -> Any:
+    """Recover the longest valid JSON object prefix when the tail was cut off."""
+    stripped = text.strip()
+    start = stripped.find("{")
+    if start < 0:
+        raise ValueError("no JSON object found to repair")
+    body = stripped[start:]
+    closes = [index for index, char in enumerate(body) if char in "}]"]
+    # ponytail: capped at the last 80 closing brackets; an adversarial 10MB
+    # response of repeated brackets would otherwise try O(n) json.loads calls.
+    candidates = [body, *[body[: index + 1] for index in reversed(closes[-80:])]]
+    best: Any = None
+    best_len = -1
+    for candidate in candidates:
+        if not candidate.strip():
+            continue
+        attempts = [candidate, _balance_json_prefix(candidate)]
+        for attempt in attempts:
+            try:
+                parsed = json.loads(attempt)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict) and len(attempt) > best_len:
+                best = parsed
+                best_len = len(attempt)
+    if best is None:
+        raise ValueError("could not repair truncated JSON")
+    return best
+
+
+def strip_fenced_json_blocks(text: str) -> str:
+    return re.sub(
+        r"```(?:json)?\s*\n.*?(?:```|$)",
+        "[structured JSON block omitted because it could not be parsed]",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+
 def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -2297,22 +2829,51 @@ def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
     }
 
 
-def parse_panel_findings(text: str) -> tuple[dict[str, Any] | None, str | None]:
+def parse_panel_findings(text: str) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
+    diagnostics: dict[str, Any] = {"repaired": False, "parse_error": None}
     try:
         parsed = extract_json_object(text)
     except Exception as exc:
-        return None, f"Judge did not return valid structured findings JSON; falling back to prose synthesis ({exc})"
+        diagnostics["parse_error"] = str(exc)
+        try:
+            parsed = repair_truncated_json(text)
+            diagnostics["repaired"] = True
+        except Exception:
+            return (
+                None,
+                "Judge did not return valid structured findings JSON; falling back to prose synthesis "
+                f"({diagnostics['parse_error']})",
+                diagnostics,
+            )
     if not isinstance(parsed, dict):
-        return None, "Judge structured findings output was not a JSON object; falling back to prose synthesis"
+        return (
+            None,
+            "Judge structured findings output was not a JSON object; falling back to prose synthesis",
+            diagnostics,
+        )
 
     raw_findings = parsed.get("findings")
     if not isinstance(raw_findings, list):
-        return None, "Judge structured findings JSON did not contain a findings list; falling back to prose synthesis"
-    findings = [
-        normalized
-        for index, item in enumerate(raw_findings, start=1)
-        if (normalized := normalize_finding_item(item, index)) is not None
-    ]
+        return (
+            None,
+            "Judge structured findings JSON did not contain a findings list; falling back to prose synthesis",
+            diagnostics,
+        )
+
+    findings: list[dict[str, Any]] = []
+    dropped = 0
+    for index, item in enumerate(raw_findings, start=1):
+        normalized = normalize_finding_item(item, index)
+        if normalized is None:
+            dropped += 1
+        else:
+            findings.append(normalized)
+    parse_warning = None
+    if diagnostics["repaired"]:
+        parse_warning = (
+            "Judge JSON was malformed or truncated and was repaired by truncating to the last complete "
+            "JSON value; findings may be incomplete."
+        )
     contract = {
         "summary": clean_string(parsed.get("summary"), max_chars=1600),
         "disagreements": clean_string_list(parsed.get("disagreements"), max_items=20, max_chars=700),
@@ -2324,19 +2885,38 @@ def parse_panel_findings(text: str) -> tuple[dict[str, Any] | None, str | None]:
         ),
         "recommended_next_actions": clean_string_list(parsed.get("recommended_next_actions"), max_items=20, max_chars=700),
         "caveats": clean_string_list(parsed.get("caveats") or parsed.get("verification_caveats"), max_items=20, max_chars=700),
+        "parse_warning": parse_warning,
+        "findings_total": len(raw_findings),
+        "findings_dropped": dropped,
     }
-    return sanitize_json(contract), None
+    return sanitize_json(contract), None, diagnostics
 
 
-def fallback_findings_contract(text: str, caveats: list[str]) -> dict[str, Any]:
+def fallback_findings_contract(
+    text: str,
+    caveats: list[str],
+    *,
+    parse_warning: str | None = None,
+) -> dict[str, Any]:
+    cleaned = strip_fenced_json_blocks(text).strip()
+    if cleaned.startswith(("{", "[")) and '"' in cleaned:
+        summary = (
+            "Judge returned a structured response that could not be parsed; see parse_warning. "
+            "No usable prose summary was produced."
+        )
+    else:
+        summary = cleaned
     return sanitize_json(
         {
-            "summary": clean_string(text, max_chars=4000),
+            "summary": clean_string(summary, max_chars=4000),
             "disagreements": [],
             "findings": [],
             "unverifiable": [],
             "recommended_next_actions": [],
             "caveats": caveats,
+            "parse_warning": parse_warning,
+            "findings_total": 0,
+            "findings_dropped": 0,
         }
     )
 
@@ -2382,7 +2962,12 @@ def render_panel_findings(findings: dict[str, Any], caveats: list[str]) -> str:
         sections.append("## Recommended Next Actions")
         sections.append("\n".join(f"- {item}" for item in actions))
 
-    rendered_caveats = clean_string_list([*(findings.get("caveats") or []), *caveats], max_items=80, max_chars=1000)
+    parse_warning = findings.get("parse_warning")
+    rendered_caveats = clean_string_list(
+        [*(findings.get("caveats") or []), *([parse_warning] if parse_warning else []), *caveats],
+        max_items=80,
+        max_chars=1000,
+    )
     sections.append("## Caveats")
     sections.append("\n".join(f"- {item}" for item in rendered_caveats) if rendered_caveats else "- None.")
     return "\n\n".join(sections).strip()
@@ -2404,6 +2989,8 @@ def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[st
             claude_guardrail_would_apply(args, model, prompt_budget) for model in resolved_panel_models
         )
         context = collect_review_context(args)
+        if not context["diff"].strip() and not context["file_texts"]:
+            raise empty_review_scope_error(args.scope)
         prompt, _paths, caveats, review_metadata = assemble_review_prompt_from_context(
             context,
             max_prompt_chars=prompt_budget,
@@ -2416,7 +3003,9 @@ def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[st
         claude_guardrail_used = claude_guardrail_available and should_run_chunked_review(args, review_metadata)
         if claude_guardrail_used:
             add_claude_guardrail_caveat(caveats, prompt_budget=prompt_budget)
-            context["caveats"] = list(caveats)
+            context["caveats"] = [
+                caveat for caveat in caveats if not caveat.startswith(GIT_DIFF_TRUNCATION_CAVEAT)
+            ]
         metadata.update(review_metadata)
         metadata["scope"] = context["scope_line"]
         metadata["prompt_chars"] = len(prompt)
@@ -2445,7 +3034,7 @@ def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[st
         prompt = "\n\n".join([collab_instruction, prompt])
         prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
         metadata["prompt_chars"] = len(prompt)
-    prompt = "\n\n".join([gpt_complement_instruction(), prompt])
+    prompt = "\n\n".join([PANEL_LANE_INSTRUCTION, gpt_complement_instruction(), prompt])
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
     metadata["prompt_chars"] = len(prompt)
 
@@ -2468,7 +3057,12 @@ def build_panel_synthesis_prompt(
         "roles": roles,
         "panel_models": [result["model"] for result in panel_results],
         "successful_models": [result["model"] for result in panel_results if result["status"] == "success"],
-        "failed_models": [result["model"] for result in panel_results if result["status"] != "success"],
+        "failed_models": [
+            result["model"]
+            for result in panel_results
+            if result["status"] not in ("success", "truncated")
+        ],
+        "truncated_models": [result["model"] for result in panel_results if result["status"] == "truncated"],
         "source_metadata": metadata,
         "source_caveats": caveats,
         "requested_output": output_mode,
@@ -2485,6 +3079,9 @@ def build_panel_synthesis_prompt(
                 lines.append(f"- model_used: {result['model_used']}")
             if result["status"] == "success":
                 lines.append(output.strip() or "(empty output)")
+            elif result["status"] == "truncated":
+                lines.append("(lane output truncated at the token cap; partial content below is incomplete)")
+                lines.append(output.strip() or "(no content)")
             else:
                 lines.append("error: " + str(result.get("error", "unknown error")))
             result_sections.append("\n".join(lines))
@@ -2575,6 +3172,30 @@ def build_panel_synthesis_prompt(
     return prompt, synthesis_caveats, synthesis_metadata
 
 
+def lane_retry_instruction() -> str:
+    return (
+        "This is a complete, self-contained review task. Produce the requested output directly now. "
+        "Do not ask for direction, restate the task, or ask clarifying questions."
+    )
+
+
+def lane_output_status(output_text: str, usage: dict[str, Any] | None, max_output_tokens: int) -> str:
+    """Classify a panel lane's output as answered, truncated, empty, or a non-answer."""
+    text = (output_text or "").strip()
+    if not text:
+        return "empty"
+    normalized = normalize_usage(usage)
+    output_tokens = int(normalized["output_tokens"]) if normalized and normalized.get("output_tokens") is not None else None
+    if output_tokens is not None and output_tokens >= max_output_tokens:
+        return "truncated"
+    lowered = text.lower()
+    if any(phrase in lowered for phrase in NON_ANSWER_STRONG_PHRASES):
+        return "non_answer"
+    if len(text) < 140 and (text.rstrip().endswith("?") or any(phrase in lowered for phrase in NON_ANSWER_PHRASES)):
+        return "non_answer"
+    return "success"
+
+
 def run_panel_call(
     *,
     args: argparse.Namespace,
@@ -2583,16 +3204,29 @@ def run_panel_call(
     max_output_tokens: int,
     model_ids: set[str],
 ) -> dict[str, Any]:
-    try:
-        text, model_used, generation_metadata = generate_with_fallback(
-            args,
-            model=model,
-            prompt=prompt,
-            max_output_tokens=max_output_tokens,
-            model_ids=model_ids,
-            purpose=f"panel model {model}",
-        )
-        result: dict[str, Any] = {"model": model, "status": "success", "output_text": text.strip()}
+    retry_cap = min(PANEL_LANE_RETRY_CEILING_TOKENS, max_output_tokens * 2)
+    attempts: list[dict[str, Any]] = []
+    for attempt in (1, 2):
+        cap = max_output_tokens if attempt == 1 else retry_cap
+        call_prompt = prompt
+        if attempt > 1:
+            call_prompt = prompt + "\n\n" + lane_retry_instruction()
+        purpose = f"panel model {model}" + ("" if attempt == 1 else f" (retry {attempt - 1})")
+        try:
+            text, model_used, generation_metadata = generate_with_fallback(
+                args,
+                model=model,
+                prompt=call_prompt,
+                max_output_tokens=cap,
+                model_ids=model_ids,
+                purpose=purpose,
+            )
+        except Exception as exc:
+            attempts.append({"attempt": attempt, "status": "error", "error": redact_sensitive_text(str(exc))})
+            break
+        status = lane_output_status(text, generation_metadata.get("usage"), cap)
+        attempts.append({"attempt": attempt, "status": status, "output_chars": len(text.strip())})
+        result: dict[str, Any] = {"model": model, "status": status, "output_text": text.strip()}
         if model_used != model:
             result["model_used"] = model_used
         result["generation"] = generation_metadata
@@ -2600,9 +3234,24 @@ def run_panel_call(
             result["usage"] = generation_metadata["usage"]
         if generation_metadata.get("elapsed_ms") is not None:
             result["elapsed_ms"] = generation_metadata["elapsed_ms"]
-        return result
-    except Exception as exc:
-        return {"model": model, "status": "error", "error": redact_sensitive_text(str(exc))}
+        result["attempts"] = attempts
+        if attempt == 1 and status == "success":
+            return result
+        if attempt == 2:
+            if status == "truncated":
+                result["error"] = "output truncated at the token cap after retry; partial content may be incomplete"
+            elif status == "non_answer":
+                result["error"] = "model asked for direction instead of delivering the requested output"
+            elif status == "empty":
+                result["error"] = "model returned empty output after retry"
+            return result
+    last_error = attempts[-1].get("error", "unknown error") if attempts else "unknown error"
+    return {
+        "model": model,
+        "status": "error",
+        "error": redact_sensitive_text(str(last_error)),
+        "attempts": attempts,
+    }
 
 
 def panel_results_for_record(panel_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2645,6 +3294,19 @@ def format_latency(elapsed_ms: Any) -> str:
     if isinstance(elapsed_ms, int) and elapsed_ms >= 0:
         return f"{elapsed_ms} ms"
     return ""
+
+
+def panel_lane_status_label(result: dict[str, Any]) -> str:
+    status = result.get("status", "error")
+    if status == "success":
+        return "success"
+    if status == "truncated":
+        return "truncated (output may be incomplete)"
+    if status == "non_answer":
+        return "non_answer: asked for direction instead of reviewing"
+    if status == "empty":
+        return "empty: returned no output"
+    return f"error: {result.get('error', 'unknown error')}"
 
 
 def print_panel_result(
@@ -2716,10 +3378,7 @@ def print_panel_result(
             if part
         )
         suffix = f" ({stats})" if stats else ""
-        if result["status"] == "success":
-            print(f"- {result['model']}: success{suffix}")
-        else:
-            print(f"- {result['model']}: error: {result.get('error', 'unknown error')}")
+        print(f"- {result['model']}: {panel_lane_status_label(result)}{suffix}")
     for caveat in caveats:
         print(f"- Caveat: {caveat}")
     print()
@@ -2793,10 +3452,14 @@ def maybe_summarize_panel_review(
         "review_summary_chars": len(summary_text),
         "review_summary_metadata": summary_metadata,
     }
-    summary_caveats.append(
+    merged_caveats = list(caveats)
+    for caveat in summary_caveats:
+        if caveat not in merged_caveats:
+            merged_caveats.append(caveat)
+    merged_caveats.append(
         "Panel review used a bounded chunked summary instead of sending the full raw review context to every lane."
     )
-    return prompt, summary_caveats, metadata
+    return prompt, merged_caveats, metadata
 
 
 def command_panel(args: argparse.Namespace) -> int:
@@ -2836,6 +3499,11 @@ def command_panel(args: argparse.Namespace) -> int:
     )
     if collab_profile != "none":
         metadata["collaboration_profile"] = collab_profile
+    if args.dry_run:
+        print(format_dry_run(mode=f"panel {args.mode}", model=panel_models[0],
+            prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
+            extra_models=panel_models[1:] + [judge_model], output_json=args.json))
+        return 0
     if args.print_prompt:
         payload = {"prompt": prompt, "metadata": metadata, "caveats": caveats}
         if args.json:
@@ -2865,8 +3533,16 @@ def command_panel(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         token_env=args.gateway_token_env,
     )
-    missing_panel_models = [model for model in panel_models if model not in model_ids]
-    available_panel_models = [model for model in panel_models if model in model_ids]
+    def _catalog_member(model_id: str) -> str | None:
+        return next(
+            (candidate for candidate in model_ids if catalog_model_matches(model_id, candidate)),
+            None,
+        )
+
+    if _catalog_member(judge_model) is None:
+        raise AntiError(f"judge model {judge_model} is not advertised by /v1/models")
+    missing_panel_models = [model for model in panel_models if _catalog_member(model) is None]
+    available_panel_models = [model for model in panel_models if _catalog_member(model) is not None]
     if len(available_panel_models) < min_successes:
         sample = ", ".join(sorted(model_ids)[:12])
         raise AntiError(
@@ -2909,19 +3585,35 @@ def command_panel(args: argparse.Namespace) -> int:
             panel_results[futures[future]] = future.result()
 
     successes = [result for result in panel_results if result["status"] == "success"]
-    failures = [result for result in panel_results if result["status"] != "success"]
+    truncated = [result for result in panel_results if result["status"] == "truncated"]
+    failures = [result for result in panel_results if result["status"] not in {"success", "truncated"}]
+    usable = [*successes, *truncated]
     if failures:
         caveats.extend(
             f"Panel model {result['model']} failed: {redact_sensitive_text(result.get('error', 'unknown error'))}"
             for result in failures
         )
+    if truncated:
+        caveats.extend(
+            f"Panel model {result['model']} output was truncated at the token cap after retry; "
+            "partial content may be incomplete"
+            for result in truncated
+        )
     metadata["successful_models"] = [result["model"] for result in successes]
     metadata["failed_models"] = [result["model"] for result in failures]
+    metadata["truncated_models"] = [result["model"] for result in truncated]
+    metadata["retried_models"] = [
+        result["model"] for result in panel_results if len(result.get("attempts", [])) > 1
+    ]
     metadata["success_count"] = len(successes)
+    metadata["usable_count"] = len(usable)
 
-    if len(successes) < min_successes:
+    if len(usable) < min_successes:
         metadata["panel_results"] = panel_results_for_record(panel_results)
-        error = f"panel had {len(successes)} successful model(s), below --min-successes {min_successes}"
+        error = (
+            f"panel had {len(successes)} successful and {len(truncated)} truncated model(s), "
+            f"below --min-successes {min_successes} (truncated lanes still count as usable)"
+        )
         try:
             write_run_record(
                 args,
@@ -2951,26 +3643,66 @@ def command_panel(args: argparse.Namespace) -> int:
     )
     caveats.extend(synthesis_caveats)
     metadata.update(synthesis_metadata)
-    judge_text, judge_model_used, judge_generation = generate_with_fallback(
-        args,
-        model=judge_model,
-        prompt=synthesis_prompt,
-        max_output_tokens=args.judge_output_tokens,
-        model_ids=model_ids,
-        purpose="panel judge",
+
+    def run_judge(prompt: str, max_output_tokens: int) -> tuple[str, str, dict[str, Any]]:
+        return generate_with_fallback(
+            args,
+            model=judge_model,
+            prompt=prompt,
+            max_output_tokens=max_output_tokens,
+            model_ids=model_ids,
+            purpose="panel judge",
+        )
+
+    judge_cap = args.judge_output_tokens
+    judge_text, judge_model_used, judge_generation = run_judge(synthesis_prompt, judge_cap)
+    findings, findings_caveat, parse_diagnostics = parse_panel_findings(judge_text)
+    judge_retried = False
+    if findings_caveat:
+        retry_cap = min(JUDGE_RETRY_CEILING_TOKENS, judge_cap * 2)
+        progress(args, "panel judge: structured findings parse failed; retrying with a stricter JSON-only instruction")
+        judge_retried = True
+        retry_prompt = (
+            "Your previous response was discarded because it was not valid JSON and could not be repaired.\n"
+            "Return ONLY one valid JSON object with no markdown code fence, no surrounding prose, and no trailing text. "
+            "Prefer a few short high-signal findings over long prose so the response fits in the output budget.\n\n"
+            + synthesis_prompt
+        )
+        judge_text, judge_model_used, judge_generation = run_judge(retry_prompt, retry_cap)
+        judge_cap = retry_cap
+        findings, findings_caveat, parse_diagnostics = parse_panel_findings(judge_text)
+
+    judge_usage = normalize_usage(judge_generation.get("usage"))
+    judge_truncated = bool(
+        judge_usage and judge_usage.get("output_tokens") is not None and int(judge_usage["output_tokens"]) >= judge_cap
     )
     metadata["judge_model_used"] = judge_model_used
     metadata["judge_generation"] = judge_generation
+    metadata["judge_retried"] = judge_retried
+    metadata["judge_json_repaired"] = bool(parse_diagnostics.get("repaired"))
+    metadata["judge_truncated"] = judge_truncated
     metadata["panel_usage_totals"] = sum_usage([result.get("generation", {}) for result in panel_results])
     metadata["usage_totals"] = sum_usage([result.get("generation", {}) for result in panel_results], judge_generation)
-    findings, findings_caveat = parse_panel_findings(judge_text)
     if findings_caveat:
-        caveats.append(findings_caveat)
+        warning = findings_caveat
+        if judge_truncated:
+            warning += " Judge output also hit the output-token cap; the prose fallback may itself be incomplete."
+        caveats.append(warning)
         metadata["findings_status"] = "fallback"
-        findings = fallback_findings_contract(judge_text, [findings_caveat])
+        findings = fallback_findings_contract(judge_text, [warning], parse_warning=warning)
         display_text = judge_text
     else:
         metadata["findings_status"] = "parsed"
+        if findings is not None:
+            if judge_truncated:
+                warning = "Judge output hit the output-token cap; structured findings may be incomplete."
+                existing = findings.get("parse_warning") or ""
+                findings["parse_warning"] = " ".join(part for part in [existing, warning] if part).strip()
+                caveats.append("Judge output hit the output-token cap; structured findings may be incomplete.")
+            if parse_diagnostics.get("repaired"):
+                caveats.append(
+                    "Judge JSON was malformed or truncated and was repaired by truncating to the last complete JSON value."
+                )
         display_text = render_panel_findings(findings or {}, caveats)
     metadata["findings"] = findings
     write_run_record(
@@ -3019,6 +3751,14 @@ def command_consult(args: argparse.Namespace) -> int:
         progress(args, f"consult: pre-read {len(read_files)} file(s) for context")
     
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+    if args.dry_run:
+        print(format_dry_run(mode="consult", model=model,
+            prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
+            output_json=args.json))
+        if not read_files:
+            print()
+            print(prompt)
+        return 0
     ensure_run_id(args)
     text, model_used, generation_metadata = generate_with_fallback(
         args,
@@ -3027,7 +3767,40 @@ def command_consult(args: argparse.Namespace) -> int:
         max_output_tokens=args.max_output_tokens,
         purpose="consult",
     )
-    metadata = {"prompt_chars": len(prompt), **generation_metadata}
+    attempts_metadata: list[dict[str, Any]] = [generation_metadata]
+    usage = generation_metadata.get("usage")
+    output_status = lane_output_status(text, usage, args.max_output_tokens)
+    last_prompt_chars = len(prompt)
+    if output_status == "truncated":
+        retry_cap = min(PANEL_LANE_RETRY_CEILING_TOKENS, args.max_output_tokens * 2)
+        progress(
+            args,
+            f"consult output hit the {args.max_output_tokens}-token cap; retrying once at {retry_cap} tokens",
+        )
+        retry_prompt = prompt + "\n\n" + lane_retry_instruction()
+        last_prompt_chars = len(retry_prompt)
+        text, model_used, retry_metadata = generate_with_fallback(
+            args,
+            model=model,
+            prompt=retry_prompt,
+            max_output_tokens=retry_cap,
+            purpose="consult (retry)",
+        )
+        attempts_metadata.append(retry_metadata)
+        usage = retry_metadata.get("usage")
+        output_status = lane_output_status(text, usage, retry_cap)
+        caveats.append("Consult output was truncated at the token cap and retried once at a higher cap")
+        if output_status == "truncated":
+            caveats.append(
+                "Consult output still truncated at the higher output cap; raise --max-output-tokens for the full answer"
+            )
+    metadata = {
+        "prompt_chars": last_prompt_chars,
+        **attempts_metadata[-1],
+        "consult_attempts": attempts_metadata,
+    }
+    if output_status != "success":
+        metadata["status"] = output_status
     if read_files:
         metadata["pre_read_files"] = read_files
     if getattr(args, "run_id", None):
@@ -3046,6 +3819,7 @@ def command_consult(args: argparse.Namespace) -> int:
         caveats=caveats,
         metadata=metadata,
         execution_ledger=execution_ledger,
+        force_full_output=output_status == "truncated",
     )
     print_result(
         mode="consult",
@@ -3065,10 +3839,13 @@ def command_review(args: argparse.Namespace) -> int:
     prompt_budget = prompt_budget_for_model(args, model)
     claude_guardrail_available = claude_guardrail_would_apply(args, model, prompt_budget)
     context = collect_review_context(args)
+    if not context["diff"].strip() and not context["file_texts"]:
+        raise empty_review_scope_error(args.scope)
     prompt, _paths, caveats, metadata = assemble_review_prompt_from_context(
         context,
         max_prompt_chars=prompt_budget,
     )
+    chunked_review = should_run_chunked_review(args, metadata)
     disclosure = byok_repo_context_disclosure(
         generation_models_for_disclosure([model], args),
         receives_repo_context=True,
@@ -3078,6 +3855,31 @@ def command_review(args: argparse.Namespace) -> int:
         metadata.setdefault("privacy_disclosures", []).append(disclosure)
         if not args.print_prompt:
             eprint(f"[anti] {redact_sensitive_text(disclosure)}")
+    if args.dry_run:
+        print(format_dry_run(mode="review", model=model,
+            prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
+            output_json=args.json))
+        if chunked_review:
+            plan_chunks, plan_metadata = build_review_chunk_prompts(
+                context,
+                max_prompt_chars=prompt_budget,
+                max_chunks=args.max_review_chunks,
+                priority_paths=getattr(args, "priority_file", None),
+            )
+            eprint(
+                f"[anti] dry-run chunk plan: {len(plan_chunks)}/"
+                f"{plan_metadata.get('planned_chunk_count', len(plan_chunks))} chunk(s)"
+                + (
+                    f"; {len(plan_metadata['omitted_items'])} item(s) would be omitted "
+                    f"({plan_metadata.get('omitted_file_count', 0)} file(s)); "
+                    "pass --allow-partial to continue partial"
+                    if plan_metadata.get("omitted_items")
+                    else ""
+                )
+            )
+            for chunk in plan_chunks:
+                eprint(f"  - {chunk['kind']}: {chunk['label']} ({chunk['prompt_chars']} chars)")
+        return 0
     if args.print_prompt:
         if args.json:
             print(json.dumps({"prompt": prompt, "metadata": metadata, "caveats": caveats}, indent=2, sort_keys=True))
@@ -3089,11 +3891,15 @@ def command_review(args: argparse.Namespace) -> int:
                 print(f"- {caveat}")
         return 0
     ensure_run_id(args)
-    chunked_review = should_run_chunked_review(args, metadata)
     claude_guardrail_used = claude_guardrail_available and chunked_review
     if claude_guardrail_used:
         add_claude_guardrail_caveat(caveats, prompt_budget=prompt_budget)
-    context["caveats"] = list(caveats)
+    # The single-prompt assembly may have truncated the diff to fit one prompt;
+    # chunked mode re-budgets the full diff, so that stale caveat must not leak
+    # into every chunk prompt's manifest (B2).
+    context["caveats"] = [
+        caveat for caveat in caveats if not caveat.startswith(GIT_DIFF_TRUNCATION_CAVEAT)
+    ]
     if chunked_review:
         text, caveats, metadata = run_chunked_review(
             args=args,
@@ -3113,6 +3919,23 @@ def command_review(args: argparse.Namespace) -> int:
         )
         metadata = {**metadata, "chunked": False, "prompt_budget_chars": prompt_budget, **generation_metadata}
     metadata["claude_prompt_guardrail"] = claude_guardrail_used
+    omitted_items = metadata.get("omitted_files") or []
+    if metadata.get("status") == "incomplete" and omitted_items:
+        omitted_file_count = int(metadata.get("omitted_file_count") or 0)
+        if omitted_file_count:
+            banner = (
+                f"⚠ INCOMPLETE — {len(omitted_items)} item(s) / {omitted_file_count} file(s) NOT reviewed; "
+                "this synthesis covers only the reviewed chunks, not the full requested scope "
+                "(see metadata.omitted_items for the manifest)."
+            )
+        else:
+            banner = (
+                f"⚠ INCOMPLETE — {len(omitted_items)} item(s) NOT reviewed; "
+                "this synthesis covers only the reviewed chunks, not the full requested scope "
+                "(see metadata.omitted_items for the manifest)."
+            )
+        text = banner + "\n\n" + text
+        caveats.insert(0, banner)
     if getattr(args, "run_id", None):
         metadata["run_id"] = args.run_id
         metadata["request_log_correlation_id"] = args.run_id
@@ -3157,6 +3980,11 @@ def command_plan(args: argparse.Namespace) -> int:
         if not args.print_prompt:
             eprint(f"[anti] {redact_sensitive_text(disclosure)}")
     recorded_prompt = prompt
+    if args.dry_run:
+        print(format_dry_run(mode="plan", model=model,
+            prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
+            output_json=args.json))
+        return 0
     if args.print_prompt:
         printable_caveats = list(caveats)
         printable_prompt = apply_prompt_limit(prompt, prompt_budget, printable_caveats)
@@ -3283,7 +4111,7 @@ def command_smoke(args: argparse.Namespace) -> int:
         requested_models = args.model or ["opus", "sonnet"]
         missing_models = []
         for model in [resolve_model(item, default=item) for item in requested_models]:
-            if model in ids:
+            if any(catalog_model_matches(model, advertised) for advertised in ids):
                 statuses["checks"].append({"name": "model", "status": "pass", "model": model})
                 if not args.json:
                     print(f"[PASS] Model available: {model}")
@@ -3300,6 +4128,59 @@ def command_smoke(args: argparse.Namespace) -> int:
         statuses["checks"].append({"name": "models", "status": "fail", "detail": error})
         if not args.json:
             print(f"[FAIL] Gateway /v1/models: {error}")
+
+    if getattr(args, "check_documented", False) and statuses.get("models_reachable"):
+        documented = sorted({resolve_model(alias, default=alias) for alias in MODEL_ALIASES})
+        missing_documented = [
+            model_id
+            for model_id in documented
+            if not any(catalog_model_matches(model_id, advertised) for advertised in ids)
+        ]
+        # openrouter:openrouter/auto is a legitimate OpenRouter id; only warn
+        # when a vendor path remains after the duplicated prefix (the form the
+        # upstream API rejects, mirroring the gateway's normalize rule).
+        double_prefixed = sorted(
+            advertised
+            for advertised in ids
+            if advertised.startswith("openrouter:openrouter/")
+            and "/" in advertised[len("openrouter:openrouter/"):]
+        )
+        if missing_documented:
+            statuses["checks"].append(
+                {
+                    "name": "documented-models",
+                    "status": "warn",
+                    "detail": "documented model ids not advertised by /v1/models",
+                    "missing": missing_documented,
+                }
+            )
+            if not args.json:
+                print(
+                    "[WARN] Documented model(s) not advertised by /v1/models: "
+                    + ", ".join(missing_documented)
+                )
+        if double_prefixed:
+            statuses["checks"].append(
+                {
+                    "name": "catalog-prefix",
+                    "status": "warn",
+                    "detail": (
+                        "gateway advertises double-prefixed openrouter ids that upstream is likely to reject"
+                    ),
+                    "ids": double_prefixed,
+                }
+            )
+            if not args.json:
+                print(
+                    "[WARN] Gateway advertises double-prefixed openrouter ids (likely rejected upstream): "
+                    + ", ".join(double_prefixed)
+                )
+        if not missing_documented and not double_prefixed:
+            statuses["checks"].append(
+                {"name": "documented-models", "status": "pass", "count": len(documented)}
+            )
+            if not args.json:
+                print(f"[PASS] All {len(documented)} documented model ids advertised or alias-normalized")
 
     should_run_doctor = args.mode in {"full", "codex-backend"} and not args.skip_doctor
     if should_run_doctor:
@@ -3439,6 +4320,36 @@ def command_doctor(args: argparse.Namespace) -> int:
     return run_cli(cli_args)
 
 
+def _install_run_signal_handlers(args: argparse.Namespace) -> None:
+    """Write an interrupted record (over the running placeholder) on SIGTERM/SIGHUP."""
+    if not hasattr(args, "save_output") or save_output_mode(args) == "never":
+        return
+
+    def handler(signum: int, _frame: Any) -> None:
+        if not getattr(args, "run_record_written", False):
+            try:
+                write_run_record(
+                    args,
+                    mode=getattr(args, "command", "unknown"),
+                    status="interrupted",
+                    models=[],
+                    base_url=getattr(args, "base_url", None),
+                    metadata={"request_log_correlation_id": getattr(args, "run_id", None)},
+                    error=f"terminated by signal {signum}",
+                )
+            except Exception:
+                pass
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        if signum is None:
+            continue
+        try:
+            signal.signal(signum, handler)
+        except (OSError, ValueError):
+            pass
+
+
 def workflow_scope(args: argparse.Namespace, *, default: str) -> str:
     return default if args.scope == "auto" else args.scope
 
@@ -3479,6 +4390,8 @@ def _panel_argv(
     extra: list[str] | None = None,
 ) -> list[str]:
     argv = ["panel", "--mode", mode]
+    if args.allow_partial:
+        argv.append("--allow-partial")
     if scope is not None:
         argv.extend(["--scope", scope])
     argv.extend(["--judge", args.judge,
@@ -3524,6 +4437,8 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         common.extend(["--max-output-tokens", str(args.max_output_tokens)])
     if args.fallback_model:
         common.extend(["--fallback-model", args.fallback_model])
+    if args.run_id:
+        common.extend(["--run-id", args.run_id])
     if args.progress:
         common.append("--progress")
     if args.run_label:
@@ -3531,6 +4446,9 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
     if args.json:
         common.append("--json")
     if args.print_prompt:
+        common.append("--print-prompt")
+    if args.dry_run:
+        common.append("--dry-run")
         common.append("--print-prompt")
 
     if args.name == "review-ready":
@@ -3566,8 +4484,8 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             str(args.max_synthesis_chars),
             *common,
         ]
-        if not args.fallback_model:
-            argv.extend(["--fallback-model", "sonnet", "--fallback-policy", "on-retryable"])
+        if not args.fallback_model and args.fallback_policy != "never":
+            argv.extend(["--fallback-model", "sonnet"])
     elif args.name == "ship-gate":
         scope = workflow_scope(args, default="staged")
         argv = _panel_argv(
@@ -3680,6 +4598,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         append_if_present(argv, "--changed-files", args.changed_files_range)
         append_each(argv, "--file", args.file)
         append_each(argv, "--files-from", args.files_from)
+        append_each(argv, "--priority-file", args.priority_file)
     elif args.name == "plan-deep" or (args.name == "claude-grok" and args.panel_mode == "plan"):
         append_each(argv, "--file", args.file)
     if args.name != "debug-consensus":
@@ -3728,9 +4647,17 @@ def command_workflow(args: argparse.Namespace) -> int:
         expanded_args.run_label = args.run_label or args.name
     if hasattr(expanded_args, "base_url") and expanded_args.base_url is not None:
         expanded_args.base_url = normalize_base_url(expanded_args.base_url)
+    # Rebind signal handlers to the expanded args so SIGTERM/SIGHUP during the
+    # inner command overwrites the inner placeholder (auto-generated ids are
+    # unknown to the outer args until the finally-block runs).
+    _install_run_signal_handlers(expanded_args)
     try:
         return int(expanded_args.func(expanded_args))
     finally:
+        # Propagate the inner run id so lifecycle handlers on the outer args
+        # overwrite the same placeholder instead of orphaning it (B5).
+        if getattr(expanded_args, "run_id", None):
+            args.run_id = expanded_args.run_id
         if getattr(expanded_args, "run_record_written", False):
             args.run_record_written = True
 
@@ -3788,7 +4715,39 @@ def command_runs(args: argparse.Namespace) -> int:
     if args.runs_command == "list":
         rows = []
         for path in iter_run_records()[: args.limit]:
-            data = load_run_record(path)
+            size = path.stat().st_size
+            if size == 0:
+                rows.append(
+                    {
+                        "id": path.stem,
+                        "created_at": None,
+                        "mode": None,
+                        "status": "interrupted",
+                        "workflow": None,
+                        "models": [],
+                        "run_label": None,
+                        "size": 0,
+                        "interrupted": True,
+                    }
+                )
+                continue
+            try:
+                data = load_run_record(path)
+            except AntiError:
+                rows.append(
+                    {
+                        "id": path.stem,
+                        "created_at": None,
+                        "mode": None,
+                        "status": "corrupt",
+                        "workflow": None,
+                        "models": [],
+                        "run_label": None,
+                        "size": size,
+                        "interrupted": True,
+                    }
+                )
+                continue
             rows.append(
                 {
                     "id": data.get("id") or path.stem,
@@ -3798,6 +4757,8 @@ def command_runs(args: argparse.Namespace) -> int:
                     "workflow": data.get("workflow"),
                     "models": data.get("models", []),
                     "run_label": data.get("run_label"),
+                    "size": size,
+                    "interrupted": data.get("status") == "running",
                 }
             )
         if args.json:
@@ -3809,7 +4770,10 @@ def command_runs(args: argparse.Namespace) -> int:
                 models = ", ".join(row.get("models") or [])
                 workflow = f" workflow={row['workflow']}" if row.get("workflow") else ""
                 label = f" label={row['run_label']}" if row.get("run_label") else ""
-                print(f"{row['created_at']} {row['id']} {row['mode']} {row['status']}{workflow}{label} [{models}]")
+                flag = ""
+                if row.get("interrupted"):
+                    flag = " (no final record; run may have been interrupted)"
+                print(f"{row['created_at']} {row['id']} {row['mode']} {row['status']}{workflow}{label} [{models}]{flag}")
         return 0
     if args.runs_command == "show":
         path = resolve_run_record_path(args.id)
@@ -3825,6 +4789,14 @@ def command_runs(args: argparse.Namespace) -> int:
                 else:
                     path.unlink()
                 removed += 1
+        if RUNS_DIR.exists():
+            for path in RUNS_DIR.glob("*.json.tmp"):
+                if path.stat().st_mtime < cutoff:
+                    if args.dry_run:
+                        print(f"[*] Would remove {path.name}")
+                    else:
+                        path.unlink()
+                    removed += 1
         verb = "Would remove" if args.dry_run else "Removed"
         print(f"[+] {verb} {removed} Anti run record(s) older than {args.older_than} day(s)")
         return 0
@@ -3898,8 +4870,8 @@ def build_parser() -> argparse.ArgumentParser:
     panel.add_argument("--files-from", action="append", help="Read review paths from a newline- or NUL-delimited file; use - for stdin")
     panel.add_argument("--prompt", help="Ask/planning prompt text")
     panel.add_argument("--prompt-file", help="Read ask/planning prompt text from file")
-    panel.add_argument("--max-output-tokens", type=positive_int, default=2048, help="Max output tokens per panel model")
-    panel.add_argument("--judge-output-tokens", type=positive_int, default=4096, help="Max output tokens for judge synthesis")
+    panel.add_argument("--max-output-tokens", type=positive_int, default=6144, help="Max output tokens per panel model")
+    panel.add_argument("--judge-output-tokens", type=positive_int, default=8192, help="Max output tokens for judge synthesis")
     panel.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
     panel.add_argument("--max-synthesis-chars", type=non_negative_int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
     panel.add_argument(
@@ -3908,14 +4880,26 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Summarize broad review scopes before panel fan-out when needed",
     )
-    panel.add_argument("--max-review-chunks", type=positive_int, default=8, help="Maximum chunk calls before panel fan-out")
-    panel.add_argument("--chunk-output-tokens", type=positive_int, default=2048, help="Max output tokens per review chunk")
+    panel.add_argument(
+        "--max-review-chunks",
+        type=non_negative_int,
+        default=8,
+        help="Maximum chunk calls before panel fan-out; 0 = review everything, however many chunks it takes",
+    )
+    panel.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Continue with a partial chunked summary when the scope exceeds --max-review-chunks",
+    )
+    panel.add_argument("--priority-file", action="append", help="Review these paths first when chunking; repeatable")
+    panel.add_argument("--chunk-output-tokens", type=positive_int, default=4096, help="Max output tokens per review chunk")
     panel.add_argument("--min-successes", type=positive_int, help="Minimum successful panel model calls before judging")
     panel.add_argument("--max-parallel", type=positive_int, default=3, help="Maximum concurrent panel model calls")
     panel.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
     panel.add_argument("--output", choices=sorted(PANEL_OUTPUT_MODES), default="prose", help="Render prose or findings JSON")
     panel.add_argument("--json", action="store_true", help="Emit structured JSON output")
     panel.add_argument("--print-prompt", action="store_true", help="Print assembled source prompt without contacting gateway")
+    panel.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
     panel.add_argument("prompt_parts", nargs="*", help="Positional ask/planning prompt text")
     panel.set_defaults(func=command_panel)
 
@@ -3926,9 +4910,10 @@ def build_parser() -> argparse.ArgumentParser:
     consult.add_argument("--prompt", help="Prompt text")
     consult.add_argument("--prompt-file", help="Read prompt text from file")
     consult.add_argument("--no-pre-read", action="store_true", dest="no_pre_read", help="Disable automatic file pre-reading for consult prompts")
-    consult.add_argument("--max-output-tokens", type=positive_int, default=2048)
+    consult.add_argument("--max-output-tokens", type=positive_int, default=4096)
     consult.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help="Maximum prompt chars before truncation; use 0 for unlimited")
     consult.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
+    consult.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
     consult.add_argument("--json", action="store_true", help="Emit structured JSON output")
     consult.add_argument("prompt_parts", nargs="*", help="Positional prompt text")
     consult.set_defaults(func=command_consult)
@@ -3954,6 +4939,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
     plan.add_argument("--json", action="store_true", help="Emit structured JSON output")
     plan.add_argument("--print-prompt", action="store_true", help="Print assembled prompt without contacting gateway")
+    plan.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
     plan.add_argument("prompt_parts", nargs="*", help="Positional planning goal text")
     plan.set_defaults(func=command_plan)
 
@@ -3975,8 +4961,23 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Split broad reviews into multiple model calls when needed",
     )
-    review.add_argument("--max-review-chunks", type=positive_int, default=8, help="Maximum chunk calls before synthesis")
-    review.add_argument("--chunk-output-tokens", type=positive_int, default=2048, help="Max output tokens per chunk review")
+    review.add_argument(
+        "--max-review-chunks",
+        type=non_negative_int,
+        default=8,
+        help="Maximum chunk calls before synthesis; 0 = review everything, however many chunks it takes",
+    )
+    review.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Continue with a partial review when the scope exceeds --max-review-chunks",
+    )
+    review.add_argument(
+        "--priority-file",
+        action="append",
+        help="Review these paths first when chunking; repeatable",
+    )
+    review.add_argument("--chunk-output-tokens", type=positive_int, default=4096, help="Max output tokens per chunk review")
     review.add_argument(
         "--max-synthesis-chars",
         type=non_negative_int,
@@ -3985,6 +4986,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review.add_argument("--json", action="store_true", help="Emit structured JSON output")
     review.add_argument("--print-prompt", action="store_true", help="Print assembled prompt without contacting gateway")
+    review.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
     review.set_defaults(func=command_review)
 
     workflow = sub.add_parser("workflow", help="Run a named V2 Anti workflow preset")
@@ -4011,6 +5013,8 @@ def build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--changed-files", dest="changed_files_range", help="Git revision range for --scope diff")
     workflow.add_argument("--file", action="append")
     workflow.add_argument("--files-from", action="append")
+    workflow.add_argument("--priority-file", action="append")
+    workflow.add_argument("--allow-partial", action="store_true")
     workflow.add_argument("--prompt")
     workflow.add_argument("--prompt-file")
     workflow.add_argument(
@@ -4026,12 +5030,18 @@ def build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--max-parallel", type=positive_int, default=3)
     workflow.add_argument("--retry", type=non_negative_int, default=1)
     workflow.add_argument("--chunked", choices=["auto", "always", "off"], default="auto")
-    workflow.add_argument("--max-review-chunks", type=positive_int, default=8)
+    workflow.add_argument(
+        "--max-review-chunks",
+        type=non_negative_int,
+        default=8,
+        help="Maximum chunk calls before synthesis; 0 = review everything, however many chunks it takes",
+    )
     workflow.add_argument("--max-plan-chunks", type=positive_int, default=6)
     workflow.add_argument("--chunk-output-tokens", type=positive_int, default=2048)
     workflow.add_argument("--output", choices=sorted(PANEL_OUTPUT_MODES), default="prose")
     workflow.add_argument("--json", action="store_true")
     workflow.add_argument("--print-prompt", action="store_true")
+    workflow.add_argument("--dry-run", action="store_true")
     workflow.add_argument("prompt_parts", nargs="*")
     workflow.set_defaults(func=command_workflow)
 
@@ -4057,6 +5067,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="sidecar checks CLI/gateway/models; full/codex-backend also require doctor/Codex config",
     )
     smoke.add_argument("--model", action="append", help="Required model alias/id; defaults to opus and sonnet")
+    smoke.add_argument(
+        "--check-documented",
+        action="store_true",
+        help="Diff the documented model alias table against /v1/models and report drift",
+    )
     smoke.add_argument("--skip-doctor", action="store_true")
     smoke.add_argument("--json", action="store_true", help="Emit structured JSON readiness output")
     smoke.set_defaults(func=command_smoke)
@@ -4097,6 +5112,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        _install_run_signal_handlers(args)
         if hasattr(args, "base_url") and args.base_url is not None:
             args.base_url = normalize_base_url(args.base_url)
         return int(args.func(args))
@@ -4121,6 +5137,8 @@ def main(argv: list[str] | None = None) -> int:
     except AntiError as exc:
         if hasattr(args, "save_output") and not getattr(args, "run_record_written", False):
             try:
+                run_id = getattr(args, "run_id", None)
+                correlation = {"request_log_correlation_id": run_id} if run_id else {}
                 write_run_record(
                     args,
                     mode=getattr(args, "command", "unknown"),
@@ -4128,7 +5146,7 @@ def main(argv: list[str] | None = None) -> int:
                     models=[],
                     base_url=getattr(args, "base_url", None),
                     caveats=[],
-                    metadata={},
+                    metadata=correlation,
                     error=str(exc),
                 )
             except Exception:

@@ -54,6 +54,7 @@ from codex_antigravity_auth.cli import (
     validate_codex_provider_name,
     version_check_result,
     write_codex_config,
+    _toml_section_name,
 )
 from codex_antigravity_auth.cli_doctor import (
     openrouter_reachability_check,
@@ -3466,6 +3467,13 @@ class TestVNextPolishCli(unittest.TestCase):
 
 
 class VisionSidecarDoctorTests(unittest.TestCase):
+    def test_toml_section_name_normalizes_quoted_subtables(self):
+        # [model_providers."antigravity"] and [model_providers.antigravity]
+        # name the same TOML table; upserts must not emit a duplicate header.
+        self.assertEqual(_toml_section_name('[model_providers."antigravity"]'), "model_providers.antigravity")
+        self.assertEqual(_toml_section_name("[model_providers.antigravity]"), "model_providers.antigravity")
+        self.assertIsNone(_toml_section_name("model = 'x'"))
+
     def test_codex_model_metadata_default_input_modalities(self):
         m = codex_model_metadata('test-model', 'Test', 100000, 'test', 1234)
         self.assertEqual(m['input_modalities'], ['text'])
@@ -3480,6 +3488,29 @@ class VisionSidecarDoctorTests(unittest.TestCase):
         for m in catalog:
             self.assertIn('input_modalities', m)
             self.assertEqual(m['input_modalities'], ['text', 'image'])
+
+    def test_native_model_catalog_overlay_stays_text_only(self):
+        # A user-defined overlay model is not known multimodal; advertising
+        # it as image-capable would make Codex send images it may reject.
+        overlay_text = "\n".join(
+            [
+                "[[models]]",
+                'id = "claude-extra"',
+                'backend_id = "claude-extra-backend"',
+                'display_name = "Claude Extra"',
+                'family = "claude"',
+                "context_window = 200000",
+                "",
+            ]
+        )
+        with TemporaryDirectory() as tmp:
+            overlay_path = Path(tmp) / "antigravity-models.toml"
+            overlay_path.write_text(overlay_text, encoding="utf-8")
+            with patch("codex_antigravity_auth.models.MODEL_OVERLAY_FILE", str(overlay_path)):
+                catalog = native_model_catalog_with_input_modalities()
+        overlay = [m for m in catalog if m["id"] == "claude-extra"]
+        self.assertEqual(len(overlay), 1)
+        self.assertEqual(overlay[0]["input_modalities"], ["text"])
 
     def test_vision_sidecar_readiness_no_config(self):
         with patch('codex_antigravity_auth.cli_doctor._opencodex_vision_sidecar_config', return_value=None):

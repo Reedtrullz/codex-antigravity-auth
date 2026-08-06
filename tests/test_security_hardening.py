@@ -79,6 +79,19 @@ class TestRedaction(unittest.TestCase):
         self.assertIn(f"authorization={REDACTED}", rendered)
         self.assertIn(f"cookie={REDACTED}", rendered)
 
+    def test_redacts_bare_key_and_x_api_key_in_json_and_repr_forms(self):
+        for body in (
+            '{"key": "bare-key-value-123"}',
+            '{"x-api-key": "x-api-key-value-123"}',
+            '{"x-goog-api-key": "x-goog-key-value-123"}',
+            "{'key': 'bare-key-value-123'}",
+            "{'x-api-key': 'x-api-key-value-123'}",
+        ):
+            with self.subTest(body=body):
+                rendered = redact_secret_text(body)
+                self.assertNotIn("value-123", rendered)
+                self.assertIn(REDACTED, rendered)
+
 
 class TestCredentialResolution(unittest.TestCase):
     def test_partial_env_credentials_merge_with_file_and_repair_permissions(self):
