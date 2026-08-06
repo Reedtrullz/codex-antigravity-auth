@@ -167,10 +167,23 @@ class AccountManager:
                                 _apply_token_refresh(account, refresh_token)
                                 dirty = True
                         except Exception as exc:
+                            # The remaining token lifetime (<=10s) cannot
+                            # outlast a generation call, so selecting it would
+                            # guarantee a 401 mid-request. Cool the account
+                            # down and let the loop try the next one, matching
+                            # the hard-refresh failure path.
+                            if acquire:
+                                self._state_owner.release(lease)
+                            self._state_owner.apply_cooldown(
+                                email,
+                                family,
+                                AttemptOutcome(scope="account", category="auth"),
+                            )
                             print(
-                                f"[*] Soft refresh failed for {email}, using current token. Reason: "
+                                f"[*] Soft refresh failed for {email}, cooling down. Reason: "
                                 f"{redact_secret_text(str(exc))}"
                             )
+                            continue
                         selected = account
                         return dirty
 

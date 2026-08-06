@@ -7,12 +7,39 @@ from codex_antigravity_auth.openai_transport import (
     NativeResponsesStreamAdapter,
     OpenAICompatibleTransport,
     TransportConfigError,
+    iter_sse_data,
 )
 from codex_antigravity_auth.response_protocol import TerminalKind
 from codex_antigravity_auth.transform import transform_chat_response, transform_request_to_chat
 
 
 class TestOpenAIRequestTranslation(unittest.TestCase):
+    def test_iter_sse_data_joins_multiline_continuation_frames(self):
+        async def run():
+            class Response:
+                async def aiter_text(self):
+                    # A JSON payload split across two data: lines between
+                    # tokens (the only split that keeps joined JSON valid),
+                    # followed by a bare-\n [DONE] frame.
+                    yield 'data: {"choices":[{"delta":{"content":"hello"}'
+                    yield '\n'
+                    yield 'data: ,"extra":true}]}\n'
+                    yield "data: [DONE]\n"
+
+            events = []
+            async for data in iter_sse_data(Response(), label="OpenAI"):
+                events.append(data)
+            return events
+
+        import asyncio
+
+        events = asyncio.run(run())
+        self.assertEqual(events[0], '{"choices":[{"delta":{"content":"hello"}\n,"extra":true}]}')
+        self.assertEqual(events[-1], "[DONE]")
+        parsed = json.loads(events[0])
+        self.assertEqual(parsed["choices"][0]["delta"]["content"], "hello")
+        self.assertTrue(parsed["choices"][0]["extra"])
+
     def test_transport_owns_chat_request_url_headers_timeout_and_payload(self):
         transport = OpenAICompatibleTransport(timeout=5)
         prepared = transport.prepare_chat_request(

@@ -86,8 +86,12 @@ def _valid_tool_call_id(value: Any) -> bool:
 
 def clean_function_call_args(value: Any) -> dict[str, Any]:
     args = value if isinstance(value, dict) else {}
-    if args == {INTERNAL_PLACEHOLDER_ARGUMENT: True}:
-        return {}
+    if INTERNAL_PLACEHOLDER_ARGUMENT in args:
+        # The schema layer injects a required _placeholder marker into every
+        # root object tool schema so the model always emits a callable shape;
+        # it must never reach Codex as a real argument, even when the model
+        # also emitted legitimate arguments alongside it.
+        args = {key: item for key, item in args.items() if key != INTERNAL_PLACEHOLDER_ARGUMENT}
     return args
 
 
@@ -292,6 +296,11 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
                         pass
             if isinstance(image_url, str) and image_url and not image_url.startswith("data:"):
                 return [{"fileData": {"mimeType": part.get("mime_type", "image/*"), "fileUri": image_url}}]
+            if part.get("filename") or part.get("file_id"):
+                # Some Responses clients send image parts with only a file_id
+                # reference (no URL we can fetch). Mirror the input_file
+                # fallback so the part is not silently dropped.
+                return [{"text": json.dumps({k: v for k, v in part.items() if k != "type"})}]
         if part_type in ("input_file", "file"):
             file_url = part.get("file_url") or part.get("url")
             if isinstance(file_url, dict):
@@ -366,11 +375,13 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
                 call_id = item.get("call_id")
                 if not isinstance(call_id, str):
                     call_id = None
-                name = "function_result"
-                for candidate in (function_names_by_call_id.get(call_id), call_id):
-                    if valid_function_name(candidate):
-                        name = candidate
-                        break
+                name = function_names_by_call_id.get(call_id)
+                if not valid_function_name(name):
+                    # A pruned or foreign call id has no matching declaration;
+                    # emitting functionResponse under the call id as a name
+                    # would be rejected by the backend, so drop the orphan
+                    # output instead of fabricating a function name.
+                    continue
                 append_content("user", [{
                     "functionResponse": {
                         "name": name,
@@ -407,6 +418,11 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
         "role": "user",
         "parts": [{"text": system_text}]
     }
+
+    if not contents:
+        # Mirror the chat lane's guard: an empty/all-filtered conversation
+        # must still produce a well-formed backend request.
+        contents.append({"role": "user", "parts": [{"text": ""}]})
         
     # 2. Build Gemini tools configuration
     # OpenAI/Codex tools format: [ { "type": "function", "function": { "name": "...", "parameters": ... } } ]
@@ -444,6 +460,11 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
                 function_calling_config["mode"] = "VALIDATED" if "claude" in backend_model.lower() else "ANY"
                 function_calling_config["allowedFunctionNames"] = [forced_name]
         elif "claude" in backend_model.lower():
+            # Deliberate: without an explicit tool_choice, Claude lanes run in
+            # VALIDATED mode so agent turns can call the advertised tools.
+            # Backend semantics (forced call vs argument validation only) were
+            # not live-verified against the Antigravity backend; revisit if a
+            # plain-text answer on a tool-enabled turn ever becomes required.
             function_calling_config["mode"] = "VALIDATED"
 
         if function_calling_config:
@@ -551,8 +572,10 @@ def transform_gemini_candidate(candidate: dict) -> dict:
                 "annotations": []
             })
 
-        # 3. Handle tool calls
-        elif "functionCall" in part:
+        # 3. Handle tool calls (independent of the text branch: a part may
+        # carry both text and a function call, and the call must not be
+        # dropped just because the text was emitted first).
+        if "functionCall" in part:
             fc = part["functionCall"]
             if not isinstance(fc, dict):
                 continue

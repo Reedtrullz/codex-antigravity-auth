@@ -54,7 +54,17 @@ from codex_antigravity_auth.cli import (
     validate_codex_provider_name,
     version_check_result,
     write_codex_config,
+    _toml_section_name,
 )
+from codex_antigravity_auth.cli_doctor import (
+    openrouter_reachability_check,
+    vision_sidecar_readiness,
+)
+from codex_antigravity_auth.server import (
+    codex_model_metadata,
+    native_model_catalog_with_input_modalities,
+)
+
 from codex_antigravity_auth.constants import save_oauth_credentials
 from codex_antigravity_auth.models import canonical_model_id, native_model_catalog, resolve_backend_model
 from codex_antigravity_auth.observability import iter_request_records, request_log_summary, write_request_record
@@ -3453,6 +3463,94 @@ class TestVNextPolishCli(unittest.TestCase):
                 with patch.object(sys, "argv", argv):
                     with self.assertRaisesRegex(SystemExit, "symlinked model overlay"):
                         main()
+
+
+
+class VisionSidecarDoctorTests(unittest.TestCase):
+    def test_toml_section_name_normalizes_quoted_subtables(self):
+        # [model_providers."antigravity"] and [model_providers.antigravity]
+        # name the same TOML table; upserts must not emit a duplicate header.
+        self.assertEqual(_toml_section_name('[model_providers."antigravity"]'), "model_providers.antigravity")
+        self.assertEqual(_toml_section_name("[model_providers.antigravity]"), "model_providers.antigravity")
+        self.assertIsNone(_toml_section_name("model = 'x'"))
+
+    def test_codex_model_metadata_default_input_modalities(self):
+        m = codex_model_metadata('test-model', 'Test', 100000, 'test', 1234)
+        self.assertEqual(m['input_modalities'], ['text'])
+
+    def test_codex_model_metadata_image_input_modalities(self):
+        m = codex_model_metadata('test-model', 'Test', 100000, 'test', 1234, input_modalities=['text', 'image'])
+        self.assertEqual(m['input_modalities'], ['text', 'image'])
+
+    def test_native_model_catalog_all_have_image(self):
+        catalog = native_model_catalog_with_input_modalities()
+        self.assertGreater(len(catalog), 0)
+        for m in catalog:
+            self.assertIn('input_modalities', m)
+            self.assertEqual(m['input_modalities'], ['text', 'image'])
+
+    def test_native_model_catalog_overlay_stays_text_only(self):
+        # A user-defined overlay model is not known multimodal; advertising
+        # it as image-capable would make Codex send images it may reject.
+        overlay_text = "\n".join(
+            [
+                "[[models]]",
+                'id = "claude-extra"',
+                'backend_id = "claude-extra-backend"',
+                'display_name = "Claude Extra"',
+                'family = "claude"',
+                "context_window = 200000",
+                "",
+            ]
+        )
+        with TemporaryDirectory() as tmp:
+            overlay_path = Path(tmp) / "antigravity-models.toml"
+            overlay_path.write_text(overlay_text, encoding="utf-8")
+            with patch("codex_antigravity_auth.models.MODEL_OVERLAY_FILE", str(overlay_path)):
+                catalog = native_model_catalog_with_input_modalities()
+        overlay = [m for m in catalog if m["id"] == "claude-extra"]
+        self.assertEqual(len(overlay), 1)
+        self.assertEqual(overlay[0]["input_modalities"], ["text"])
+
+    def test_vision_sidecar_readiness_no_config(self):
+        with patch('codex_antigravity_auth.cli_doctor._opencodex_vision_sidecar_config', return_value=None):
+            result = vision_sidecar_readiness()
+            self.assertFalse(result['ok'])
+            self.assertIsNone(result['backend'])
+
+    def test_vision_sidecar_readiness_openrouter(self):
+        sidecar_config = {'enabled': True, 'backend': 'openrouter', 'model': 'nvidia/nemotron-nano-12b-v2-vl:free'}
+        with patch('codex_antigravity_auth.cli_doctor._opencodex_vision_sidecar_config', return_value=sidecar_config):
+            result = vision_sidecar_readiness()
+            self.assertTrue(result['ok'])
+
+    def test_vision_sidecar_readiness_unknown_model(self):
+        sidecar_config = {'enabled': True, 'backend': 'openrouter', 'model': 'some/unknown:free'}
+        with patch('codex_antigravity_auth.cli_doctor._opencodex_vision_sidecar_config', return_value=sidecar_config):
+            result = vision_sidecar_readiness()
+            model_check = [c for c in result['checks'] if c['name'] == 'sidecar_model'][0]
+            self.assertEqual(model_check['status'], 'warn')
+
+    def test_vision_sidecar_readiness_other_backend(self):
+        sidecar_config = {'enabled': True, 'backend': 'anthropic', 'model': 'claude-sonnet-4-6'}
+        with patch('codex_antigravity_auth.cli_doctor._opencodex_vision_sidecar_config', return_value=sidecar_config):
+            result = vision_sidecar_readiness()
+            self.assertTrue(result['ok'])
+
+    def test_openrouter_reachability_check_mocked(self):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        with patch('urllib.request.urlopen', return_value=mock_resp):
+            result = openrouter_reachability_check(timeout=1.0)
+            self.assertTrue(result['ok'])
+
+    def test_openrouter_reachability_check_failure(self):
+        with patch('urllib.request.urlopen', side_effect=urllib.error.URLError('timeout')):
+            result = openrouter_reachability_check(timeout=1.0)
+            self.assertFalse(result['ok'])
+
 
 if __name__ == "__main__":
     unittest.main()

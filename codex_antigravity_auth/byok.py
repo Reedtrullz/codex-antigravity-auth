@@ -1,6 +1,7 @@
 import os
 import re
 import math
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -19,6 +20,7 @@ PROVIDERS_FILE = "~/.codex/antigravity-providers.json"
 PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_warned_invalid_provider_keys: set[str] = set()
 RESERVED_SLASH_PROVIDER_PREFIXES = {"openai", "openai-responses"}
 PROVIDER_AUTH_MODE_API_KEY = "api_key"
 PROVIDER_AUTH_MODE_OAUTH = "oauth"
@@ -289,8 +291,13 @@ def provider_capabilities(
     }
     overrides: list[object] = [provider.get("capabilities")]
     if provider_model is not None:
+        provider_id = provider.get("id")
+        selected_model = normalize_byok_model_id(provider_model, provider_id)
         for model in provider.get("models", []):
-            if isinstance(model, dict) and model.get("id") == provider_model:
+            if (
+                isinstance(model, dict)
+                and normalize_byok_model_id(str(model.get("id", "")), provider_id) == selected_model
+            ):
                 overrides.append(model.get("capabilities"))
                 break
 
@@ -530,6 +537,14 @@ def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
             normalized["apiKey"] = api_key
         else:
             normalized.pop("apiKey", None)
+            provider_label = normalized.get("displayName") or normalized.get("id") or "unknown"
+            if provider_label not in _warned_invalid_provider_keys:
+                _warned_invalid_provider_keys.add(provider_label)
+                print(
+                    f"[gateway] BYOK provider {provider_label}: stored apiKey failed validation "
+                    "and was dropped (control characters or non-ASCII); fix the provider config",
+                    file=sys.stderr,
+                )
     aliases = normalized.get("apiKeyEnvAliases")
     if "apiKeyEnvAliases" in normalized:
         if isinstance(aliases, str):
@@ -637,8 +652,15 @@ def resolve_api_key(provider: dict[str, Any]) -> str | None:
     if api_key:
         return api_key
     for env_name in provider_api_key_env_names(provider):
-        if os.environ.get(env_name):
-            return os.environ[env_name]
+        raw_key = os.environ.get(env_name)
+        if not raw_key:
+            continue
+        try:
+            validated = validate_provider_api_key(raw_key)
+        except ValueError:
+            continue
+        if validated:
+            return validated
     if provider_allows_keyless_local_use(provider):
         return provider.get("defaultApiKey", "not-needed")
     return None
@@ -702,6 +724,8 @@ def provider_has_oauth_tokens(provider: dict[str, Any], *, read_only: bool = Fal
 
         status = xai_oauth_status_read_only() if read_only else xai_oauth_status()
         return bool(status.get("ready"))
+    except ImportError:
+        raise
     except Exception:
         return False
 
@@ -844,3 +868,20 @@ def split_provider_model(model: str) -> tuple[str | None, str]:
         if provider_id in PROVIDER_PRESETS or provider_id in all_provider_configs(include_env_enabled=False):
             return provider_id, provider_model
     return None, model
+
+
+def normalize_byok_model_id(model_id: str, provider_id: str | None = None) -> str:
+    """Strip a self-referential provider prefix from a BYOK model id.
+
+    Configs commonly list OpenRouter models as ``openrouter/nvidia/...`` or
+    ``openrouter/openrouter/nvidia/...`` while the upstream API only accepts
+    ``nvidia/...``. Only the ``{provider_id}/`` prefix is stripped, and only
+    while a real vendor path remains, so special ids like ``openrouter/auto``
+    and non-self-referential ids like ``org/team/deployment`` are preserved.
+    """
+    model = str(model_id).strip()
+    prefix = f"{provider_id}/" if provider_id else None
+    if prefix:
+        while model.startswith(prefix) and "/" in model[len(prefix) :]:
+            model = model[len(prefix) :]
+    return model

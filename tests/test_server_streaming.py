@@ -1,15 +1,222 @@
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 import json
 import asyncio
 import time
 import unittest
 import httpx
 from unittest.mock import patch, MagicMock
-from codex_antigravity_auth.server import app, create_response, google_rotation_diagnostics, stream_error_from_payload
+from codex_antigravity_auth import server as server_module
+from codex_antigravity_auth.server import (
+    app,
+    create_response,
+    google_rotation_diagnostics,
+    openai_compatible_sse_generator,
+    stream_error_from_payload,
+)
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 class TestServerStreaming(unittest.TestCase):
+    def test_openai_compatible_sse_generator_emits_error_event_and_done(self):
+        class FakeTransport:
+            def __init__(self, **kwargs):
+                pass
+
+            def prepare_chat_request(self, codex_req, provider, provider_model, *, stream):
+                return SimpleNamespace(
+                    payload={"model": provider_model, "messages": [], "stream": stream},
+                    url="https://example.invalid/v1/chat/completions",
+                    headers={},
+                    timeout=5,
+                )
+
+            async def stream_chat_events(self, *args, **kwargs):
+                raise httpx.ConnectError("upstream refused connection")
+                yield  # pragma: no cover - async generator shape
+
+        with patch("codex_antigravity_auth.server.OpenAICompatibleTransport", FakeTransport):
+            generator = openai_compatible_sse_generator(
+                payload={"model": "nvidia/x"},
+                url="https://openrouter.example/v1/chat/completions",
+                headers={},
+                timeout=5,
+                provider={"id": "openrouter"},
+                display_model="openrouter:nvidia/x",
+            )
+            chunks: list[str] = []
+
+            async def consume():
+                async for chunk in generator:
+                    chunks.append(chunk)
+
+            asyncio.run(consume())
+
+        self.assertEqual(len(chunks), 2)
+        self.assertIn("[DONE]", chunks[1])
+        error_event = json.loads(chunks[0][len("data: ") :])
+        self.assertEqual(error_event["error"]["code"], "connection_error")
+        self.assertIn("upstream refused connection", error_event["error"]["message"])
+
+    def test_request_backend_logs_unexpected_errors_instead_of_masking_them(self):
+        fake_account = {"email": "test@gmail.com", "accessToken": "dummy_access"}
+
+        class MockClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            async def post(self, *args, **kwargs):
+                raise KeyError("programming bug")
+
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", side_effect=[fake_account, None]):
+            with patch("codex_antigravity_auth.server.account_manager.release_account"):
+                    with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
+                        with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
+                            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                                with patch("codex_antigravity_auth.server.sys.stderr") as mock_stderr:
+                                    response = TestClient(app, raise_server_exceptions=False).post(
+                                        "/v1/responses",
+                                        json={"model": "gemini-3.5-flash-high", "input": "hello"},
+                                    )
+
+        self.assertEqual(response.status_code, 500)
+        stderr_text = "".join(call.args[0] for call in mock_stderr.write.call_args_list)
+        self.assertIn("request_backend unexpected error", stderr_text)
+        self.assertIn("KeyError", stderr_text)
+
+    def test_google_streaming_same_email_rotation_releases_duplicate_lease(self):
+        account = {"email": "solo@gmail.com", "accessToken": "token"}
+
+        class ThrowingResponse:
+            status_code = 200
+
+            async def aiter_text(self):
+                raise httpx.ConnectError("backend down")
+                yield  # pragma: no cover - async generator shape
+
+        class StreamContext:
+            async def __aenter__(self):
+                return ThrowingResponse()
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        class MockClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            def stream(self, *args, **kwargs):
+                return StreamContext()
+
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", side_effect=[account, account]) as acquire:
+            with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
+                with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
+                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                        response = TestClient(app).post(
+                            "/v1/responses",
+                            json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
+                        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("response.failed", response.text)
+        self.assertEqual(acquire.call_count, 2)
+        # The duplicate same-email lease from rotation must be released in
+        # addition to the tracked account's release in the finally block.
+        self.assertEqual(
+            [call.args[0] for call in release.call_args_list],
+            ["solo@gmail.com", "solo@gmail.com"],
+        )
+
+    def test_byok_chat_stream_logs_finish_reason_success_and_error_events(self):
+        provider = {
+            "id": "matrix",
+            "kind": "openai_chat",
+            "baseUrl": "https://example.invalid/v1",
+            "apiKey": "sk-test-matrix-key-1234567890",
+            "models": ["model"],
+        }
+
+        class FakeTransport:
+            def __init__(self, **kwargs):
+                pass
+
+            def prepare_chat_request(self, codex_req, provider, provider_model, *, stream):
+                return SimpleNamespace(
+                    payload={"model": provider_model, "messages": [], "stream": stream},
+                    url="https://example.invalid/v1/chat/completions",
+                    headers={},
+                    timeout=5,
+                )
+
+            async def stream_chat_events(self, *args, **kwargs):
+                yield {"id": "chatcmpl-1", "choices": [{"finish_reason": None, "delta": {"content": "ok"}}]}
+                yield {"id": "chatcmpl-1", "choices": [{"finish_reason": "stop", "delta": {}}], "usage": {"total_tokens": 5}}
+                yield "[DONE]"
+
+        logged: list[dict] = []
+
+        def fake_write_request_record(record):
+            logged.append(record)
+
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"matrix": provider}):
+            with patch("codex_antigravity_auth.server.OpenAICompatibleTransport", FakeTransport):
+                with patch("codex_antigravity_auth.server.write_request_record", side_effect=fake_write_request_record):
+                    response = TestClient(app).post(
+                        "/v1/responses",
+                        json={"model": "matrix:model", "input": "hello", "stream": True},
+                    )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("data: [DONE]", response.text)
+        terminal = logged[-1]
+        self.assertEqual(terminal["status"], "success")
+        self.assertEqual(terminal["usage"], {"total_tokens": 5})
+
+        # Error events must be recorded as failures too.
+        class FailingTransport:
+            def __init__(self, **kwargs):
+                pass
+
+            def prepare_chat_request(self, codex_req, provider, provider_model, *, stream):
+                return SimpleNamespace(
+                    payload={"model": provider_model, "messages": [], "stream": stream},
+                    url="https://example.invalid/v1/chat/completions",
+                    headers={},
+                    timeout=5,
+                )
+
+            async def stream_chat_events(self, *args, **kwargs):
+                yield {"error": {"message": "upstream rejected", "code": "bad_request"}}
+                yield "[DONE]"
+
+        logged.clear()
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"matrix": provider}):
+            with patch("codex_antigravity_auth.server.OpenAICompatibleTransport", FailingTransport):
+                with patch("codex_antigravity_auth.server.write_request_record", side_effect=fake_write_request_record):
+                    error_response = TestClient(app).post(
+                        "/v1/responses",
+                        json={"model": "matrix:model", "input": "hello", "stream": True},
+                    )
+
+        self.assertEqual(error_response.status_code, 200, error_response.text)
+        self.assertIn("data: [DONE]", error_response.text)
+        terminal = logged[-1]
+        self.assertEqual(terminal["status"], "failed")
+        self.assertEqual(terminal["error_class"], "bad_request")
+        self.assertEqual(terminal["error"], "upstream rejected")
+
     def test_google_rotation_diagnostics_respects_family_scoped_cooldowns(self):
         now = 1_700_000_000
         data = {
@@ -181,7 +388,7 @@ class TestServerStreaming(unittest.TestCase):
                 pass
 
             async def post(self, *args, **kwargs):
-                raise RuntimeError("backend down")
+                raise httpx.ConnectError("backend down")
 
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", side_effect=[fake_account, None]):
             with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
@@ -473,6 +680,54 @@ class TestServerStreaming(unittest.TestCase):
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertEqual(response.json()["status"], expected_terminal)
 
+    def test_byok_chat_forwards_normalized_model_id_for_double_prefixed_request(self):
+        provider = {
+            "id": "openrouter",
+            "kind": "openai_chat",
+            "baseUrl": "https://openrouter.ai/api/v1",
+            "apiKey": "sk-test-matrix-key-1234567890",
+            "models": ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"],
+        }
+        forwarded_models: list[str] = []
+
+        class MockClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            async def post(self, *args, **kwargs):
+                forwarded_models.append(kwargs.get("json", {}).get("model"))
+                return httpx.Response(
+                    200,
+                    json={"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]},
+                )
+
+        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"openrouter": provider}):
+            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                legacy = TestClient(app).post(
+                    "/v1/responses",
+                    json={"model": "openrouter:openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "input": "hello"},
+                )
+                normalized = TestClient(app).post(
+                    "/v1/responses",
+                    json={"model": "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free", "input": "hello"},
+                )
+
+        self.assertEqual(legacy.status_code, 200, legacy.text)
+        self.assertEqual(normalized.status_code, 200, normalized.text)
+        self.assertEqual(
+            forwarded_models,
+            [
+                "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "nvidia/nemotron-3-ultra-550b-a55b:free",
+            ],
+        )
+
     def test_native_responses_non_streaming_terminal_matrix_validates_provider_payload(self):
         provider = {
             "id": "xai-oauth",
@@ -617,7 +872,10 @@ class TestServerStreaming(unittest.TestCase):
 
         started = time.monotonic()
         with patch("codex_antigravity_auth.server.MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS", 0.01):
-            with patch("codex_antigravity_auth.server.all_provider_configs", side_effect=slow_provider_configs):
+            with patch(
+                "codex_antigravity_auth.server.all_provider_configs_read_only",
+                side_effect=slow_provider_configs,
+            ):
                 response = TestClient(app).get("/v1/models")
         elapsed = time.monotonic() - started
 

@@ -516,28 +516,75 @@ class GoogleTransport:
             if not adapter.created_emitted:
                 yield adapter.created()
             buffer = ""
+            pending: list[str] = []
+
             async for chunk in response.aiter_text():
                 buffer += chunk
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
                     stripped = line.strip()
-                    if not stripped or not stripped.startswith("data:"):
+                    if not stripped:
+                        # SSE event boundary: flush accumulated continuation
+                        # lines as one frame.
+                        if pending:
+                            data = "\n".join(pending)
+                            pending = []
+                            if data == "[DONE]":
+                                adapter.mark_done()
+                                continue
+                            try:
+                                payload = json.loads(data)
+                            except json.JSONDecodeError as exc:
+                                raise GoogleStreamPayloadError(
+                                    "invalid_stream_chunk",
+                                    "The Google provider returned malformed stream JSON.",
+                                ) from exc
+                            if isinstance(payload, list):
+                                payload = payload[0] if payload else {}
+                            for event in adapter.consume(payload):
+                                yield event
+                        continue
+                    if not stripped.startswith("data:"):
                         continue
                     data = stripped[5:].strip()
                     if data == "[DONE]":
                         adapter.mark_done()
                         continue
+                    # Parse-or-accumulate: emit standalone JSON frames
+                    # immediately; hold fragments that do not yet parse as
+                    # JSON until their SSE continuation lines arrive. This
+                    # supports both blank-line-separated and bare-\n frames.
+                    if pending:
+                        candidate = "\n".join([*pending, data])
+                        try:
+                            payload = json.loads(candidate)
+                        except json.JSONDecodeError:
+                            pending.append(data)
+                            continue
+                        pending = []
+                        if isinstance(payload, list):
+                            payload = payload[0] if payload else {}
+                        for event in adapter.consume(payload):
+                            yield event
+                        continue
                     try:
                         payload = json.loads(data)
-                    except json.JSONDecodeError as exc:
-                        raise GoogleStreamPayloadError(
-                            "invalid_stream_chunk",
-                            "The Google provider returned malformed stream JSON.",
-                        ) from exc
+                    except json.JSONDecodeError:
+                        pending.append(data)
+                        continue
                     if isinstance(payload, list):
                         payload = payload[0] if payload else {}
                     for event in adapter.consume(payload):
                         yield event
+            if pending:
+                data = "\n".join(pending)
+                if data == "[DONE]":
+                    adapter.mark_done()
+                else:
+                    raise GoogleStreamPayloadError(
+                        "invalid_stream_chunk",
+                        "The Google provider stream ended with an incomplete SSE frame.",
+                    )
             if buffer.strip():
                 raise GoogleStreamPayloadError(
                     "invalid_stream_chunk",

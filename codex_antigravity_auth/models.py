@@ -394,8 +394,10 @@ def _alias_map(*, include_overlays: bool = True, strict_overlays: bool = False) 
 def canonical_model_id(model: str) -> str:
     """Resolve a user-facing Google/Antigravity alias to the canonical Codex model id."""
     lower = str(model).strip().lower()
-    if "/" in lower:
-        prefix, rest = lower.split("/", 1)
+    for separator in ("/", ":"):
+        if separator not in lower:
+            continue
+        prefix, rest = lower.split(separator, 1)
         if prefix in RESERVED_GOOGLE_MODEL_PREFIXES:
             return canonical_model_id(rest)
         return lower
@@ -478,8 +480,10 @@ def model_identifier_collisions(
 def resolve_backend_model(model: str) -> str:
     """Resolve Codex-provided model name to official Antigravity backend model."""
     lower = str(model).strip().lower()
-    if "/" in lower:
-        prefix, rest = lower.split("/", 1)
+    for separator in ("/", ":"):
+        if separator not in lower:
+            continue
+        prefix, rest = lower.split(separator, 1)
         if prefix in RESERVED_GOOGLE_MODEL_PREFIXES:
             return resolve_backend_model(rest)
         return lower

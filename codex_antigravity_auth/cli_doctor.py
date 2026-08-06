@@ -143,6 +143,78 @@ def _source_checkout_version() -> str | None:
     if not match:
         return None
     return match.group(1)
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+_FREE_OPENROUTER_VISION_MODELS = frozenset({
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+})
+
+
+def openrouter_reachability_check(*, timeout: float = 5.0) -> dict:
+    """Probe OpenRouter API reachability for the vision sidecar."""
+    started = time.time()
+    result = {"ok": False, "latency_ms": 0, "error": None}
+    req = urllib.request.Request(
+        _OPENROUTER_BASE_URL + "/models",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if 200 <= resp.status < 300:
+                result["ok"] = True
+            else:
+                result["error"] = f"HTTP {resp.status}"
+    except Exception as exc:
+        result["error"] = _cli.redact_secret_text(str(exc))[:200]
+    result["latency_ms"] = int((time.time() - started) * 1000)
+    return result
+
+
+def _opencodex_vision_sidecar_config() -> dict | None:
+    """Read the opencodex vision sidecar config, returning None if unavailable."""
+    config_path = Path(os.path.expanduser("~/.opencodex/config.json"))
+    try:
+        if not config_path.is_file():
+            return None
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    sidecar = data.get("visionSidecar")
+    if not isinstance(sidecar, dict) or not sidecar.get("enabled"):
+        return None
+    return sidecar
+
+
+def vision_sidecar_readiness() -> dict:
+    """Check opencodex vision sidecar readiness for OpenRouter backend."""
+    result: dict = {"ok": False, "backend": None, "model": None, "checks": []}
+    sidecar = _opencodex_vision_sidecar_config()
+    if sidecar is None:
+        result["checks"].append({"name": "sidecar_config", "status": "warn", "detail": "vision sidecar is not enabled in ~/.opencodex/config.json"})
+        return result
+    backend = sidecar.get("backend")
+    model = sidecar.get("model")
+    result["backend"] = backend
+    result["model"] = model
+    if backend != "openrouter":
+        result["checks"].append({"name": "sidecar_backend", "status": "pass", "detail": f"vision sidecar backend is {backend} (not openrouter)"})
+    else:
+        result["checks"].append({"name": "sidecar_backend", "status": "pass", "detail": "vision sidecar backend is openrouter"})
+        if model and model in _FREE_OPENROUTER_VISION_MODELS:
+            result["checks"].append({"name": "sidecar_model", "status": "pass", "detail": f"vision sidecar model {model} is a known free vision-capable model"})
+        elif model:
+            result["checks"].append({"name": "sidecar_model", "status": "warn", "detail": f"vision sidecar model {model} is not in the known free vision model list"})
+        else:
+            result["checks"].append({"name": "sidecar_model", "status": "fail", "detail": "no vision sidecar model configured"})
+    non_warn_checks = [c for c in result["checks"] if c["status"] != "warn"]
+    # An all-warn (or empty) check list must not report ok: all() over an
+    # empty sequence is vacuously True, which would mask a future warn-only
+    # configuration as ready.
+    result["ok"] = bool(non_warn_checks) and all(c["status"] == "pass" for c in non_warn_checks)
+    return result
 
 
 def _installed_package_version() -> str | None:
@@ -549,6 +621,36 @@ def codex_ready_report(
         f"{len(capability_mismatches)} provider capability mismatch(es)",
         mismatches=capability_mismatches,
     )
+    # Vision sidecar readiness
+    try:
+        sidecar = _cli.vision_sidecar_readiness()
+    except Exception as exc:
+        add("vision_sidecar", "warn", f"Could not inspect vision sidecar: {_cli.redact_secret_text(str(exc))}")
+    else:
+        for check in sidecar.get("checks", []):
+            add(f"vision_sidecar_{check['name']}", check["status"], check["detail"])
+        if sidecar.get("ok") and sidecar.get("backend") == "openrouter":
+            or_reachability = _cli.openrouter_reachability_check()
+            # Third-party reachability is advisory for the gateway's own
+            # readiness: a transient openrouter.ai blip (or offline dev
+            # machine) must not flip the whole codex-ready gate to failed.
+            status = "pass" if or_reachability["ok"] else "warn"
+            add(
+                "openrouter_reachability",
+                status,
+                f"OpenRouter API {'reachable' if or_reachability['ok'] else 'unreachable'} in {or_reachability['latency_ms']}ms"
+            )
+            # Check OpenRouter provider has API key configured
+            try:
+                providers = _cli._diagnostic_all_provider_configs()
+                or_provider = providers.get("openrouter")
+                if or_provider and _cli.resolve_api_key(or_provider):
+                    add("openrouter_provider", "pass", "OpenRouter provider has a usable API key")
+                else:
+                    add("openrouter_provider", "warn", "OpenRouter provider is not configured with an API key")
+            except Exception:
+                add("openrouter_provider", "warn", "Could not verify OpenRouter provider configuration")
+
 
     failed = [check for check in checks if check["status"] == "fail"]
     ok = not failed
@@ -837,4 +939,3 @@ def run_doctor(
 
     print("=" * 60)
     return healthy
-

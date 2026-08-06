@@ -59,10 +59,10 @@ _QUERY_SECRET_RE = re.compile(
     r"(?i)([?&](?:access_token|accessToken|refresh_token|refreshToken|id_token|idToken|client_secret|clientSecret|code|code_verifier|codeVerifier|session_token|sessionToken|api_key|apiKey|apikey|x-api-key|x-goog-api-key|cookie|set-cookie|set_cookie|setCookie|key)=)[^&#\s]+"
 )
 _JSON_SECRET_RE = re.compile(
-    r'(?i)("(?:access_token|refresh_token|id_token|accessToken|refreshToken|idToken|client_secret|clientSecret|code_verifier|codeVerifier|session_token|sessionToken|oauth_code|oauthCode|authorization|refresh|access|code|api_key|apiKey|apikey|x-api-key|x-goog-api-key|cookie|set-cookie|set_cookie|setCookie)"\s*:\s*")[^"]*(")'
+    r'(?i)("(?:access_token|refresh_token|id_token|accessToken|refreshToken|idToken|client_secret|clientSecret|code_verifier|codeVerifier|session_token|sessionToken|oauth_code|oauthCode|authorization|refresh|access|code|api_key|apiKey|apikey|x-api-key|x-goog-api-key|key|cookie|set-cookie|set_cookie|setCookie)"\s*:\s*")([^"]*)(")'
 )
 _PYTHON_REPR_SECRET_RE = re.compile(
-    r"(?i)('(?:access_token|refresh_token|id_token|accessToken|refreshToken|idToken|client_secret|clientSecret|code_verifier|codeVerifier|session_token|sessionToken|oauth_code|oauthCode|authorization|refresh|access|code|api_key|apiKey|apikey|x-api-key|x-goog-api-key|cookie|set-cookie|set_cookie|setCookie)'\s*:\s*')[^']*(')"
+    r"(?i)('(?:access_token|refresh_token|id_token|accessToken|refreshToken|idToken|client_secret|clientSecret|code_verifier|codeVerifier|session_token|sessionToken|oauth_code|oauthCode|authorization|refresh|access|code|api_key|apiKey|apikey|x-api-key|x-goog-api-key|key|cookie|set-cookie|set_cookie|setCookie)'\s*:\s*')([^']*)(')"
 )
 _FORM_SECRET_RE = re.compile(
     r"(?i)\b(access_token|accessToken|refresh_token|refreshToken|id_token|idToken|client_secret|clientSecret|code_verifier|codeVerifier|session_token|sessionToken|authorization|code|api_key|apiKey|apikey|x-api-key|x-goog-api-key|cookie|set-cookie|set_cookie|setCookie|key)=([^&\s]+)"
@@ -93,6 +93,26 @@ def _is_secret_key(key: Any) -> bool:
     return any(fragment in normalized or fragment in compact for fragment in _SECRET_KEY_FRAGMENTS)
 
 
+def _is_status_code_value(key: Any, value: Any) -> bool:
+    return (
+        str(key).replace("-", "_").lower() == "code"
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 100 <= value <= 599
+    )
+
+
+def _preserve_status_code_string(match: "re.Match[str]", quote: str) -> str:
+    key = match.group(1)[1:].split(quote, 1)[0].lower()
+    try:
+        number = float(match.group(2))
+    except ValueError:
+        number = None
+    if key == "code" and number is not None and 100 <= number <= 599:
+        return match.group(0)
+    return match.group(1) + REDACTED + match.group(3)
+
+
 def redact_secret_text(text: str) -> str:
     """Redact token-shaped values from free-form text."""
     if not text:
@@ -101,8 +121,8 @@ def redact_secret_text(text: str) -> str:
     redacted = _BEARER_RE.sub("Bearer " + REDACTED, text)
     redacted = _HEADER_SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + REDACTED, redacted)
     redacted = _QUERY_SECRET_RE.sub(lambda m: m.group(1) + REDACTED, redacted)
-    redacted = _JSON_SECRET_RE.sub(lambda m: m.group(1) + REDACTED + m.group(2), redacted)
-    redacted = _PYTHON_REPR_SECRET_RE.sub(lambda m: m.group(1) + REDACTED + m.group(2), redacted)
+    redacted = _JSON_SECRET_RE.sub(lambda m: _preserve_status_code_string(m, '"'), redacted)
+    redacted = _PYTHON_REPR_SECRET_RE.sub(lambda m: _preserve_status_code_string(m, "'"), redacted)
     redacted = _FORM_SECRET_RE.sub(lambda m: f"{m.group(1)}={REDACTED}", redacted)
     return redacted
 
@@ -113,7 +133,11 @@ def redact_secrets(obj: Any) -> Any:
         result: dict[Any, Any] = {}
         for key, value in obj.items():
             if _is_secret_key(key):
-                result[key] = REDACTED if value not in (None, "") else value
+                result[key] = (
+                    value
+                    if value in (None, "") or _is_status_code_value(key, value)
+                    else REDACTED
+                )
             else:
                 result[key] = redact_secrets(value)
         return result

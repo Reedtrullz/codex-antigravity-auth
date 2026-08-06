@@ -28,11 +28,14 @@ Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to mu
 - Use `glm-5.2` or `glm52` for `bluesminds:z-ai/glm-5.2`, especially as a long-context planning or repository-review lane.
 - Use `flash-high` for `gemini-3.5-flash-high` (Gemini Flash Agent). Fast agent-tuned reasoning, 1M context.
 - Use `flash` or `flash-medium` for `gemini-3.5-flash-medium` (Gemini Flash General). Balanced speed and quality, 1M context.
-- Use `gemini-pro` for `gemini-3.1-pro-high` (Gemini Pro). Deep reasoning and analysis, 1M context.
+- Use `flash-3.6` for `gemini-3.6-flash-high` and `flash-3.6-medium` for `gemini-3.6-flash-medium` (newer Flash line; more token-efficient than 3.5).
+- Use `gemini-pro` for `gemini-3.1-pro-high` (Gemini Pro). Deep reasoning and analysis, 1M context. Live check 2026-08-06: this lane currently fails through the gateway with `INVALID_ARGUMENT` on every request (tiny prompts included) while all Flash lanes work — a backend model-id/availability issue, not a payload problem; treat the lane as unavailable until re-verified.
 - Use `nemotron-super` for `openrouter:nvidia/nemotron-3-super-120b-a12b:free` (120B MoE, 262K ctx). Fast, good for second opinions.
-- Use `nemotron-ultra` for `openrouter:nvidia/nemotron-3-ultra-550b-a55b:free` (550B, 1M ctx). Large-context analysis and planning.
+- Use `nemotron-ultra` for `openrouter:nvidia/nemotron-3-ultra-550b-a55b:free` (550B, 1M ctx, vendor-reported). Large-context analysis and planning.
+- Use `nemotron-omni` for `openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` (30B MoE, 256K ctx, reasoning-capable, vision). Good for image tasks and reasoning.
+- Use `nemotron-vl` for `openrouter:nvidia/nemotron-nano-12b-v2-vl:free` (12B, 128K ctx, vision). Fast and reliable for image understanding — the default vision sidecar model.
 - Use `poolside` for `openrouter:poolside/laguna-s-2.1:free`. Coding-focused model for code generation and refactoring.
-- Use `gemma-4` for `openrouter:google/gemma-4-31b-it:free` (30.7B dense). Lightweight, fast for simple consults.
+- Use `gemma-4` for `openrouter:google/gemma-4-31b-it:free` (30.7B dense, 262K ctx, vision). Lightweight, fast for simple consults and image tasks.
 - Use `gpt-oss` for `ollama:gpt-oss:20b` (local). Private, offline inference.
 - Use `qwen3` for `ollama:qwen3:8b` (local). Private, offline inference.
 - Default review model: `opus`.
@@ -41,6 +44,17 @@ Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to mu
 - Default panel models: `sonnet` and `opus`.
 - Default panel judge: `opus`.
 - `panel --collab claude-grok` defaults to `sonnet`, `opus`, and `grok`, with Opus judging. If Grok is not advertised by `/v1/models`, it is recorded as a failed lane unless `--min-successes` requires it.
+
+**Gateway advertisement is required.** Every model below (including DeepSeek,
+Nemotron, Poolside, Gemma, and BluesMinds routes) must be advertised by the
+gateway's `/v1/models` before a call can succeed. `smoke --check-documented`
+diffs this documented table against the live catalog and reports drift
+(documented-but-unadvertised ids, plus double-prefixed `openrouter:openrouter/…`
+catalog ids that upstream rejects). The helper also fuzzy-matches aliases
+against the catalog (e.g. `openrouter:x` ≡ `openrouter:openrouter/x`) and
+suggests the closest advertised id when a requested model is missing, so
+documented-but-drifted models fail with an actionable message instead of a
+confusing two-layer error.
 
 BluesMinds uses the gateway's OpenAI Chat Completions adapter. Native Responses streaming, structured output, tool-call, usage, and model-identity fidelity are not claimed until successful live probes prove them. Opus remains the default judge for BluesMinds and DeepSeek advisory lanes.
 
@@ -51,20 +65,34 @@ The helper tracks per-model capabilities and cost tiers to make cost-aware decis
 | Model | Alias | Cost | Context | Images | Video | Audio | Tools | Quality |
 |---|---|---|---|---|---|---|---|---|
 | `claude-opus-4-6` | `opus` | quota | 200K | yes | no | no | yes | 100 |
-| `gemini-3.6-flash-high` | `flash-3.6` | quota | 1M | yes | yes | yes | yes | 82 |
 | `gemini-3.1-pro-high` | `gemini-pro` | quota | 1M | yes | yes | yes | yes | 90 |
 | `claude-3.5-sonnet` | `sonnet` | quota | 200K | yes | no | no | yes | 85 |
+| `gemini-3.6-flash-high` | `flash-3.6` | quota | 1M | yes | yes | yes | yes | 82 |
 | `gemini-3.5-flash-high` | `flash-high` | quota | 1M | yes | yes | yes | yes | 80 |
 | `xai-oauth:grok-4.3` | `grok-4.3` | free | 128K | yes | no | no | yes | 78 |
 | `xai-oauth:grok-build-0.1` | `grok` | free | 128K | yes | no | no | yes | 75 |
 | `gemini-3.6-flash-medium` | `flash-3.6-medium` | quota | 1M | yes | yes | yes | yes | 70 |
-| `nemotron-3-ultra-550b` | `nemotron-ultra` | free | 128K | no | no | no | yes | 70 |
+| `openrouter:nvidia/nemotron-3-ultra-550b-a55b:free` | `nemotron-ultra` | free | 1M | no | no | no | yes | 70 |
 | `gemini-3.5-flash-medium` | `flash` | quota | 1M | yes | yes | yes | yes | 68 |
-| `nemotron-3-super-120b` | `nemotron-super` | free | 128K | no | no | no | yes | 65 |
-| `poolside/laguna-s-2.1` | `poolside` | free | 128K | no | no | no | yes | 60 |
-| `gpt-oss:20b` | `gpt-oss` | free | 128K | yes | no | no | yes | 50 |
-| `gemma-4-31b-it` | `gemma-4` | free | 128K | no | no | no | yes | 45 |
-| `qwen3:8b` | `qwen3` | free | 128K | yes | no | no | yes | 40 |
+| `openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | `nemotron-omni` | free | 256K | yes | no | no | yes | 65 |
+| `openrouter:nvidia/nemotron-3-super-120b-a12b:free` | `nemotron-super` | free | 262K | no | no | no | yes | 65 |
+| `openrouter:nvidia/nemotron-nano-12b-v2-vl:free` | `nemotron-vl` | free | 128K | yes | no | no | yes | 60 |
+| `openrouter:poolside/laguna-s-2.1:free` | `poolside` | free | 128K | no | no | no | yes | 60 |
+| `openrouter:google/gemma-4-31b-it:free` | `gemma-4` | free | 262K | yes | no | no | yes | 55 |
+| `deepseek:deepseek-v4-pro` | `deepseek-v4-pro` | paid | — | no | no | no | yes | 88 |
+| `deepseek:deepseek-v4-flash` | `deepseek-v4-flash` | paid | — | no | no | no | yes | 74 |
+| `bluesminds:z-ai/glm-5.2` | `glm-5.2` | paid | — | yes | no | no | yes | 80 |
+| `bluesminds:grok-4.5` | `grok-bluesminds` | paid | — | yes | no | no | yes | 78 |
+| `ollama:gpt-oss:20b` | `gpt-oss` | free | 128K | no | no | no | yes | 50 |
+| `ollama:qwen3:8b` | `qwen3` | free | 128K | no | no | no | yes | 40 |
+
+Table rows are *documented routes*, not guarantees: every row (except Ollama
+local) requires the gateway to advertise its id in `/v1/models`. Quality ranks
+are planning heuristics; observed output-cap failures or unavailable routes
+can be checked live with `smoke --check-documented` and do not downgrade the
+table itself. Context figures are vendor-reported and were not live-verified
+against OpenRouter (these routes are not currently runnable through this
+gateway); re-verify the OpenRouter spec when a route is enabled.
 
 **Cost tiers:**
 - `free` — No metering. OpenRouter free tier, Ollama local, xAI OAuth (SuperGrok subscription).
@@ -72,10 +100,10 @@ The helper tracks per-model capabilities and cost tiers to make cost-aware decis
 - `paid` — Metered billing (not currently in rotation).
 
 **Cost-aware selection strategy:**
-- When Opus quota is low, use `nemotron-ultra` (70 quality, free, 128K) for broad scans and planning.
+- When Opus quota is low, use `nemotron-ultra` (70 quality, free, 1M) for broad scans and planning.
 - For quick consults, prefer `flash-3.6` (82 quality, quota, 1M, more efficient than 3.5) or `grok` (75 quality, free).
 - For code review, prefer `poolside` (60 quality, free, coding-focused) first, then fall back to quota models.
-- For image/video/audio tasks, only Gemini and Claude families support multimodal — no free multimodal models exist.
+- For image/video/audio tasks, Gemini and Claude families support full multimodal. Free OpenRouter vision models (nemotron-vl, nemotron-omni, gemma-4) also support images, making them cost-effective for image tasks when Gemini/Claude quota is low. For video/audio, only Gemini models support those modalities.
 - Gemini 3.6 Flash is more token-efficient than 3.5 Flash (17% fewer output tokens) at a lower cost. Prefer it over 3.5 Flash for new workflows.
 - The helper's `cheapest_models_for_task()` function automates this: it filters by capability requirements, then sorts free models first, then by quality.
 
@@ -111,7 +139,8 @@ Common commands:
 
 ```bash
 python3 ~/.codex/skills/anti/scripts/anti.py smoke
-python3 ~/.codex/skills/anti/scripts/anti.py consult --model sonnet --prompt "Review this idea" --dry-run --model sonnet --prompt "Review this idea"
+python3 ~/.codex/skills/anti/scripts/anti.py smoke --check-documented
+python3 ~/.codex/skills/anti/scripts/anti.py consult --model sonnet --prompt "Review this idea" --dry-run
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model deepseek-v4-flash --prompt "Give a fast second opinion"
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model flash-high --prompt "Quick sanity check on this approach"
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model gemini-pro --prompt "Deep analysis of this architecture"
@@ -145,6 +174,9 @@ python3 ~/.codex/skills/anti/scripts/anti.py review --model sonnet --scope stage
 python3 ~/.codex/skills/anti/scripts/anti.py review --model deepseek-v4-pro --scope staged
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope files --timeout 240 --max-prompt-chars 120000 --file src/main.ts --file src/config.ts
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope diff --base origin/main
+python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope files --files-from /tmp/anti-files.zlist --max-review-chunks 0 --priority-file src/prices.ts --priority-file src/scanner.ts
+python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope files --files-from /tmp/anti-files.zlist --max-review-chunks 10 --allow-partial --json
+python3 ~/.codex/skills/anti/scripts/anti.py consult --model gemini-3.6-flash-high --prompt "Explain this" --max-output-tokens 8192 --save-output summary
 git diff -z --name-only origin/main...HEAD > /tmp/anti-files.zlist
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope files --files-from /tmp/anti-files.zlist --json
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope diff --base origin/main --chunked auto --max-review-chunks 8 --max-synthesis-chars 120000 --json
@@ -176,19 +208,26 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - `review --scope working-tree` and `review --scope staged` require a git repository. If the workspace is not a git repo, switch to `review --scope files` and pass a curated list of high-risk files.
 - For large Opus/Sonnet reviews and plans, prefer focused batches. With `--chunked auto`, Claude-family calls use a conservative safety budget of about 30k prompt chars by default, splitting broad work into bounded chunk calls plus synthesis so one huge request is less likely to time out or lose auth rotation progress. `--max-prompt-chars 0` does not bypass that Claude safety budget; use `--chunked off` only when you intentionally want one large call.
 - For large Opus reviews, add `--timeout 240`, `--retry 2`, and realistic `--max-prompt-chars` / `--max-synthesis-chars` budgets when needed. `review` defaults to `--chunked auto`, so incomplete broad prompts are split into bounded chunk calls and a bounded synthesis call. The helper emits a review manifest with included, omitted, excluded, and warning fields; treat `status: incomplete` as a scope limitation and rerun a narrower batch when missing files matter.
+- Scope honesty is enforced, not just reported: if a review scope needs more chunks than `--max-review-chunks` (default 8), the helper prints the chunk plan and fails before any model call unless `--allow-partial` is passed. Use `--max-review-chunks 0` to review everything in as many chunks as needed. Partial runs prefix the synthesis with `⚠ INCOMPLETE — N item(s) NOT reviewed`, and the full diff is always split across chunks instead of silently truncated before chunking.
+- Use `--priority-file <path>` (repeatable) to force important files into the first chunks of a broad `--files-from` review; `--dry-run` prints the full chunk plan so you can check coverage before spending quota.
+- Consult answers are checked against the output-token cap: a truncated answer is retried once at double the cap and recorded as `truncated` with the full output saved in the run record. Raise `--max-output-tokens` (default 4096) for long answers.
+- Run records now split lifecycle from coverage: `runStatus` (success/failed/interrupted) and `scopeStatus` (complete/partial) are separate top-level fields, with `omittedFileCount`/`omittedChunkCount` always present. A `running` placeholder record is written before the first model call, so killed backgrounded runs leave an identifiable record instead of a 0-byte file; `runs list` flags 0-byte/corrupt records, and `runs clean` also prunes stale `.tmp` files. Backgrounding is still unsupported — use a foreground run or the workflow presets.
 - If a broad review times out, do not keep retrying the same prompt. Narrow to the files most likely to contain the bug, or split by concern such as config, scanner, verifier, report, and tests.
 - Use `--files-from` with newline- or NUL-delimited file lists for large PRs. Prefer NUL-delimited lists from `git diff -z --name-only` when paths may contain spaces.
 - Path lists must be valid UTF-8. Generate them from git or another trusted local command rather than hand-editing binary path lists.
 - Use `--json` when a release workflow needs to separate helper caveats, chunk metadata, and model output.
 - Use `panel --json` when you need model-by-model success/error metadata, usage/latency, panel caveats, omitted files, structured findings, and judge synthesis in separate fields.
+- Panel lane outcomes are reported honestly: `success`, `truncated` (hit the output-token cap), `non_answer`, or `empty`, with one bounded retry before a lane is recorded in `failed_models`/`truncated_models`. Truncated lanes still count as usable for `--min-successes` but are flagged to the judge with a visible warning.
+- `panel --output findings` and `panel --json` keep a stable schema: the findings contract always includes `summary`, `disagreements`, `findings`, `unverifiable`, `recommended_next_actions`, `caveats`, `parse_warning`, `findings_total`, and `findings_dropped`. When judge JSON is malformed or truncated, the helper repairs it, retries once with a stricter JSON-only instruction, and only then falls back to prose with a `parse_warning`; it never embeds a broken JSON blob inside `summary`.
 - `panel --collab claude-grok` sends the same bounded context to Claude and Grok lanes, asks them to lean into complementary strengths, and asks the judge to compare Claude-backed and Grok-backed disagreements. It is still advisory, not automatic collaboration in Codex's native model loop.
 - Broad `panel --mode review` runs summarize oversized review scopes before fan-out instead of silently truncating raw context for every lane. Treat the summary caveat as a scope limitation.
+- `review` with an empty scope (for example `--scope staged` with nothing staged, or a clean working tree) fails with an actionable error before any model call instead of asking the model to explain "no content".
 - Use `--fallback-model sonnet --fallback-policy on-retryable` for long Opus planning/review calls when backend `502`/timeout drift would otherwise block the workflow.
 - A provider fallback is always explicit. For example, `--fallback-model deepseek-v4-flash --fallback-policy on-retryable` may send the same prompt/context to DeepSeek; use it only when that disclosure and trust boundary are acceptable.
 - After retryable generation failures, the helper probes `/v1/models`; if that probe also times out, treat the gateway as wedged and restart it before retrying the same Opus job.
 - `--progress` is enabled by default for all `workflow`, `plan`, `review`, `consult`, `panel`, `moa`, and `fusion` runs, streaming real-time `[anti]` step milestones (model call starts, completed prompt/output char counts, elapsed time, chunk progress, and judge synthesis) directly to stderr for live visibility in Codex. Use `--no-progress` to suppress stderr progress logging if quiet output is explicitly required.
 - V2 workflow presets default to sanitized run summaries under `~/.codex/anti-runs`; use `runs list`, `runs show <id>`, and `runs clean --older-than N` (add `--dry-run` to preview deletions) to inspect or prune them. Primitive commands default to `--save-output never`; pass `--save-output summary` or `--save-output full` only when useful.
-- The helper emits a cost-awareness hint to stderr when a quota-tier model is selected and free alternatives of similar quality are available. Use `--model <free-alias>` to switch.
+- The helper emits a cost-awareness hint to stderr when a quota/paid-tier model is selected and free alternatives of similar quality are available. Use `--model <free-alias>` to switch.
 - `--dry-run` prints token estimates and cost tiers without contacting the gateway. Available on `consult`, `review`, `plan`, `panel`, and `workflow` commands.
 - Treat sidecar and panel findings as leads. Consensus is not proof. Before editing, verify actionable claims with local source inspection, official docs when relevant, typecheck/tests, or a small reproducer; record dubious or unverified claims as caveats instead of patching them blindly.
 

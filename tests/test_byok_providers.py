@@ -1,4 +1,6 @@
 import json
+import os
+import io
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -10,6 +12,7 @@ from codex_antigravity_auth.byok import (
     all_provider_configs,
     normalize_provider_config,
     normalize_provider_entry,
+    normalize_byok_model_id,
     provider_capabilities,
     provider_auth_mode,
     provider_oauth_unsupported_message,
@@ -32,6 +35,105 @@ from codex_antigravity_auth.transform import transform_chat_response, transform_
 
 
 class TestBYOKProviders(unittest.TestCase):
+    def test_resolve_api_key_skips_invalid_env_values(self):
+        provider = {
+            "id": "custom",
+            "kind": "openai_chat",
+            "apiKeyEnv": "BAD_KEY_ENV",
+            "apiKeyEnvAliases": ["GOOD_KEY_ENV"],
+            "autoEnable": False,
+        }
+        with patch.dict(
+            os.environ,
+            {"BAD_KEY_ENV": "bad\x01key", "GOOD_KEY_ENV": "  good-key-123  "},
+            clear=False,
+        ):
+            self.assertEqual(resolve_api_key(provider), "good-key-123")
+        with patch.dict(os.environ, {"BAD_KEY_ENV": "bad\x01key"}, clear=False):
+            self.assertIsNone(resolve_api_key(provider))
+
+    def test_normalize_byok_model_id_strips_self_referential_prefixes(self):
+        cases = {
+            ("openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter"): "nvidia/nemotron-3-ultra-550b-a55b:free",
+            ("openrouter/openrouter/nvidia/nemotron-3-super-120b-a12b:free", "openrouter"): "nvidia/nemotron-3-super-120b-a12b:free",
+            ("openrouter/auto", "openrouter"): "openrouter/auto",
+            ("nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter"): "nvidia/nemotron-3-ultra-550b-a55b:free",
+            # No vendor path remains after the prefix, so it is preserved
+            # (same rule that keeps openrouter/auto intact).
+            ("deepseek/deepseek-chat", "deepseek"): "deepseek/deepseek-chat",
+            ("z-ai/glm-5.2", "bluesminds"): "z-ai/glm-5.2",
+            ("grok-build-0.1", "xai-oauth"): "grok-build-0.1",
+            ("openrouter/google/gemma-4-31b-it:free", "openrouter"): "google/gemma-4-31b-it:free",
+            # Non-self-referential multi-segment ids must never be rewritten.
+            ("org/team/deployment", "custom"): "org/team/deployment",
+            ("org/team/deployment", None): "org/team/deployment",
+        }
+        for (raw, provider_id), expected in cases.items():
+            with self.subTest(raw=raw, provider_id=provider_id):
+                self.assertEqual(normalize_byok_model_id(raw, provider_id), expected)
+
+    def test_models_catalog_deduplicates_normalized_ids(self):
+        provider = {
+            "id": "openrouter",
+            "displayName": "OpenRouter",
+            "kind": "openai_chat",
+            "baseUrl": "https://openrouter.ai/api/v1",
+            "apiKey": "sk-test-key-1234567890",
+            "models": [
+                "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+                "nvidia/nemotron-3-ultra-550b-a55b:free",
+            ],
+        }
+        with patch(
+            "codex_antigravity_auth.server.all_provider_configs_read_only",
+            return_value={"openrouter": provider},
+        ):
+            response = TestClient(app).get("/v1/models")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        advertised = [model["id"] for model in response.json()["data"]]
+        self.assertEqual(advertised.count("openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"), 1)
+
+    def test_models_catalog_normalizes_double_prefixed_openrouter_ids(self):
+        provider = {
+            "id": "openrouter",
+            "displayName": "OpenRouter",
+            "kind": "openai_chat",
+            "baseUrl": "https://openrouter.ai/api/v1",
+            "apiKey": "sk-test-key-1234567890",
+            "models": [
+                "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+                "openrouter/auto",
+            ],
+        }
+        with patch(
+            "codex_antigravity_auth.server.all_provider_configs_read_only",
+            return_value={"openrouter": provider},
+        ):
+            response = TestClient(app).get("/v1/models")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        advertised = {model["id"]: model for model in response.json()["data"]}
+        self.assertIn("openrouter:nvidia/nemotron-3-ultra-550b-a55b:free", advertised)
+        self.assertNotIn("openrouter:openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", advertised)
+        self.assertIn("openrouter:openrouter/auto", advertised)
+
+    def test_provider_capabilities_match_normalized_model_ids(self):
+        provider = {
+            "id": "openrouter",
+            "kind": "openai_chat",
+            "models": [
+                {
+                    "id": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+                    "capabilities": {"parallel_tool_calls": False},
+                }
+            ],
+        }
+        selected = provider_capabilities(provider, "nvidia/nemotron-3-ultra-550b-a55b:free")
+        self.assertFalse(selected.parallel_tool_calls)
+        legacy = provider_capabilities(provider, "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free")
+        self.assertFalse(legacy.parallel_tool_calls)
+
     def test_provider_capabilities_use_route_defaults_and_validated_overrides(self):
         chat = provider_capabilities({"kind": "openai_chat"})
         self.assertFalse(chat.native_responses)
@@ -473,10 +575,23 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertNotIn("apiKeyEnv", custom_two)
         self.assertEqual(custom_two["apiKeyEnvAliases"], ["GOOD_ENV"])
 
-        for api_key in ("secret\nbad", "secret\u00e9bad"):
+        for index, api_key in enumerate(("secret\nbad", "secret\u00e9bad")):
             with self.subTest(api_key=repr(api_key)):
-                malformed_key = normalize_provider_entry({"apiKey": api_key})
+                captured_stderr = io.StringIO()
+                with patch("sys.stderr", captured_stderr):
+                    malformed_key = normalize_provider_entry(
+                        {"apiKey": api_key, "displayName": f"Broken Provider {index}"}
+                    )
                 self.assertNotIn("apiKey", malformed_key)
+                self.assertIn(f"Broken Provider {index}", captured_stderr.getvalue())
+                self.assertIn("failed validation", captured_stderr.getvalue())
+                self.assertNotIn(api_key, captured_stderr.getvalue())
+        # The warning is emitted once per provider label, not on every load.
+        captured_stderr = io.StringIO()
+        with patch("sys.stderr", captured_stderr):
+            normalize_provider_entry({"apiKey": "bad\x01key", "displayName": "Repeat Warning Provider"})
+            normalize_provider_entry({"apiKey": "bad\x01key", "displayName": "Repeat Warning Provider"})
+        self.assertEqual(captured_stderr.getvalue().count("failed validation"), 1)
 
         reserved = normalize_provider_entry(
             {
