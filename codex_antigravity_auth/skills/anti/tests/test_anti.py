@@ -2669,6 +2669,281 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(parsed["panel_results"][0]["model_used"], "claude-3.5-sonnet")
         self.assertTrue(parsed["panel_results"][0]["generation"]["fallback_used"])
 
+    def test_panel_fallback_keeps_identity_failures_and_marks_collapsed_panel(self) -> None:
+        """A fallback result must not masquerade as the requested lane."""
+        anti = load_anti()
+        fallback = "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
+        requested = ["claude-opus-4-6", "gemini-3.5-flash-high", fallback]
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: set(requested)
+        judge_prompts: list[str] = []
+
+        def fake_post_response(**kwargs):
+            prompt = kwargs["prompt"]
+            if "You are synthesizing an Antigravity multi-model advisory panel" in prompt:
+                judge_prompts.append(prompt)
+                return json.dumps(
+                    {
+                        "summary": "The available evidence is degraded.",
+                        "disagreements": [],
+                        "findings": [],
+                        "unverifiable": [],
+                        "recommended_next_actions": [],
+                        "caveats": [],
+                    }
+                )
+            if kwargs["model"] in requested[:2]:
+                raise anti.AntiError("HTTP 502: requested backend unavailable retryable=true")
+            return f"lane-output-{kwargs['model']}"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(
+                [
+                    "panel",
+                    "--mode",
+                    "ask",
+                    "--model",
+                    "opus",
+                    "--model",
+                    "flash-high",
+                    "--model",
+                    "nemotron-ultra",
+                    "--judge",
+                    "opus",
+                    "--prompt",
+                    "What next?",
+                    "--fallback-model",
+                    "nemotron-ultra",
+                    "--fallback-policy",
+                    "on-retryable",
+                    "--min-successes",
+                    "1",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        results = {item["model"]: item for item in parsed["panel_results"]}
+        for model in requested:
+            self.assertIn(model, results)
+            self.assertEqual(results[model]["model"], model)
+            self.assertIn("generation", results[model])
+
+        for model in requested[:2]:
+            result = results[model]
+            # `model` remains the requested lane while `model_used` records the
+            # model that actually produced the output.
+            self.assertEqual(result["model_used"], fallback)
+            generation = result["generation"]
+            self.assertEqual(generation["primary_model"], model)
+            self.assertEqual(generation["model_used"], fallback)
+            self.assertEqual(generation["fallback_model"], fallback)
+            self.assertTrue(generation["fallback_used"])
+            self.assertEqual(generation["generation_failures"][0]["model"], model)
+            self.assertIn("HTTP 502", generation["generation_failures"][0]["error"])
+
+        # Two logical lanes completed, but both (and the direct Nemotron lane)
+        # were produced by one actual model.  The panel must expose that loss
+        # of independence to callers and to the judge.
+        metadata = parsed["metadata"]
+        self.assertEqual(metadata["status"], "degraded_single_model")
+        self.assertEqual(metadata["distinct_actual_models"], [fallback])
+        self.assertEqual(metadata["distinct_actual_model_count"], 1)
+        self.assertTrue(any("degraded_single_model" in caveat for caveat in parsed["caveats"]))
+        self.assertEqual(len(judge_prompts), 1)
+        self.assertIn("degraded_single_model", judge_prompts[0])
+        self.assertIn("HTTP 502", judge_prompts[0])
+        self.assertIn(fallback, judge_prompts[0])
+        self.assertIn("independent", judge_prompts[0].lower())
+
+    def test_panel_min_successes_uses_actual_model_diversity(self) -> None:
+        """A single fallback model cannot satisfy a two-model panel minimum."""
+        anti = load_anti()
+        fallback = "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
+        requested = {"claude-opus-4-6", "gemini-3.5-flash-high", fallback}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: set(requested)
+        judge_called = False
+
+        def fake_post_response(**kwargs):
+            nonlocal judge_called
+            if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
+                judge_called = True
+                return "judge-output"
+            if kwargs["model"] in {"claude-opus-4-6", "gemini-3.5-flash-high"}:
+                raise anti.AntiError("HTTP 502: requested backend unavailable retryable=true")
+            return "nemotron-output"
+
+        anti.post_response = fake_post_response
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            rc = anti.main(
+                [
+                    "panel",
+                    "--mode",
+                    "ask",
+                    "--model",
+                    "opus",
+                    "--model",
+                    "flash-high",
+                    "--model",
+                    "nemotron-ultra",
+                    "--judge",
+                    "opus",
+                    "--prompt",
+                    "What next?",
+                    "--fallback-model",
+                    "nemotron-ultra",
+                    "--fallback-policy",
+                    "on-retryable",
+                    "--min-successes",
+                    "2",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertFalse(judge_called, "a panel below the distinct-model minimum must not be synthesized")
+        self.assertIn("below --min-successes 2", stderr.getvalue())
+        self.assertIn("distinct", stderr.getvalue().lower())
+        parsed = json.loads(stdout.getvalue())
+        self.assertEqual(parsed["metadata"]["status"], "degraded_single_model")
+        self.assertIn("below --min-successes 2", parsed["metadata"]["panel_error"])
+        self.assertEqual(parsed["panel_results"][0]["actualModel"], fallback)
+        self.assertTrue(parsed["panel_results"][0]["fallbackChain"])
+
+    def test_panel_failed_fallback_keeps_both_errors_and_identity(self) -> None:
+        anti = load_anti()
+        fallback = "gemini-3.5-flash-high"
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
+            "claude-opus-4-6",
+            "claude-3.5-sonnet",
+            fallback,
+        }
+        judge_prompts: list[str] = []
+
+        def fake_post_response(**kwargs):
+            prompt = kwargs["prompt"]
+            if "You are synthesizing an Antigravity multi-model advisory panel" in prompt:
+                judge_prompts.append(prompt)
+                return json.dumps(
+                    {
+                        "summary": "ok",
+                        "disagreements": [],
+                        "findings": [],
+                        "unverifiable": [],
+                        "recommended_next_actions": [],
+                        "caveats": [],
+                    }
+                )
+            if kwargs["model"] == "claude-opus-4-6":
+                raise anti.AntiError("HTTP 502: opus unavailable retryable=true")
+            if kwargs["model"] == fallback:
+                raise anti.AntiError("HTTP 503: flash unavailable retryable=true")
+            return "sonnet lane output"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(
+                [
+                    "panel",
+                    "--mode",
+                    "ask",
+                    "--model",
+                    "opus",
+                    "--model",
+                    "sonnet",
+                    "--judge",
+                    "sonnet",
+                    "--fallback-model",
+                    "flash-high",
+                    "--fallback-policy",
+                    "on-retryable",
+                    "--min-successes",
+                    "1",
+                    "--prompt",
+                    "What next?",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        failed = parsed["panel_results"][0]
+        self.assertEqual(failed["requestedModel"], "claude-opus-4-6")
+        self.assertIsNone(failed["actualModel"])
+        self.assertEqual(failed["fallbackChain"], ["claude-opus-4-6", fallback])
+        self.assertIn("opus unavailable", failed["primaryError"])
+        self.assertIn("flash unavailable", failed["fallbackError"])
+        self.assertEqual(failed["modelIdentity"]["status"], "failed")
+        self.assertIn("flash unavailable", judge_prompts[0])
+
+    def test_panel_judge_requested_and_actual_identity_are_separate(self) -> None:
+        anti = load_anti()
+        fallback = "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
+            "claude-opus-4-6",
+            "claude-3.5-sonnet",
+            fallback,
+        }
+
+        def fake_post_response(**kwargs):
+            prompt = kwargs["prompt"]
+            if "You are synthesizing an Antigravity multi-model advisory panel" in prompt:
+                if kwargs["model"] == "claude-opus-4-6":
+                    raise anti.AntiError("HTTP 502: judge unavailable retryable=true")
+                return json.dumps(
+                    {
+                        "summary": "ok",
+                        "disagreements": [],
+                        "findings": [],
+                        "unverifiable": [],
+                        "recommended_next_actions": [],
+                        "caveats": [],
+                    }
+                )
+            return "sonnet lane output"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(
+                [
+                    "panel",
+                    "--mode",
+                    "ask",
+                    "--model",
+                    "sonnet",
+                    "--judge",
+                    "opus",
+                    "--fallback-model",
+                    "nemotron-ultra",
+                    "--fallback-policy",
+                    "on-retryable",
+                    "--min-successes",
+                    "1",
+                    "--prompt",
+                    "What next?",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(parsed["judge_model"], "claude-opus-4-6")
+        metadata = parsed["metadata"]
+        self.assertEqual(metadata["judge_requested_model"], "claude-opus-4-6")
+        self.assertEqual(metadata["judge_actual_model"], fallback)
+        self.assertEqual(metadata["judge_fallback_chain"], ["claude-opus-4-6", fallback])
+        self.assertIn("judge unavailable", metadata["judge_primary_error"])
+        self.assertTrue(any("Judge fallback" in caveat for caveat in parsed["caveats"]))
+
     def test_panel_model_failure_is_metadata_when_min_successes_met(self) -> None:
         anti = load_anti()
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
