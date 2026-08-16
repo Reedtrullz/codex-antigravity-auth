@@ -433,7 +433,10 @@ def write_run_record(
     record["runStatus"] = status
     scope_status: str | None = None
     if isinstance(metadata, dict):
-        metadata_status = metadata.get("status")
+        # Panel ``status`` is an integrity result (for example
+        # ``degraded_single_model``), while review/plan ``scope_status`` keeps
+        # the older complete/incomplete coverage contract for run records.
+        metadata_status = metadata.get("scope_status") or metadata.get("status")
         if metadata_status == "incomplete":
             scope_status = "partial"
         elif metadata_status == "complete":
@@ -623,6 +626,80 @@ def normalize_base_url(value: str) -> str:
 def resolve_model(value: str | None, *, default: str) -> str:
     raw = (value or default).strip()
     return MODEL_ALIASES.get(raw.lower(), raw)
+
+
+def provider_for_model(model: str | None) -> str | None:
+    """Return the provider portion of a model id.
+
+    Gateway-native Antigravity ids have no explicit provider prefix, while
+    BYOK ids use ``provider:model`` (and some model ids contain additional
+    colons).  Keeping this derivation in one place lets panel diversity be
+    calculated from the model that actually ran, not the requested alias.
+    """
+    if not model:
+        return None
+    provider, separator, _model = str(model).partition(":")
+    return provider if separator and provider else "google-antigravity"
+
+
+def panel_model_identity(
+    *,
+    requested_model: str,
+    actual_model: str | None,
+    fallback_chain: list[str] | None = None,
+    fallback_used: bool = False,
+    primary_error: str | None = None,
+    fallback_error: str | None = None,
+    fallback_reason: str | None = None,
+) -> dict[str, Any]:
+    """Return the stable, explicit model identity contract for a panel lane.
+
+    The snake-case keys are used internally and by existing consumers.  The
+    camel-case aliases mirror the public contract documented for panel output
+    and make it difficult to mistake the requested lane for the model that
+    actually produced the text.
+    """
+    requested_model = str(requested_model)
+    actual = str(actual_model) if actual_model else None
+    requested_provider = provider_for_model(requested_model)
+    actual_provider = provider_for_model(actual)
+    chain = list(fallback_chain or [requested_model])
+    execution_status = "fallback" if fallback_used else ("primary" if actual else "failed")
+    identity = {
+        "requestedModel": requested_model,
+        "actualModel": actual,
+        "provider": actual_provider,
+        "status": execution_status,
+        "primaryError": primary_error,
+        "fallbackReason": fallback_reason,
+        "fallbackChain": chain,
+    }
+    return {
+        "requested_model": requested_model,
+        "requestedModel": requested_model,
+        "requested_provider": requested_provider,
+        "requestedProvider": requested_provider,
+        "actual_model": actual,
+        "actualModel": actual,
+        "actual_provider": actual_provider,
+        "actualProvider": actual_provider,
+        "provider": actual_provider,
+        "primary_error": primary_error,
+        "primaryError": primary_error,
+        "fallback_error": fallback_error,
+        "fallbackError": fallback_error,
+        "fallback_reason": fallback_reason,
+        "fallbackReason": fallback_reason,
+        "fallback_chain": chain,
+        "fallbackChain": chain,
+        "fallback_used": bool(fallback_used),
+        "fallbackUsed": bool(fallback_used),
+        "fallback_attempted": len(chain) > 1,
+        "fallbackAttempted": len(chain) > 1,
+        "execution_status": execution_status,
+        "model_identity": identity,
+        "modelIdentity": identity,
+    }
 
 
 def model_cost_tier(model_id: str) -> str:
@@ -948,6 +1025,20 @@ def extract_usage(payload: Any) -> dict[str, int] | None:
     return None
 
 
+def extract_response_model(payload: Any) -> str | None:
+    """Return a model id explicitly reported by the gateway response."""
+    if not isinstance(payload, dict):
+        return None
+    candidates: list[Any] = [payload.get("model")]
+    response = payload.get("response")
+    if isinstance(response, dict):
+        candidates.append(response.get("model"))
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
 def response_call_metadata(value: Any) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     usage = normalize_usage(getattr(value, "usage", None))
@@ -975,7 +1066,12 @@ def sum_usage(*values: Any) -> dict[str, int]:
                 for key in totals:
                     totals[key] += int(usage.get(key, 0))
                 return
-            for item in value.values():
+            # The current generation is already represented by its top-level
+            # usage entry.  Retry histories are evidence metadata, not extra
+            # generations to add to token totals.
+            for key, item in value.items():
+                if key in {"attempts", "panel_attempts", "judge_attempts", "judgeAttempts"}:
+                    continue
                 visit(item)
         elif isinstance(value, list):
             for item in value:
@@ -1077,11 +1173,15 @@ def post_response(
                 eprint(f"[anti] extract_response_text fell back to JSON dump for model {model} "
                        f"(status={decoded.get('status', 'unknown')}); "
                        f"the response may be malformed or empty")
+            response_metadata: dict[str, Any] = {"attempts": attempt}
+            response_model = extract_response_model(decoded)
+            if response_model:
+                response_metadata["backend_model"] = response_model
             return ResponseText(
                 text,
                 usage=extract_usage(decoded),
                 elapsed_ms=int((time.monotonic() - started) * 1000),
-                response_metadata={"attempts": attempt},
+                response_metadata=response_metadata,
             )
 
         detail = decoded.get("detail") or decoded.get("error") or decoded
@@ -1143,6 +1243,54 @@ def generate_with_fallback(
 
     _pre_flight_cost_suggestion(args, model, model_ids, prompt)
     failures: list[dict[str, str]] = []
+
+    def identity_metadata(
+        *,
+        actual_model: str | None,
+        fallback_used: bool,
+        fallback_chain: list[str],
+        primary_error: str | None = None,
+        fallback_error: str | None = None,
+        fallback_reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Build explicit requested/actual identity metadata for every call.
+
+        ``model_used`` is retained for compatibility with older consumers, but
+        callers should use ``requested_model`` and ``actual_model``.  Keeping
+        the error and chain next to those identities prevents a successful
+        fallback from looking like a successful primary generation.
+        """
+        metadata = panel_model_identity(
+            requested_model=model,
+            actual_model=actual_model,
+            fallback_chain=fallback_chain,
+            fallback_used=fallback_used,
+            primary_error=primary_error,
+            fallback_error=fallback_error,
+            fallback_reason=fallback_reason,
+        )
+        metadata.update(
+            {
+                # These legacy fields are still consumed by consult/plan
+                # callers and older run records.
+                "model_used": actual_model,
+                "primary_model": model,
+                "fallback_model": fallback_model,
+                "fallback_policy": fallback_policy,
+                "fallback_used": fallback_used,
+                "generation_failures": list(failures),
+            }
+        )
+        return metadata
+
+    def raise_with_metadata(message: str, cause: BaseException, metadata: dict[str, Any]) -> None:
+        # Preserve structured failure details even though this API historically
+        # raises AntiError for failed generations.  run_panel_call consumes the
+        # attribute when it records an error lane.
+        error = AntiError(message)
+        error.generation_metadata = metadata  # type: ignore[attr-defined]
+        raise error from cause
+
     progress(args, f"{purpose}: calling {model} ({len(prompt)} prompt chars)")
     try:
         raw_text = post_response(
@@ -1158,21 +1306,29 @@ def generate_with_fallback(
         )
         text = str(raw_text)
         call_metadata = response_call_metadata(raw_text)
+        actual_model = str(call_metadata.get("backend_model") or model)
         progress(args, f"{purpose}: {model} completed ({len(text)} output chars)")
-        return text, model, {
-            "model_used": model,
-            "primary_model": model,
-            "fallback_model": fallback_model,
-            "fallback_policy": fallback_policy,
-            "fallback_used": False,
-            "generation_failures": failures,
-            **call_metadata,
-        }
+        metadata = identity_metadata(
+            actual_model=actual_model,
+            fallback_used=False,
+            fallback_chain=[model],
+        )
+        metadata.update(call_metadata)
+        # Identity fields are authoritative even if a backend response happens
+        # to contain similarly named metadata keys.
+        metadata.update(identity_metadata(actual_model=actual_model, fallback_used=False, fallback_chain=[model]))
+        return text, actual_model, metadata
     except AntiError as exc:
         error = redact_sensitive_text(str(exc))
         failures.append({"model": model, "error": error})
         if not fallback_model or fallback_model == model or not should_use_fallback(error, fallback_policy):
-            raise AntiError(enrich_generation_error(args, error)) from exc
+            failure_metadata = identity_metadata(
+                actual_model=None,
+                fallback_used=False,
+                fallback_chain=[model],
+                primary_error=error,
+            )
+            raise_with_metadata(enrich_generation_error(args, error), exc, failure_metadata)
         progress(args, f"{purpose}: {model} failed; trying fallback {fallback_model}")
         try:
             raw_text = post_response(
@@ -1190,22 +1346,42 @@ def generate_with_fallback(
             fallback_error = redact_sensitive_text(str(fallback_exc))
             failures.append({"model": fallback_model, "error": fallback_error})
             enriched_fallback_error = enrich_generation_error(args, fallback_error)
-            raise AntiError(
+            failure_metadata = identity_metadata(
+                actual_model=None,
+                fallback_used=False,
+                fallback_chain=[model, fallback_model],
+                primary_error=error,
+                fallback_error=fallback_error,
+                fallback_reason=f"primary model failed with {fallback_policy}; fallback generation also failed",
+            )
+            raise_with_metadata(
                 f"{purpose} failed on primary model {model} and fallback model {fallback_model}. "
-                f"Primary error: {error}. Fallback error: {enriched_fallback_error}"
-            ) from fallback_exc
+                f"Primary error: {error}. Fallback error: {enriched_fallback_error}",
+                fallback_exc,
+                failure_metadata,
+            )
         text = str(raw_text)
         call_metadata = response_call_metadata(raw_text)
+        actual_model = str(call_metadata.get("backend_model") or fallback_model)
         progress(args, f"{purpose}: fallback {fallback_model} completed ({len(text)} output chars)")
-        return text, fallback_model, {
-            "model_used": fallback_model,
-            "primary_model": model,
-            "fallback_model": fallback_model,
-            "fallback_policy": fallback_policy,
-            "fallback_used": True,
-            "generation_failures": failures,
-            **call_metadata,
-        }
+        metadata = identity_metadata(
+            actual_model=actual_model,
+            fallback_used=True,
+            fallback_chain=[model, fallback_model],
+            primary_error=error,
+            fallback_reason=f"primary model failed with {fallback_policy}; fallback model was used",
+        )
+        metadata.update(call_metadata)
+        metadata.update(
+            identity_metadata(
+                actual_model=actual_model,
+                fallback_used=True,
+                fallback_chain=[model, fallback_model],
+                primary_error=error,
+                fallback_reason=f"primary model failed with {fallback_policy}; fallback model was used",
+            )
+        )
+        return text, actual_model, metadata
 
 
 def find_repo_root(start: Path) -> Path | None:
@@ -3051,11 +3227,45 @@ def build_panel_synthesis_prompt(
     max_chars: int,
     output_mode: str = "prose",
 ) -> tuple[str, list[str], dict[str, Any]]:
+    panel_status = str(metadata.get("status") or metadata.get("panel_status") or "unknown")
+    distinct_actual_models = list(metadata.get("distinct_actual_models") or [])
+    distinct_actual_providers = list(metadata.get("distinct_actual_providers") or [])
     manifest = {
         "panel_mode": panel_mode,
         "roles": roles,
+        "panel_status": panel_status,
         "panel_models": [result["model"] for result in panel_results],
+        "requested_models": [result.get("requested_model", result["model"]) for result in panel_results],
         "successful_models": [result["model"] for result in panel_results if result["status"] == "success"],
+        "successful_actual_models": [
+            result.get("actual_model")
+            for result in panel_results
+            if result["status"] in ("success", "truncated") and result.get("actual_model")
+        ],
+        "successful_actual_providers": [
+            result.get("provider")
+            for result in panel_results
+            if result["status"] in ("success", "truncated") and result.get("provider")
+        ],
+        "fallback_models": [
+            result.get("requested_model", result["model"])
+            for result in panel_results
+            if panel_result_fallback_attempted(result)
+        ],
+        "primary_failed_models": [
+            result.get("requested_model", result["model"])
+            for result in panel_results
+            if result.get("primary_error")
+            or (isinstance(result.get("generation"), dict) and result["generation"].get("primary_error"))
+        ],
+        "distinct_actual_models": distinct_actual_models,
+        "distinct_actual_model_count": int(
+            metadata.get("distinct_actual_model_count", len(distinct_actual_models))
+        ),
+        "distinct_actual_identity_count": int(
+            metadata.get("distinct_actual_identity_count", len(distinct_actual_models))
+        ),
+        "distinct_actual_providers": distinct_actual_providers,
         "failed_models": [
             result["model"]
             for result in panel_results
@@ -3071,11 +3281,30 @@ def build_panel_synthesis_prompt(
         result_sections = []
         for result, output in zip(panel_results, outputs):
             lines = [
-                f"## Panel Model: {result['model']}",
+                f"## Panel Model (requested): {result['model']}",
                 f"- status: {result['status']}",
+                f"- requested_model: {result.get('requested_model', result['model'])}",
+                f"- requested_provider: {result.get('requested_provider') or 'unknown'}",
             ]
+            actual_model = result.get("actual_model") or result.get("model_used")
+            if actual_model:
+                lines.append(f"- actual_model: {actual_model}")
+                lines.append(f"- provider: {result.get('provider') or provider_for_model(str(actual_model)) or 'unknown'}")
             if result.get("model_used") and result.get("model_used") != result["model"]:
-                lines.append(f"- model_used: {result['model_used']}")
+                lines.append(f"- model_used (compatibility alias): {result['model_used']}")
+            if result.get("fallback_chain"):
+                lines.append(f"- fallback_chain: {json.dumps(result['fallback_chain'], sort_keys=True)}")
+            if result.get("primary_error"):
+                lines.append(f"- primary_error: {result['primary_error']}")
+            if result.get("fallback_error"):
+                lines.append(f"- fallback_error: {result['fallback_error']}")
+            if result.get("fallback_reason"):
+                lines.append(f"- fallback_reason: {result['fallback_reason']}")
+            if result.get("attempts"):
+                lines.append(f"- panel_attempts: {json.dumps(result['attempts'], sort_keys=True)}")
+            if result.get("model_identity"):
+                lines.append(f"- model_identity: {json.dumps(result['model_identity'], sort_keys=True)}")
+            lines.append(f"- independent_of_other_lanes: {bool(result.get('independent'))}")
             if result["status"] == "success":
                 lines.append(output.strip() or "(empty output)")
             elif result["status"] == "truncated":
@@ -3089,6 +3318,13 @@ def build_panel_synthesis_prompt(
                 "You are synthesizing an Antigravity multi-model advisory panel for a Codex coding session.",
                 "Use only the source prompt/context and panel outputs below. Do not claim local verification, tool execution, or proof that is not present.",
                 "Prioritize disagreements, contradictions, and unique insights before consensus. Consensus is only a prioritization signal, not proof.",
+                (
+                    f"Panel integrity status is {panel_status}. Requested model identity is separate from actual model identity. "
+                    f"Distinct successful actual models/providers: {json.dumps(distinct_actual_models)} / {json.dumps(distinct_actual_providers)}. "
+                    "Treat a lane as independent only when its actual provider/model identity is unique. "
+                    "If status is degraded_single_model, explicitly state that no independent multi-model consensus was established "
+                    "and never describe repeated fallback output as agreement."
+                ),
                 (
                     "Collaboration profile claude-grok: Compare Claude-backed lanes with Grok-backed lanes. "
                     "Name meaningful agreement, contradiction, and blind spots from each family, then give local checks that can adjudicate them."
@@ -3205,6 +3441,84 @@ def run_panel_call(
 ) -> dict[str, Any]:
     retry_cap = min(PANEL_LANE_RETRY_CEILING_TOKENS, max_output_tokens * 2)
     attempts: list[dict[str, Any]] = []
+    failure_generation_metadata: dict[str, Any] = {}
+
+    def attach_attempt_history(
+        result: dict[str, Any],
+        generation_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Retain fallback evidence when a lane retry changes the final route.
+
+        A retry can first succeed through a fallback and then produce the
+        final answer through the requested model (or vice versa).  The final
+        model remains the answer's ``actual_model``, while the complete
+        attempt history records every route and error that influenced the
+        lane's reliability classification.
+        """
+        fallback_attempts = [
+            attempt
+            for attempt in attempts
+            if len(attempt.get("fallback_chain") or []) > 1
+            or bool(attempt.get("fallback_used"))
+        ]
+        primary_errors: list[str] = []
+        fallback_errors: list[str] = []
+        fallback_reasons: list[str] = []
+        for attempt in attempts:
+            for key, target in (
+                ("primary_error", primary_errors),
+                ("fallback_error", fallback_errors),
+                ("fallback_reason", fallback_reasons),
+            ):
+                value = attempt.get(key)
+                if isinstance(value, str) and value and value not in target:
+                    target.append(value)
+        fallback_attempted = bool(fallback_attempts)
+        result["panel_attempts"] = attempts
+        result["fallback_attempted"] = fallback_attempted
+        result["fallbackAttempted"] = fallback_attempted
+        result["attempt_fallback_chains"] = [
+            list(attempt.get("fallback_chain") or []) for attempt in fallback_attempts
+        ]
+        result["attemptFallbackChains"] = result["attempt_fallback_chains"]
+        if primary_errors:
+            result["primary_errors"] = primary_errors
+            result["primaryErrors"] = primary_errors
+            if not result.get("primary_error"):
+                result["primary_error"] = primary_errors[0]
+                result["primaryError"] = primary_errors[0]
+        if fallback_errors:
+            result["fallback_errors"] = fallback_errors
+            result["fallbackErrors"] = fallback_errors
+            if not result.get("fallback_error"):
+                result["fallback_error"] = fallback_errors[0]
+                result["fallbackError"] = fallback_errors[0]
+        if fallback_reasons:
+            result["fallback_reasons"] = fallback_reasons
+            result["fallbackReasons"] = fallback_reasons
+            if not result.get("fallback_reason"):
+                result["fallback_reason"] = fallback_reasons[0]
+                result["fallbackReason"] = fallback_reasons[0]
+        identity = result.get("model_identity")
+        if isinstance(identity, dict):
+            identity["fallbackAttempted"] = fallback_attempted
+            if primary_errors and not identity.get("primaryError"):
+                identity["primaryError"] = primary_errors[0]
+            if fallback_errors and not identity.get("fallbackError"):
+                identity["fallbackError"] = fallback_errors[0]
+            if fallback_reasons and not identity.get("fallbackReason"):
+                identity["fallbackReason"] = fallback_reasons[0]
+        if isinstance(generation_metadata, dict):
+            generation_metadata["panel_attempts"] = attempts
+            generation_metadata["fallback_attempted"] = fallback_attempted
+            generation_metadata["fallbackAttempted"] = fallback_attempted
+            generation_metadata["attempt_fallback_chains"] = result["attempt_fallback_chains"]
+            generation_metadata["primary_errors"] = primary_errors
+            generation_metadata["fallback_errors"] = fallback_errors
+            generation_metadata["fallback_reasons"] = fallback_reasons
+            result["generation"] = generation_metadata
+        return result
+
     for attempt in (1, 2):
         cap = max_output_tokens if attempt == 1 else retry_cap
         call_prompt = prompt
@@ -3221,21 +3535,87 @@ def run_panel_call(
                 purpose=purpose,
             )
         except Exception as exc:
-            attempts.append({"attempt": attempt, "status": "error", "error": redact_sensitive_text(str(exc))})
+            error = redact_sensitive_text(str(exc))
+            failure_metadata = getattr(exc, "generation_metadata", {})
+            if isinstance(failure_metadata, dict):
+                failure_generation_metadata = dict(failure_metadata)
+            attempt_record: dict[str, Any] = {
+                "attempt": attempt,
+                "status": "error",
+                "error": error,
+                "requested_model": model,
+                "requested_provider": provider_for_model(model),
+                "actual_model": None,
+                "provider": None,
+                "fallback_chain": [model],
+            }
+            if isinstance(failure_metadata, dict):
+                for key in (
+                    "actual_model",
+                    "provider",
+                    "fallback_chain",
+                    "primary_error",
+                    "fallback_error",
+                    "fallback_reason",
+                    "fallback_used",
+                ):
+                    if key in failure_metadata:
+                        attempt_record[key] = failure_metadata[key]
+            attempts.append(attempt_record)
             break
         status = lane_output_status(text, generation_metadata.get("usage"), cap)
-        attempts.append({"attempt": attempt, "status": status, "output_chars": len(text.strip())})
-        result: dict[str, Any] = {"model": model, "status": status, "output_text": text.strip()}
+        attempts.append(
+            {
+                "attempt": attempt,
+                "status": status,
+                "output_chars": len(text.strip()),
+                "requested_model": model,
+                "requested_provider": provider_for_model(model),
+                "actual_model": model_used,
+                "provider": provider_for_model(model_used),
+                "fallback_chain": generation_metadata.get("fallback_chain", [model]),
+                "fallback_used": bool(generation_metadata.get("fallback_used")),
+                "primary_error": generation_metadata.get("primary_error"),
+            }
+        )
+        result: dict[str, Any] = {
+            # ``model`` remains the requested lane for compatibility.  The
+            # explicit names below prevent a fallback from masquerading as it.
+            "model": model,
+            "requested_model": model,
+            "requested_provider": provider_for_model(model),
+            "actual_model": model_used,
+            "provider": provider_for_model(model_used),
+            "status": status,
+            "output_text": text.strip(),
+            "fallback_chain": generation_metadata.get("fallback_chain", [model]),
+            "primary_error": generation_metadata.get("primary_error"),
+            "fallback_reason": generation_metadata.get("fallback_reason"),
+            "independent": None,
+        }
+        result.update(
+            panel_model_identity(
+                requested_model=model,
+                actual_model=model_used,
+                fallback_chain=generation_metadata.get("fallback_chain", [model]),
+                fallback_used=bool(generation_metadata.get("fallback_used")),
+                primary_error=generation_metadata.get("primary_error"),
+                fallback_error=generation_metadata.get("fallback_error"),
+                fallback_reason=generation_metadata.get("fallback_reason"),
+            )
+        )
         if model_used != model:
             result["model_used"] = model_used
         result["generation"] = generation_metadata
+        generation_metadata["panel_attempts"] = attempts
+        result["panel_attempts"] = attempts
         if generation_metadata.get("usage"):
             result["usage"] = generation_metadata["usage"]
         if generation_metadata.get("elapsed_ms") is not None:
             result["elapsed_ms"] = generation_metadata["elapsed_ms"]
         result["attempts"] = attempts
         if attempt == 1 and status == "success":
-            return result
+            return attach_attempt_history(result, generation_metadata)
         if attempt == 2:
             if status == "truncated":
                 result["error"] = "output truncated at the token cap after retry; partial content may be incomplete"
@@ -3243,14 +3623,243 @@ def run_panel_call(
                 result["error"] = "model asked for direction instead of delivering the requested output"
             elif status == "empty":
                 result["error"] = "model returned empty output after retry"
-            return result
+            return attach_attempt_history(result, generation_metadata)
     last_error = attempts[-1].get("error", "unknown error") if attempts else "unknown error"
-    return {
+    failure_metadata = attempts[-1] if attempts else {}
+    result = {
         "model": model,
+        "requested_model": model,
+        "requested_provider": provider_for_model(model),
+        "actual_model": failure_metadata.get("actual_model"),
+        "provider": failure_metadata.get("provider"),
         "status": "error",
         "error": redact_sensitive_text(str(last_error)),
+        "fallback_chain": failure_metadata.get("fallback_chain", [model]),
+        "primary_error": failure_metadata.get("primary_error"),
+        "fallback_reason": failure_metadata.get("fallback_reason"),
+        "independent": False,
         "attempts": attempts,
     }
+    result.update(
+        panel_model_identity(
+            requested_model=model,
+            actual_model=failure_metadata.get("actual_model"),
+            fallback_chain=failure_metadata.get("fallback_chain", [model]),
+            fallback_used=bool(failure_metadata.get("fallback_used")),
+            primary_error=failure_metadata.get("primary_error"),
+            fallback_error=failure_metadata.get("fallback_error"),
+            fallback_reason=failure_metadata.get("fallback_reason"),
+        )
+    )
+    if failure_generation_metadata:
+        result["generation"] = failure_generation_metadata
+    return attach_attempt_history(result, failure_generation_metadata or None)
+
+
+def panel_result_actual_model(result: dict[str, Any]) -> str | None:
+    """Return the model that produced a usable lane result, if known."""
+    actual = result.get("actual_model") or result.get("model_used")
+    if isinstance(actual, str) and actual.strip():
+        return actual.strip()
+    return None
+
+
+def panel_result_fallback_attempted(result: dict[str, Any]) -> bool:
+    """Whether any usable or failed attempt in a lane traversed a fallback."""
+    generation = result.get("generation") if isinstance(result.get("generation"), dict) else {}
+    if result.get("fallback_attempted") or generation.get("fallback_attempted"):
+        return True
+    if result.get("fallback_used") or generation.get("fallback_used"):
+        return True
+    attempts = result.get("panel_attempts") or result.get("attempts") or generation.get("panel_attempts") or []
+    return any(
+        isinstance(attempt, dict)
+        and (len(attempt.get("fallback_chain") or []) > 1 or bool(attempt.get("fallback_used")))
+        for attempt in attempts
+    )
+
+
+def panel_result_identity(result: dict[str, Any]) -> tuple[str, str] | None:
+    """Return a stable provider/model key for diversity checks."""
+    actual = panel_result_actual_model(result)
+    if not actual:
+        return None
+    return provider_for_model(actual) or "unknown", normalize_catalog_model_id(actual)
+
+
+def panel_result_identity_label(result: dict[str, Any]) -> str | None:
+    actual = panel_result_actual_model(result)
+    if not actual:
+        return None
+    # The canonical model id already carries a BYOK prefix when one exists;
+    # avoid producing the misleading ``openrouter:openrouter:...`` form.
+    return normalize_catalog_model_id(actual)
+
+
+def annotate_panel_results(panel_results: list[dict[str, Any]]) -> tuple[list[str], list[str], str]:
+    """Attach independence metadata and classify the panel's integrity.
+
+    Diversity is based on actual provider/model execution identities for usable
+    (success or truncated) lanes.  Logical requested lanes and fallback
+    completions are intentionally not counted as independent evidence.
+    """
+    usable = [result for result in panel_results if result.get("status") in {"success", "truncated"}]
+    identity_counts: dict[tuple[str, str], int] = {}
+    for result in usable:
+        identity = panel_result_identity(result)
+        if identity:
+            identity_counts[identity] = identity_counts.get(identity, 0) + 1
+
+    distinct_actual_models: list[str] = []
+    distinct_actual_providers: list[str] = []
+    for result in usable:
+        label = panel_result_identity_label(result)
+        if label and label not in distinct_actual_models:
+            distinct_actual_models.append(label)
+        provider = provider_for_model(panel_result_actual_model(result))
+        if provider and provider not in distinct_actual_providers:
+            distinct_actual_providers.append(provider)
+
+    for result in panel_results:
+        identity = panel_result_identity(result)
+        result["independent"] = bool(identity and identity_counts.get(identity, 0) == 1)
+        result.setdefault("requested_model", result.get("model"))
+        result.setdefault("requested_provider", provider_for_model(result.get("requested_model")))
+        result.setdefault("actual_model", panel_result_actual_model(result))
+        result.setdefault("provider", provider_for_model(result.get("actual_model")))
+        result.setdefault("fallback_chain", [result.get("requested_model")])
+        generation = result.get("generation") if isinstance(result.get("generation"), dict) else {}
+        primary_error = result.get("primary_error") or generation.get("primary_error")
+        fallback_error = result.get("fallback_error") or generation.get("fallback_error")
+        fallback_reason = result.get("fallback_reason") or generation.get("fallback_reason")
+        fallback_used = bool(result.get("fallback_used") or generation.get("fallback_used"))
+        result.update(
+            panel_model_identity(
+                requested_model=str(result.get("requested_model") or result.get("model") or "unknown"),
+                actual_model=result.get("actual_model"),
+                fallback_chain=result.get("fallback_chain"),
+                fallback_used=fallback_used,
+                primary_error=primary_error,
+                fallback_error=fallback_error,
+                fallback_reason=fallback_reason,
+            )
+        )
+        fallback_attempted = panel_result_fallback_attempted(result)
+        result["fallback_attempted"] = fallback_attempted
+        result["fallbackAttempted"] = fallback_attempted
+        identity_status = "fallback" if fallback_used else (
+            "primary" if result.get("status") in {"success", "truncated"} else result.get("status", "error")
+        )
+        result["model_identity"] = {
+            "requestedModel": result.get("requested_model"),
+            "actualModel": result.get("actual_model"),
+            "requestedProvider": result.get("requested_provider"),
+            "actualProvider": result.get("provider"),
+            "provider": result.get("provider"),
+            "status": identity_status,
+            "fallbackChain": result.get("fallback_chain"),
+            "fallbackAttempted": fallback_attempted,
+            "primaryError": primary_error,
+            "fallbackReason": fallback_reason,
+            "independent": result.get("independent"),
+        }
+        # Top-level camelCase aliases make the structured lane record usable by
+        # consumers that do not know the helper's legacy snake_case schema.
+        result["requestedModel"] = result.get("requested_model")
+        result["actualModel"] = result.get("actual_model")
+        result["requestedProvider"] = result.get("requested_provider")
+        result["actualProvider"] = result.get("provider")
+        result["fallbackChain"] = result.get("fallback_chain")
+        result["primaryError"] = primary_error
+        result["fallbackReason"] = fallback_reason
+        result["independentOfOtherLanes"] = result.get("independent")
+
+    fallback_lanes = any(panel_result_fallback_attempted(result) for result in usable)
+    if not usable:
+        status = "failed"
+    elif len(identity_counts) <= 1:
+        status = "degraded_single_model"
+    elif len(usable) < len(panel_results) or fallback_lanes or len(identity_counts) < len(usable):
+        status = "partial_multi_model"
+    else:
+        status = "complete_multi_model"
+    return distinct_actual_models, distinct_actual_providers, status
+
+
+def panel_actual_identity_count(panel_results: list[dict[str, Any]]) -> int:
+    """Count distinct usable provider/model pairs, not logical lanes."""
+    return len(
+        {
+            identity
+            for result in panel_results
+            if result.get("status") in {"success", "truncated"}
+            for identity in [panel_result_identity(result)]
+            if identity is not None
+        }
+    )
+
+
+def panel_integrity_notice(
+    *,
+    status: str,
+    requested_models: list[str],
+    distinct_actual_models: list[str],
+) -> str:
+    """Return deterministic disclosure text for degraded/partial panels."""
+    if status == "complete_multi_model":
+        return ""
+    requested = ", ".join(requested_models) or "none"
+    actual = ", ".join(distinct_actual_models) or "none"
+    if status == "degraded_single_model":
+        return (
+            "Panel integrity notice: degraded_single_model. "
+            f"Requested models: {requested}. Successful actual model/provider: {actual}. "
+            "No independent multi-model consensus was established."
+        )
+    if status == "partial_multi_model":
+        return (
+            "Panel integrity notice: partial_multi_model. "
+            f"Requested models: {requested}. Distinct successful actual models/providers: {actual}. "
+            "Some requested lanes failed, were truncated, or used fallback; do not treat this as complete consensus."
+        )
+    return (
+        "Panel integrity notice: failed. "
+        f"Requested models: {requested}. No successful actual model/provider was available."
+    )
+
+
+def apply_panel_integrity_to_findings(
+    findings: dict[str, Any] | None,
+    *,
+    panel_status: str,
+    integrity_notice: str,
+    caveats: list[str],
+) -> dict[str, Any] | None:
+    """Make integrity warnings part of the findings contract, not just stderr."""
+    if not isinstance(findings, dict):
+        return findings
+    findings_caveats = findings.setdefault("caveats", [])
+    if not isinstance(findings_caveats, list):
+        findings_caveats = []
+        findings["caveats"] = findings_caveats
+    for caveat in [integrity_notice, *caveats]:
+        if caveat and caveat not in findings_caveats:
+            findings_caveats.append(caveat)
+    if panel_status == "degraded_single_model":
+        # Do not allow a model-generated summary to be the only visible label
+        # for a collapsed panel. Preserve it as an explicitly unverified note.
+        original_summary = str(findings.get("summary") or "").strip()
+        findings["summary"] = (
+            "DEGRADED_SINGLE_MODEL: no independent multi-model consensus was established. "
+            "The judge output is single-actual-model synthesis and is advisory only."
+        )
+        if original_summary and original_summary != findings["summary"]:
+            unverifiable = findings.setdefault("unverifiable", [])
+            if isinstance(unverifiable, list):
+                note = f"Original judge summary (single-actual-model, unverified): {original_summary}"
+                if note not in unverifiable:
+                    unverifiable.insert(0, note)
+    return findings
 
 
 def panel_results_for_record(panel_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3361,10 +3970,15 @@ def print_panel_result(
     print(f"- Gateway: {safe_gateway}")
     print(f"- Panel models: {', '.join(panel_models)}")
     print(f"- Judge model: {judge_model}")
+    if metadata.get("judge_actual_model") and metadata.get("judge_actual_model") != judge_model:
+        print(f"- Judge actual model: {metadata['judge_actual_model']}")
     if metadata.get("scope"):
         print(f"- Scope: {metadata['scope']}")
     if metadata.get("status"):
         print(f"- Status: {metadata['status']}")
+    if metadata.get("distinct_actual_models") is not None:
+        actual_models = ", ".join(str(model) for model in metadata.get("distinct_actual_models") or []) or "none"
+        print(f"- Distinct actual model/provider(s): {actual_models}")
     if metadata.get("collaboration_profile"):
         print(f"- Collaboration: {metadata['collaboration_profile']}")
     for result in panel_results:
@@ -3377,7 +3991,12 @@ def print_panel_result(
             if part
         )
         suffix = f" ({stats})" if stats else ""
-        print(f"- {result['model']}: {panel_lane_status_label(result)}{suffix}")
+        requested = result.get("requested_model", result["model"])
+        actual = result.get("actual_model") or result.get("model_used")
+        identity_suffix = f"; actual: {actual}" if actual and actual != requested else ""
+        chain = result.get("fallback_chain") or []
+        chain_suffix = f"; fallback chain: {' -> '.join(str(item) for item in chain)}" if len(chain) > 1 else ""
+        print(f"- {requested}: {panel_lane_status_label(result)}{identity_suffix}{chain_suffix}{suffix}")
     for caveat in caveats:
         print(f"- Caveat: {caveat}")
     print()
@@ -3591,31 +4210,116 @@ def command_panel(args: argparse.Namespace) -> int:
     truncated = [result for result in panel_results if result["status"] == "truncated"]
     failures = [result for result in panel_results if result["status"] not in {"success", "truncated"}]
     usable = [*successes, *truncated]
+    distinct_actual_models, distinct_actual_providers, panel_status = annotate_panel_results(panel_results)
+    distinct_actual_identity_count = panel_actual_identity_count(panel_results)
     if failures:
         caveats.extend(
             f"Panel model {result['model']} failed: {redact_sensitive_text(result.get('error', 'unknown error'))}"
             for result in failures
         )
+    for result in panel_results:
+        generation = result.get("generation") if isinstance(result.get("generation"), dict) else {}
+        if not panel_result_fallback_attempted(result):
+            continue
+        requested = result.get("requested_model", result.get("model"))
+        actual = result.get("actual_model") or result.get("model_used") or "unknown"
+        primary_error = result.get("primary_error") or generation.get("primary_error") or "unknown error"
+        if result.get("fallback_used") or generation.get("fallback_used"):
+            caveats.append(
+                f"Panel requested model {requested} failed and used fallback {actual}; "
+                f"primary error: {redact_sensitive_text(str(primary_error))}"
+            )
+        else:
+            caveats.append(
+                f"Panel requested model {requested} encountered a fallback during an earlier attempt; "
+                f"final actual model: {actual}; primary error: {redact_sensitive_text(str(primary_error))}"
+            )
     if truncated:
         caveats.extend(
             f"Panel model {result['model']} output was truncated at the token cap after retry; "
             "partial content may be incomplete"
             for result in truncated
         )
+    integrity_notice = panel_integrity_notice(
+        status=panel_status,
+        requested_models=panel_models,
+        distinct_actual_models=distinct_actual_models,
+    )
+    if integrity_notice:
+        caveats.append(integrity_notice)
     metadata["successful_models"] = [result["model"] for result in successes]
     metadata["failed_models"] = [result["model"] for result in failures]
     metadata["truncated_models"] = [result["model"] for result in truncated]
+    metadata["fallback_models"] = [
+        result.get("requested_model", result.get("model"))
+        for result in panel_results
+        if panel_result_fallback_attempted(result)
+    ]
+    metadata["primary_failed_models"] = [
+        result.get("requested_model", result.get("model"))
+        for result in panel_results
+        if result.get("primary_error")
+        or (isinstance(result.get("generation"), dict) and result["generation"].get("primary_error"))
+    ]
     metadata["retried_models"] = [
         result["model"] for result in panel_results if len(result.get("attempts", [])) > 1
     ]
     metadata["success_count"] = len(successes)
     metadata["usable_count"] = len(usable)
+    if metadata.get("status") in {"complete", "incomplete"}:
+        metadata["scope_status"] = metadata["status"]
+    metadata["logical_success_count"] = len(successes)
+    metadata["logical_usable_count"] = len(usable)
+    metadata["successful_actual_models"] = [
+        result.get("actual_model")
+        for result in usable
+        if result.get("actual_model")
+    ]
+    metadata["successful_actual_providers"] = [
+        result.get("provider")
+        for result in usable
+        if result.get("provider")
+    ]
+    metadata["min_successes_basis"] = "distinct_actual_model_provider"
+    metadata["min_successes_met"] = distinct_actual_identity_count >= min_successes
+    metadata["status"] = panel_status
+    metadata["panel_status"] = panel_status
+    metadata["requested_models"] = list(panel_models)
+    metadata["actual_models"] = [
+        result.get("actual_model")
+        for result in usable
+        if result.get("actual_model")
+    ]
+    metadata["actual_providers"] = [
+        result.get("provider")
+        for result in usable
+        if result.get("provider")
+    ]
+    metadata["distinct_actual_models"] = distinct_actual_models
+    metadata["distinct_actual_model_count"] = len(distinct_actual_models)
+    metadata["distinct_actual_identity_count"] = distinct_actual_identity_count
+    metadata["distinct_actual_providers"] = distinct_actual_providers
+    metadata["distinct_actual_provider_count"] = len(distinct_actual_providers)
+    metadata["requestedModels"] = list(panel_models)
+    metadata["actualModels"] = list(metadata["actual_models"])
+    metadata["actualProviders"] = list(metadata["actual_providers"])
+    metadata["distinctActualModels"] = list(distinct_actual_models)
+    metadata["distinctActualModelCount"] = len(distinct_actual_models)
+    metadata["distinctActualIdentityCount"] = distinct_actual_identity_count
+    metadata["distinctActualProviders"] = list(distinct_actual_providers)
+    metadata["distinctActualProviderCount"] = len(distinct_actual_providers)
+    metadata["panelStatus"] = panel_status
 
-    if len(usable) < min_successes:
+    # ``--min-successes`` is a minimum amount of independent evidence.  A
+    # fallback may make multiple logical lanes usable, but it cannot satisfy a
+    # diversity requirement when all outputs came from one actual model.
+    if distinct_actual_identity_count < min_successes:
         metadata["panel_results"] = panel_results_for_record(panel_results)
         error = (
-            f"panel had {len(successes)} successful and {len(truncated)} truncated model(s), "
-            f"below --min-successes {min_successes} (truncated lanes still count as usable)"
+            f"panel had {len(successes)} successful and {len(truncated)} truncated model(s) "
+            f"from {distinct_actual_identity_count} distinct actual model/provider(s), "
+            f"below --min-successes {min_successes} (truncated lanes still count as usable; "
+            "fallback lanes sharing an actual model are not independent)"
         )
         try:
             write_run_record(
@@ -3632,6 +4336,25 @@ def command_panel(args: argparse.Namespace) -> int:
         except AntiError:
             pass
         args.run_record_written = True
+        # A fail-closed diversity gate still needs to expose the lane-level
+        # evidence to machine consumers.  Keep the non-zero exit status, but
+        # emit the same structured panel envelope when JSON/findings output
+        # was requested instead of reducing the fallback chain to stderr.
+        metadata["panel_error"] = error
+        if args.json or args.output == "findings":
+            print_panel_result(
+                panel_mode=args.mode,
+                base_url=args.base_url,
+                judge_model=str(judge_model),
+                panel_models=panel_models,
+                panel_results=panel_results,
+                text="",
+                caveats=caveats,
+                metadata=metadata,
+                output_json=args.json,
+                output_mode=args.output,
+                findings=None,
+            )
         raise AntiError(error)
 
     synthesis_prompt, synthesis_caveats, synthesis_metadata = build_panel_synthesis_prompt(
@@ -3659,6 +4382,9 @@ def command_panel(args: argparse.Namespace) -> int:
 
     judge_cap = args.judge_output_tokens
     judge_text, judge_model_used, judge_generation = run_judge(synthesis_prompt, judge_cap)
+    judge_attempts: list[dict[str, Any]] = [
+        dict(judge_generation, attempt=1)
+    ]
     findings, findings_caveat, parse_diagnostics = parse_panel_findings(judge_text)
     judge_retried = False
     if findings_caveat:
@@ -3672,14 +4398,75 @@ def command_panel(args: argparse.Namespace) -> int:
             + synthesis_prompt
         )
         judge_text, judge_model_used, judge_generation = run_judge(retry_prompt, retry_cap)
+        judge_attempts.append(dict(judge_generation, attempt=2))
         judge_cap = retry_cap
         findings, findings_caveat, parse_diagnostics = parse_panel_findings(judge_text)
+
+    judge_primary_errors: list[str] = []
+    judge_fallback_errors: list[str] = []
+    judge_fallback_reasons: list[str] = []
+    for attempt in judge_attempts:
+        for key, target in (
+            ("primary_error", judge_primary_errors),
+            ("fallback_error", judge_fallback_errors),
+            ("fallback_reason", judge_fallback_reasons),
+        ):
+            value = attempt.get(key)
+            if isinstance(value, str) and value and value not in target:
+                target.append(value)
+    judge_fallback_attempted = any(
+        bool(attempt.get("fallback_used"))
+        or len(attempt.get("fallback_chain") or []) > 1
+        for attempt in judge_attempts
+    )
+    if judge_primary_errors and not judge_generation.get("primary_error"):
+        judge_generation["primary_error"] = judge_primary_errors[0]
+    if judge_fallback_errors and not judge_generation.get("fallback_error"):
+        judge_generation["fallback_error"] = judge_fallback_errors[0]
+    if judge_fallback_reasons and not judge_generation.get("fallback_reason"):
+        judge_generation["fallback_reason"] = judge_fallback_reasons[0]
+    judge_generation["judge_attempts"] = judge_attempts
+    judge_generation["judgeAttempts"] = judge_attempts
+    judge_generation["fallback_attempted"] = judge_fallback_attempted
+    judge_generation["fallbackAttempted"] = judge_fallback_attempted
+    judge_generation["primary_errors"] = judge_primary_errors
+    judge_generation["fallback_errors"] = judge_fallback_errors
+    judge_generation["fallback_reasons"] = judge_fallback_reasons
 
     judge_usage = normalize_usage(judge_generation.get("usage"))
     judge_truncated = bool(
         judge_usage and judge_usage.get("output_tokens") is not None and int(judge_usage["output_tokens"]) >= judge_cap
     )
+    metadata["judge_requested_model"] = judge_model
     metadata["judge_model_used"] = judge_model_used
+    metadata["judge_actual_model"] = judge_model_used
+    metadata["judge_provider"] = provider_for_model(judge_model_used)
+    metadata["judge_fallback_chain"] = judge_generation.get("fallback_chain", [judge_model])
+    metadata["judge_fallback_attempted"] = judge_fallback_attempted
+    metadata["judge_attempts"] = judge_attempts
+    metadata["judge_primary_error"] = judge_generation.get("primary_error") or (judge_primary_errors[0] if judge_primary_errors else None)
+    metadata["judge_fallback_reason"] = judge_generation.get("fallback_reason") or (judge_fallback_reasons[0] if judge_fallback_reasons else None)
+    metadata["judge_identity"] = panel_model_identity(
+        requested_model=judge_model,
+        actual_model=judge_model_used,
+        fallback_chain=judge_generation.get("fallback_chain", [judge_model]),
+        fallback_used=bool(judge_generation.get("fallback_used")),
+        primary_error=judge_generation.get("primary_error"),
+        fallback_error=judge_generation.get("fallback_error"),
+        fallback_reason=judge_generation.get("fallback_reason"),
+    )
+    metadata["judge_identity"]["fallbackAttempted"] = judge_fallback_attempted
+    if judge_generation.get("fallback_used"):
+        judge_notice = (
+            f"Judge fallback: requested {judge_model} failed; synthesis was produced by "
+            f"{judge_model_used}."
+        )
+        caveats.append(judge_notice)
+    elif judge_fallback_attempted:
+        caveats.append(
+            f"Judge fallback was attempted during an earlier synthesis attempt; final actual model: "
+            f"{judge_model_used}."
+        )
     metadata["judge_generation"] = judge_generation
     metadata["judge_retried"] = judge_retried
     metadata["judge_json_repaired"] = bool(parse_diagnostics.get("repaired"))
@@ -3707,12 +4494,44 @@ def command_panel(args: argparse.Namespace) -> int:
                     "Judge JSON was malformed or truncated and was repaired by truncating to the last complete JSON value."
                 )
         display_text = render_panel_findings(findings or {}, caveats)
+
+    # Make the panel-integrity disclosure part of the structured findings
+    # contract as well as the top-level caveats.  Consumers using
+    # ``--output findings`` must not be able to miss a collapsed or partial
+    # panel merely because the judge returned valid JSON.  For parsed output,
+    # render again so the deterministic summary/caveats are visible in the
+    # human-readable text too; malformed/legacy judge output keeps its
+    # historical prose payload while the findings object remains authoritative.
+    findings = apply_panel_integrity_to_findings(
+        findings,
+        panel_status=panel_status,
+        integrity_notice=integrity_notice,
+        caveats=caveats,
+    )
+    if metadata.get("findings_status") == "parsed" and isinstance(findings, dict):
+        display_text = render_panel_findings(findings, [])
+
+    # Keep the historical prose payload stable for a partially failed panel;
+    # its structured metadata/caveat still carries the authoritative warning.
+    # A fully completed but collapsed panel needs the notice inside the final
+    # synthesis because otherwise the judge text could look like consensus.
+    output_integrity_notice = (
+        integrity_notice
+        if panel_status == "degraded_single_model" and len(usable) == len(panel_results)
+        else ""
+    )
+    if output_integrity_notice and output_integrity_notice not in display_text:
+        if findings is not None:
+            findings_caveats = findings.setdefault("caveats", [])
+            if isinstance(findings_caveats, list) and output_integrity_notice not in findings_caveats:
+                findings_caveats.insert(0, output_integrity_notice)
+        display_text = "\n\n".join(part for part in [output_integrity_notice, display_text] if part).strip()
     metadata["findings"] = findings
     write_run_record(
         args,
         mode="panel",
         status="success",
-        models=[*panel_models, str(judge_model_used)],
+        models=list(dict.fromkeys([*panel_models, str(judge_model), str(judge_model_used)])),
         base_url=args.base_url,
         prompt_text=prompt,
         output_text=display_text,
@@ -3722,7 +4541,10 @@ def command_panel(args: argparse.Namespace) -> int:
     print_panel_result(
         panel_mode=args.mode,
         base_url=args.base_url,
-        judge_model=str(judge_model_used),
+        # Keep the public judge_model field as the requested lane.  The
+        # metadata carries judge_actual_model/judge_model_used separately when
+        # the judge itself falls back.
+        judge_model=str(judge_model),
         panel_models=panel_models,
         panel_results=panel_results,
         text=display_text,
@@ -4906,7 +5728,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     panel.add_argument("--priority-file", action="append", help="Review these paths first when chunking; repeatable")
     panel.add_argument("--chunk-output-tokens", type=positive_int, default=4096, help="Max output tokens per review chunk")
-    panel.add_argument("--min-successes", type=positive_int, help="Minimum successful panel model calls before judging")
+    panel.add_argument(
+        "--min-successes",
+        type=positive_int,
+        help="Minimum distinct actual provider/model identities before judging",
+    )
     panel.add_argument("--max-parallel", type=positive_int, default=3, help="Maximum concurrent panel model calls")
     panel.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
     panel.add_argument("--output", choices=sorted(PANEL_OUTPUT_MODES), default="prose", help="Render prose or findings JSON")
