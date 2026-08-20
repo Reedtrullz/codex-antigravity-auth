@@ -1,3 +1,4 @@
+import logging
 import copy
 import math
 import threading
@@ -15,6 +16,7 @@ from .storage import (
     update_accounts,
 )
 
+_log = logging.getLogger(__name__)
 
 def _default_fingerprint() -> dict:
     """Build a fingerprint matching the real Antigravity IDE client.
@@ -36,23 +38,45 @@ FINGERPRINT: dict = _default_fingerprint()
 
 
 
+_refresh_locks: dict[str, threading.Lock] = {}
+_refresh_locks_lock = threading.Lock()
+
+
+def _get_refresh_lock(email: str) -> threading.Lock:
+    """Return a per-account lock for serializing token refresh attempts."""
+    with _refresh_locks_lock:
+        if email not in _refresh_locks:
+            _refresh_locks[email] = threading.Lock()
+        return _refresh_locks[email]
+
 
 def _apply_token_refresh(account: dict, refresh_token: str) -> None:
-    refreshed = refresh_access_token(refresh_token)
-    account["accessToken"] = refreshed["access_token"]
-    account["expiresAt"] = time.time() + token_expires_in_seconds(refreshed)
-    if refreshed.get("refresh_token"):
-        account["refreshToken"] = refreshed["refresh_token"]
-    # Discover the Cloud Code Assist project if not already stored.
-    # The backend rejects requests without a valid project id (403 VALIDATION_REQUIRED).
-    if not account.get("projectId"):
-        try:
-            from .oauth import discover_project_id
-            project_id = discover_project_id(refreshed["access_token"])
-            if project_id:
-                account["projectId"] = project_id
-        except Exception:
-            pass
+    email = account.get("email", "")
+    lock = _get_refresh_lock(email)
+    if not lock.acquire(blocking=False):
+        _log.debug("Refresh already in progress for %s, skipping", email)
+        return
+    try:
+        refreshed = refresh_access_token(refresh_token)
+        account["accessToken"] = refreshed["access_token"]
+        account["expiresAt"] = time.time() + token_expires_in_seconds(refreshed)
+        if refreshed.get("refresh_token"):
+            account["refreshToken"] = refreshed["refresh_token"]
+        # Discover the Cloud Code Assist project if not already stored.
+        # The backend rejects requests without a valid project id (403 VALIDATION_REQUIRED).
+        if not account.get("projectId"):
+            try:
+                from .oauth import discover_project_id
+                project_id = discover_project_id(refreshed["access_token"])
+                if project_id:
+                    account["projectId"] = project_id
+                    _log.info("Discovered project ID %s for %s", project_id, email)
+                else:
+                    _log.warning("Project discovery returned empty for %s", email)
+            except Exception as exc:
+                _log.warning("Project discovery failed for %s: %s", email, exc)
+    finally:
+        lock.release()
 class AccountManager:
     """Compatibility facade over the production AccountState owner."""
 
@@ -359,8 +383,11 @@ class AccountManager:
                                 pid = discover_project_id(refreshed["access_token"])
                                 if pid:
                                     account["projectId"] = pid
+                                    _log.info("Discovered project ID %s for %s", pid, email)
+                                else:
+                                    _log.warning("Project discovery returned empty for %s", email)
                             except Exception:
-                                pass
+                                _log.warning("Project discovery failed for %s during refresh", email)
                         summary["refreshed"] += 1
                     except Exception:
                         self._state_owner.apply_cooldown(
@@ -377,3 +404,29 @@ class AccountManager:
     def clear_failures(self, email: str, family: str | None = None) -> None:
         with self._lock:
             self._mutate_state(lambda state: state.clear_failures(email, family))
+
+
+def is_validation_required_error(status_code: int, body: str | None = None) -> bool:
+    """Check if an error is a VALIDATION_REQUIRED auth issue rather than rate limit."""
+    if status_code == 403:
+        if body and "VALIDATION_REQUIRED" in body:
+            return True
+        if body and "permission_denied" in body.lower():
+            return True
+    return False
+
+
+def classify_backend_status(status_code: int, body: str | None = None) -> str:
+    """Classify a backend HTTP status into an error category string.
+    
+    Returns one of: 'auth', 'rate_limit', 'invalid_request', 'transport'.
+    """
+    if status_code == 429:
+        return "rate_limit"
+    if is_validation_required_error(status_code, body):
+        return "auth"
+    if status_code in (401, 403):
+        return "auth"
+    if 400 <= status_code < 500:
+        return "invalid_request"
+    return "transport"

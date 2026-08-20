@@ -16,7 +16,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
-from .accounts import AccountManager
+from .accounts import AccountManager, classify_backend_status, is_validation_required_error
 from .account_state import scoped_cooldown_expiry
 from .byok import (
     PROVIDER_AUTH_MODE_API_KEY,
@@ -1424,8 +1424,12 @@ async def create_response(request: Request):
             if res.status_code in (401, 403, 429):
                 retry_after_seconds = retry_after_seconds_from_response(res)
                 retry_after_source = retry_after_source_from_response(res)
-                cooldown_scope = "family" if res.status_code == 429 else "account"
-                cooldown_category = "rate_limit" if res.status_code == 429 else "auth"
+                # Use explicit VALIDATION_REQUIRED detection to avoid misclassifying
+                # 403 auth failures as rate limits.
+                error_category = classify_backend_status(res.status_code, res.text)
+                is_validation = is_validation_required_error(res.status_code, res.text)
+                cooldown_scope = "family" if error_category == "rate_limit" else "account"
+                cooldown_category = error_category
                 await record_attempt_outcome(
                     response_account.get("email", ""),
                     model,
@@ -1435,6 +1439,7 @@ async def create_response(request: Request):
                         retry_after_seconds=retry_after_seconds,
                     ),
                     status_code=res.status_code,
+                    error_class="validation_required" if is_validation else None,
                 )
                 new_account = await acquire_active_account_for_request(model)
                 rotation_attempted = True
@@ -1477,12 +1482,14 @@ async def create_response(request: Request):
             if res.status_code in (401, 403):
                 retry_after_seconds = retry_after_seconds_from_response(res)
                 retry_after_source = retry_after_source_from_response(res)
+                is_validation = is_validation_required_error(res.status_code, res.text)
+                error_class = "validation_required" if is_validation else "auth_failure"
                 await record_attempt_outcome(
                     response_account.get("email", ""),
                     model,
                     outcome_for_http_status(res.status_code),
                     status_code=res.status_code,
-                    error_class="auth_failure",
+                    error_class=error_class,
                 )
                 await log_request(
                     "failed",
@@ -1493,14 +1500,22 @@ async def create_response(request: Request):
                     http_status=res.status_code,
                     retry_after_source=retry_after_source,
                     rotation_attempted=rotation_attempted,
-                    error_class="auth_failure",
+                    error_class=error_class,
                     error=safe_error_detail(res.text),
                 )
+                if is_validation:
+                    detail_msg = (
+                        f"Google account requires verification (VALIDATION_REQUIRED). "
+                        f"Run 'codex-antigravity login' to re-authenticate. "
+                        f"{safe_error_detail(res.text)}"
+                    )
+                else:
+                    detail_msg = f"Google Authentication failure: {safe_error_detail(res.text)}"
                 raise HTTPException(
                     status_code=res.status_code,
                     detail=google_failure_detail(
                         model,
-                        f"Google Authentication failure: {safe_error_detail(res.text)}",
+                        detail_msg,
                         retry_after_seconds=retry_after_seconds,
                         retry_after_source=retry_after_source,
                         rotation_attempted=rotation_attempted,
@@ -1732,19 +1747,34 @@ async def create_response(request: Request):
                     )
                 except (AttributeError, TypeError):
                     retry_after = None
+                # Detect VALIDATION_REQUIRED for explicit error messaging
+                response_text = ""
+                try:
+                    if exc.response is not None:
+                        response_text = exc.response.text
+                except Exception:
+                    pass
                 outcome = AttemptOutcome(
                     scope=exc.outcome.scope,
                     category=exc.outcome.category,
                     retry_after_seconds=retry_after,
                 )
+                is_validation = is_validation_required_error(exc.status_code, response_text)
+                error_class = "validation_required" if is_validation else outcome.category
                 await record_stream_attempt(
                     stream_account,
                     outcome,
                     status_code=exc.status_code,
-                    error_class=outcome.category,
+                    error_class=error_class,
                 )
                 error_code = outcome.category
-                error_message = f"Google Antigravity returned HTTP {exc.status_code}."
+                if is_validation:
+                    error_message = (
+                        f"Google account requires verification (VALIDATION_REQUIRED). "
+                        f"Run 'codex-antigravity login' to re-authenticate."
+                    )
+                else:
+                    error_message = f"Google Antigravity returned HTTP {exc.status_code}."
             except GoogleStreamPayloadError as exc:
                 outcome = outcome_for_backend_error(exc.code, exc.message)
                 await record_stream_attempt(
