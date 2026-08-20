@@ -25,7 +25,7 @@ Write the following model declarations to `~/.codex-shim/models.json`. This tell
 {
   "models": [
     {
-      "model": "gemini-3.5-flash-high",
+      "model": "gemini-3.7-flash",
       "provider": "generic-chat-completion-api",
       "base_url": "http://127.0.0.1:51122/v1",
       "api_key": "antigravity-key",
@@ -46,7 +46,7 @@ Write the following model declarations to `~/.codex-shim/models.json`. This tell
       "display_name": "Gemini 3.1 Pro (Reasoning)"
     },
     {
-      "model": "claude-3.5-sonnet",
+      "model": "claude-sonnet-4-6",
       "provider": "generic-chat-completion-api",
       "base_url": "http://127.0.0.1:51122/v1",
       "api_key": "antigravity-key",

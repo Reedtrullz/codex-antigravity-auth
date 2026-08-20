@@ -24,7 +24,7 @@ When `"thoughtSignature" in part` triggers, the code emits a `response.reasoning
 **Fix**: Add `import time` at the top of `transform.py`.
 
 ### 4. `codex-shim` model slugs get dash-normalized — `server.py:15-18`
-Our model IDs use dotted notation (`gemini-3.5-flash-high`) but `codex-shim` normalizes to hyphens (`gemini-3-5-flash-high`). If a user switches models via the shim, the slug sent to our gateway won't match `MODEL_MAP`. When using our gateway directly (no shim), this is fine. But it's a documented gotcha.
+Our model IDs use dotted notation (`gemini-3.7-flash`) but `codex-shim` normalizes to hyphens (`gemini-3-5-flash-high`). If a user switches models via the shim, the slug sent to our gateway won't match `MODEL_MAP`. When using our gateway directly (no shim), this is fine. But it's a documented gotcha.
 
 **Fix**: Accept both forms in `models.py:resolve_backend_model` by normalizing hyphens to dots.
 

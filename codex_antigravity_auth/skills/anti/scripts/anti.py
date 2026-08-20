@@ -35,13 +35,15 @@ from anti_lib.runner import presentable_result
 DEFAULT_BASE_URL = "http://127.0.0.1:51122/v1"
 DEFAULT_TOKEN_ENV = "ANTIGRAVITY_GATEWAY_TOKEN"
 MODEL_ALIASES = {
-    "opus": "claude-opus-4-6",
+    "opus": "claude-opus-4-6-thinking",
     "claude-opus": "claude-opus-4-6",
-    "claude-opus-4-6": "claude-opus-4-6",
-    "sonnet": "claude-3.5-sonnet",
-    "claude-sonnet": "claude-3.5-sonnet",
-    "claude-3.5-sonnet": "claude-3.5-sonnet",
-    "claude-3-5-sonnet": "claude-3.5-sonnet",
+    "claude-opus-4-6": "claude-opus-4-6-thinking",
+    "claude-opus-4-6-thinking": "claude-opus-4-6-thinking",
+    "sonnet": "claude-sonnet-4-6",
+    "claude-sonnet": "claude-sonnet-4-6",
+    "claude-sonnet-4-6": "claude-sonnet-4-6",
+    "claude-3.5-sonnet": "claude-sonnet-4-6",
+    "claude-3-5-sonnet": "claude-sonnet-4-6",
     "grok": "xai-oauth:grok-build-0.1",
     "supergrok": "xai-oauth:grok-build-0.1",
     "xai-grok": "xai-oauth:grok-build-0.1",
@@ -57,12 +59,15 @@ MODEL_ALIASES = {
     "glm-5.2": "bluesminds:z-ai/glm-5.2",
     "glm52": "bluesminds:z-ai/glm-5.2",
     # Gemini Antigravity (free, fast, 1M context)
-    "flash-high": "gemini-3.5-flash-high",
+    "flash-3.7": "gemini-3.7-flash",
+    "gemini-3.7-flash": "gemini-3.7-flash",
+    "flash-high": "gemini-3.7-flash",
     "flash": "gemini-3.5-flash-medium",
     "flash-medium": "gemini-3.5-flash-medium",
     "gemini-flash": "gemini-3.5-flash-medium",
-    "gemini-pro": "gemini-3.1-pro-high",
-    "gemini-3.1-pro": "gemini-3.1-pro-high",
+    "gemini-pro": "gemini-3.1-pro",
+    "gemini-3.1-pro": "gemini-3.1-pro",
+    "gpt-oss-120b": "gpt-oss-120b-medium",
     # Gemini 3.6 Flash (newer, more efficient)
     "flash-3.6": "gemini-3.6-flash-high",
     "flash-3.6-high": "gemini-3.6-flash-high",
@@ -86,14 +91,20 @@ MODEL_ALIASES = {
 # Model capabilities: what each model supports
 MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
     # Gemini Antigravity (Google backend)
+    "gemini-3.7-flash": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
+    "gemini-3.1-flash-image": {"images": True, "video": False, "audio": False, "tools": False, "streaming": True, "json_mode": False},
     "gemini-3.5-flash-high": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
     "gemini-3.5-flash-medium": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
     "gemini-3.6-flash-high": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
     "gemini-3.6-flash-medium": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
+    "gemini-3.1-pro": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
     "gemini-3.1-pro-high": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
     # Claude Antigravity (Google backend)
+    "claude-sonnet-4-6": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "claude-opus-4-6-thinking": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "claude-3.5-sonnet": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "claude-opus-4-6": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "gpt-oss-120b-medium": {"images": False, "video": False, "audio": False, "tools": False, "streaming": True, "json_mode": True},
     # OpenRouter free tier (BYOK)
     "openrouter:nvidia/nemotron-3-super-120b-a12b:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
@@ -121,11 +132,17 @@ MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
 # quota = Google Antigravity quota (shared across accounts)
 # paid = metered billing (not currently in rotation)
 MODEL_COST_TIER: dict[str, str] = {
+    "gemini-3.7-flash": "quota",
+    "gemini-3.1-flash-image": "quota",
     "gemini-3.5-flash-high": "quota",
     "gemini-3.5-flash-medium": "quota",
     "gemini-3.6-flash-high": "quota",
     "gemini-3.6-flash-medium": "quota",
+    "gemini-3.1-pro": "quota",
     "gemini-3.1-pro-high": "quota",
+    "gpt-oss-120b-medium": "quota",
+    "claude-sonnet-4-6": "quota",
+    "claude-opus-4-6-thinking": "quota",
     "claude-3.5-sonnet": "quota",
     "claude-opus-4-6": "quota",
     "openrouter:nvidia/nemotron-3-super-120b-a12b:free": "free",
@@ -146,9 +163,15 @@ MODEL_COST_TIER: dict[str, str] = {
 
 # Relative quality ranking for cost-aware selection (higher = better for code tasks)
 MODEL_QUALITY_RANK: dict[str, int] = {
+    "claude-opus-4-6-thinking": 100,
     "claude-opus-4-6": 100,
+    "gemini-3.1-pro": 90,
     "gemini-3.1-pro-high": 90,
+    "claude-sonnet-4-6": 85,
     "claude-3.5-sonnet": 85,
+    "gemini-3.7-flash": 85,
+    "gemini-3.1-flash-image": 50,
+    "gpt-oss-120b-medium": 65,
     "gemini-3.6-flash-high": 82,
     "gemini-3.6-flash-medium": 70,
     "gemini-3.5-flash-high": 80,
@@ -169,11 +192,11 @@ MODEL_QUALITY_RANK: dict[str, int] = {
     "ollama:qwen3:8b": 40,
 }
 
-DEFAULT_REVIEW_MODEL = "claude-opus-4-6"
-DEFAULT_CONSULT_MODEL = "claude-3.5-sonnet"
-DEFAULT_PLAN_MODEL = "claude-opus-4-6"
-DEFAULT_PANEL_MODELS = ["claude-3.5-sonnet", "claude-opus-4-6"]
-DEFAULT_PANEL_JUDGE_MODEL = "claude-opus-4-6"
+DEFAULT_REVIEW_MODEL = "claude-opus-4-6-thinking"
+DEFAULT_CONSULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_PLAN_MODEL = "claude-opus-4-6-thinking"
+DEFAULT_PANEL_MODELS = ["claude-sonnet-4-6", "claude-opus-4-6-thinking"]
+DEFAULT_PANEL_JUDGE_MODEL = "claude-opus-4-6-thinking"
 COLLAB_PROFILES = {"none", "claude-grok"}
 CLAUDE_GROK_PANEL_MODELS = ["sonnet", "opus", "grok"]
 MAX_FILE_BYTES = 180_000
@@ -4021,7 +4044,7 @@ def print_panel_result(
 
 def panel_review_summary_model(panel_models: list[str]) -> str:
     for model in panel_models:
-        if model == "claude-3.5-sonnet" or "sonnet" in model:
+        if model in {"claude-3.5-sonnet", "claude-sonnet-4-6"} or "sonnet" in model:
             return model
     return panel_models[0]
 

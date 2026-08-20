@@ -87,7 +87,7 @@ class AntiHelperTests(unittest.TestCase):
     def test_smoke_explicit_model_does_not_require_default_models(self) -> None:
         anti = load_anti()
         anti.find_cli = lambda: (["codex-antigravity"], None)
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
         anti.fetch_gateway_package_version = lambda base_url, *, timeout, token_env: "1.6.3"
         output = io.StringIO()
 
@@ -96,13 +96,13 @@ class AntiHelperTests(unittest.TestCase):
 
         self.assertEqual(rc, 0, output.getvalue())
         self.assertIn("Gateway package version: 1.6.3", output.getvalue())
-        self.assertIn("claude-3.5-sonnet", output.getvalue())
-        self.assertNotIn("claude-opus-4-6", output.getvalue())
+        self.assertIn("claude-sonnet-4-6", output.getvalue())
+        self.assertNotIn("claude-opus-4-6-thinking", output.getvalue())
 
     def test_smoke_sidecar_mode_does_not_fail_on_doctor_config_mismatch(self) -> None:
         anti = load_anti()
         anti.find_cli = lambda: (["codex-antigravity"], None)
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
         anti.fetch_gateway_package_version = lambda base_url, *, timeout, token_env: "1.7.0"
         anti.run_cli = lambda args: self.fail("doctor should not run in sidecar mode")
         output = io.StringIO()
@@ -116,7 +116,7 @@ class AntiHelperTests(unittest.TestCase):
     def test_smoke_full_mode_fails_when_doctor_fails(self) -> None:
         anti = load_anti()
         anti.find_cli = lambda: (["codex-antigravity"], None)
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
         anti.fetch_gateway_package_version = lambda base_url, *, timeout, token_env: "1.7.0"
         anti.run_cli = lambda args: 1
         output = io.StringIO()
@@ -130,7 +130,7 @@ class AntiHelperTests(unittest.TestCase):
     def test_smoke_json_full_mode_suppresses_doctor_stdout(self) -> None:
         anti = load_anti()
         anti.find_cli = lambda: (["codex-antigravity"], None)
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
         anti.fetch_gateway_package_version = lambda base_url, *, timeout, token_env: "1.6.3"
         anti.run_cli = lambda args: self.fail("json smoke should use quiet doctor")
         anti.run_cli_quiet = lambda args: 0
@@ -183,7 +183,7 @@ class AntiHelperTests(unittest.TestCase):
     def test_smoke_warns_on_health_failure_without_overriding_models_readiness(self) -> None:
         anti = load_anti()
         anti.find_cli = lambda: (["codex-antigravity"], None)
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
 
         def fail_health(base_url, *, timeout, token_env):
             raise anti.AntiError("/health returned HTTP 503")
@@ -416,7 +416,7 @@ class AntiHelperTests(unittest.TestCase):
         text, caveats, metadata = anti.run_chunked_review(
             args=args,
             context=context,
-            model="claude-opus-4-6",
+            model="claude-opus-4-6-thinking",
             base_metadata=base_metadata,
             max_prompt_chars=30000,
         )
@@ -482,7 +482,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_post_response_retries_transient_backend_errors(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-opus-4-6-thinking"}
         calls = {"count": 0}
 
         def fake_request_json(method, url, *, payload=None, timeout=10.0, token_env=anti.DEFAULT_TOKEN_ENV):
@@ -495,7 +495,7 @@ class AntiHelperTests(unittest.TestCase):
 
         text = anti.post_response(
             base_url="http://127.0.0.1:51122/v1",
-            model="claude-opus-4-6",
+            model="claude-opus-4-6-thinking",
             prompt="hello",
             max_output_tokens=10,
             timeout=1,
@@ -888,11 +888,11 @@ class AntiHelperTests(unittest.TestCase):
         anti.fetch_model_ids = fail_gateway_call
         anti.request_json = fail_gateway_call
         cases = [
-            (None, ["claude-3.5-sonnet", "claude-opus-4-6", "xai-oauth:grok-build-0.1"]),
-            (["sonnet", "grok"], ["claude-3.5-sonnet", "xai-oauth:grok-build-0.1"]),
+            (None, ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "xai-oauth:grok-build-0.1"]),
+            (["sonnet", "grok"], ["claude-sonnet-4-6", "xai-oauth:grok-build-0.1"]),
             (
                 ["sonnet", "opus", "grok-bluesminds"],
-                ["claude-3.5-sonnet", "claude-opus-4-6", "bluesminds:grok-4.5"],
+                ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "bluesminds:grok-4.5"],
             ),
         ]
 
@@ -919,7 +919,7 @@ class AntiHelperTests(unittest.TestCase):
                 self.assertEqual(rc, 0, stderr.getvalue())
                 parsed = json.loads(stdout.getvalue())
                 self.assertEqual(parsed["metadata"]["panel_models"], expected_models)
-                self.assertEqual(parsed["metadata"]["judge_model"], "claude-opus-4-6")
+                self.assertEqual(parsed["metadata"]["judge_model"], "claude-opus-4-6-thinking")
 
     def test_workflow_claude_grok_rejects_single_family_reviewer_sets(self) -> None:
         anti = load_anti()
@@ -985,13 +985,13 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(rc, 0, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["panel_models"], ["bluesminds:grok-4.5"])
-        self.assertEqual(parsed["metadata"]["judge_model"], "claude-opus-4-6")
+        self.assertEqual(parsed["metadata"]["judge_model"], "claude-opus-4-6-thinking")
 
     def test_claude_grok_reviewer_family_classifier_is_narrow(self) -> None:
         anti = load_anti()
         cases = {
-            "claude-3.5-sonnet": "claude",
-            "claude-opus-4-6": "claude",
+            "claude-sonnet-4-6": "claude",
+            "claude-opus-4-6-thinking": "claude",
             "xai-oauth:grok-build-0.1": "grok",
             "bluesminds:grok-4.5": "grok",
             "openrouter:grok-4": None,
@@ -1026,7 +1026,7 @@ class AntiHelperTests(unittest.TestCase):
 
         def fake_post_response(**kwargs):
             calls.append(kwargs["model"])
-            if kwargs["model"] == "claude-opus-4-6":
+            if kwargs["model"] == "claude-opus-4-6-thinking":
                 raise anti.AntiError("HTTP 502: backend failed retryable=true")
             return "fallback-ok"
 
@@ -1050,9 +1050,9 @@ class AntiHelperTests(unittest.TestCase):
             )
 
         self.assertEqual(rc, 0, output.getvalue())
-        self.assertEqual(calls, ["claude-opus-4-6", "claude-3.5-sonnet"])
+        self.assertEqual(calls, ["claude-opus-4-6-thinking", "claude-sonnet-4-6"])
         parsed = json.loads(output.getvalue())
-        self.assertEqual(parsed["model"], "claude-3.5-sonnet")
+        self.assertEqual(parsed["model"], "claude-sonnet-4-6")
         self.assertTrue(parsed["metadata"]["fallback_used"])
 
     def test_generation_fallback_uses_sonnet_on_non_json_http_502(self) -> None:
@@ -1074,24 +1074,24 @@ class AntiHelperTests(unittest.TestCase):
 
         def fake_request_json(method, url, *, payload=None, timeout=10.0, token_env=anti.DEFAULT_TOKEN_ENV):
             calls.append(payload["model"])
-            if payload["model"] == "claude-opus-4-6":
+            if payload["model"] == "claude-opus-4-6-thinking":
                 raise anti.AntiError("request to http://127.0.0.1:51122/v1/responses returned HTTP 502 non-JSON response")
             return 200, {"output_text": "fallback-ok"}
 
         anti.request_json = fake_request_json
         text, model_used, metadata = anti.generate_with_fallback(
             args,
-            model="claude-opus-4-6",
+            model="claude-opus-4-6-thinking",
             prompt="hello",
             max_output_tokens=16,
             purpose="consult",
-            model_ids={"claude-opus-4-6", "claude-3.5-sonnet"},
+            model_ids={"claude-opus-4-6-thinking", "claude-sonnet-4-6"},
         )
 
         self.assertEqual(text, "fallback-ok")
-        self.assertEqual(model_used, "claude-3.5-sonnet")
+        self.assertEqual(model_used, "claude-sonnet-4-6")
         self.assertTrue(metadata["fallback_used"])
-        self.assertEqual(calls, ["claude-opus-4-6", "claude-opus-4-6", "claude-3.5-sonnet"])
+        self.assertEqual(calls, ["claude-opus-4-6-thinking", "claude-opus-4-6-thinking", "claude-sonnet-4-6"])
 
     def test_retryable_generation_failure_reports_wedged_gateway_probe(self) -> None:
         anti = load_anti()
@@ -1101,7 +1101,7 @@ class AntiHelperTests(unittest.TestCase):
         def fake_post_response(**kwargs):
             raise anti.AntiError(
                 "/v1/responses returned HTTP 502: backend failed after 1 attempt(s). "
-                "Diagnostics: model=claude-opus-4-6, retryable=true"
+                "Diagnostics: model=claude-opus-4-6-thinking, retryable=true"
             )
 
         def fake_fetch_model_ids(base_url: str, *, timeout: float, token_env: str):
@@ -1114,7 +1114,7 @@ class AntiHelperTests(unittest.TestCase):
         with self.assertRaises(anti.AntiError) as raised:
             anti.generate_with_fallback(
                 args,
-                model="claude-opus-4-6",
+                model="claude-opus-4-6-thinking",
                 prompt="hello",
                 max_output_tokens=16,
                 purpose="plan",
@@ -1134,16 +1134,16 @@ class AntiHelperTests(unittest.TestCase):
         def fake_post_response(**kwargs):
             raise anti.AntiError(
                 "/v1/responses returned HTTP 502: backend failed after 1 attempt(s). "
-                "Diagnostics: model=claude-opus-4-6, retryable=true"
+                "Diagnostics: model=claude-opus-4-6-thinking, retryable=true"
             )
 
         anti.post_response = fake_post_response
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-opus-4-6", "claude-3.5-sonnet"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-opus-4-6-thinking", "claude-sonnet-4-6"}
 
         with self.assertRaises(anti.AntiError) as raised:
             anti.generate_with_fallback(
                 args,
-                model="claude-opus-4-6",
+                model="claude-opus-4-6-thinking",
                 prompt="hello",
                 max_output_tokens=16,
                 purpose="plan",
@@ -1168,15 +1168,15 @@ class AntiHelperTests(unittest.TestCase):
         anti.request_json = fake_request_json
         text, model_used, metadata = anti.generate_with_fallback(
             args,
-            model="claude-3.5-sonnet",
+            model="claude-sonnet-4-6",
             prompt="hello",
             max_output_tokens=16,
             purpose="consult",
-            model_ids={"claude-3.5-sonnet"},
+            model_ids={"claude-sonnet-4-6"},
         )
 
         self.assertEqual(text, "ok")
-        self.assertEqual(model_used, "claude-3.5-sonnet")
+        self.assertEqual(model_used, "claude-sonnet-4-6")
         self.assertEqual(payloads[0]["metadata"], {"run_id": "anti-run_123"})
         self.assertEqual(metadata["usage"], {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3})
 
@@ -1192,15 +1192,15 @@ class AntiHelperTests(unittest.TestCase):
         anti.request_json = fake_request_json
         text, model_used, _metadata = anti.generate_with_fallback(
             args,
-            model="claude-opus-4-6",
+            model="claude-opus-4-6-thinking",
             prompt="hello",
             max_output_tokens=16,
             purpose="plan",
-            model_ids={"claude-opus-4-6"},
+            model_ids={"claude-opus-4-6-thinking"},
         )
 
         self.assertEqual(text, "ok")
-        self.assertEqual(model_used, "claude-opus-4-6")
+        self.assertEqual(model_used, "claude-opus-4-6-thinking")
         self.assertEqual(payloads[0]["metadata"], {"antigravity_backend_timeout_seconds": 230.0})
 
     def test_base_url_rejects_userinfo_without_echoing_secret(self) -> None:
@@ -1636,7 +1636,7 @@ class AntiHelperTests(unittest.TestCase):
         anti = load_anti()
         parser = anti.build_parser()
         args = parser.parse_args(["plan", "--model", "opus", "--max-prompt-chars", "0", "--prompt", "x"])
-        budget = anti.prompt_budget_for_model(args, "claude-opus-4-6")
+        budget = anti.prompt_budget_for_model(args, "claude-opus-4-6-thinking")
 
         self.assertEqual(budget, anti.CLAUDE_SAFE_PROMPT_CHARS)
         self.assertFalse(hasattr(args, "_effective_prompt_budget"))
@@ -1714,8 +1714,8 @@ class AntiHelperTests(unittest.TestCase):
         parser = anti.build_parser()
         args = parser.parse_args(["panel", "--mode", "ask", "--prompt", "x"])
 
-        self.assertEqual(anti.resolve_panel_models(args.model), ["claude-3.5-sonnet", "claude-opus-4-6"])
-        self.assertEqual(anti.resolve_model(args.judge, default=anti.DEFAULT_PANEL_JUDGE_MODEL), "claude-opus-4-6")
+        self.assertEqual(anti.resolve_panel_models(args.model), ["claude-sonnet-4-6", "claude-opus-4-6-thinking"])
+        self.assertEqual(anti.resolve_model(args.judge, default=anti.DEFAULT_PANEL_JUDGE_MODEL), "claude-opus-4-6-thinking")
 
     def test_provider_aliases_resolve_deterministically_without_changing_oauth_defaults(self) -> None:
         anti = load_anti()
@@ -1750,7 +1750,7 @@ class AntiHelperTests(unittest.TestCase):
 
         self.assertEqual(default_models[-1], "xai-oauth:grok-build-0.1")
         self.assertEqual(explicit_models[-1], "bluesminds:grok-4.5")
-        self.assertEqual(anti.DEFAULT_PANEL_JUDGE_MODEL, "claude-opus-4-6")
+        self.assertEqual(anti.DEFAULT_PANEL_JUDGE_MODEL, "claude-opus-4-6-thinking")
 
     def test_claude_grok_collab_defaults_models_and_prompt_contract(self) -> None:
         anti = load_anti()
@@ -1764,7 +1764,7 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(parsed["metadata"]["collaboration_profile"], "claude-grok")
         self.assertEqual(
             parsed["metadata"]["panel_models"],
-            ["claude-3.5-sonnet", "claude-opus-4-6", "xai-oauth:grok-build-0.1"],
+            ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "xai-oauth:grok-build-0.1"],
         )
         self.assertIn("Claude + Grok collaboration", parsed["prompt"])
         self.assertIn("Claude-family lanes", parsed["prompt"])
@@ -1773,8 +1773,8 @@ class AntiHelperTests(unittest.TestCase):
     def test_claude_grok_judge_prompt_requires_cross_lane_synthesis(self) -> None:
         anti = load_anti()
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
-            "claude-3.5-sonnet",
-            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
             "xai-oauth:grok-build-0.1",
         }
         judge_prompts: list[str] = []
@@ -2006,7 +2006,7 @@ class AntiHelperTests(unittest.TestCase):
         parsed = json.loads(output.getvalue())
         disclosure = next(item for item in parsed["caveats"] if "BYOK disclosure" in item)
         self.assertIn("deepseek:deepseek-v4-flash", disclosure)
-        self.assertNotIn("claude-opus-4-6", disclosure)
+        self.assertNotIn("claude-opus-4-6-thinking", disclosure)
 
     def test_chunked_review_preserves_bluesminds_disclosure(self) -> None:
         anti = load_anti()
@@ -2089,7 +2089,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_successful_two_model_run_calls_judge_once(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
         judge_prompts: list[str] = []
 
         def fake_post_response(**kwargs):
@@ -2115,8 +2115,8 @@ class AntiHelperTests(unittest.TestCase):
 
         self.assertEqual(rc, 0, output.getvalue())
         self.assertEqual(len(judge_prompts), 1)
-        self.assertIn("panel-output-claude-3.5-sonnet", judge_prompts[0])
-        self.assertIn("panel-output-claude-opus-4-6", judge_prompts[0])
+        self.assertIn("panel-output-claude-sonnet-4-6", judge_prompts[0])
+        self.assertIn("panel-output-claude-opus-4-6-thinking", judge_prompts[0])
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["findings_status"], "parsed")
         self.assertEqual(parsed["metadata"]["judge_retried"], False)
@@ -2124,7 +2124,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_usage_latency_and_findings_are_reported(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
         calls: list[dict] = []
         finding_payload = {
             "summary": "Disagreements first.",
@@ -2134,7 +2134,7 @@ class AntiHelperTests(unittest.TestCase):
                     "id": "F1",
                     "claim": "A branch needs local verification.",
                     "severity": "medium",
-                    "lanes": ["claude-3.5-sonnet", "claude-opus-4-6"],
+                    "lanes": ["claude-sonnet-4-6", "claude-opus-4-6-thinking"],
                     "verify": "Run python3 -m pytest -q.",
                 }
             ],
@@ -2175,7 +2175,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_output_findings_emits_sanitized_json_contract(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
         secret = "sk-testsecret1234567890"
 
         def fake_post_response(**kwargs):
@@ -2215,7 +2215,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_malformed_findings_falls_back_to_markdown_with_caveat(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
         anti.post_response = lambda **kwargs: "judge-output" if "You are synthesizing" in kwargs["prompt"] else "lane"
         output = io.StringIO()
 
@@ -2230,7 +2230,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_truncated_lane_is_retried_and_recorded(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
         judge_prompts: list[str] = []
 
         def fake_post_response(**kwargs):
@@ -2246,7 +2246,7 @@ class AntiHelperTests(unittest.TestCase):
                         "caveats": [],
                     }
                 )
-            if kwargs["model"] == "claude-3.5-sonnet":
+            if kwargs["model"] == "claude-sonnet-4-6":
                 cap = kwargs["max_output_tokens"]
                 return anti.ResponseText(
                     f"partial-{cap}",
@@ -2275,14 +2275,14 @@ class AntiHelperTests(unittest.TestCase):
         # Truncated lanes are usable and fed to the judge, so they belong in
         # truncated_models, not failed_models (failed = non-usable lanes only).
         self.assertEqual(parsed["metadata"]["failed_models"], [])
-        self.assertEqual(parsed["metadata"]["truncated_models"], ["claude-3.5-sonnet"])
-        self.assertEqual(parsed["metadata"]["retried_models"], ["claude-3.5-sonnet"])
+        self.assertEqual(parsed["metadata"]["truncated_models"], ["claude-sonnet-4-6"])
+        self.assertEqual(parsed["metadata"]["retried_models"], ["claude-sonnet-4-6"])
         self.assertTrue(any("truncated at the token cap" in caveat for caveat in parsed["caveats"]))
         self.assertIn("lane output truncated at the token cap", judge_prompts[0])
 
     def test_panel_non_answer_lane_retries_with_directive_and_recovers(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
         judge_prompts: list[str] = []
 
         def fake_post_response(**kwargs):
@@ -2298,7 +2298,7 @@ class AntiHelperTests(unittest.TestCase):
                         "caveats": [],
                     }
                 )
-            if kwargs["model"] == "claude-opus-4-6" and "Produce the requested output directly now" not in kwargs["prompt"]:
+            if kwargs["model"] == "claude-opus-4-6-thinking" and "Produce the requested output directly now" not in kwargs["prompt"]:
                 return "What would you like me to do with it?"
             return f"output-{kwargs['model']}"
 
@@ -2311,16 +2311,16 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(rc, 0, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual([item["status"] for item in parsed["panel_results"]], ["success", "success"])
-        self.assertEqual(parsed["metadata"]["retried_models"], ["claude-opus-4-6"])
+        self.assertEqual(parsed["metadata"]["retried_models"], ["claude-opus-4-6-thinking"])
         self.assertEqual(parsed["metadata"]["failed_models"], [])
-        self.assertIn("output-claude-opus-4-6", judge_prompts[0])
+        self.assertIn("output-claude-opus-4-6-thinking", judge_prompts[0])
 
     def test_panel_non_answer_lane_counts_as_failure_below_min_successes(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
 
         def fake_post_response(**kwargs):
-            if kwargs["model"] == "claude-opus-4-6" and "You are synthesizing" not in kwargs["prompt"]:
+            if kwargs["model"] == "claude-opus-4-6-thinking" and "You are synthesizing" not in kwargs["prompt"]:
                 return "What would you like me to do with it?"
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
                 return "judge-output"
@@ -2356,7 +2356,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_long_non_answer_lane_is_excluded_and_recorded(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
         judge_prompts: list[str] = []
         non_answer = (
             "I've read the full bounded review summary. It covers 13 confirmed defects and a cross-chunk checklist.\n\n"
@@ -2379,7 +2379,7 @@ class AntiHelperTests(unittest.TestCase):
                         "caveats": [],
                     }
                 )
-            if kwargs["model"] == "claude-opus-4-6":
+            if kwargs["model"] == "claude-opus-4-6-thinking":
                 return non_answer
             return "sonnet output"
 
@@ -2396,8 +2396,8 @@ class AntiHelperTests(unittest.TestCase):
         opus = parsed["panel_results"][1]
         self.assertEqual(opus["status"], "non_answer")
         self.assertEqual(len(opus["attempts"]), 2)
-        self.assertEqual(parsed["metadata"]["failed_models"], ["claude-opus-4-6"])
-        self.assertEqual(parsed["metadata"]["retried_models"], ["claude-opus-4-6"])
+        self.assertEqual(parsed["metadata"]["failed_models"], ["claude-opus-4-6-thinking"])
+        self.assertEqual(parsed["metadata"]["retried_models"], ["claude-opus-4-6-thinking"])
         self.assertNotIn("Which direction", judge_prompts[0])
         self.assertIn("asked for direction", judge_prompts[0])
         self.assertTrue(any("asked for direction" in caveat for caveat in parsed["caveats"]))
@@ -2445,7 +2445,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_judge_truncated_json_is_repaired_without_retry(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
         calls: list[str] = []
         truncated = (
             '{"summary": "partial", "disagreements": [], "findings": ['
@@ -2477,7 +2477,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_judge_malformed_json_retries_once_with_strict_instruction(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
         judge_calls: list[str] = []
 
         def fake_post_response(**kwargs):
@@ -2493,7 +2493,7 @@ class AntiHelperTests(unittest.TestCase):
                                     "id": "F1",
                                     "claim": "fixed after retry",
                                     "severity": "high",
-                                    "lanes": ["claude-opus-4-6"],
+                                    "lanes": ["claude-opus-4-6-thinking"],
                                     "verify": "run the test",
                                 }
                             ],
@@ -2521,7 +2521,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_judge_fallback_never_embeds_broken_json_in_summary(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
 
         def fake_post_response(**kwargs):
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
@@ -2564,7 +2564,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_output_findings_json_keeps_stable_top_level_schema(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
 
         def fake_post_response(**kwargs):
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
@@ -2606,10 +2606,10 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_errors_are_redacted_in_json_output(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
 
         def fake_post_response(**kwargs):
-            if kwargs["model"] == "claude-3.5-sonnet":
+            if kwargs["model"] == "claude-sonnet-4-6":
                 raise anti.AntiError('HTTP 502: {"client_secret":"CLIENTSECRET1234567890"}')
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
                 return "judge-output"
@@ -2629,12 +2629,12 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_model_lane_uses_configured_fallback(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
         calls: list[str] = []
 
         def fake_post_response(**kwargs):
             calls.append(kwargs["model"])
-            if kwargs["model"] == "claude-opus-4-6" and "You are synthesizing" not in kwargs["prompt"]:
+            if kwargs["model"] == "claude-opus-4-6-thinking" and "You are synthesizing" not in kwargs["prompt"]:
                 raise anti.AntiError("HTTP 502: backend failed retryable=true")
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
                 return "judge-output"
@@ -2664,16 +2664,16 @@ class AntiHelperTests(unittest.TestCase):
             )
 
         self.assertEqual(rc, 0, output.getvalue())
-        self.assertEqual(calls[:2], ["claude-opus-4-6", "claude-3.5-sonnet"])
+        self.assertEqual(calls[:2], ["claude-opus-4-6-thinking", "claude-sonnet-4-6"])
         parsed = json.loads(output.getvalue())
-        self.assertEqual(parsed["panel_results"][0]["model_used"], "claude-3.5-sonnet")
+        self.assertEqual(parsed["panel_results"][0]["model_used"], "claude-sonnet-4-6")
         self.assertTrue(parsed["panel_results"][0]["generation"]["fallback_used"])
 
     def test_panel_fallback_keeps_identity_failures_and_marks_collapsed_panel(self) -> None:
         """A fallback result must not masquerade as the requested lane."""
         anti = load_anti()
         fallback = "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
-        requested = ["claude-opus-4-6", "gemini-3.5-flash-high", fallback]
+        requested = ["claude-opus-4-6-thinking", "gemini-3.7-flash", fallback]
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: set(requested)
         judge_prompts: list[str] = []
 
@@ -2763,7 +2763,7 @@ class AntiHelperTests(unittest.TestCase):
         """A single fallback model cannot satisfy a two-model panel minimum."""
         anti = load_anti()
         fallback = "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
-        requested = {"claude-opus-4-6", "gemini-3.5-flash-high", fallback}
+        requested = {"claude-opus-4-6-thinking", "gemini-3.5-flash-high", fallback}
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: set(requested)
         judge_called = False
 
@@ -2772,7 +2772,7 @@ class AntiHelperTests(unittest.TestCase):
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
                 judge_called = True
                 return "judge-output"
-            if kwargs["model"] in {"claude-opus-4-6", "gemini-3.5-flash-high"}:
+            if kwargs["model"] in {"claude-opus-4-6-thinking", "gemini-3.5-flash-high"}:
                 raise anti.AntiError("HTTP 502: requested backend unavailable retryable=true")
             return "nemotron-output"
 
@@ -2817,10 +2817,10 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_failed_fallback_keeps_both_errors_and_identity(self) -> None:
         anti = load_anti()
-        fallback = "gemini-3.5-flash-high"
+        fallback = "gemini-3.7-flash"
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
-            "claude-opus-4-6",
-            "claude-3.5-sonnet",
+            "claude-opus-4-6-thinking",
+            "claude-sonnet-4-6",
             fallback,
         }
         judge_prompts: list[str] = []
@@ -2839,7 +2839,7 @@ class AntiHelperTests(unittest.TestCase):
                         "caveats": [],
                     }
                 )
-            if kwargs["model"] == "claude-opus-4-6":
+            if kwargs["model"] == "claude-opus-4-6-thinking":
                 raise anti.AntiError("HTTP 502: opus unavailable retryable=true")
             if kwargs["model"] == fallback:
                 raise anti.AntiError("HTTP 503: flash unavailable retryable=true")
@@ -2875,9 +2875,9 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(rc, 0, output.getvalue())
         parsed = json.loads(output.getvalue())
         failed = parsed["panel_results"][0]
-        self.assertEqual(failed["requestedModel"], "claude-opus-4-6")
+        self.assertEqual(failed["requestedModel"], "claude-opus-4-6-thinking")
         self.assertIsNone(failed["actualModel"])
-        self.assertEqual(failed["fallbackChain"], ["claude-opus-4-6", fallback])
+        self.assertEqual(failed["fallbackChain"], ["claude-opus-4-6-thinking", fallback])
         self.assertIn("opus unavailable", failed["primaryError"])
         self.assertIn("flash unavailable", failed["fallbackError"])
         self.assertEqual(failed["modelIdentity"]["status"], "failed")
@@ -2887,15 +2887,15 @@ class AntiHelperTests(unittest.TestCase):
         anti = load_anti()
         fallback = "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
-            "claude-opus-4-6",
-            "claude-3.5-sonnet",
+            "claude-opus-4-6-thinking",
+            "claude-sonnet-4-6",
             fallback,
         }
 
         def fake_post_response(**kwargs):
             prompt = kwargs["prompt"]
             if "You are synthesizing an Antigravity multi-model advisory panel" in prompt:
-                if kwargs["model"] == "claude-opus-4-6":
+                if kwargs["model"] == "claude-opus-4-6-thinking":
                     raise anti.AntiError("HTTP 502: judge unavailable retryable=true")
                 return json.dumps(
                     {
@@ -2936,20 +2936,20 @@ class AntiHelperTests(unittest.TestCase):
 
         self.assertEqual(rc, 0, output.getvalue())
         parsed = json.loads(output.getvalue())
-        self.assertEqual(parsed["judge_model"], "claude-opus-4-6")
+        self.assertEqual(parsed["judge_model"], "claude-opus-4-6-thinking")
         metadata = parsed["metadata"]
-        self.assertEqual(metadata["judge_requested_model"], "claude-opus-4-6")
+        self.assertEqual(metadata["judge_requested_model"], "claude-opus-4-6-thinking")
         self.assertEqual(metadata["judge_actual_model"], fallback)
-        self.assertEqual(metadata["judge_fallback_chain"], ["claude-opus-4-6", fallback])
+        self.assertEqual(metadata["judge_fallback_chain"], ["claude-opus-4-6-thinking", fallback])
         self.assertIn("judge unavailable", metadata["judge_primary_error"])
         self.assertTrue(any("Judge fallback" in caveat for caveat in parsed["caveats"]))
 
     def test_panel_model_failure_is_metadata_when_min_successes_met(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
 
         def fake_post_response(**kwargs):
-            if kwargs["model"] == "claude-3.5-sonnet":
+            if kwargs["model"] == "claude-sonnet-4-6":
                 raise anti.AntiError("temporary backend failure")
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
                 return "judge-output"
@@ -2969,10 +2969,10 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_fails_when_successes_below_minimum(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
 
         def fake_post_response(**kwargs):
-            if kwargs["model"] == "claude-3.5-sonnet":
+            if kwargs["model"] == "claude-sonnet-4-6":
                 raise anti.AntiError("temporary backend failure")
             return "opus-panel-output"
 
@@ -2987,7 +2987,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_missing_model_fails_before_generation(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
         anti.post_response = lambda **kwargs: self.fail("panel should validate models before generation")
         output = io.StringIO()
 
@@ -2999,10 +2999,10 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_missing_model_becomes_failed_entry_when_min_successes_met(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
 
         def fake_post_response(**kwargs):
-            self.assertEqual(kwargs["model"], "claude-3.5-sonnet")
+            self.assertEqual(kwargs["model"], "claude-sonnet-4-6")
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
                 return "judge-output"
             return "sonnet-panel-output"
@@ -3040,12 +3040,12 @@ class AntiHelperTests(unittest.TestCase):
     def test_provider_alias_missing_from_catalog_is_explicit_failed_lane(self) -> None:
         anti = load_anti()
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
-            "claude-3.5-sonnet",
+            "claude-sonnet-4-6",
             "deepseek:deepseek-v4-pro",
         }
 
         def fake_post_response(**kwargs):
-            self.assertIn(kwargs["model"], {"claude-3.5-sonnet", "deepseek:deepseek-v4-pro"})
+            self.assertIn(kwargs["model"], {"claude-sonnet-4-6", "deepseek:deepseek-v4-pro"})
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
                 return "judge-output"
             return "deepseek-panel-output"
@@ -3108,7 +3108,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_missing_judge_model_still_fails_before_generation(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
         anti.post_response = lambda **kwargs: self.fail("panel should validate the judge before generation")
         output = io.StringIO()
 
@@ -3120,10 +3120,10 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_below_min_successes_writes_single_failed_record_with_partial_results(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
 
         def fake_post_response(**kwargs):
-            if kwargs["model"] == "claude-3.5-sonnet":
+            if kwargs["model"] == "claude-sonnet-4-6":
                 raise anti.AntiError("temporary backend failure")
             return "opus-panel-output"
 
@@ -3144,15 +3144,15 @@ class AntiHelperTests(unittest.TestCase):
             panel_results = record["metadata"]["panel_results"]
             self.assertEqual(len(panel_results), 2)
             statuses = {item["model"]: item["status"] for item in panel_results}
-            self.assertEqual(statuses["claude-3.5-sonnet"], "error")
-            self.assertEqual(statuses["claude-opus-4-6"], "success")
+            self.assertEqual(statuses["claude-sonnet-4-6"], "error")
+            self.assertEqual(statuses["claude-opus-4-6-thinking"], "success")
             success_entry = next(item for item in panel_results if item["status"] == "success")
             self.assertNotIn("output_text", success_entry)
             self.assertIn("opus-panel-output", success_entry["output_preview"])
 
     def test_panel_synthesis_prompt_is_bounded(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
         judge_prompt_lengths: list[int] = []
 
         def fake_post_response(**kwargs):
@@ -3186,7 +3186,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_large_review_summarizes_before_fanout(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
         panel_prompts: list[str] = []
 
         def fake_post_response(**kwargs):
@@ -3243,7 +3243,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_default_claude_panel_review_summarizes_before_large_fanout(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-3.5-sonnet", "claude-opus-4-6"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
         panel_prompts: list[str] = []
 
         def fake_post_response(**kwargs):
@@ -3722,7 +3722,7 @@ class BugfixRegressionTests(unittest.TestCase):
 
     def test_unadvertised_model_error_suggests_closest_ids(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-opus-4-6", "gemini-3.5-flash-high"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-opus-4-6-thinking", "gemini-3.5-flash-high"}
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             rc = anti.main(["consult", "--prompt", "x", "--model", "deepseek-v4-pro"])
@@ -3739,7 +3739,7 @@ class BugfixRegressionTests(unittest.TestCase):
             "openrouter:openrouter/openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free",
             "openrouter:openrouter/auto": "openrouter:openrouter/auto",
             "openrouter:google/gemma-4-31b-it:free": "openrouter:google/gemma-4-31b-it:free",
-            "claude-opus-4-6": "claude-opus-4-6",
+            "claude-opus-4-6-thinking": "claude-opus-4-6-thinking",
         }
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
@@ -3756,8 +3756,8 @@ class BugfixRegressionTests(unittest.TestCase):
         anti = load_anti()
         anti.find_cli = lambda: (["codex-antigravity"], None)
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
-            "claude-opus-4-6",
-            "claude-3.5-sonnet",
+            "claude-opus-4-6-thinking",
+            "claude-sonnet-4-6",
             "openrouter:openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
             "openrouter:openrouter/auto",
         }
@@ -3784,7 +3784,7 @@ class BugfixRegressionTests(unittest.TestCase):
         anti = load_anti()
         anti.find_cli = lambda: (["codex-antigravity"], None)
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
-            "claude-opus-4-6",
+            "claude-opus-4-6-thinking",
             "openrouter:openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         }
         anti.fetch_gateway_package_version = lambda base_url, *, timeout, token_env: "1.7.0"
@@ -4122,12 +4122,12 @@ class BugfixRegressionTests(unittest.TestCase):
         # probe http://127.0.0.1:51122/v1/models and fail with connection
         # refused, so the test must be hermetic like the other panel tests.
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
-            "claude-3.5-sonnet", "claude-opus-4-6",
+            "claude-sonnet-4-6", "claude-opus-4-6-thinking",
         }
         anti.generate_with_fallback = lambda args, **kwargs: (
-            ("summary", "claude-3.5-sonnet", {"usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}})
+            ("summary", "claude-sonnet-4-6", {"usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}})
             if "synthesizing" in kwargs["prompt"]
-            else ("chunk", "claude-3.5-sonnet", {"usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}})
+            else ("chunk", "claude-sonnet-4-6", {"usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}})
         )
         with tempfile.TemporaryDirectory(prefix="anti-skill-test-") as tmp:
             root = Path(tmp)
@@ -4164,7 +4164,7 @@ class BugfixRegressionTests(unittest.TestCase):
 
     def test_estimate_cost_does_not_allocate_prompt_sized_string(self) -> None:
         anti = load_anti()
-        estimate = anti.estimate_cost(model="claude-opus-4-6", prompt_chars=4000)
+        estimate = anti.estimate_cost(model="claude-opus-4-6-thinking", prompt_chars=4000)
         self.assertEqual(estimate["estimated_input_tokens"], 1000)
 
     def test_model_metadata_covers_documented_byok_aliases(self) -> None:
@@ -4186,12 +4186,12 @@ class BugfixRegressionTests(unittest.TestCase):
         anti = load_anti()
         result = anti.cheapest_models_for_task(available=["opus", "sonnet", "grok", "flash-3.6"])
         # Alias ids must resolve to canonical ids before capability/tier lookup.
-        self.assertIn("claude-opus-4-6", result)
-        self.assertIn("claude-3.5-sonnet", result)
+        self.assertIn("claude-opus-4-6-thinking", result)
+        self.assertIn("claude-sonnet-4-6", result)
         self.assertIn("xai-oauth:grok-build-0.1", result)
         self.assertIn("gemini-3.6-flash-high", result)
         # Free tiers sort first, so grok leads over the quota-tier claude models.
-        self.assertLess(result.index("xai-oauth:grok-build-0.1"), result.index("claude-opus-4-6"))
+        self.assertLess(result.index("xai-oauth:grok-build-0.1"), result.index("claude-opus-4-6-thinking"))
 
     def test_base_url_rejects_non_http_schemes(self) -> None:
         anti = load_anti()
@@ -4368,7 +4368,7 @@ class BugfixRegressionTests(unittest.TestCase):
     def test_panel_membership_uses_fuzzy_catalog_matching(self) -> None:
         anti = load_anti()
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
-            "claude-opus-4-6",
+            "claude-opus-4-6-thinking",
             "openrouter:openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         }
         seen_models: list[str] = []
@@ -4391,5 +4391,5 @@ class BugfixRegressionTests(unittest.TestCase):
         self.assertEqual([item["status"] for item in parsed["panel_results"]], ["success", "success"])
         self.assertEqual(
             {item["model"] for item in parsed["panel_results"]},
-            {"claude-opus-4-6", "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"},
+            {"claude-opus-4-6-thinking", "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"},
         )

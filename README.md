@@ -12,14 +12,14 @@ The default setup is intentionally conservative: it can install the Codex provid
 
 ```bash
 uv tool install codex-antigravity-auth
-codex-antigravity setup --write --accounts 1 --model claude-3.5-sonnet --install-skill --start
-codex-antigravity setup --check --model claude-3.5-sonnet
+codex-antigravity setup --write --accounts 1 --model claude-sonnet-4-6 --install-skill --start
+codex-antigravity setup --check --model claude-sonnet-4-6
 ```
 
 To make Antigravity Claude the active Codex default, opt in explicitly:
 
 ```bash
-codex-antigravity configure-codex --write --activate --model claude-3.5-sonnet
+codex-antigravity configure-codex --write --activate --model claude-sonnet-4-6
 ```
 
 Use `$anti` only as an optional sidecar reviewer/planner after the gateway is working; Codex remains the acting agent.
@@ -71,7 +71,7 @@ uv pip install -e .
 The recommended first-run path is the primary setup command. It validates OAuth credentials, prompts for missing Google OAuth desktop-client credentials on an interactive TTY, runs Google login, writes the Codex provider block only when `--write` is present, can install the optional `$anti` helper skill, starts the gateway in the background, waits for `/v1/models`, and ends with readiness diagnostics. It does not change your active default Codex model unless you add `--activate`:
 
 ```bash
-codex-antigravity setup --write --accounts 1 --model claude-3.5-sonnet --install-skill --start
+codex-antigravity setup --write --accounts 1 --model claude-sonnet-4-6 --install-skill --start
 ```
 
 When `--base-url` is omitted, `setup` derives `http://localhost:<port>/v1` from `--port`; if both `--start --port` and `--base-url` are supplied, their ports must match so Codex is not configured for a different gateway than the one just started.
@@ -109,7 +109,7 @@ On macOS this writes a user LaunchAgent under `~/Library/LaunchAgents`; on Linux
 If your Codex provider block drifts, repair only the Codex config without OAuth login, skill install, or gateway mutation:
 
 ```bash
-codex-antigravity setup --repair --config ~/.codex/config.toml --model claude-3.5-sonnet
+codex-antigravity setup --repair --config ~/.codex/config.toml --model claude-sonnet-4-6
 ```
 
 Install or refresh the Codex provider block without changing your active default model:
@@ -359,7 +359,7 @@ wire_api = "responses"
 If you deliberately pass `--activate`, it also writes the active default keys:
 
 ```toml
-model = "claude-3.5-sonnet"
+model = "claude-sonnet-4-6"
 model_provider = "antigravity"
 wire_api = "responses"
 ```
@@ -370,7 +370,7 @@ To run connection check diagnostics and verify token security:
 ```bash
 codex-antigravity doctor
 codex-antigravity doctor --codex-ready
-codex-antigravity doctor --live --live-model claude-3.5-sonnet
+codex-antigravity doctor --live --live-model claude-sonnet-4-6
 codex-antigravity doctor --byok-only
 ```
 
@@ -384,7 +384,7 @@ python3 -m compileall -q codex_antigravity_auth tests
 git diff --check
 codex-antigravity models doctor
 # Explicitly authorized only:
-codex-antigravity doctor --codex-ready --live --live-model claude-3.5-sonnet
+codex-antigravity doctor --codex-ready --live --live-model claude-sonnet-4-6
 ```
 
 The gateway binds to `127.0.0.1` by default. Binding to a non-loopback host requires both `--allow-remote` and an `ANTIGRAVITY_GATEWAY_TOKEN` of at least 32 visible ASCII characters; remote callers must send `Authorization: Bearer <token>`. The built-in server still speaks plain HTTP, so use remote mode only behind a trusted tunnel, local network boundary, or TLS-terminating proxy.

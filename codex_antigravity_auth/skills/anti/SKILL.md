@@ -19,17 +19,19 @@ Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to mu
 
 ## Models
 
-- Use `opus` for deep review. It maps to `claude-opus-4-6`.
-- Use `sonnet` for faster focused consults. It maps to `claude-3.5-sonnet`.
+- Use `opus` for deep review. It maps to `claude-opus-4-6-thinking` (the `claude-opus-4-6` name remains a compatibility alias).
+- Use `sonnet` for faster focused consults. It maps to `claude-sonnet-4-6` (the `claude-3.5-sonnet` name remains a compatibility alias).
 - Use `grok`, `supergrok`, `grok-build`, or `grok-oauth` for the xAI OAuth lane. They map to `xai-oauth:grok-build-0.1`.
 - Use `grok-4.3` for `xai-oauth:grok-4.3`.
 - Use `grok-bluesminds` or `grok-4.5` for `bluesminds:grok-4.5`. This is a separate API-key route; never silently fail over to or from xAI OAuth.
 - Use `deepseek-v4-pro` for `deepseek:deepseek-v4-pro` and `deepseek-v4-flash` for `deepseek:deepseek-v4-flash` through the official DeepSeek API key.
 - Use `glm-5.2` or `glm52` for `bluesminds:z-ai/glm-5.2`, especially as a long-context planning or repository-review lane.
-- Use `flash-high` for `gemini-3.5-flash-high` (Gemini Flash Agent). Fast agent-tuned reasoning, 1M context.
+- Use `flash-3.7` or `flash-high` for `gemini-3.7-flash` (current Gemini Flash generation). Fast agent-tuned reasoning, 1M context.
 - Use `flash` or `flash-medium` for `gemini-3.5-flash-medium` (Gemini Flash General). Balanced speed and quality, 1M context.
 - Use `flash-3.6` for `gemini-3.6-flash-high` and `flash-3.6-medium` for `gemini-3.6-flash-medium` (newer Flash line; more token-efficient than 3.5).
-- Use `gemini-pro` for `gemini-3.1-pro-high` (Gemini Pro). Deep reasoning and analysis, 1M context. Live check 2026-08-06: this lane currently fails through the gateway with `INVALID_ARGUMENT` on every request (tiny prompts included) while all Flash lanes work — a backend model-id/availability issue, not a payload problem; treat the lane as unavailable until re-verified.
+- Use `gemini-pro` for `gemini-3.1-pro` (Gemini Pro). Deep reasoning and analysis, 1M context.
+- Use `gpt-oss-120b` for `gpt-oss-120b-medium` (text-only, 131K context).
+- Use `gemini-3.1-flash-image` for image generation; it is image-only and does not support tools.
 - Use `nemotron-super` for `openrouter:nvidia/nemotron-3-super-120b-a12b:free` (120B MoE, 262K ctx). Fast, good for second opinions.
 - Use `nemotron-ultra` for `openrouter:nvidia/nemotron-3-ultra-550b-a55b:free` (550B, 1M ctx, vendor-reported). Large-context analysis and planning.
 - Use `nemotron-omni` for `openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` (30B MoE, 256K ctx, reasoning-capable, vision). Good for image tasks and reasoning.
@@ -64,11 +66,14 @@ The helper tracks per-model capabilities and cost tiers to make cost-aware decis
 
 | Model | Alias | Cost | Context | Images | Video | Audio | Tools | Quality |
 |---|---|---|---|---|---|---|---|---|
-| `claude-opus-4-6` | `opus` | quota | 200K | yes | no | no | yes | 100 |
-| `gemini-3.1-pro-high` | `gemini-pro` | quota | 1M | yes | yes | yes | yes | 90 |
-| `claude-3.5-sonnet` | `sonnet` | quota | 200K | yes | no | no | yes | 85 |
+| `claude-opus-4-6-thinking` | `opus` | quota | 250K | yes | no | no | yes | 100 |
+| `gemini-3.1-pro` | `gemini-pro` | quota | 1M | yes | yes | yes | yes | 90 |
+| `claude-sonnet-4-6` | `sonnet` | quota | 250K | yes | no | no | yes | 85 |
+| `gemini-3.7-flash` | `flash-3.7`, `flash-high` | quota | 1M | yes | yes | yes | yes | 85 |
+| `gemini-3.1-flash-image` | — | quota | 1M | yes (generation) | no | no | no | 50 |
+| `gpt-oss-120b-medium` | `gpt-oss-120b` | quota | 131K | no | no | no | no | 65 |
 | `gemini-3.6-flash-high` | `flash-3.6` | quota | 1M | yes | yes | yes | yes | 82 |
-| `gemini-3.5-flash-high` | `flash-high` | quota | 1M | yes | yes | yes | yes | 80 |
+| `gemini-3.5-flash-high` | retired alias | quota | 1M | yes | yes | yes | yes | 80 |
 | `xai-oauth:grok-4.3` | `grok-4.3` | free | 128K | yes | no | no | yes | 78 |
 | `xai-oauth:grok-build-0.1` | `grok` | free | 128K | yes | no | no | yes | 75 |
 | `gemini-3.6-flash-medium` | `flash-3.6-medium` | quota | 1M | yes | yes | yes | yes | 70 |

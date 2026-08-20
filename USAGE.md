@@ -8,8 +8,8 @@ Install the command from PyPI, then run the primary Claude-in-Codex setup:
 
 ```bash
 uv tool install codex-antigravity-auth
-codex-antigravity setup --write --accounts 1 --model claude-3.5-sonnet --install-skill --start
-codex-antigravity setup --check --model claude-3.5-sonnet
+codex-antigravity setup --write --accounts 1 --model claude-sonnet-4-6 --install-skill --start
+codex-antigravity setup --check --model claude-sonnet-4-6
 ```
 
 For a read-only check that does not mutate OAuth state, Codex config, installed skills, or gateway processes:
@@ -28,7 +28,7 @@ The setup command validates the selected model/provider/base URL, preflights Goo
 Use `setup --repair` when Codex config has drifted and you only want to reconcile the provider block and selected model. It does not run OAuth, install the `$anti` skill, or start/stop the gateway:
 
 ```bash
-codex-antigravity setup --repair --config ~/.codex/config.toml --model claude-3.5-sonnet
+codex-antigravity setup --repair --config ~/.codex/config.toml --model claude-sonnet-4-6
 ```
 
 For durable startup after reboot, install the gateway as a per-user service:
@@ -191,7 +191,7 @@ The gateway binds to loopback by default. Non-loopback binds require `--allow-re
 Use live diagnostics sparingly when proving a final install:
 
 ```bash
-codex-antigravity doctor --codex-ready --live --live-model claude-3.5-sonnet
+codex-antigravity doctor --codex-ready --live --live-model claude-sonnet-4-6
 ```
 
 `doctor --live` currently supports Google Antigravity models only. It also performs a once-daily cached package-version check against PyPI and warns when an upgrade is available. Set `CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1` to disable that external metadata lookup.
@@ -201,20 +201,20 @@ You can use standard, developer-friendly names in your `~/.codex/config.toml` th
 
 | OpenAI Codex Model ID | Antigravity Backend Model |
 | --- | --- |
-| `gemini-3.5-flash-high` | `gemini-3-flash-agent` (DeepMind Agentic Flash) |
-| `gemini-3.5-flash-medium` | `gemini-3.5-flash-low` (General Purpose Flash) |
-| `gemini-3.1-pro-high` | `gemini-3.1-pro-high` (Advanced Reasoning Pro) |
-| `claude-3.5-sonnet` | `claude-sonnet-4-6` (High-Fidelity Anthropic Sonnet) |
-| `claude-opus-4-6` | `claude-opus-4-6-thinking` (Deep Anthropic Opus Reasoning) |
+| `gemini-3.7-flash` | `gemini-3.7-flash-tiered` (DeepMind Agentic Flash) |
+| `gemini-3.7-flash` | `gemini-3.5-flash-low` (General Purpose Flash) |
+| `gemini-3.1-pro` | `gemini-3.1-pro` (Advanced Reasoning Pro) |
+| `claude-sonnet-4-6` | `claude-sonnet-4-6` (High-Fidelity Anthropic Sonnet) |
+| `claude-opus-4-6-thinking` | `claude-opus-4-6-thinking` (Deep Anthropic Opus Reasoning) |
 
 Claude-first setup aliases are accepted anywhere the CLI accepts a Codex model id:
 
 | Alias | Canonical Codex Model ID |
 | --- | --- |
-| `sonnet` | `claude-3.5-sonnet` |
-| `claude-sonnet` | `claude-3.5-sonnet` |
-| `opus` | `claude-opus-4-6` |
-| `claude-opus` | `claude-opus-4-6` |
+| `sonnet` | `claude-sonnet-4-6` |
+| `claude-sonnet` | `claude-sonnet-4-6` |
+| `opus` | `claude-opus-4-6-thinking` |
+| `claude-opus` | `claude-opus-4-6-thinking` |
 
 `codex-antigravity models doctor` also prints the Claude thinking-budget mapping for `low`, `medium`, `high`, and `xhigh` so advertised reasoning metadata can be compared with runtime request transforms.
 
