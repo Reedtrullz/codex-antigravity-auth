@@ -40,7 +40,7 @@ class TestReleaseWorkflow(unittest.TestCase):
         project = tomllib.loads(
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )["project"]
-        self.assertEqual(project["version"], "1.8.0")
+        self.assertEqual(project["version"], "1.8.1")
         self.assertIn("Verify tag matches package version", self.workflow_text)
         self.assertIn('expected = f"v{version}"', self.workflow_text)
 
