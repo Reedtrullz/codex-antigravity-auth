@@ -53,8 +53,11 @@ def _get_refresh_lock(email: str) -> threading.Lock:
 def _apply_token_refresh(account: dict, refresh_token: str) -> None:
     email = account.get("email", "")
     lock = _get_refresh_lock(email)
-    if not lock.acquire(blocking=False):
-        _log.debug("Refresh already in progress for %s, skipping", email)
+    # Block with a timeout rather than skipping: another thread may be
+    # refreshing the same account, and skipping leaves the caller with
+    # a stale token.  Wait for the in-progress refresh to finish.
+    if not lock.acquire(blocking=True, timeout=30):
+        _log.warning("Refresh lock timeout for %s; proceeding anyway", email)
         return
     try:
         refreshed = refresh_access_token(refresh_token)
@@ -77,6 +80,8 @@ def _apply_token_refresh(account: dict, refresh_token: str) -> None:
                 _log.warning("Project discovery failed for %s: %s", email, exc)
     finally:
         lock.release()
+
+
 class AccountManager:
     """Compatibility facade over the production AccountState owner."""
 

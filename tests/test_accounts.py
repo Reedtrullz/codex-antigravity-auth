@@ -415,5 +415,61 @@ class TestAccounts(unittest.TestCase):
         self.assertEqual(self.accounts_data["accounts"][0]["accessToken"], "fresh_access")
         mock_refresh.assert_called_once_with("ref_1")
 
+
+
+class TestErrorClassification(unittest.TestCase):
+    def test_is_validation_required_error_403_with_validation_required(self):
+        from codex_antigravity_auth.accounts import is_validation_required_error
+        self.assertTrue(is_validation_required_error(403, '{"error": {"status": "VALIDATION_REQUIRED"}}'))
+
+    def test_is_validation_required_error_403_with_permission_denied(self):
+        from codex_antigravity_auth.accounts import is_validation_required_error
+        self.assertTrue(is_validation_required_error(403, 'PERMISSION_DENIED'))
+
+    def test_is_validation_required_error_403_without_body(self):
+        from codex_antigravity_auth.accounts import is_validation_required_error
+        self.assertFalse(is_validation_required_error(403, None))
+
+    def test_is_validation_required_error_403_without_markers(self):
+        from codex_antigravity_auth.accounts import is_validation_required_error
+        self.assertFalse(is_validation_required_error(403, 'Some other error'))
+
+    def test_is_validation_required_error_429(self):
+        from codex_antigravity_auth.accounts import is_validation_required_error
+        self.assertFalse(is_validation_required_error(429, 'VALIDATION_REQUIRED'))
+
+    def test_is_validation_required_error_401(self):
+        from codex_antigravity_auth.accounts import is_validation_required_error
+        self.assertFalse(is_validation_required_error(401, 'VALIDATION_REQUIRED'))
+
+    def test_classify_backend_status_429(self):
+        from codex_antigravity_auth.accounts import classify_backend_status
+        self.assertEqual(classify_backend_status(429), 'rate_limit')
+
+    def test_classify_backend_status_403_validation(self):
+        from codex_antigravity_auth.accounts import classify_backend_status
+        self.assertEqual(classify_backend_status(403, 'VALIDATION_REQUIRED'), 'auth')
+
+    def test_classify_backend_status_403_plain(self):
+        from codex_antigravity_auth.accounts import classify_backend_status
+        self.assertEqual(classify_backend_status(403), 'auth')
+
+    def test_classify_backend_status_401(self):
+        from codex_antigravity_auth.accounts import classify_backend_status
+        self.assertEqual(classify_backend_status(401), 'auth')
+
+    def test_classify_backend_status_400(self):
+        from codex_antigravity_auth.accounts import classify_backend_status
+        self.assertEqual(classify_backend_status(400), 'invalid_request')
+
+    def test_classify_backend_status_500(self):
+        from codex_antigravity_auth.accounts import classify_backend_status
+        self.assertEqual(classify_backend_status(500), 'transport')
+
+    def test_classify_backend_status_200(self):
+        from codex_antigravity_auth.accounts import classify_backend_status
+        self.assertEqual(classify_backend_status(200), 'transport')
+
+
 if __name__ == "__main__":
     unittest.main()
