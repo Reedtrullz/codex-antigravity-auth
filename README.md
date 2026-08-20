@@ -394,6 +394,41 @@ And execute full unit test coverage:
 python3 -m pytest
 ```
 
+## Troubleshooting
+
+### HTTP 403 VALIDATION_REQUIRED
+
+If you see "Verify your account to continue" or VALIDATION_REQUIRED errors:
+
+1. Check logs: `codex-antigravity logs --tail 20`
+2. Reset accounts: `codex-antigravity accounts reset --all --yes`
+3. Re-login: `codex-antigravity login --count 4`
+4. The gateway now correctly surfaces 403 auth failures (not misreported as 429 rate limits)
+
+### All Accounts Cooling Down
+
+If all accounts are in cooldown:
+
+```bash
+codex-antigravity accounts reset --all --yes
+codex-antigravity accounts list
+```
+
+### Project Discovery Failures
+
+If project IDs are not being discovered:
+
+1. Check logs for "Project discovery failed" warnings
+2. Re-login to trigger fresh project discovery: `codex-antigravity login`
+3. Verify accounts have project IDs: `codex-antigravity accounts list`
+
+### Gateway Not Starting
+
+```bash
+codex-antigravity doctor --codex-ready
+codex-antigravity start --port 51122
+```
+
 ## Release Automation
 
 Tagged releases are prepared for PyPI Trusted Publishing. The `.github/workflows/publish.yml` workflow runs on `v*` tags, requires the full Ubuntu Python 3.10/3.11/3.12/3.14 plus Windows Python 3.12 test matrix and a checked sdist/wheel build, then publishes with `pypa/gh-action-pypi-publish@release/v1` using OIDC (`id-token: write`) in the `pypi` environment. The tag must exactly match the package version.
