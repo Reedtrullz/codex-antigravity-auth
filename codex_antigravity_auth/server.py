@@ -529,12 +529,24 @@ def codex_model_metadata(
 def native_model_catalog_with_input_modalities() -> list[dict]:
     """Return Google Antigravity models with accurate input_modalities."""
     builtin_ids = {model.id for model in NATIVE_MODELS}
+    # Map every known alias to its canonical builtin id so backward-compat
+    # catalog entries (e.g. "claude-3.5-sonnet") inherit image modality.
+    alias_to_canonical: dict[str, str] = {}
+    for model in NATIVE_MODELS:
+        for alias in model.aliases:
+            alias_to_canonical[alias] = model.id
+    # Models that are text-only despite being built-in (no image support).
+    _TEXT_ONLY_BUILTIN = {"gpt-oss-120b-medium"}
     models = []
     for m in native_model_catalog():
-        # Only the built-in Google models are known multimodal; user-defined
-        # overlay models keep the conservative ['text'] default so a text-only
-        # overlay is never advertised as image-capable.
-        modalities = ["text", "image"] if m.get("id") in builtin_ids else ["text"]
+        mid = m.get("id", "")
+        canonical = alias_to_canonical.get(mid, mid)
+        # Built-in models and their backward-compat aliases are multimodal;
+        # user-defined overlay models and known text-only models get ['text'].
+        if canonical in builtin_ids and canonical not in _TEXT_ONLY_BUILTIN:
+            modalities = ["text", "image"]
+        else:
+            modalities = ["text"]
         models.append({**m, "input_modalities": modalities})
     return models
 

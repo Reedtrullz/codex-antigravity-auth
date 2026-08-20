@@ -80,7 +80,7 @@ def write_ready_codex_config(
     path: Path,
     *,
     base_url: str = "http://localhost:51122/v1",
-    model: str = "claude-3.5-sonnet",
+    model: str = "claude-sonnet-4-6",
     provider_id: str = "antigravity",
     provider_name: str = "Google Antigravity",
 ) -> None:
@@ -677,7 +677,7 @@ class TestConfigureCodex(unittest.TestCase):
     def test_render_codex_config_snippet_contains_gateway_provider(self):
         snippet = render_codex_config_snippet()
 
-        self.assertNotIn('model = "claude-3.5-sonnet"', snippet)
+        self.assertNotIn('model = "claude-sonnet-4-6"', snippet)
         self.assertNotIn('model_provider = "antigravity"', snippet)
         self.assertIn("[model_providers.antigravity]", snippet)
         self.assertIn('base_url = "http://localhost:51122/v1"', snippet)
@@ -686,19 +686,19 @@ class TestConfigureCodex(unittest.TestCase):
     def test_render_codex_config_snippet_can_activate_gateway_provider(self):
         snippet = render_codex_config_snippet(activate=True)
 
-        self.assertIn('model = "claude-3.5-sonnet"', snippet)
+        self.assertIn('model = "claude-sonnet-4-6"', snippet)
         self.assertIn('model_provider = "antigravity"', snippet)
         self.assertIn("[model_providers.antigravity]", snippet)
 
     def test_claude_aliases_resolve_for_native_codex_setup(self):
-        self.assertEqual(validate_codex_model_id("sonnet"), "claude-3.5-sonnet")
-        self.assertEqual(validate_codex_model_id("claude-sonnet"), "claude-3.5-sonnet")
-        self.assertEqual(validate_codex_model_id("opus"), "claude-opus-4-6")
-        self.assertEqual(validate_codex_model_id("claude-opus"), "claude-opus-4-6")
-        self.assertEqual(canonical_model_id("openai-responses/sonnet"), "claude-3.5-sonnet")
+        self.assertEqual(validate_codex_model_id("sonnet"), "claude-sonnet-4-6")
+        self.assertEqual(validate_codex_model_id("claude-sonnet"), "claude-sonnet-4-6")
+        self.assertEqual(validate_codex_model_id("opus"), "claude-opus-4-6-thinking")
+        self.assertEqual(validate_codex_model_id("claude-opus"), "claude-opus-4-6-thinking")
+        self.assertEqual(canonical_model_id("openai-responses/sonnet"), "claude-sonnet-4-6")
         self.assertEqual(resolve_backend_model("sonnet"), "claude-sonnet-4-6")
         self.assertEqual(resolve_backend_model("opus"), "claude-opus-4-6-thinking")
-        self.assertEqual(resolve_backend_model("gemini-3.5-flash-low"), "gemini-3.5-flash-low")
+        self.assertEqual(resolve_backend_model("gemini-3.5-flash-low"), "gemini-3.7-flash-tiered")
         self.assertEqual(resolve_backend_model("gemini-3.1-pro"), "gemini-3.1-pro-low")
 
     def test_configure_codex_write_command_preserves_custom_options(self):
@@ -831,7 +831,7 @@ class TestConfigureCodex(unittest.TestCase):
             config_path.write_text('model = "gpt-5.5"\n', encoding="utf-8")
             args = Namespace(
                 config=str(config_path),
-                model="claude-3.5-sonnet",
+                model="claude-sonnet-4-6",
                 provider="antigravity",
                 provider_name="Google Antigravity",
                 base_url="http://localhost:51122/v1",
@@ -855,7 +855,7 @@ class TestConfigureCodex(unittest.TestCase):
             config_path = Path(tmp) / "config.toml"
             args = Namespace(
                 config=str(config_path),
-                model="claude-3.5-sonnet",
+                model="claude-sonnet-4-6",
                 provider="antigravity",
                 provider_name="Google Antigravity",
                 base_url="http://localhost:51122/v1",
@@ -869,7 +869,7 @@ class TestConfigureCodex(unittest.TestCase):
             written = config_path.read_text(encoding="utf-8")
 
         printed = "\n".join(call.args[0] for call in mock_print.call_args_list if call.args)
-        self.assertIn("Active Codex default set to claude-3.5-sonnet", printed)
+        self.assertIn("Active Codex default set to claude-sonnet-4-6", printed)
         self.assertIn('model_provider = "antigravity"', written)
 
     def test_merge_codex_config_preserves_unrelated_sections(self):
@@ -902,7 +902,7 @@ class TestConfigureCodex(unittest.TestCase):
     def test_merge_codex_config_can_activate_gateway_provider(self):
         merged = merge_codex_config('model = "gpt-5"\n', activate=True)
 
-        self.assertIn('model = "claude-3.5-sonnet"', merged)
+        self.assertIn('model = "claude-sonnet-4-6"', merged)
         self.assertIn('model_provider = "antigravity"', merged)
         self.assertIn("[model_providers.antigravity]", merged)
 
@@ -949,7 +949,7 @@ class TestConfigureCodex(unittest.TestCase):
 
             with patch("codex_antigravity_auth.cli.time.strftime", return_value="20260702140000"):
                 changed_first, first_backup = write_codex_config(config_path, model="gemini-3.5-flash-high", activate=True)
-                changed_second, second_backup = write_codex_config(config_path, model="gemini-3.5-flash-medium", activate=True)
+                changed_second, second_backup = write_codex_config(config_path, model="claude-sonnet-4-6", activate=True)
 
             self.assertTrue(changed_first)
             self.assertTrue(changed_second)
@@ -1121,7 +1121,7 @@ class TestInstallSkill(unittest.TestCase):
                 check_google=False,
                 check_byok=False,
             )
-            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6", "claude-3.5-sonnet"}):
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6-thinking", "claude-sonnet-4-6"}):
                 with patch("codex_antigravity_auth.cli.all_provider_configs") as providers:
                     with patch("builtins.print") as mock_print:
                         run_setup_v2(args)
@@ -1149,7 +1149,7 @@ class TestInstallSkill(unittest.TestCase):
                 check_google=False,
                 check_byok=False,
             )
-            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6", "claude-3.5-sonnet"}):
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6-thinking", "claude-sonnet-4-6"}):
                 with patch("builtins.print") as mock_print:
                     run_setup_v2(args)
 
@@ -1175,7 +1175,7 @@ class TestInstallSkill(unittest.TestCase):
                 check_google=False,
                 check_byok=True,
             )
-            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6", "claude-3.5-sonnet"}):
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6-thinking", "claude-sonnet-4-6"}):
                 with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"deepseek": provider}):
                     with patch("codex_antigravity_auth.cli.load_provider_config", return_value={"providers": {"deepseek": provider}}):
                         with patch("builtins.print") as mock_print:
@@ -1197,7 +1197,7 @@ class TestInstallSkill(unittest.TestCase):
                 check_google=False,
                 check_byok=True,
             )
-            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6", "claude-3.5-sonnet"}):
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6-thinking", "claude-sonnet-4-6"}):
                 with patch("codex_antigravity_auth.cli.all_provider_configs", side_effect=RuntimeError("api_key=sk-testsecret1234567890")):
                     with patch("builtins.print") as mock_print:
                         run_setup_v2(args)
@@ -1212,7 +1212,7 @@ class TestInstallSkill(unittest.TestCase):
         def fake_urlopen(req, timeout=None):
             captured["auth"] = req.get_header("Authorization")
             response = MagicMock()
-            response.read.return_value = b'{"data": [{"id": "claude-opus-4-6"}]}'
+            response.read.return_value = b'{"data": [{"id": "claude-opus-4-6-thinking"}]}'
             response.__enter__ = lambda self_: response
             response.__exit__ = lambda self_, *exc: False
             return response
@@ -1221,7 +1221,7 @@ class TestInstallSkill(unittest.TestCase):
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
                 ids = gateway_model_ids("https://gateway.example/v1", token_env="TEST_GATEWAY_TOKEN")
 
-        self.assertEqual(ids, {"claude-opus-4-6"})
+        self.assertEqual(ids, {"claude-opus-4-6-thinking"})
         self.assertEqual(captured["auth"], "Bearer unit-test-token-value")
 
     def test_gateway_model_ids_omits_auth_header_when_env_missing(self):
@@ -1230,7 +1230,7 @@ class TestInstallSkill(unittest.TestCase):
         def fake_urlopen(req, timeout=None):
             captured["auth"] = req.get_header("Authorization")
             response = MagicMock()
-            response.read.return_value = b'{"data": [{"id": "claude-opus-4-6"}]}'
+            response.read.return_value = b'{"data": [{"id": "claude-opus-4-6-thinking"}]}'
             response.__enter__ = lambda self_: response
             response.__exit__ = lambda self_, *exc: False
             return response
@@ -1261,7 +1261,7 @@ class TestInstallSkill(unittest.TestCase):
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
                 probe = gateway_generate_probe(
                     "https://gateway.example/v1",
-                    "claude-3.5-sonnet",
+                    "claude-sonnet-4-6",
                     timeout=12,
                     token_env="TEST_GATEWAY_TOKEN",
                 )
@@ -1282,7 +1282,7 @@ class TestInstallSkill(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=error):
             probe = gateway_generate_probe(
                 "https://gateway.example/v1",
-                "claude-3.5-sonnet",
+                "claude-sonnet-4-6",
                 timeout=1,
                 token_env="TEST_GATEWAY_TOKEN",
             )
@@ -1309,7 +1309,7 @@ class TestV3NativeSetup(unittest.TestCase):
             activate=False,
             no_input=False,
             accounts=1,
-            model="claude-3.5-sonnet",
+            model="claude-sonnet-4-6",
             provider="antigravity",
             provider_name="Google Antigravity",
             base_url="http://localhost:51122/v1",
@@ -1341,7 +1341,7 @@ class TestV3NativeSetup(unittest.TestCase):
                     with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
                         with patch("codex_antigravity_auth.cli.run_install_skill") as install:
                             with patch("codex_antigravity_auth.cli.start_gateway_background") as start:
-                                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                                     with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": []}):
                                         with patch("builtins.print"):
                                             report = run_setup(args)
@@ -1357,7 +1357,7 @@ class TestV3NativeSetup(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             args = self.setup_args(config=str(Path(tmp) / "config.toml"), skill_dir=tmp)
             with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
-                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                     with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": []}):
                         with patch("builtins.print") as mock_print:
                             report = run_setup(args)
@@ -1380,7 +1380,7 @@ class TestV3NativeSetup(unittest.TestCase):
                         "next_command": "codex",
                     }
                 if name == "gateway":
-                    return {"claude-3.5-sonnet", "claude-opus-4-6"}
+                    return {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
                 return None
             return _inner
 
@@ -1403,7 +1403,7 @@ class TestV3NativeSetup(unittest.TestCase):
         with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
             with patch("codex_antigravity_auth.cli.run_login"):
                 with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
-                    with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                    with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                         with patch(
                             "codex_antigravity_auth.cli.codex_ready_report",
                             return_value={"ok": True, "checks": [], "next_command": "codex"},
@@ -1414,14 +1414,14 @@ class TestV3NativeSetup(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertFalse(configure.call_args.args[0].activate)
         self.assertFalse(readiness.call_args.kwargs["require_active_provider"])
-        self.assertEqual(readiness.call_args.kwargs["selected_model"], "claude-3.5-sonnet")
+        self.assertEqual(readiness.call_args.kwargs["selected_model"], "claude-sonnet-4-6")
 
     def test_setup_write_activate_opts_into_active_codex_provider(self):
         args = self.setup_args(write=True, activate=True)
         with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
             with patch("codex_antigravity_auth.cli.run_login"):
                 with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
-                    with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                    with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                         with patch(
                             "codex_antigravity_auth.cli.codex_ready_report",
                             return_value={"ok": True, "checks": [], "next_command": "codex"},
@@ -1503,7 +1503,7 @@ class TestV3NativeSetup(unittest.TestCase):
                                 ):
                                     with patch("codex_antigravity_auth.cli.run_login") as login:
                                         with patch("codex_antigravity_auth.cli.run_configure_codex") as configure:
-                                            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                                            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                                                 with patch(
                                                     "codex_antigravity_auth.cli.codex_ready_report",
                                                     return_value={"ok": True, "checks": [], "next_command": "codex"},
@@ -1599,7 +1599,7 @@ class TestV3NativeSetup(unittest.TestCase):
         self.assertIn("codex-antigravity start --background --port 51122", printed_text)
 
     def test_setup_write_start_waits_for_gateway_models(self):
-        provider_models = iter([RuntimeError("booting"), {"claude-3.5-sonnet", "claude-opus-4-6"}])
+        provider_models = iter([RuntimeError("booting"), {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}])
 
         def fake_models(*args, **kwargs):
             result = next(provider_models)
@@ -1671,7 +1671,7 @@ class TestV3NativeSetup(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
             write_ready_codex_config(config_path, model="sonnet")
-            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet", "claude-opus-4-6"}):
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6", "claude-opus-4-6-thinking"}):
                 with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": [{"email": "a@example.com"}]}):
                     report = codex_ready_report(
                         config=str(config_path),
@@ -1681,7 +1681,7 @@ class TestV3NativeSetup(unittest.TestCase):
                     )
 
         self.assertTrue(report["ok"])
-        self.assertEqual(report["canonical_model"], "claude-3.5-sonnet")
+        self.assertEqual(report["canonical_model"], "claude-sonnet-4-6")
         self.assertEqual(report["route"], "google")
 
     def test_codex_ready_report_exposes_store_service_and_capability_diagnostics(self):
@@ -1747,7 +1747,7 @@ class TestV3NativeSetup(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
             write_ready_codex_config(config_path, model="opus")
-            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                 with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": [{"email": "a@example.com"}]}):
                     report = codex_ready_report(
                         config=str(config_path),
@@ -1764,7 +1764,7 @@ class TestV3NativeSetup(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
             write_ready_codex_config(config_path, model="sonnet")
-            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                 with patch("codex_antigravity_auth.cli.load_accounts", side_effect=RuntimeError("account-store boom")):
                     report = codex_ready_report(
                         config=str(config_path),
@@ -1802,13 +1802,13 @@ class TestV3NativeSetup(unittest.TestCase):
             write_ready_codex_config(config_path, model="sonnet")
             probe = {
                 "ok": True,
-                "model": "claude-3.5-sonnet",
+                "model": "claude-sonnet-4-6",
                 "latency_ms": 12,
                 "output_preview": "ready",
                 "http_status": 200,
                 "error": None,
             }
-            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                 with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": [{"email": "a@example.com"}]}):
                     with patch("codex_antigravity_auth.cli.gateway_generate_probe", return_value=probe) as live_probe:
                         with patch("codex_antigravity_auth.cli.version_check_result", return_value={"status": "skip", "detail": "skip", "installed": None, "latest": None}):
@@ -1822,7 +1822,7 @@ class TestV3NativeSetup(unittest.TestCase):
 
         live_probe.assert_called_once_with(
             "http://localhost:51122/v1",
-            "claude-3.5-sonnet",
+            "claude-sonnet-4-6",
             timeout=7,
             token_env="ANTIGRAVITY_GATEWAY_TOKEN",
         )
@@ -1836,13 +1836,13 @@ class TestV3NativeSetup(unittest.TestCase):
             write_ready_codex_config(config_path, model="sonnet")
             probe = {
                 "ok": True,
-                "model": "claude-3.5-sonnet",
+                "model": "claude-sonnet-4-6",
                 "latency_ms": 12,
                 "output_preview": "",
                 "http_status": 200,
                 "error": None,
             }
-            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                 with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": [{"email": "a@example.com"}]}):
                     with patch("codex_antigravity_auth.cli.gateway_generate_probe", return_value=probe):
                         with patch("codex_antigravity_auth.cli.version_check_result", return_value={"status": "skip", "detail": "skip", "installed": None, "latest": None}):
@@ -1912,7 +1912,7 @@ class TestV3NativeSetup(unittest.TestCase):
     def test_run_gateway_status_reports_unmanaged_reachable_gateway(self):
         with TemporaryDirectory() as tmp:
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
-                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                     with patch("codex_antigravity_auth.cli.service_status", return_value={"installed": False, "active": False}):
                         with patch("codex_antigravity_auth.cli.request_log_info", return_value={"path": "requests.jsonl"}):
                             with patch("builtins.print"):
@@ -1925,7 +1925,7 @@ class TestV3NativeSetup(unittest.TestCase):
     def test_gateway_reachability_default_allows_cold_model_catalog(self):
         info = {"port": 51122, "status": "stopped", "running": False}
 
-        with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}) as models:
+        with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}) as models:
             add_gateway_reachability(info)
 
         self.assertTrue(info["reachable"])
@@ -1959,9 +1959,9 @@ class TestV3NativeSetup(unittest.TestCase):
     def test_codex_ready_treats_unmanaged_reachable_gateway_as_process_ready(self):
         with TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
-            write_ready_codex_config(config_path, model="claude-3.5-sonnet")
+            write_ready_codex_config(config_path, model="claude-sonnet-4-6")
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
-                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                     with patch("codex_antigravity_auth.cli.service_status", return_value={"installed": False, "active": False}):
                         with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": [{"email": "a@example.com"}]}):
                             with patch("codex_antigravity_auth.cli.version_check_result", return_value={"status": "skip", "detail": "skip", "installed": None, "latest": None}):
@@ -2067,7 +2067,7 @@ class TestV3NativeSetup(unittest.TestCase):
     def test_start_background_refuses_already_reachable_gateway_without_pid_file(self):
         with TemporaryDirectory() as tmp:
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
-                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                     with patch("codex_antigravity_auth.cli.subprocess.Popen") as popen:
                         with self.assertRaisesRegex(SystemExit, "already reachable"):
                             start_gateway_background(Namespace(host="127.0.0.1", port=51122, allow_remote=False))
@@ -2080,7 +2080,7 @@ class TestV3NativeSetup(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
                 with patch("codex_antigravity_auth.cli.gateway_model_ids", side_effect=RuntimeError("not ready")):
-                    with patch("codex_antigravity_auth.cli.wait_for_gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                    with patch("codex_antigravity_auth.cli.wait_for_gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                         with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
                             with patch("codex_antigravity_auth.cli.process_is_running", return_value=True):
                                 with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=True):
@@ -2126,7 +2126,7 @@ class TestV3NativeSetup(unittest.TestCase):
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
                 with patch("codex_antigravity_auth.onepassword.shutil.which", return_value="/usr/local/bin/op"):
                     with patch("codex_antigravity_auth.cli.gateway_model_ids", side_effect=RuntimeError("not ready")):
-                        with patch("codex_antigravity_auth.cli.wait_for_gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+                        with patch("codex_antigravity_auth.cli.wait_for_gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                             with patch("codex_antigravity_auth.cli.subprocess.Popen", return_value=proc) as popen:
                                 with patch("codex_antigravity_auth.cli.process_is_running", return_value=True):
                                     with patch("codex_antigravity_auth.cli.gateway_pid_matches", return_value=True):
@@ -2680,8 +2680,8 @@ class TestVNextPolishCli(unittest.TestCase):
     def test_codex_ready_report_suggests_repair_for_existing_config_drift(self):
         with TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
-            config_path.write_text('model = "claude-3.5-sonnet"\n', encoding="utf-8")
-            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+            config_path.write_text('model = "claude-sonnet-4-6"\n', encoding="utf-8")
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                 with patch("codex_antigravity_auth.cli.load_accounts", return_value={"accounts": [{"email": "a@example.com"}]}):
                     report = codex_ready_report(
                         config=str(config_path),
@@ -2696,7 +2696,7 @@ class TestVNextPolishCli(unittest.TestCase):
     def test_codex_ready_report_suggests_write_when_config_missing(self):
         with TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "missing.toml"
-            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-3.5-sonnet"}):
+            with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
                 report = codex_ready_report(
                     config=str(config_path),
                     provider_id="antigravity",
@@ -3089,7 +3089,7 @@ class TestVNextPolishCli(unittest.TestCase):
                     {
                         "request_id": "req_test",
                         "run_id": "anti-run_123",
-                        "model": "claude-3.5-sonnet",
+                        "model": "claude-sonnet-4-6",
                         "route": "google",
                         "status": "failed",
                         "prompt": "do not persist",
@@ -3331,7 +3331,7 @@ class TestVNextPolishCli(unittest.TestCase):
                     "codex-antigravity",
                     "models",
                     "add",
-                    "claude-3.5-sonnet",
+                    "claude-sonnet-4-6",
                     "--backend-id",
                     "claude-sonnet-4-6",
                     "--family",
@@ -3347,7 +3347,7 @@ class TestVNextPolishCli(unittest.TestCase):
                 with patch.object(sys, "argv", force_argv):
                     with patch("builtins.print"):
                         main()
-                forced = {model["id"]: model for model in native_model_catalog()}["claude-3.5-sonnet"]
+                forced = {model["id"]: model for model in native_model_catalog()}["claude-sonnet-4-6"]
                 self.assertEqual(forced["display_name"], "Forced Sonnet")
 
     def test_model_overlay_rejects_identifier_shadowing(self):
@@ -3487,7 +3487,10 @@ class VisionSidecarDoctorTests(unittest.TestCase):
         self.assertGreater(len(catalog), 0)
         for m in catalog:
             self.assertIn('input_modalities', m)
-            self.assertEqual(m['input_modalities'], ['text', 'image'])
+            self.assertIn('text', m['input_modalities'])
+            # Most native models support image; only text-only models (like gpt-oss) don't.
+            if m['id'] != 'gpt-oss-120b-medium':
+                self.assertIn('image', m['input_modalities'])
 
     def test_native_model_catalog_overlay_stays_text_only(self):
         # A user-defined overlay model is not known multimodal; advertising

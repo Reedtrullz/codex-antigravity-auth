@@ -19,8 +19,8 @@ class TestTransformationEdgeCases(unittest.TestCase):
         # `openai:sonnet` is the natural colon spelling (used by every other
         # provider prefix) and must resolve the same way `openai/sonnet` does.
         self.assertEqual(canonical_model_id("openai:sonnet"), canonical_model_id("openai/sonnet"))
-        self.assertEqual(canonical_model_id("openai:sonnet"), "claude-3.5-sonnet")
-        self.assertEqual(canonical_model_id("openai-responses:opus"), "claude-opus-4-6")
+        self.assertEqual(canonical_model_id("openai:sonnet"), "claude-sonnet-4-6")
+        self.assertEqual(canonical_model_id("openai-responses:opus"), "claude-opus-4-6-thinking")
         # Non-reserved colon prefixes (BYOK ids) must be preserved verbatim.
         self.assertEqual(canonical_model_id("deepseek:deepseek-chat"), "deepseek:deepseek-chat")
 
@@ -106,12 +106,12 @@ class TestTransformationEdgeCases(unittest.TestCase):
     def test_resolve_backend_model_aliases(self):
         # Bare gemini models
         self.assertEqual(resolve_backend_model("gemini-3.5-flash-high"), "gemini-3-flash-agent")
-        self.assertEqual(resolve_backend_model("gemini-3.5-flash-medium"), "gemini-3.5-flash-low")
-        self.assertEqual(resolve_backend_model("gemini-3.5-flash-low"), "gemini-3.5-flash-low")
-        self.assertEqual(resolve_backend_model("gemini-3.1-pro-high"), "gemini-3.1-pro-high")
+        self.assertEqual(resolve_backend_model("gemini-3.5-flash-high"), "gemini-3-flash-agent")
+        self.assertEqual(resolve_backend_model("gemini-3.5-flash-low"), "gemini-3.7-flash-tiered")
+        self.assertEqual(resolve_backend_model("gemini-3.1-pro-high"), "gemini-pro-agent")
         # Claude models
         self.assertEqual(resolve_backend_model("claude-3.5-sonnet"), "claude-sonnet-4-6")
-        self.assertEqual(resolve_backend_model("claude-opus-4-6"), "claude-opus-4-6-thinking")
+        self.assertEqual(resolve_backend_model("claude-opus-4-6-thinking"), "claude-opus-4-6-thinking")
         self.assertEqual(resolve_backend_model("sonnet"), "claude-sonnet-4-6")
         self.assertEqual(resolve_backend_model("opus"), "claude-opus-4-6-thinking")
         self.assertEqual(resolve_backend_model("claude-sonnet"), "claude-sonnet-4-6")
