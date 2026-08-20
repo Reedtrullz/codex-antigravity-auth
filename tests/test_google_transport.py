@@ -243,7 +243,9 @@ class TestGoogleRequestConstruction(unittest.TestCase):
 
         self.assertEqual(envelope["project"], "safe-project")
         self.assertEqual(headers["Authorization"], "Bearer token-value")
-        self.assertEqual(headers["User-Agent"], "Agent/1")
+        # The IDE User-Agent is always used; fingerprint UA overrides are
+        # ignored to match the real Antigravity IDE header set.
+        self.assertIn("antigravity/ide/", headers["User-Agent"])
         self.assertNotIn("person@example.com", str(envelope))
         self.assertNotIn("person@example.com", str(headers))
 
@@ -258,9 +260,11 @@ class TestGoogleRequestConstruction(unittest.TestCase):
 
         headers = transport.build_headers(lease)
 
-        self.assertIn('"valid": 1', headers["Client-Metadata"])
-        self.assertNotIn("Infinity", headers["Client-Metadata"])
-        self.assertNotIn("invalid", headers["Client-Metadata"])
+        # Client-Metadata is no longer sent by default; only User-Agent +
+        # Authorization are required for generateContent (matching the real
+        # Antigravity IDE header set).
+        self.assertNotIn("Client-Metadata", headers)
+        self.assertNotIn("X-Goog-Api-Client", headers)
 
 
 class TestGoogleHTTPExecution(unittest.IsolatedAsyncioTestCase):

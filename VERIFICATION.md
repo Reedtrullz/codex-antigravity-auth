@@ -53,7 +53,7 @@ codex-antigravity configure-codex --write --model deepseek:deepseek-chat
 Equivalent manual TOML:
 
 ```toml
-model = "gemini-3.5-flash-high"
+model = "gemini-3.7-flash"
 model_provider = "antigravity"
 wire_api = "responses"
 
@@ -85,7 +85,7 @@ For the `1.7.0` release candidate, the publish workflow is blocked on both its a
 ```bash
 curl -s -X POST http://localhost:51122/v1/responses \
   -H "Content-Type: application/json" \
-  -d '{"model":"gemini-3.5-flash-high","input":"Say hello!"}'
+  -d '{"model":"gemini-3.7-flash","input":"Say hello!"}'
 # Expect: 200 with output containing text
 ```
 
@@ -116,11 +116,11 @@ OpenRouter was also smoke-tested with a transient `OPENROUTER_API_KEY` environme
 - **Use Antigravity**: Add `model_provider = "antigravity"`, ensure gateway is running
 
 ## Available Models
-- `gemini-3.5-flash-high` → Gemini 3.5 Flash (Agent High)
-- `gemini-3.5-flash-medium` → Gemini 3.5 Flash (General)
-- `gemini-3.1-pro-high` → Gemini 3.1 Pro (Reasoning)
-- `claude-3.5-sonnet` → Claude Sonnet 4.6 (Google)
-- `claude-opus-4-6` → Claude Opus 4.6 (Google)
+- `gemini-3.7-flash` → Gemini 3.5 Flash (Agent High)
+- `gemini-3.7-flash` → Gemini 3.5 Flash (General)
+- `gemini-3.1-pro` → Gemini 3.1 Pro (Reasoning)
+- `claude-sonnet-4-6` → Claude Sonnet 4.6 (Google)
+- `claude-opus-4-6-thinking` → Claude Opus 4.6 (Google)
 - `deepseek:deepseek-v4-flash` → DeepSeek V4 Flash BYOK
 - `deepseek:deepseek-chat` → DeepSeek BYOK
 - `openrouter:openrouter/auto` → OpenRouter BYOK auto-router

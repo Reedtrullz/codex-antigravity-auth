@@ -227,7 +227,7 @@ class TestServerStreaming(unittest.TestCase):
         }
         with patch("codex_antigravity_auth.server.load_accounts_read_only", return_value=data):
             with patch("codex_antigravity_auth.server.time.time", return_value=now):
-                claude = google_rotation_diagnostics("claude-3.5-sonnet")
+                claude = google_rotation_diagnostics("claude-sonnet-4-6")
                 gemini = google_rotation_diagnostics("gemini-3.5-flash-high")
 
         self.assertEqual(claude["cooldown_count"], 1)
@@ -240,7 +240,7 @@ class TestServerStreaming(unittest.TestCase):
         }
         with patch("codex_antigravity_auth.server.load_accounts_read_only", return_value=data):
             with patch("codex_antigravity_auth.server.time.time", return_value=1_700_000_001):
-                diagnostics = google_rotation_diagnostics("claude-3.5-sonnet")
+                diagnostics = google_rotation_diagnostics("claude-sonnet-4-6")
 
         self.assertEqual(diagnostics["cooldown_count"], 0)
         self.assertFalse(diagnostics["all_accounts_cooling_down"])
@@ -881,8 +881,8 @@ class TestServerStreaming(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         ids = [model["id"] for model in response.json()["data"]]
-        self.assertIn("claude-3.5-sonnet", ids)
-        self.assertIn("claude-opus-4-6", ids)
+        self.assertIn("claude-sonnet-4-6", ids)
+        self.assertIn("claude-opus-4-6-thinking", ids)
         self.assertNotIn("openrouter:openrouter/auto", ids)
         self.assertLess(elapsed, 1.0)
 

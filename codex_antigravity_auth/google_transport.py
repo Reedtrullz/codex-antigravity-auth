@@ -30,6 +30,37 @@ from .transform import (
     transform_request,
     valid_function_name,
 )
+ANTIGRAVITY_IDE_VERSION = "2.5.5"
+_IDE_USER_AGENT_CACHE: str | None = None
+
+
+def ide_user_agent() -> str:
+    """Return the Antigravity IDE User-Agent that matches the real IDE client.
+
+    The backend validates the User-Agent against the OAuth credential's client
+    identity.  Sending a non-IDE UA (e.g. Electron/Chrome) causes 403
+    VALIDATION_REQUIRED errors.
+    """
+    global _IDE_USER_AGENT_CACHE
+    if _IDE_USER_AGENT_CACHE is not None:
+        return _IDE_USER_AGENT_CACHE
+    import platform as _platform
+    os_type = _platform.system().lower()  # darwin, linux, windows
+    machine = _platform.machine().lower()  # arm64, x86_64, amd64
+    if machine in ("arm64", "aarch64"):
+        arch = "arm64"
+    elif machine in ("x86_64", "x86", "i386", "i686"):
+        arch = "amd64"
+    else:
+        arch = machine
+    ua = (
+        f"antigravity/ide/{ANTIGRAVITY_IDE_VERSION} "
+        f"(os_type={os_type}; arch={arch}; aidev_client; auth_method=oauth)"
+    )
+    _IDE_USER_AGENT_CACHE = ua
+    return ua
+
+
 
 
 @dataclass(frozen=True)
@@ -423,33 +454,19 @@ class GoogleTransport:
         return transform_request(request, project_id=safe_project_id(lease.project_id))
 
     def build_headers(self, lease: AccountLease) -> dict[str, str]:
+        # Match the real Antigravity IDE header set exactly.  OpenCodex sends
+        # only User-Agent + Authorization for generateContent; extra headers
+        # like X-Goog-Api-Client and Client-Metadata cause fingerprint mismatches.
         headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/2.0.0 Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36",
-            "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-            "Client-Metadata": json.dumps(
-                {"ideType": "ANTIGRAVITY", "platform": self.platform_name, "pluginType": "GEMINI"},
-                separators=(",", ":"),
-            ),
+            "User-Agent": ide_user_agent(),
             "Content-Type": "application/json",
             "Authorization": f"Bearer {lease.access_token}",
         }
-        fingerprint = lease.fingerprint
-        if isinstance(fingerprint, dict):
-            user_agent = _safe_header_string(fingerprint.get("userAgent"))
-            api_client = _safe_header_string(fingerprint.get("apiClient"))
-            if user_agent is not None:
-                headers["User-Agent"] = user_agent
-            if api_client is not None:
-                headers["X-Goog-Api-Client"] = api_client
-            client_metadata = _safe_client_metadata(fingerprint.get("clientMetadata"))
-            device_id = _safe_header_string(fingerprint.get("deviceId"))
-            session_token = _safe_header_string(fingerprint.get("sessionToken"))
-            if device_id is not None:
-                client_metadata["deviceId"] = device_id
-            if session_token is not None:
-                client_metadata["sessionToken"] = session_token
-            if client_metadata:
-                headers["Client-Metadata"] = json.dumps(client_metadata)
+        # NOTE: We intentionally ignore stored fingerprint overrides for
+        # User-Agent, apiClient, and clientMetadata.  The real Antigravity IDE
+        # only sends User-Agent + Authorization for generateContent; extra
+        # headers (X-Goog-Api-Client, Client-Metadata) cause fingerprint
+        # mismatches and 403 VALIDATION_REQUIRED errors.
         return headers
 
     async def post(self, request: dict[str, Any], lease: AccountLease) -> httpx.Response:

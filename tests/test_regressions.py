@@ -119,10 +119,10 @@ class TestRegressionFixes(unittest.TestCase):
             return {"email": "worker@example.com"}
 
         with patch("codex_antigravity_auth.server.run_in_threadpool", new=fake_threadpool):
-            account = asyncio.run(select_active_account_for_request("claude-3.5-sonnet"))
+            account = asyncio.run(select_active_account_for_request("claude-sonnet-4-6"))
 
         self.assertEqual(account["email"], "worker@example.com")
-        self.assertEqual(calls[0][1], ("claude-3.5-sonnet",))
+        self.assertEqual(calls[0][1], ("claude-sonnet-4-6",))
 
     def test_model_overlay_is_advertised_by_models_endpoint(self):
         from pathlib import Path
@@ -162,10 +162,10 @@ class TestRegressionFixes(unittest.TestCase):
                     with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
                         response = TestClient(app).get("/v1/models")
 
-        self.assertEqual(resolved, "claude-3.5-sonnet")
-        self.assertIn("claude-3.5-sonnet", {model["id"] for model in catalog})
+        self.assertEqual(resolved, "claude-sonnet-4-6")
+        self.assertIn("claude-sonnet-4-6", {model["id"] for model in catalog})
         self.assertEqual(response.status_code, 200)
-        self.assertIn("claude-3.5-sonnet", {model["id"] for model in response.json()["data"]})
+        self.assertIn("claude-sonnet-4-6", {model["id"] for model in response.json()["data"]})
         self.assertTrue(any("Ignoring invalid Codex Antigravity model overlay" in str(item.message) for item in captured))
 
     def test_model_overlay_toml_preserves_quoted_hash_values(self):
@@ -1178,7 +1178,7 @@ class TestRegressionFixes(unittest.TestCase):
                         response = TestClient(app).post(
                             "/v1/responses",
                             json={
-                                "model": "claude-opus-4-6",
+                                "model": "claude-opus-4-6-thinking",
                                 "input": "hello",
                                 "metadata": {
                                     "run_id": "anti-run_123",
@@ -1197,7 +1197,7 @@ class TestRegressionFixes(unittest.TestCase):
             response = client.post(
                 "/v1/responses",
                 json={
-                    "model": "claude-opus-4-6",
+                    "model": "claude-opus-4-6-thinking",
                     "input": "hello",
                     "metadata": {"antigravity_backend_timeout_seconds": "slow"},
                 },
@@ -1315,8 +1315,8 @@ class TestRegressionFixes(unittest.TestCase):
 
                 self.assertEqual(headers["Authorization"], "Bearer tok")
                 self.assertIsInstance(headers["User-Agent"], str)
-                self.assertIsInstance(headers["X-Goog-Api-Client"], str)
-                self.assertEqual(json.loads(headers["Client-Metadata"])["ideType"], "ANTIGRAVITY")
+                # X-Goog-Api-Client and Client-Metadata are no longer sent by default
+                # (matching the real Antigravity IDE header set).
 
     def test_google_headers_filter_malformed_account_fingerprint_values(self):
         headers = build_headers(
@@ -1341,21 +1341,12 @@ class TestRegressionFixes(unittest.TestCase):
             }
         )
 
-        metadata = json.loads(headers["Client-Metadata"])
-
         self.assertIsInstance(headers["User-Agent"], str)
-        self.assertIn("Antigravity/2.0.0", headers["User-Agent"])
-        self.assertEqual(headers["X-Goog-Api-Client"], "google-cloud-sdk vscode_cloudshelleditor/0.1")
-        self.assertEqual(metadata["ideType"], "ANTIGRAVITY")
-        self.assertEqual(metadata["deviceId"], "device-1")
-        self.assertEqual(metadata["count"], 1)
-        self.assertIs(metadata["enabled"], True)
-        self.assertNotIn("bad\nkey", metadata)
-        self.assertNotIn("badValue", metadata)
-        self.assertNotIn("nonAscii", metadata)
-        self.assertNotIn("nested", metadata)
-        self.assertNotIn("floatNaN", metadata)
-        self.assertNotIn("sessionToken", metadata)
+        # The IDE User-Agent is used by default; fingerprint userAgent override is
+        # ignored when it's not a valid string.
+        self.assertIn("antigravity/ide/", headers["User-Agent"])
+        # Client-Metadata and X-Goog-Api-Client are no longer sent by default;
+        # only the IDE UA + Authorization are required for generateContent.
 
     def test_streaming_function_calls_use_stable_unique_output_items(self):
         fake_account = {

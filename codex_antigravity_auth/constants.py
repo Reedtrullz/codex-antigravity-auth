@@ -19,7 +19,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/experimentsandconfigs",
 ]
 
-ANTIGRAVITY_ENDPOINT_PROD = "https://cloudcode-pa.googleapis.com"
+ANTIGRAVITY_ENDPOINT_PROD = "https://daily-cloudcode-pa.googleapis.com"
 ANTIGRAVITY_ACCOUNTS_FILE = "~/.codex/antigravity-accounts.json"
 CREDENTIALS_FILE = "~/.codex/antigravity-credentials.json"
 GATEWAY_TOKEN_MIN_LENGTH = 32

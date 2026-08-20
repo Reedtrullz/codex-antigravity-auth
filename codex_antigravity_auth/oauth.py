@@ -159,3 +159,84 @@ def refresh_access_token(refresh_token: str) -> dict:
         error = payload.get("error") or payload.get("error_description") or f"HTTP {status}"
         raise RuntimeError(f"Token refresh failed: {redact_secret_text(str(error))}")
     return payload
+
+
+def _extract_project_id(data: dict | None) -> str | None:
+    """Pull a Cloud Code Assist project id from a loadCodeAssist/onboardUser response."""
+    if not isinstance(data, dict):
+        return None
+    for key in ("cloudaicompanionProject", "projectId", "project"):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, dict):
+            inner = value.get("id")
+            if isinstance(inner, str) and inner:
+                return inner
+    return None
+
+
+def load_code_assist(access_token: str) -> str | None:
+    """Call loadCodeAssist to discover the CCA project for an account."""
+    from .google_transport import ide_user_agent
+    req = urllib.request.Request(
+        "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+        data=json.dumps({"metadata": {"ideType": "ANTIGRAVITY"}}).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "*/*",
+            "Content-Type": "application/json",
+            "User-Agent": ide_user_agent(),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15.0) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    return _extract_project_id(payload)
+
+
+def onboard_user(access_token: str) -> str | None:
+    """Call onboardUser (with retry) to create and discover the CCA project."""
+    from .google_transport import ide_user_agent, ANTIGRAVITY_IDE_VERSION
+    import time as _time
+    for _attempt in range(5):
+        req = urllib.request.Request(
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser",
+            data=json.dumps({
+                "tier_id": "free-tier",
+                "metadata": {
+                    "ide_type": "ANTIGRAVITY",
+                    "ide_name": "antigravity",
+                    "ide_version": ANTIGRAVITY_IDE_VERSION,
+                },
+            }).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "*/*",
+                "Content-Type": "application/json",
+                "User-Agent": ide_user_agent(),
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15.0) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code in (429, 500, 502, 503):
+                _time.sleep(2.0)
+                continue
+            return None
+        except Exception:
+            return None
+        if isinstance(payload, dict) and payload.get("done") is True:
+            return _extract_project_id(payload.get("response"))
+        _time.sleep(2.0)
+    return None
+
+
+def discover_project_id(access_token: str) -> str | None:
+    """Discover the CCA project for an access token (loadCodeAssist -> onboardUser fallback)."""
+    return load_code_assist(access_token) or onboard_user(access_token)

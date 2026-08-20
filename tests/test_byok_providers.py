@@ -1222,16 +1222,16 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(payload["models"], payload["data"])
         model_ids = [m["id"] for m in payload["data"]]
         self.assertIn("gemini-3.5-flash-high", model_ids)
-        self.assertIn("gemini-3.5-flash-medium", model_ids)
-        self.assertIn("gemini-3.1-pro-high", model_ids)
+        self.assertIn("gemini-3.5-flash-high", model_ids)
+        self.assertIn("gemini-3.1-pro", model_ids)
         self.assertIn("claude-3.5-sonnet", model_ids)
-        self.assertIn("claude-opus-4-6", model_ids)
+        self.assertIn("claude-opus-4-6-thinking", model_ids)
         by_id = {model["id"]: model for model in payload["data"]}
         self.assertEqual(by_id["claude-3.5-sonnet"]["display_name"], "Claude Sonnet 4.6 (Google)")
         self.assertEqual(by_id["claude-3.5-sonnet"]["default_reasoning_level"], "high")
-        self.assertEqual(by_id["claude-opus-4-6"]["display_name"], "Claude Opus 4.6 (Google)")
-        self.assertEqual(by_id["claude-opus-4-6"]["default_reasoning_level"], "xhigh")
-        self.assertEqual(by_id["gemini-3.5-flash-medium"]["owned_by"], "google-antigravity")
+        self.assertEqual(by_id["claude-opus-4-6-thinking"]["display_name"], "Claude Opus 4.6 (Google)")
+        self.assertEqual(by_id["claude-opus-4-6-thinking"]["default_reasoning_level"], "xhigh")
+        self.assertEqual(by_id["gemini-3.5-flash-high"]["owned_by"], "google-antigravity")
         for model in payload["models"]:
             self.assertEqual(model["slug"], model["id"])
             self.assertEqual(model["shell_type"], "shell_command")

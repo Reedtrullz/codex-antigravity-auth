@@ -10,3 +10,4 @@ dist/
 *.tmp
 antigravity-accounts.json
 antigravity-credentials.json
+codex_antigravity_auth/google_transport.py.bak

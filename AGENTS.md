@@ -4,7 +4,7 @@ Guidance for AI coding agents (Codex, Claude Code, OpenCode, etc.) working on th
 
 ## Overview
 
-Local gateway server that allows OpenAI Codex (CLI and Desktop) to use Google Antigravity models (Gemini 3.x, Claude Opus/Sonnet 4.6) via Google OAuth PKCE and multi-account rotation, plus BYOK OpenAI-compatible providers such as OpenRouter, DeepSeek, xAI, Kimi/Moonshot, Ollama, and OpenCode-compatible endpoints.
+Local gateway server that allows OpenAI Codex (CLI and Desktop) to use Google Antigravity models (Gemini 3.7/3.1, Claude Sonnet/Opus 4.6) via Google OAuth PKCE and multi-account rotation, plus BYOK OpenAI-compatible providers such as OpenRouter, DeepSeek, xAI, Kimi/Moonshot, Ollama, and OpenCode-compatible endpoints.
 
 ## Architecture
 
@@ -20,7 +20,6 @@ codex_antigravity_auth/
 ├── byok.py          # Encrypted BYOK provider config, presets, model routing
 ├── models.py        # User-facing model name → backend ID mapping
 ├── schema.py        # JSON Schema sanitization for Antigravity compatibility
-├── fingerprint.py   # Device fingerprint generation (Electron UA, IDE metadata)
 tests/
 ├── test_transform.py
 ├── test_server_streaming.py
@@ -41,7 +40,7 @@ Codex Desktop/CLI
 server.py: create_response()
     │  1. select_active_account(model)  → accounts.py
     │  2. transform_request()           → transform.py
-    │  3. POST to cloudcode-pa.googleapis.com/v1internal:generateContent
+    │  3. POST to daily-cloudcode-pa.googleapis.com/v1internal:generateContent
     │  4. transform_response()          → transform.py
     ▼
 Codex Desktop/CLI  ←  Responses API formatted response
@@ -52,7 +51,7 @@ Codex Desktop/CLI  ←  Responses API formatted response
 - **Python 3.10+** — use `python3` or activate venv
 - **Virtual env**: `source .venv/bin/activate`
 - **Install**: `uv pip install -e .`
-- **Test**: `python3 -m pytest` (current suite: 577 tests plus 193 subtests, all must pass)
+- **Test**: `python3 -m pytest` (current suite: 710 tests plus 260 subtests, all must pass)
 - **Run server**: `codex-antigravity start --port 51122`
 - **Credentials**: `~/.codex/antigravity-credentials.json` or env vars
 - **Accounts**: `~/.codex/antigravity-accounts.json` (Fernet-encrypted)
@@ -61,11 +60,14 @@ Codex Desktop/CLI  ←  Responses API formatted response
 ## Model Name Mapping
 
 User-facing aliases → Google backend models (`models.py`):
-- `gemini-3.5-flash-high` → `gemini-3-flash-agent`
-- `gemini-3.5-flash-medium` → `gemini-3.5-flash-low`
-- `gemini-3.1-pro-high` → `gemini-3.1-pro-high`
-- `claude-3.5-sonnet` → `claude-sonnet-4-6`
-- `claude-opus-4-6` → `claude-opus-4-6-thinking`
+- `gemini-3.7-flash` → `gemini-3.7-flash-tiered` (current Flash generation)
+- `gemini-3.1-pro` → `gemini-3.1-pro-low` (alias: `gemini-pro-agent` → `gemini-pro-agent`)
+- `gemini-3.1-flash-image` → `gemini-3.1-flash-image` (image generation)
+- `gemini-3.5-flash-high` → `gemini-3-flash-agent` (retired, backward compat)
+- `gemini-3.6-flash-high` → `gemini-3.6-flash-high` (retired, backward compat)
+- `claude-sonnet-4-6` → `claude-sonnet-4-6` (alias: `claude-3.5-sonnet`)
+- `claude-opus-4-6-thinking` → `claude-opus-4-6-thinking` (alias: `claude-opus-4-6`)
+- `gpt-oss-120b-medium` → `gpt-oss-120b-medium` (open-source, text-only)
 
 BYOK provider models use a provider prefix:
 - `deepseek:deepseek-chat`

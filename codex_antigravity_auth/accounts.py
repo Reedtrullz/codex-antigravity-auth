@@ -16,22 +16,23 @@ from .storage import (
 )
 
 
-FINGERPRINT: dict = {
-    "deviceId": "generated-fingerprint-000000000000",
-    "sessionToken": "00000000000000000000000000000000",
-    "userAgent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Antigravity/2.0.0 "
-        "Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36"
-    ),
-    "apiClient": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-    "clientMetadata": {
-        "ideType": "ANTIGRAVITY",
-        "platform": "MACOS",
-        "pluginType": "GEMINI",
-    },
-    "createdAt": int(time.time() * 1000),
-}
+def _default_fingerprint() -> dict:
+    """Build a fingerprint matching the real Antigravity IDE client.
+
+    The User-Agent must use the IDE format (``antigravity/ide/<ver>``); the
+    Electron/Chrome UA previously sent here causes 403 VALIDATION_REQUIRED
+    errors from the Cloud Code Assist backend.
+    """
+    from .google_transport import ide_user_agent
+    return {
+        "deviceId": "generated-fingerprint-000000000000",
+        "sessionToken": "00000000000000000000000000000000",
+        "userAgent": ide_user_agent(),
+        "createdAt": int(time.time() * 1000),
+    }
+
+
+FINGERPRINT: dict = _default_fingerprint()
 
 
 
@@ -42,6 +43,16 @@ def _apply_token_refresh(account: dict, refresh_token: str) -> None:
     account["expiresAt"] = time.time() + token_expires_in_seconds(refreshed)
     if refreshed.get("refresh_token"):
         account["refreshToken"] = refreshed["refresh_token"]
+    # Discover the Cloud Code Assist project if not already stored.
+    # The backend rejects requests without a valid project id (403 VALIDATION_REQUIRED).
+    if not account.get("projectId"):
+        try:
+            from .oauth import discover_project_id
+            project_id = discover_project_id(refreshed["access_token"])
+            if project_id:
+                account["projectId"] = project_id
+        except Exception:
+            pass
 class AccountManager:
     """Compatibility facade over the production AccountState owner."""
 
@@ -341,6 +352,15 @@ class AccountManager:
                         account["expiresAt"] = current_time + token_expires_in_seconds(refreshed)
                         if refreshed.get("refresh_token"):
                             account["refreshToken"] = refreshed["refresh_token"]
+                        # Discover project ID if missing
+                        if not account.get("projectId"):
+                            try:
+                                from .oauth import discover_project_id
+                                pid = discover_project_id(refreshed["access_token"])
+                                if pid:
+                                    account["projectId"] = pid
+                            except Exception:
+                                pass
                         summary["refreshed"] += 1
                     except Exception:
                         self._state_owner.apply_cooldown(

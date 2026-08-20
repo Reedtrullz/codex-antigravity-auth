@@ -30,65 +30,85 @@ class NativeModel:
     aliases: tuple[str, ...] = ()
 
 
-DEFAULT_CLAUDE_MODEL_ID = "claude-3.5-sonnet"
-DEFAULT_GEMINI_MODEL_ID = "gemini-3.5-flash-high"
+DEFAULT_CLAUDE_MODEL_ID = "claude-sonnet-4-6"
+DEFAULT_GEMINI_MODEL_ID = "gemini-3.7-flash"
 DEFAULT_CODEX_MODEL_ID = DEFAULT_CLAUDE_MODEL_ID
 
 
 NATIVE_MODELS: tuple[NativeModel, ...] = (
+    # ── Gemini Flash (current generation: 3.7) ──
+    # CCA serves 3.7 Flash as a single "tiered" wire id; effort is carried via
+    # thinkingConfig.thinkingLevel rather than suffixed wire ids.
     NativeModel(
-        id="gemini-3.5-flash-high",
-        backend_id="gemini-3-flash-agent",
-        display_name="Gemini 3.5 Flash (Agent High)",
-        context_window=1_000_000,
+        id="gemini-3.7-flash",
+        backend_id="gemini-3.7-flash-tiered",
+        display_name="Gemini 3.7 Flash",
+        context_window=1_048_576,
+        family="gemini",
+        aliases=("gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low"),
+    ),
+    # ── Gemini Pro (current generation: 3.1) ──
+    # effort → wire model mapping handled by LEGACY_BACKEND_ALIASES / model effort tables.
+    NativeModel(
+        id="gemini-3.1-pro",
+        backend_id="gemini-3.1-pro-low",
+        display_name="Gemini 3.1 Pro",
+        context_window=1_048_576,
+        family="gemini",
+        aliases=("gemini-3.1-pro-high", "gemini-pro-agent", "gemini-3.1-pro-preview"),
+    ),
+    # ── Gemini Image generation ──
+    NativeModel(
+        id="gemini-3.1-flash-image",
+        backend_id="gemini-3.1-flash-image",
+        display_name="Gemini 3.1 Flash Image",
+        context_window=1_048_576,
         family="gemini",
     ),
+    # ── Claude (via Google Antigravity) ──
     NativeModel(
-        id="gemini-3.5-flash-medium",
-        backend_id="gemini-3.5-flash-low",
-        display_name="Gemini 3.5 Flash (General)",
-        context_window=1_000_000,
-        family="gemini",
-        aliases=("gemini-3.5-flash", "gemini-3.5-flash-low"),
+        id="claude-sonnet-4-6",
+        backend_id="claude-sonnet-4-6",
+        display_name="Claude Sonnet 4.6 (Google)",
+        context_window=250_000,
+        family="claude",
+        aliases=("sonnet", "claude-sonnet", "claude-3.5-sonnet", "claude-3-5-sonnet"),
     ),
+    NativeModel(
+        id="claude-opus-4-6-thinking",
+        backend_id="claude-opus-4-6-thinking",
+        display_name="Claude Opus 4.6 (Google)",
+        context_window=250_000,
+        family="claude",
+        default_reasoning_level="xhigh",
+        aliases=("opus", "claude-opus", "claude-opus-4-6"),
+    ),
+    # ── GPT-OSS (open-source, via Google Antigravity) ──
+    NativeModel(
+        id="gpt-oss-120b-medium",
+        backend_id="gpt-oss-120b-medium",
+        display_name="GPT-OSS 120B (Medium)",
+        context_window=131_072,
+        family="gemini",
+    ),
+    # ── Retired Flash generations (route to current 3.7) ──
+    # Google takes previous Flash models offline quickly; these aliases ensure
+    # saved configs continue to work by routing to the current generation.
     NativeModel(
         id="gemini-3.6-flash-high",
         backend_id="gemini-3.6-flash-high",
-        display_name="Gemini 3.6 Flash (Agent High)",
-        context_window=1_000_000,
+        display_name="Gemini 3.6 Flash (High)",
+        context_window=1_048_576,
         family="gemini",
+        aliases=("gemini-3.6-flash", "gemini-3.6-flash-medium", "gemini-3.6-flash-low"),
     ),
     NativeModel(
-        id="gemini-3.6-flash-medium",
-        backend_id="gemini-3.6-flash-low",
-        display_name="Gemini 3.6 Flash (General)",
-        context_window=1_000_000,
+        id="gemini-3.5-flash-high",
+        backend_id="gemini-3-flash-agent",
+        display_name="Gemini 3.5 Flash (High)",
+        context_window=1_048_576,
         family="gemini",
-        aliases=("gemini-3.6-flash", "gemini-3.6-flash-low"),
-    ),
-    NativeModel(
-        id="gemini-3.1-pro-high",
-        backend_id="gemini-3.1-pro-high",
-        display_name="Gemini 3.1 Pro (Reasoning)",
-        context_window=1_000_000,
-        family="gemini",
-    ),
-    NativeModel(
-        id="claude-3.5-sonnet",
-        backend_id="claude-sonnet-4-6",
-        display_name="Claude Sonnet 4.6 (Google)",
-        context_window=200_000,
-        family="claude",
-        aliases=("sonnet", "claude-sonnet", "claude-3-5-sonnet", "claude-sonnet-4-6"),
-    ),
-    NativeModel(
-        id="claude-opus-4-6",
-        backend_id="claude-opus-4-6-thinking",
-        display_name="Claude Opus 4.6 (Google)",
-        context_window=200_000,
-        family="claude",
-        default_reasoning_level="xhigh",
-        aliases=("opus", "claude-opus", "claude-opus-4-6-thinking"),
+        aliases=("gemini-3.5-flash", "gemini-3.5-flash-medium", "gemini-3.5-flash-low", "gemini-3.5-flash-extra-low"),
     ),
 )
 
@@ -97,6 +117,17 @@ RESERVED_GOOGLE_MODEL_PREFIXES = {"openai", "openai-responses"}
 LEGACY_BACKEND_ALIASES = {
     "gemini-3.1-pro": "gemini-3.1-pro-low",
     "gemini-3.1-pro-low": "gemini-3.1-pro-low",
+    "gemini-3.1-pro-high": "gemini-pro-agent",
+    # Retired Flash generations route to the current wire id.
+    "gemini-3.6-flash": "gemini-3.7-flash-tiered",
+    "gemini-3.6-flash-low": "gemini-3.7-flash-tiered",
+    "gemini-3.6-flash-medium": "gemini-3.7-flash-tiered",
+    "gemini-3.6-flash-high": "gemini-3.7-flash-tiered",
+    "gemini-3.5-flash": "gemini-3.7-flash-tiered",
+    "gemini-3.5-flash-low": "gemini-3.7-flash-tiered",
+    "gemini-3.5-flash-medium": "gemini-3.7-flash-tiered",
+    "gemini-3.5-flash-extra-low": "gemini-3.7-flash-tiered",
+    "gemini-3-flash-agent": "gemini-3.7-flash-tiered",
 }
 NATIVE_MODEL_BY_ID = {model.id: model for model in NATIVE_MODELS}
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -438,19 +469,42 @@ def native_model_capabilities(model: str) -> ProviderCapabilities:
 
 
 def native_model_catalog(*, strict_overlays: bool = False) -> list[dict[str, Any]]:
-    return [
-        {
-            "id": model.id,
-            "backend_id": model.backend_id,
-            "display_name": model.display_name,
-            "context_window": model.context_window,
-            "family": model.family,
-            "default_reasoning_level": model.default_reasoning_level,
-            "supports_parallel_tool_calls": model.supports_parallel_tool_calls,
-            "aliases": list(model.aliases),
-        }
-        for model in all_native_models(strict_overlays=strict_overlays)
-    ]
+    entries: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for model in all_native_models(strict_overlays=strict_overlays):
+        entries.append(
+            {
+                "id": model.id,
+                "backend_id": model.backend_id,
+                "display_name": model.display_name,
+                "context_window": model.context_window,
+                "family": model.family,
+                "default_reasoning_level": model.default_reasoning_level,
+                "supports_parallel_tool_calls": model.supports_parallel_tool_calls,
+                "aliases": list(model.aliases),
+            }
+        )
+        seen_ids.add(model.id.lower())
+    # Include well-known aliases as separate model entries for backward
+    # compatibility.  Clients that saved an old model id (e.g.
+    # "claude-3.5-sonnet") expect it to appear in /v1/models.
+    _backward_compat_aliases = {
+        "claude-3.5-sonnet": "claude-sonnet-4-6",
+        "gemini-3.1-pro-high": "gemini-3.1-pro",
+    }
+    for alias_id, canonical_id in _backward_compat_aliases.items():
+        if alias_id.lower() in seen_ids:
+            continue
+        # Find the canonical model to copy its metadata
+        for entry in entries:
+            if entry["id"] == canonical_id:
+                alias_entry = dict(entry)
+                alias_entry["id"] = alias_id
+                alias_entry["aliases"] = []
+                entries.append(alias_entry)
+                seen_ids.add(alias_id.lower())
+                break
+    return entries
 
 
 def model_identifier_collisions(

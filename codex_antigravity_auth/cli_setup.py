@@ -205,6 +205,20 @@ def run_local_oauth_flow(*, select_account: bool = False) -> dict:
     finally:
         server.server_close()
 
+    # Discover the Cloud Code Assist project for this account.
+    # The backend rejects requests without a valid project id (403 VALIDATION_REQUIRED).
+    print("[*] Discovering Cloud Code Assist project...")
+    project_id = None
+    try:
+        from .oauth import discover_project_id
+        project_id = discover_project_id(tokens["access_token"])
+    except Exception as exc:
+        print(f"[!] Project discovery failed: {exc}")
+    if project_id:
+        print(f"[+] Discovered project: {project_id}")
+    else:
+        print("[!] WARNING: Could not discover project id. Requests may fail with 403.")
+
     # Extract user profile email
     email = None
     try:
@@ -247,6 +261,8 @@ def run_local_oauth_flow(*, select_account: bool = False) -> dict:
         "accessToken": tokens["access_token"],
         "expiresAt": int(time.time()) + _cli.token_expires_in_seconds(tokens),
     }
+    if project_id:
+        account_entry["projectId"] = project_id
 
     result = _cli.upsert_google_account(data, account_entry)
     if result["created"]:
