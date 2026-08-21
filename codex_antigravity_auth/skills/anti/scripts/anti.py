@@ -33,7 +33,7 @@ from anti_lib.ledger import execution_entry, prompts_as_text
 from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
 from anti_lib.runner import presentable_result
 from anti_lib.verifier import verify_findings
-from anti_lib.reflections import record_review, get_summary, list_records, clear_records
+from anti_lib.reflections import record_review, get_summary, list_records, clear_records, prune_reflections_older_than
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:51122/v1"
@@ -5337,9 +5337,12 @@ def command_smoke(args: argparse.Namespace) -> int:
         # Version drift check: warn when installed gateway is older than the
         # repo checkout (which may contain fixes for known upstream bugs).
         try:
-            import tomllib
+            import tomllib  # type: ignore[import-not-found]
         except ImportError:
-            tomllib = None  # type: ignore[assignment]
+            try:
+                import tomli as tomllib  # type: ignore[no-redef, import-not-found]
+            except ImportError:
+                tomllib = None  # type: ignore[assignment, no-redef]
         if tomllib is not None:
             # Walk upward from the script location to find pyproject.toml.
             # This works for both the repo copy and the installed skill copy.
@@ -5351,11 +5354,27 @@ def command_smoke(args: argparse.Namespace) -> int:
                     break
             if pyproject is not None and pyproject.is_file():
                 try:
-                    with open(pyproject, "rb") as fh:
-                        repo_version = str(tomllib.load(fh).get("project", {}).get("version", "")).strip()
+                    if tomllib is not None:
+                        with open(pyproject, "rb") as fh:
+                            repo_version = str(tomllib.load(fh).get("project", {}).get("version", "")).strip()
+                    else:
+                        # Minimal fallback for environments without tomllib/tomli
+                        # (Python 3.10 without extras): parse the project version
+                        # line directly instead of silently skipping drift checks.
+                        text_content = pyproject.read_text(encoding="utf-8")
+                        version_match = re.search(
+                            r'^version\s*=\s*["\']([^"\']+)["\']',
+                            text_content,
+                            re.MULTILINE,
+                        )
+                        repo_version = version_match.group(1).strip() if version_match else ""
                     if repo_version and package_version != repo_version:
                         def _vkey(v: str) -> tuple[int, ...]:
-                            return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+                            try:
+                                parts = tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+                                return parts if parts else (0,)
+                            except (ValueError, TypeError):
+                                return (0,)
                         if _vkey(package_version) < _vkey(repo_version):
                             statuses["version_drift"] = {
                                 "installed": package_version,
@@ -6076,8 +6095,10 @@ def command_runs(args: argparse.Namespace) -> int:
                     else:
                         path.unlink()
                     removed += 1
+        reflection_removed = prune_reflections_older_than(cutoff, dry_run=args.dry_run)
         verb = "Would remove" if args.dry_run else "Removed"
         print(f"[+] {verb} {removed} Anti run record(s) older than {args.older_than} day(s)")
+        print(f"[+] {verb} {reflection_removed} reflection record file(s) older than {args.older_than} day(s)")
         return 0
     if args.runs_command == "reflections":
         repo = Path(args.repo).resolve()
@@ -6438,6 +6459,46 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _extract_error_diagnostics(exc: AntiError, args: argparse.Namespace) -> dict[str, Any]:
+    """Extract structured diagnostics from an AntiError for run records.
+
+    Returns requested models, token usage estimates, and failed-lane summaries
+    so failed runs carry the same observability as successful ones.
+    """
+    gen_meta = getattr(exc, "generation_metadata", None) or {}
+    requested_models = getattr(args, "resolved_panel_models", None) or []
+    if not requested_models and isinstance(gen_meta, dict):
+        chain = gen_meta.get("fallbackChain") or gen_meta.get("fallback_chain") or []
+        if chain:
+            requested_models = list(chain)
+    prompt_chars = 0
+    output_chars = 0
+    failed_lanes: list[dict[str, Any]] = []
+    if isinstance(gen_meta, dict):
+        try:
+            prompt_chars = int(gen_meta.get("prompt_chars") or 0)
+        except (ValueError, TypeError):
+            pass
+        try:
+            output_chars = int(gen_meta.get("output_chars") or 0)
+        except (ValueError, TypeError):
+            pass
+        failed_lanes = [
+            {
+                "model": item.get("model"),
+                "error": redact_sensitive_text(item.get("error", "")),
+            }
+            for item in (gen_meta.get("generation_failures") or [])
+            if isinstance(item, dict)
+        ]
+    return {
+        "requested_models": requested_models,
+        "prompt_chars": prompt_chars,
+        "output_chars": output_chars,
+        "failed_lanes": failed_lanes,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -6469,25 +6530,11 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 run_id = getattr(args, "run_id", None)
                 correlation = {"request_log_correlation_id": run_id} if run_id else {}
-                # Extract structured diagnostics from the error text so failed
-                # runs carry the same observability as successful ones.
                 gen_meta = getattr(exc, "generation_metadata", None) or {}
-                requested = getattr(args, "resolved_panel_models", None) or []
-                if not requested and isinstance(gen_meta, dict):
-                    chain = gen_meta.get("fallbackChain") or gen_meta.get("fallback_chain") or []
-                    if chain:
-                        requested = list(chain)
-                prompt_chars = 0
-                output_chars = 0
-                if isinstance(gen_meta, dict):
-                    try:
-                        prompt_chars = int(gen_meta.get("prompt_chars") or 0)
-                    except (ValueError, TypeError):
-                        pass
-                    try:
-                        output_chars = int(gen_meta.get("output_chars") or 0)
-                    except (ValueError, TypeError):
-                        pass
+                diagnostics = _extract_error_diagnostics(exc, args)
+                requested = diagnostics["requested_models"]
+                prompt_chars = diagnostics["prompt_chars"]
+                output_chars = diagnostics["output_chars"]
                 write_run_record(
                     args,
                     mode=getattr(args, "command", "unknown"),
@@ -6497,14 +6544,7 @@ def main(argv: list[str] | None = None) -> int:
                     caveats=[],
                     metadata={
                         **correlation,
-                        "failed_lanes": [
-                            {
-                                "model": item.get("model"),
-                                "error": redact_sensitive_text(item.get("error", "")),
-                            }
-                            for item in (gen_meta.get("generation_failures") or [])
-                            if isinstance(item, dict)
-                        ],
+                        "failed_lanes": diagnostics["failed_lanes"],
                         "requested_model": gen_meta.get("requestedModel") or gen_meta.get("primary_model"),
                         "actual_model": gen_meta.get("actualModel"),
                         "fallback_used": bool(gen_meta.get("fallbackUsed")),

@@ -1,6 +1,8 @@
+import argparse
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -10,6 +12,7 @@ if str(ANTI_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(ANTI_SCRIPTS))
 
 import anti  # noqa: E402
+import anti_lib.reflections as reflections  # noqa: E402
 from anti_lib.verifier import verify_finding  # noqa: E402
 
 
@@ -141,6 +144,55 @@ class RoutingAndCostTests(unittest.TestCase):
         self.assertAlmostEqual(fallback, 0.003)
         self.assertEqual(anti.actual_call_cost("openrouter:nvidia/nemotron-3-super-120b-a12b:free", {"usage": {"total_tokens": 999}}, prompt_chars=1, max_output_tokens=1), 0.0)
 
+    def test_maybe_summarize_raises_on_chunk_overflow(self):
+        """When omitted_items exist and allow_partial=False, raise before any model call."""
+        from unittest.mock import patch
+
+        args = argparse.Namespace(
+            mode="review",
+            chunked="always",
+            allow_partial=False,
+            max_review_chunks=2,
+            max_prompt_chars=100000,
+            priority_file=None,
+        )
+        metadata = {
+            "_review_context": {"diff": "x", "scope_line": "s", "excluded": [], "caveats": []},
+            "status": "incomplete",
+        }
+        chunk_metadata = {
+            "planned_chunk_count": 3,
+            "omitted_items": ["item-a", "item-b"],
+            "omitted_file_count": 2,
+        }
+        with (
+            patch.object(anti, "build_review_chunk_prompts", return_value=([{"kind": "diff"}], chunk_metadata)),
+            patch.object(anti, "generate_with_fallback") as mock_generate,
+            patch.object(anti, "run_chunked_review") as mock_run_chunked,
+        ):
+            with self.assertRaisesRegex(anti.AntiError, r"review scope needs.*--max-review-chunks"):
+                anti.maybe_summarize_panel_review(args=args, prompt="p", caveats=[], metadata=metadata, panel_models=["claude-sonnet-4-6"])
+            mock_generate.assert_not_called()
+            mock_run_chunked.assert_not_called()
+
+    def test_main_error_handler_populates_models_from_generation_metadata(self):
+        """AntiError with generation_metadata should populate models/prompt_chars/output_chars."""
+        exc = anti.AntiError("boom")
+        exc.generation_metadata = {  # type: ignore[attr-defined]
+            "fallbackChain": ["sonnet", "flash"],
+            "prompt_chars": "123",
+            "output_chars": None,
+            "generation_failures": [{"model": "sonnet", "error": "rate limited sk-abc123def456ghi789"}],
+        }
+        args = argparse.Namespace(resolved_panel_models=None)
+        extract = anti.main.__globals__["_extract_error_diagnostics"]
+        result = extract(exc, args)
+        self.assertEqual(result["requested_models"], ["sonnet", "flash"])
+        self.assertEqual(result["prompt_chars"], 123)
+        self.assertEqual(result["output_chars"], 0)
+        self.assertEqual(len(result["failed_lanes"]), 1)
+        self.assertNotIn("sk-abc123def456ghi789", result["failed_lanes"][0]["error"])
+
 
 class VerifierTests(unittest.TestCase):
     def test_verifier_syntax_and_secrets(self):
@@ -163,6 +215,130 @@ class VerifierTests(unittest.TestCase):
             self.assertEqual(verify_finding(missing, root), missing)
             no_file = {"claim": "x"}
             self.assertEqual(verify_finding(no_file, root), no_file)
+
+
+class ReflectionTests(unittest.TestCase):
+    def setUp(self):
+        self._original_dir = reflections.REFLECTIONS_DIR
+        self._temp_dir = tempfile.TemporaryDirectory()
+        reflections.REFLECTIONS_DIR = Path(self._temp_dir.name) / "reflections"
+
+    def tearDown(self):
+        reflections.REFLECTIONS_DIR = self._original_dir
+        self._temp_dir.cleanup()
+
+    def _record(self, repo: Path, fingerprint: str = "fp-1", severity: str = "high"):
+        return reflections.record_review(
+            repo_path=repo,
+            findings=[{"id": "F001", "fingerprint": fingerprint, "severity": severity, "file": "src/app.py", "line": 7}],
+            models=["sonnet"],
+            panel_status="complete",
+            mode="quick",
+        )
+
+    def test_record_review_creates_file_with_correct_permissions(self):
+        repo = Path(self._temp_dir.name) / "repo-a"
+        record = self._record(repo)
+
+        path = reflections.REFLECTIONS_DIR / f"{reflections._repo_hash(repo)}.json"
+        self.assertTrue(path.exists())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(saved, [record])
+
+    def test_directory_created_with_700_permissions(self):
+        repo = Path(self._temp_dir.name) / "repo-b"
+        self.assertFalse(reflections.REFLECTIONS_DIR.exists())
+
+        self._record(repo)
+
+        self.assertEqual(reflections.REFLECTIONS_DIR.stat().st_mode & 0o777, 0o700)
+
+    def test_get_summary_counts_findings_and_recurring(self):
+        repo = Path(self._temp_dir.name) / "repo-c"
+        findings_sets = [
+            [
+                {"fingerprint": "shared", "severity": "high", "file": "a.py"},
+                {"fingerprint": "only-one", "severity": "medium", "file": "b.py"},
+            ],
+            [
+                {"fingerprint": "shared", "severity": "high", "file": "nested/a.py"},
+            ],
+            [
+                {"fingerprint": "final", "severity": "low", "file": "c.py"},
+            ],
+        ]
+        for findings in findings_sets:
+            reflections.record_review(
+                repo_path=repo,
+                findings=findings,
+                models=["sonnet", "flash"],
+                panel_status="complete",
+                mode="deep",
+            )
+
+        summary = reflections.get_summary(repo)
+        self.assertEqual(summary["records"], 3)
+        self.assertEqual(summary["total_findings"], 4)
+        self.assertEqual(summary["recurring_fingerprints"], 1)
+        self.assertEqual(summary["top_recurring"], [("shared", 2)])
+        self.assertEqual(summary["severity_distribution"], {"high": 2, "medium": 1, "low": 1})
+        self.assertEqual(summary["models_used"], {"sonnet": 3, "flash": 3})
+
+    def test_prune_old_respects_ttl(self):
+        repo = Path(self._temp_dir.name) / "repo-d"
+        path = reflections._reflection_path(repo)
+        old_timestamp = int(time.time()) - ((reflections.TTL_DAYS + 1) * 86400)
+        recent_timestamp = int(time.time()) - 3600
+        reflections._save_records(
+            path,
+            [
+                {"timestamp": old_timestamp, "findings_count": 1, "findings": [], "models": []},
+                {"timestamp": recent_timestamp, "findings_count": 1, "findings": [], "models": []},
+            ],
+        )
+
+        self._record(repo)
+
+        records = reflections._load_records(path)
+        self.assertEqual(len(records), 2)
+        self.assertGreater(records[0]["timestamp"], old_timestamp)
+
+    def test_clear_records_deletes_and_returns_count(self):
+        repo = Path(self._temp_dir.name) / "repo-e"
+        self._record(repo)
+        self._record(repo, fingerprint="fp-2")
+
+        deleted = reflections.clear_records(repo)
+
+        self.assertEqual(deleted, 2)
+        self.assertFalse(reflections._reflection_path(repo).exists())
+        self.assertEqual(reflections.list_records(repo), [])
+
+    def test_bounded_at_max_entries(self):
+        original_limit = reflections.MAX_ENTRIES_PER_REPO
+        reflections.MAX_ENTRIES_PER_REPO = 5
+        try:
+            repo = Path(self._temp_dir.name) / "repo-f"
+            for index in range(10):
+                self._record(repo, fingerprint=f"fp-{index}")
+
+            path = reflections._reflection_path(repo)
+            records = reflections._load_records(path)
+            self.assertEqual(len(records), 5)
+            self.assertEqual([r["findings"][0]["fingerprint"] for r in records], [f"fp-{i}" for i in range(5, 10)])
+        finally:
+            reflections.MAX_ENTRIES_PER_REPO = original_limit
+
+    def test_existing_files_migrated_to_600_on_next_write(self):
+        legacy_path = reflections.REFLECTIONS_DIR / "legacy.json"
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.write_text("[]", encoding="utf-8")
+        legacy_path.chmod(0o644)
+
+        self._record(Path(self._temp_dir.name) / "repo-g")
+
+        self.assertEqual(legacy_path.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,19 @@ def _reflection_path(repo_path: Path) -> Path:
     return REFLECTIONS_DIR / f"{_repo_hash(repo_path)}.json"
 
 
+def _ensure_permissions(directory: Path | None = None) -> None:
+    """Force owner-only access on reflection data, including legacy files."""
+    directory = directory or REFLECTIONS_DIR
+    if not directory.exists():
+        return
+    os.chmod(directory, 0o700)
+    for path in directory.rglob("*.json"):
+        if path.is_file():
+            current_mode = path.stat().st_mode & 0o777
+            if current_mode != 0o600:
+                os.chmod(path, 0o600)
+
+
 def _load_records(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -38,8 +52,13 @@ def _load_records(path: Path) -> list[dict[str, Any]]:
 
 
 def _save_records(path: Path, records: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(records, indent=2, sort_keys=True), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        # Existing files keep their old mode through O_TRUNC, so enforce 600 here.
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(json.dumps(records, indent=2, sort_keys=True))
 
 
 def _prune_old(records: list[dict[str, Any]], ttl_days: int = TTL_DAYS) -> list[dict[str, Any]]:
@@ -86,6 +105,7 @@ def record_review(
     }
     
     path = _reflection_path(repo_path)
+    _ensure_permissions()
     records = _load_records(path)
     records.append(record)
     records = _prune_old(records)
@@ -156,3 +176,25 @@ def clear_records(repo_path: Path) -> int:
     if path.exists():
         path.unlink()
     return count
+
+
+def prune_reflections_older_than(cutoff_epoch: float, *, dry_run: bool = False) -> int:
+    """Remove reflection files whose newest record is older than the cutoff.
+
+    A file is deleted entirely when every remaining record would be stale;
+    partial pruning inside a file is handled by the per-record TTL during
+    normal writes. Returns number of files removed (or that would be).
+    """
+    if not REFLECTIONS_DIR.exists():
+        return 0
+    removed = 0
+    for path in REFLECTIONS_DIR.glob("*.json"):
+        records = _load_records(path)
+        if not records:
+            continue
+        newest = max(r.get("timestamp", 0) for r in records)
+        if newest < cutoff_epoch:
+            if not dry_run:
+                path.unlink()
+            removed += 1
+    return removed

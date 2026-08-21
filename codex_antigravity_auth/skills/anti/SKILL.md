@@ -154,6 +154,7 @@ python3 ~/.codex/skills/anti/scripts/anti.py workflow quick-check --scope staged
 python3 ~/.codex/skills/anti/scripts/anti.py workflow consensus --scope staged --prompt "Review for bugs"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "Intermittent 502s after rotation"
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
+python3 ~/.codex/skills/anti/scripts/anti.py runs reflections --repo /path/to/repo
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope working-tree
 python3 ~/.codex/skills/anti/scripts/anti.py review --model sonnet --scope staged --file path/to/file.py
 python3 ~/.codex/skills/anti/scripts/anti.py review --model deepseek-v4-pro --scope staged
@@ -215,6 +216,7 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - `/v1/models` is a catalog/readiness hint, not proof that a model can generate. Generation failures remain attached to the requested lane; use the bounded panel generation call (or an explicit smoke/probe workflow when available) to establish live readiness. After retryable generation failures, the helper probes `/v1/models`; if that probe also times out, treat the gateway as wedged and restart it before retrying the same Opus job.
 - `--progress` is enabled by default for all `workflow`, `plan`, `review`, `consult`, `panel`, `moa`, and `fusion` runs, streaming real-time `[anti]` step milestones (model call starts, completed prompt/output char counts, elapsed time, chunk progress, and judge synthesis) directly to stderr for live visibility in Codex. Use `--no-progress` to suppress stderr progress logging if quiet output is explicitly required.
 - V2 workflow presets default to sanitized run summaries under `~/.codex/anti-runs`; use `runs list`, `runs show <id>`, and `runs clean --older-than N` (add `--dry-run` to preview deletions) to inspect or prune them. Primitive commands default to `--save-output never`; pass `--save-output summary` or `--save-output full` only when useful.
+- Repo-level reflection memory passively records review findings per repo under `~/.codex/anti-runs/reflections/` for pattern analysis. Use `runs reflections --repo <path>` to show summary (recurring fingerprints, severity distribution, most-reviewed files) and recent history. Pass `--clear` to reset. Reflections never suppress findings; they only surface patterns. Files are stored at 0600 permissions.
 - The helper emits a cost-awareness hint to stderr when a quota/paid-tier model is selected and free alternatives of similar quality are available. Use `--model <free-alias>` to switch.
 - `--dry-run` prints token estimates and cost tiers without contacting the gateway. Available on `consult`, `review`, `plan`, `panel`, and `workflow` commands.
 - Treat sidecar and panel findings as leads. Consensus is not proof. Before editing, verify actionable claims with local source inspection, official docs when relevant, typecheck/tests, or a small reproducer; record dubious or unverified claims as caveats instead of patching them blindly.
