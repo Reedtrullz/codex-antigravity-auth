@@ -44,32 +44,6 @@ class TestReleaseWorkflow(unittest.TestCase):
         self.assertIn("Verify tag matches package version", self.workflow_text)
         self.assertIn('expected = f"v{version}"', self.workflow_text)
 
-    def test_provider_and_anti_docs_cover_explicit_bluesminds_deepseek_and_grok_routes(self):
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        usage = (ROOT / "USAGE.md").read_text(encoding="utf-8")
-        skill = (ROOT / "codex_antigravity_auth/skills/anti/SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        combined = "\n".join([readme, usage, skill])
-
-        for required in (
-            "bluesminds:grok-4.5",
-            "bluesminds:z-ai/glm-5.2",
-            "deepseek:deepseek-v4-pro",
-            "deepseek:deepseek-v4-flash",
-            "grok-oauth",
-            "grok-bluesminds",
-            "glm-5.2",
-            "workflow claude-grok --model sonnet --model opus --model grok-bluesminds",
-            "workflow provider-compare",
-            "--fallback-model deepseek-v4-flash",
-            "Chat Completions adapter",
-        ):
-            with self.subTest(required=required):
-                self.assertIn(required, combined)
-
-        self.assertNotIn("gpt-5.4", combined.lower())
-
     def test_provider_lane_selection_guidance_is_explicit_and_truthful(self):
         docs = {
             "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
@@ -103,35 +77,45 @@ class TestReleaseWorkflow(unittest.TestCase):
                 self.assertIn(corrected, text)
                 self.assertNotIn("gpt-5.4", text.lower())
 
-    def test_bluesminds_degradation_and_future_enablement_gate_are_explicit(self):
-        docs = {
-            "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
-            "USAGE.md": (ROOT / "USAGE.md").read_text(encoding="utf-8"),
-            "bundled Anti skill": (
-                ROOT / "codex_antigravity_auth/skills/anti/SKILL.md"
-            ).read_text(encoding="utf-8"),
-        }
-        required = (
-            "normal service intentionally omits",
-            "billing error",
-            "upstream 429",
-            "temporary process",
-            "catalog identity",
-            "non-streaming output and exact model identity",
-            "SSE completion and `[DONE]`",
-            "structured JSON",
-            "tool call and continuation",
-            "usage accounting",
-            "bounded retries and no billing/capacity error",
-            "later authorized task",
-            "BLUESMINDS_API_KEY=op://",
-        )
-
-        for name, text in docs.items():
-            with self.subTest(document=name):
-                for phrase in required:
-                    self.assertIn(phrase, text)
-
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAntiSkillDocumentation(unittest.TestCase):
+    """M-3: Verify anti skill SKILL.md contains expected sections and features."""
+
+    def setUp(self) -> None:
+        self.skill_path = ROOT / "codex_antigravity_auth" / "skills" / "anti" / "SKILL.md"
+        self.skill_text = self.skill_path.read_text(encoding="utf-8") if self.skill_path.exists() else ""
+
+    def test_skill_md_exists(self):
+        self.assertTrue(self.skill_path.exists(), f"SKILL.md not found at {self.skill_path}")
+
+    def test_findings_schema_section(self):
+        self.assertIn("## Findings Schema", self.skill_text)
+        self.assertIn("fingerprint", self.skill_text)
+        self.assertIn("confidence", self.skill_text)
+        self.assertIn("evidence", self.skill_text)
+
+    def test_anonymized_panel_section(self):
+        self.assertIn("## Anonymized Panel Judging", self.skill_text)
+        self.assertIn("--no-anonymize", self.skill_text)
+
+    def test_role_specialized_section(self):
+        self.assertIn("## Role-Specialized Prompts", self.skill_text)
+        self.assertIn("correctness", self.skill_text)
+        self.assertIn("security", self.skill_text)
+
+    def test_agent_execution_pattern(self):
+        self.assertIn("## Agent Execution Pattern", self.skill_text)
+        self.assertIn("exec_command", self.skill_text)
+        self.assertIn("yield_time_ms", self.skill_text)
+
+    def test_no_grok_references(self):
+        """Phase 9: Grok/BluesMinds should be removed."""
+        lower = self.skill_text.lower()
+        self.assertNotIn("grok", lower)
+        self.assertNotIn("bluesminds", lower)
+        self.assertNotIn("claude-grok", lower)
+        self.assertNotIn("glm-5.2", lower)

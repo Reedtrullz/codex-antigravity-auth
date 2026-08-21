@@ -373,8 +373,6 @@ def _print_setup_report(report: dict) -> None:
 
 
 def byok_setup_next_command(provider_prefix: str, provider_model: str, provider: dict | None = None) -> str:
-    if provider_prefix == "xai-oauth":
-        return "codex-antigravity provider login xai-oauth"
     if provider is None:
         try:
             provider = _cli.provider_preset(provider_prefix)
@@ -395,12 +393,6 @@ def setup_byok_preflight(provider_prefix: str, provider_model: str) -> tuple[str
     except Exception as exc:
         return "fail", f"Could not load BYOK provider configuration: {_cli.redact_secret_text(str(exc))}", None
     provider = providers.get(provider_prefix)
-    if not provider and provider_prefix == "xai-oauth":
-        try:
-            provider = _cli.provider_preset("xai-oauth")
-            provider["id"] = "xai-oauth"
-        except ValueError:
-            provider = None
     if not provider:
         return "fail", f"BYOK provider '{provider_prefix}' is not configured", None
     key_status = _cli.provider_key_status(provider, configured_label="key OK")
@@ -602,16 +594,16 @@ def run_setup(args) -> dict:
     else:
         _cli._setup_check(checks, "google_oauth_credentials", "skip", f"{model} routes to BYOK")
         byok_status, byok_detail, byok_provider = _cli.setup_byok_preflight(provider_prefix or "", provider_model)
-        if args.write and provider_prefix == "xai-oauth" and byok_status == "fail":
-            _cli.run_xai_oauth_login(
-                argparse.Namespace(
-                    provider="xai-oauth",
-                    device=getattr(args, "no_browser", False),
-                    no_browser=getattr(args, "no_browser", False),
-                )
+        if byok_status == "fail" and provider_prefix == "xai-oauth":
+            migration_command = (
+                "codex-antigravity provider set xai --api-key-env XAI_API_KEY --model grok-build-0.1"
             )
-            _cli._setup_check(checks, "xai_oauth_login", "pass", "completed xAI Grok OAuth login")
-            byok_status, byok_detail, byok_provider = _cli.setup_byok_preflight(provider_prefix or "", provider_model)
+            byok_status = "warn"
+            byok_detail = (
+                "xAI OAuth support has been removed. Migrate with: "
+                f"{migration_command}"
+            )
+            print(f"[!] {byok_detail}")
         _cli._setup_check(checks, "byok_provider", byok_status, byok_detail, provider=provider_prefix, model=provider_model)
         if args.write and byok_status == "fail":
             report = {
@@ -660,8 +652,6 @@ def run_setup(args) -> dict:
         ok = all(check["status"] != "fail" for check in checks)
         if ok:
             next_command = "codex"
-        elif provider_prefix == "xai-oauth" and not _cli.xai_oauth_status().get("ready"):
-            next_command = "codex-antigravity provider login xai-oauth"
         else:
             next_command = "codex-antigravity setup --write --accounts 1 --install-skill --start"
         report = {
@@ -794,4 +784,3 @@ def run_setup(args) -> dict:
     if not ok:
         raise SystemExit(f"Setup completed with readiness failures. Next command: {report['next_command']}")
     return report
-

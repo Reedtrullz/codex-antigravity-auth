@@ -61,8 +61,6 @@ class TestBYOKProviders(unittest.TestCase):
             # No vendor path remains after the prefix, so it is preserved
             # (same rule that keeps openrouter/auto intact).
             ("deepseek/deepseek-chat", "deepseek"): "deepseek/deepseek-chat",
-            ("z-ai/glm-5.2", "bluesminds"): "z-ai/glm-5.2",
-            ("grok-build-0.1", "xai-oauth"): "grok-build-0.1",
             ("openrouter/google/gemma-4-31b-it:free", "openrouter"): "google/gemma-4-31b-it:free",
             # Non-self-referential multi-segment ids must never be rewritten.
             ("org/team/deployment", "custom"): "org/team/deployment",
@@ -216,20 +214,7 @@ class TestBYOKProviders(unittest.TestCase):
             self.assertIn(provider_id, PROVIDER_PRESETS)
             self.assertEqual(PROVIDER_PRESETS[provider_id]["kind"], "openai_chat")
             self.assertEqual(PROVIDER_PRESETS[provider_id]["authModes"], ["api_key"])
-        self.assertIn("xai-oauth", PROVIDER_PRESETS)
-        self.assertEqual(PROVIDER_PRESETS["xai-oauth"]["kind"], "openai_responses")
-        self.assertEqual(PROVIDER_PRESETS["xai-oauth"]["authModes"], ["oauth"])
-        self.assertIn("SuperGrok", PROVIDER_PRESETS["xai-oauth"]["displayName"])
-
-    def test_bluesminds_and_deepseek_v4_presets_are_first_class_chat_routes(self):
-        bluesminds = PROVIDER_PRESETS["bluesminds"]
-        self.assertEqual(bluesminds["displayName"], "BluesMinds")
-        self.assertEqual(bluesminds["kind"], "openai_chat")
-        self.assertEqual(bluesminds["baseUrl"], "https://api.bluesminds.com/v1")
-        self.assertEqual(bluesminds["apiKeyEnv"], "BLUESMINDS_API_KEY")
-        self.assertEqual(bluesminds["authModes"], ["api_key"])
-        self.assertEqual(bluesminds["models"], ["grok-4.5", "z-ai/glm-5.2"])
-
+    def test_deepseek_v4_preset_is_first_class_chat_route(self):
         deepseek = PROVIDER_PRESETS["deepseek"]
         self.assertEqual(deepseek["kind"], "openai_chat")
         self.assertEqual(deepseek["baseUrl"], "https://api.deepseek.com")
@@ -239,30 +224,7 @@ class TestBYOKProviders(unittest.TestCase):
             ["deepseek-v4-flash", "deepseek-v4-pro"],
         )
 
-    def test_models_catalog_advertises_only_the_requested_bluesminds_ids(self):
-        provider = {
-            **PROVIDER_PRESETS["bluesminds"],
-            "id": "bluesminds",
-            "apiKey": "synthetic-bluesminds-key-1234567890",
-        }
-        with patch(
-            "codex_antigravity_auth.server.all_provider_configs_read_only",
-            return_value={"bluesminds": provider},
-        ):
-            response = TestClient(app).get("/v1/models")
-
-        self.assertEqual(response.status_code, 200, response.text)
-        bluesminds_ids = {
-            model["id"]
-            for model in response.json()["data"]
-            if model["owned_by"] == "bluesminds"
-        }
-        self.assertEqual(
-            bluesminds_ids,
-            {"bluesminds:grok-4.5", "bluesminds:z-ai/glm-5.2"},
-        )
-
-    def test_provider_auth_mode_supports_xai_oauth_only_on_dedicated_provider(self):
+    def test_provider_auth_mode_validation_for_api_key_providers(self):
         self.assertEqual(validate_provider_auth_mode("api-key"), "api_key")
         self.assertEqual(validate_provider_auth_mode("api_key"), "api_key")
         self.assertEqual(validate_provider_auth_mode("oauth"), "oauth")
@@ -271,10 +233,8 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertIsNone(validate_provider_auth_mode(None))
         with self.assertRaisesRegex(ValueError, "auth mode"):
             validate_provider_auth_mode("browser")
-        self.assertEqual(validate_supported_provider_auth_mode("xai-oauth", "oauth"), "oauth")
-        with self.assertRaisesRegex(ValueError, "use xai-oauth"):
+        with self.assertRaisesRegex(ValueError, "does not support OAuth"):
             validate_supported_provider_auth_mode("xai", "oauth")
-        self.assertIn("xai-oauth", provider_oauth_unsupported_message("xai"))
 
     def test_oauth_mode_does_not_make_provider_key_usable(self):
         provider = {
