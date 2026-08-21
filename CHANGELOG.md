@@ -1,6 +1,57 @@
 # Changelog
 
-## v2.0.0 — Anti Skill Overhaul (Aug 21, 2026)
+## v2.2.0 - Security Hardening & Release Readiness (Aug 21, 2026)
+
+### Security Fixes
+
+- **Reflection files now written at 0600, directory at 0700.** Legacy
+  world-readable reflection JSON files are migrated to owner-only on the next
+  write. These files contain review findings from private repos and should
+  never have been group/world-readable.
+- **Test isolation.** Reflection tests no longer write to real user data;
+  REFLECTIONS_DIR is monkeypatched to a tempdir for all test runs.
+
+### Bug Fixes (External Agent Report)
+
+- **Plan scope grounding**: plan prompts now include a language/framework
+  profile (pyproject.toml, package.json, etc.) plus top-level directories,
+  so models stop guessing TypeScript on Python repos when the tree is clean.
+- **Chunk-cap fail-fast ordering**: panel review pre-checks chunk overflow
+  before spending any model call; pre-computed chunks pass through to
+  run_chunked_review instead of being recomputed.
+- **VALIDATION_REQUIRED 403 recovery**: Google re-auth URLs are extracted
+  and surfaced with [ACTION REQUIRED] guidance; query-param tokens are
+  redacted from both the displayed URL and the original error body.
+- **Error-path run records**: failed runs populate models, prompt_chars,
+  output_chars, and failed_lanes from generation metadata instead of writing
+  empty fields.
+
+### New Features & Improvements
+
+- **runs clean --older-than N prunes stale reflections** alongside run
+  records; empty per-repo files are deleted entirely.
+- **Smoke version-drift check** compares installed gateway version against
+  repo pyproject.toml; works on Python 3.10 via tomli/regex fallback chain.
+- **_vkey hardened** against unparseable version strings.
+- **Polyglot repos** report all matching language manifests, not just the first.
+- **Error diagnostics helper** extracted to module-level
+  _extract_error_diagnostics() for testability.
+
+### Documentation
+
+- SKILL.md documents runs reflections, passive tracking semantics, and
+  the track-don't-suppress contract.
+
+### Tests
+
+- Full suite: 719 tests + 204 subtests (up from 702), covering reflection
+  permissions, TTL pruning, bounding, migration, chunk-cap fail-fast, URL
+  redaction, malformed-metadata coercion, polyglot profiles, and version-key
+  parsing. POSIX permission assertions are skipped on Windows.
+
+---
+
+## v2.0.0 - Anti Skill Overhaul (Aug 21, 2026)
 
 ### Breaking Changes
 
