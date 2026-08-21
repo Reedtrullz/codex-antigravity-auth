@@ -49,7 +49,10 @@ def _check_secrets(file_path: Path) -> str | None:
         for pattern in patterns:
             match = re.search(pattern, content)
             if match:
-                return f"Potential secret found: {match.group()[:80]}..."
+                # Redact the actual matched value to avoid leaking credentials
+                matched = match.group()
+                key_part = matched.split("=")[0] if "=" in matched else matched[:30]
+                return f"Potential secret pattern detected in: {key_part}=***"
     except Exception:
         pass
     return None
@@ -86,7 +89,9 @@ def verify_finding(finding: dict[str, Any], workspace_root: Path) -> dict[str, A
         file_path = workspace_root / file_path
     file_path = file_path.resolve()
     workspace_resolved = workspace_root.resolve()
-    if not str(file_path).startswith(str(workspace_resolved) + os.sep) and file_path != workspace_resolved:
+    try:
+        file_path.relative_to(workspace_resolved)
+    except ValueError:
         return finding
     
     if not file_path.exists() or not file_path.is_file():
