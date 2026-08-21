@@ -684,7 +684,30 @@ def gateway_post_failure_diagnostic(args: argparse.Namespace, error: str) -> str
 
 def enrich_generation_error(args: argparse.Namespace, error: str) -> str:
     diagnostic = gateway_post_failure_diagnostic(args, error)
-    return error + diagnostic if diagnostic else error
+    enriched = error + diagnostic if diagnostic else error
+    return enrich_validation_required_error(enriched)
+
+
+def extract_validation_url(error_text: str) -> str | None:
+    """Return the Google account-validation URL from a 403 error body, if present."""
+    match = re.search(r'validation_url"?\s*[:=]?\s*"?(https://accounts\.google\.com/[^"\x27\s,}]+)', error_text)
+    return match.group(1) if match else None
+
+
+def enrich_validation_required_error(error: str) -> str:
+    """Surface actionable recovery steps for Google VALIDATION_REQUIRED 403 errors."""
+    if "VALIDATION_REQUIRED" not in error:
+        return error
+    url = extract_validation_url(error)
+    hint = (
+        " This is an account-level block (VALIDATION_REQUIRED), not a code or gateway bug."
+        " Open the validation URL in a browser to re-authorize the account,"
+        " then retry. If it persists after re-auth, upgrade the installed gateway:"
+        " pip install --upgrade codex-antigravity-auth"
+    )
+    if url:
+        return f"{error}\n[ACTION REQUIRED] Verify your Google account: {url}{hint}"
+    return f"{error}{hint}"
 
 
 def backend_timeout_hint(timeout: float) -> float | None:
@@ -2493,6 +2516,44 @@ def run_chunked_review(
     return synthesis, caveats, metadata
 
 
+def detect_repo_profile(root: Path) -> str:
+    """Build a short language/framework preamble from top-level manifests."""
+    lines: list[str] = []
+    manifest_checks = [
+        ("pyproject.toml", "Python project (pyproject.toml present)"),
+        ("setup.py", "Python project (setup.py present)"),
+        ("setup.cfg", "Python project (setup.cfg present)"),
+        ("package.json", "JavaScript/TypeScript project (package.json present)"),
+        ("Cargo.toml", "Rust project (Cargo.toml present)"),
+        ("go.mod", "Go project (go.mod present)"),
+        ("Gemfile", "Ruby project (Gemfile present)"),
+        ("pom.xml", "Java project (pom.xml present)"),
+        ("build.gradle", "JVM project (build.gradle present)"),
+        ("*.csproj", ".NET project"),
+    ]
+    for pattern, label in manifest_checks:
+        if pattern.startswith("*."):
+            if list(root.glob(pattern)):
+                lines.append(label)
+                break
+        elif (root / pattern).is_file():
+            lines.append(label)
+            break
+    try:
+        top_entries = sorted(
+            entry.name
+            for entry in root.iterdir()
+            if not entry.name.startswith(".")
+            and entry.is_dir()
+            and entry.name not in {"node_modules", "__pycache__", ".venv", "venv", "dist", "build", "target"}
+        )[:15]
+    except OSError:
+        top_entries = []
+    if top_entries:
+        lines.append(f"Top-level directories: {', '.join(top_entries)}")
+    return "\n".join(lines)
+
+
 def assemble_plan_prompt(args: argparse.Namespace, *, apply_limit: bool = True) -> tuple[str, list[str]]:
     user_goal = read_prompt(args)
     context = ""
@@ -2526,6 +2587,9 @@ def assemble_plan_prompt(args: argparse.Namespace, *, apply_limit: bool = True) 
                 scope_line += f", ... ({len(paths)} files total)"
 
         context_parts = [f"Planning context scope: {scope_line}."]
+        repo_profile = detect_repo_profile(root)
+        if repo_profile:
+            context_parts.insert(1, f"## Repository Profile\n{repo_profile}")
         if diff.strip():
             context_parts.append("## Git Diff\n```diff\n" + diff + "\n```")
         if file_blocks:
@@ -4198,6 +4262,24 @@ def maybe_summarize_panel_review(
     if not should_run_chunked_review(args, metadata):
         return prompt, caveats, metadata
 
+    # Fail fast on chunk-cap overflow before spending any model call.
+    pre_chunks, pre_chunk_metadata = build_review_chunk_prompts(
+        context,
+        max_prompt_chars=prompt_budget_for_model(args, panel_review_summary_model(panel_models)),
+        max_chunks=args.max_review_chunks,
+        priority_paths=getattr(args, "priority_file", None),
+    )
+    planned_count = int(pre_chunk_metadata.get("planned_chunk_count") or len(pre_chunks))
+    omitted = pre_chunk_metadata.get("omitted_items", [])
+    if omitted and not getattr(args, "allow_partial", False):
+        raise AntiError(
+            f"review scope needs {planned_count} chunk(s) but --max-review-chunks={args.max_review_chunks}; "
+            f"{len(omitted)} item(s) would be omitted "
+            f"({pre_chunk_metadata.get('omitted_file_count', 0)} file(s)). "
+            "Pass --allow-partial to continue with a partial review, "
+            "raise --max-review-chunks, or narrow the file set."
+        )
+
     raw_prompt_chars = len(prompt)
     summary_model = panel_review_summary_model(panel_models)
     prompt_budget = prompt_budget_for_model(args, summary_model)
@@ -5246,6 +5328,42 @@ def command_smoke(args: argparse.Namespace) -> int:
         )
         if not args.json:
             print(f"[PASS] Gateway package version: {package_version}")
+        # Version drift check: warn when installed gateway is older than the
+        # repo checkout (which may contain fixes for known upstream bugs).
+        try:
+            import tomllib
+        except ImportError:
+            tomllib = None  # type: ignore[assignment]
+        if tomllib is not None:
+            pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
+            if not pyproject.is_file():
+                pyproject = Path(__file__).resolve().parents[4] / "pyproject.toml"
+            if pyproject.is_file():
+                try:
+                    with open(pyproject, "rb") as fh:
+                        repo_version = str(tomllib.load(fh).get("project", {}).get("version", "")).strip()
+                    if repo_version and package_version != repo_version:
+                        def _vkey(v: str) -> tuple[int, ...]:
+                            return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+                        if _vkey(package_version) < _vkey(repo_version):
+                            statuses["version_drift"] = {
+                                "installed": package_version,
+                                "repo": repo_version,
+                                "direction": "installed_older",
+                            }
+                            statuses["checks"].append({
+                                "name": "version_drift",
+                                "status": "warn",
+                                "detail": (
+                                    f"Installed gateway {package_version} is older than repo checkout {repo_version}. "
+                                    "Known bug fixes may be missing. Consider: pip install --upgrade codex-antigravity-auth "
+                                    f"or pip install -e '{pyproject.parent}'"
+                                ),
+                            })
+                            if not args.json:
+                                print(f"[WARN] Version drift: installed {package_version} < repo {repo_version}")
+                except Exception:
+                    pass
     except AntiError as exc:
         warning = redact_sensitive_text(str(exc))
         statuses["checks"].append({"name": "health", "status": "warn", "detail": warning})
@@ -6340,14 +6458,42 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 run_id = getattr(args, "run_id", None)
                 correlation = {"request_log_correlation_id": run_id} if run_id else {}
+                # Extract structured diagnostics from the error text so failed
+                # runs carry the same observability as successful ones.
+                gen_meta = getattr(exc, "generation_metadata", None) or {}
+                requested = getattr(args, "resolved_panel_models", None) or []
+                if not requested and isinstance(gen_meta, dict):
+                    chain = gen_meta.get("fallbackChain") or gen_meta.get("fallback_chain") or []
+                    if chain:
+                        requested = list(chain)
+                prompt_chars = 0
+                output_chars = 0
+                if isinstance(gen_meta, dict):
+                    prompt_chars = int(gen_meta.get("prompt_chars") or 0)
+                    output_chars = int(gen_meta.get("output_chars") or 0)
                 write_run_record(
                     args,
                     mode=getattr(args, "command", "unknown"),
                     status="error",
-                    models=[],
+                    models=requested,
                     base_url=getattr(args, "base_url", None),
                     caveats=[],
-                    metadata=correlation,
+                    metadata={
+                        **correlation,
+                        "failed_lanes": [
+                            {
+                                "model": item.get("model"),
+                                "error": redact_sensitive_text(item.get("error", "")),
+                            }
+                            for item in (gen_meta.get("generation_failures") or [])
+                            if isinstance(item, dict)
+                        ],
+                        "requested_model": gen_meta.get("requestedModel") or gen_meta.get("primary_model"),
+                        "actual_model": gen_meta.get("actualModel"),
+                        "fallback_used": bool(gen_meta.get("fallbackUsed")),
+                        "prompt_chars": prompt_chars,
+                        "output_chars": output_chars,
+                    },
                     error=str(exc),
                 )
             except Exception:

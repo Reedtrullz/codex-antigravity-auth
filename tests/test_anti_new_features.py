@@ -58,6 +58,37 @@ class NormalizeAndFindingsTests(unittest.TestCase):
 
 
 class RoutingAndCostTests(unittest.TestCase):
+    def test_extract_validation_url_from_403_body(self):
+        body = 'HTTP 403: {"error": {"reason": "VALIDATION_REQUIRED", "metadata": {"validation_url": "https://accounts.google.com/signin/continue?sarp=1&plt=abc"}}}'
+        url = anti.extract_validation_url(body)
+        self.assertIsNotNone(url)
+        self.assertIn("accounts.google.com/signin/continue", url)
+
+    def test_enrich_validation_required_adds_action(self):
+        body = "HTTP 403: VALIDATION_REQUIRED validation_url https://accounts.google.com/signin/continue?x=1"
+        enriched = anti.enrich_validation_required_error(body)
+        self.assertIn("[ACTION REQUIRED]", enriched)
+        self.assertIn("Verify your Google account", enriched)
+
+    def test_enrich_validation_required_noop_for_other_errors(self):
+        body = "HTTP 429: rate limited"
+        self.assertEqual(anti.enrich_validation_required_error(body), body)
+
+    def test_detect_repo_profile_python_project(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\nname='x'\n")
+            (root / "antigravity_auth").mkdir()
+            profile = anti.detect_repo_profile(root)
+            self.assertIn("Python project", profile)
+            self.assertIn("antigravity_auth", profile)
+
+    def test_detect_repo_profile_empty_dir(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = anti.detect_repo_profile(Path(tmp))
+            self.assertEqual(profile, "")
     def test_resolve_auto_model_thresholds_high_risk_and_no_diff(self):
         self.assertEqual(anti.resolve_auto_model(diff_lines=1)[0], "flash-3.6")
         self.assertEqual(anti.resolve_auto_model(diff_lines=200)[0], "flash-3.6")
