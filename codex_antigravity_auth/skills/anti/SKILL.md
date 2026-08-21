@@ -149,6 +149,8 @@ python3 ~/.codex/skills/anti/scripts/anti.py workflow ship-gate --scope diff --b
 python3 ~/.codex/skills/anti/scripts/anti.py workflow provider-compare --model sonnet --model openrouter:deepseek/deepseek-chat --prompt "Compare these approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow provider-compare --model deepseek-v4-pro --model sonnet --prompt "Compare repository planning approaches"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow security-review --scope staged --output findings
+python3 ~/.codex/skills/anti/scripts/anti.py workflow quick-check --scope staged
+python3 ~/.codex/skills/anti/scripts/anti.py workflow consensus --scope staged --prompt "Review for bugs"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "Intermittent 502s after rotation"
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope working-tree
@@ -178,7 +180,9 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 2. Run `smoke` first when helper readiness is uncertain. Use `codex-antigravity setup --check` or `codex-antigravity doctor --codex-ready` when the user asks whether Claude is native-ready in Codex. Default `smoke` is sidecar readiness; use `smoke --mode full` only when the user asked to make Antigravity the active Codex backend.
 3. For deep autonomous work planning, use `plan --model opus`. Add `--scope working-tree`, `--scope staged`, or `--file` when the plan should account for current repo state.
 4. For multi-model review or planning, use `panel --mode review` or `panel --mode plan`. Use `--role` for lenses such as correctness, security, tests, protocol, or UX. Use `--output findings` when you want machine-readable `id`, `claim`, `severity`, `lanes`, `verify`, `confidence`, `file`, `line`, `evidence`, and `fingerprint` fields. Cross-lane dedup is automatic by fingerprint. Use BYOK `provider:model` ids only when `/v1/models` advertises them.
-5. For common helper flows, prefer named workflow presets: `workflow review-ready` before commit/PR review, `workflow plan-deep` for long autonomous planning, `workflow ship-gate` for merge readiness, `workflow security-review` for injection/secrets/authz/dependency lenses, `workflow debug-consensus` for ranked hypotheses plus discriminating tests, and `workflow provider-compare` for BYOK/provider lane comparisons.
+5. For common helper flows, prefer named workflow presets: `workflow review-ready` before commit/PR review, `workflow plan-deep` for long autonomous planning, `workflow ship-gate` for merge readiness, `workflow security-review` for injection/secrets/authz/dependency lenses, `workflow debug-consensus` for ranked hypotheses plus discriminating tests, and `workflow provider-compare` for BYOK/provider lane comparisons,
+`workflow quick-check` for fast free-model pre-commit gates (60s budget), and
+`workflow consensus` for disagreement-focused 3-model panels with min-successes 2.
 6. For code review, prefer `review --scope staged`, `workflow review-ready --scope staged`, or `panel --mode review --scope staged` when the user asks about commit readiness; use `review --scope working-tree` for current local changes and `review --scope diff --base origin/main` for a clean merge-candidate branch.
 7. For focused questions, use `consult --prompt` for one model or `panel --mode ask --prompt` for a bounded multi-model comparison. Write temporary prompt files outside the repo and pass `--prompt-file` when useful.
 8. Read the helper output and synthesize it with native Codex analysis. Call out disagreements, caveats, and what was or was not live-verified.
@@ -213,6 +217,13 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - The helper emits a cost-awareness hint to stderr when a quota/paid-tier model is selected and free alternatives of similar quality are available. Use `--model <free-alias>` to switch.
 - `--dry-run` prints token estimates and cost tiers without contacting the gateway. Available on `consult`, `review`, `plan`, `panel`, and `workflow` commands.
 - Treat sidecar and panel findings as leads. Consensus is not proof. Before editing, verify actionable claims with local source inspection, official docs when relevant, typecheck/tests, or a small reproducer; record dubious or unverified claims as caveats instead of patching them blindly.
+
+## New Flags
+
+- `--auto-route` — Automatically pick the cheapest adequate model based on diff size and file risk. Small diffs use flash-3.6, medium use sonnet, large or high-risk files use opus. Only activates when `--model` is not explicitly passed.
+- `--budget <cost>` — Maximum estimated cost for a run. Skips remaining panel lanes when the cap is exceeded. Cost is in arbitrary units (not real USD), tracked per lane with estimated vs actual.
+- `--no-verify` — Skip evidence-linked verification of findings (syntax, secrets, eslint checks on referenced files).
+- `--no-anonymize` — Preserve original model names and lane order in judge synthesis (default: anonymize and shuffle).
 
 ## Agent Execution Pattern
 

@@ -5978,7 +5978,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_gateway_args(panel, default_timeout=120.0)
     add_generation_control_args(panel)
     panel.add_argument("--mode", choices=["review", "plan", "ask"], default="review")
-    panel.add_argument("--collab", choices=sorted(COLLAB_PROFILES), default="none", help="Optional collaboration profile")
+    # --collab removed: no active collaboration profiles
     panel.add_argument("--model", action="append", help="Panel model alias/id; repeatable; defaults to sonnet + opus")
     panel.add_argument("--judge", default="opus", help="Judge model alias/id; defaults to opus")
     panel.add_argument("--role", action="append", help="Review/planning lens such as security, correctness, tests, ux")
