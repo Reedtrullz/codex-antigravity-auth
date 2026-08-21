@@ -391,13 +391,11 @@ def provider_capability_mismatches(providers: dict[str, dict]) -> list[dict[str,
             mismatches.append(
                 {"provider": provider_id, "reason": "openai_chat routes require api_key auth"}
             )
-        elif kind == "openai_responses" and not (
-            provider_id == "xai-oauth" and auth_mode == "oauth"
-        ):
+        elif kind == "openai_responses":
             mismatches.append(
                 {
                     "provider": provider_id,
-                    "reason": "native Responses routing currently requires xai-oauth OAuth",
+                    "reason": "native Responses routing is not supported by the CLI",
                 }
             )
         elif kind not in {"openai_chat", "openai_responses"}:
@@ -519,16 +517,7 @@ def codex_ready_report(
         else:
             provider = providers.get(provider_prefix)
             if not provider:
-                if provider_prefix == "xai-oauth":
-                    oauth_status = _cli.xai_oauth_status()
-                    add(
-                        "model_route",
-                        "fail",
-                        "xAI OAuth provider is not logged in" if not oauth_status.get("ready") else "xAI OAuth provider is not visible",
-                        auth=oauth_status,
-                    )
-                else:
-                    add("model_route", "fail", f"BYOK provider '{provider_prefix}' is not configured")
+                add("model_route", "fail", f"BYOK provider '{provider_prefix}' is not configured")
             elif _cli.provider_key_status(provider, configured_label="key OK") != "key OK":
                 credential_name = "OAuth login" if _cli.provider_auth_mode(provider) == "oauth" else "key"
                 add("model_route", "fail", f"BYOK provider '{provider_prefix}' does not have a usable {credential_name}")
@@ -664,12 +653,7 @@ def codex_ready_report(
         elif first == "gateway_models":
             next_command = f"codex-antigravity start --background --port {gateway_port}"
         elif first == "model_catalog":
-            if provider_prefix == "xai-oauth" and not _cli.xai_oauth_status().get("ready"):
-                next_command = "codex-antigravity provider login xai-oauth"
-            else:
-                next_command = "codex-antigravity status && codex-antigravity doctor --codex-ready"
-        elif first == "model_route" and provider_prefix == "xai-oauth":
-            next_command = "codex-antigravity provider login xai-oauth"
+            next_command = "codex-antigravity status && codex-antigravity doctor --codex-ready"
         elif first == "google_rotation":
             next_command = "codex-antigravity setup-google --accounts 1"
         else:
