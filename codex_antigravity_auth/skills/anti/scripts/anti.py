@@ -699,6 +699,10 @@ def enrich_validation_required_error(error: str) -> str:
     if "VALIDATION_REQUIRED" not in error:
         return error
     url = extract_validation_url(error)
+    if url:
+        # Redact user-specific tokens from the original error body too.
+        safe_base = url.split("?")[0]
+        error = error.replace(url, safe_base)
     hint = (
         " This is an account-level block (VALIDATION_REQUIRED), not a code or gateway bug."
         " Open the validation URL in a browser to re-authorize the account,"
@@ -706,7 +710,9 @@ def enrich_validation_required_error(error: str) -> str:
         " pip install --upgrade codex-antigravity-auth"
     )
     if url:
-        return f"{error}\n[ACTION REQUIRED] Verify your Google account: {url}{hint}"
+        # Strip query params (which may contain user-specific tokens) before display.
+        safe_url = url.split("?")[0]
+        return f"{error}\n[ACTION REQUIRED] Verify your Google account: {safe_url}{hint}"
     return f"{error}{hint}"
 
 
@@ -2535,10 +2541,8 @@ def detect_repo_profile(root: Path) -> str:
         if pattern.startswith("*."):
             if list(root.glob(pattern)):
                 lines.append(label)
-                break
         elif (root / pattern).is_file():
             lines.append(label)
-            break
     try:
         top_entries = sorted(
             entry.name
@@ -4290,6 +4294,8 @@ def maybe_summarize_panel_review(
         model=summary_model,
         base_metadata=metadata,
         max_prompt_chars=prompt_budget,
+        chunks=pre_chunks,
+        chunk_metadata=pre_chunk_metadata,
     )
     prompt = "\n\n".join(
         [
@@ -5335,10 +5341,15 @@ def command_smoke(args: argparse.Namespace) -> int:
         except ImportError:
             tomllib = None  # type: ignore[assignment]
         if tomllib is not None:
-            pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
-            if not pyproject.is_file():
-                pyproject = Path(__file__).resolve().parents[4] / "pyproject.toml"
-            if pyproject.is_file():
+            # Walk upward from the script location to find pyproject.toml.
+            # This works for both the repo copy and the installed skill copy.
+            pyproject = None
+            for parent in Path(__file__).resolve().parents:
+                candidate = parent / "pyproject.toml"
+                if candidate.is_file():
+                    pyproject = candidate
+                    break
+            if pyproject is not None and pyproject.is_file():
                 try:
                     with open(pyproject, "rb") as fh:
                         repo_version = str(tomllib.load(fh).get("project", {}).get("version", "")).strip()
@@ -6469,8 +6480,14 @@ def main(argv: list[str] | None = None) -> int:
                 prompt_chars = 0
                 output_chars = 0
                 if isinstance(gen_meta, dict):
-                    prompt_chars = int(gen_meta.get("prompt_chars") or 0)
-                    output_chars = int(gen_meta.get("output_chars") or 0)
+                    try:
+                        prompt_chars = int(gen_meta.get("prompt_chars") or 0)
+                    except (ValueError, TypeError):
+                        pass
+                    try:
+                        output_chars = int(gen_meta.get("output_chars") or 0)
+                    except (ValueError, TypeError):
+                        pass
                 write_run_record(
                     args,
                     mode=getattr(args, "command", "unknown"),

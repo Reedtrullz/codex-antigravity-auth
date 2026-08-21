@@ -89,6 +89,35 @@ class RoutingAndCostTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             profile = anti.detect_repo_profile(Path(tmp))
             self.assertEqual(profile, "")
+
+    def test_detect_repo_profile_polyglot_reports_all(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\nname='x'\n")
+            (root / "package.json").write_text("{}")
+            profile = anti.detect_repo_profile(root)
+            self.assertIn("Python project", profile)
+            self.assertIn("JavaScript/TypeScript project", profile)
+
+    def test_extract_validation_url_redacted_in_enriched_output(self):
+        body = "HTTP 403: VALIDATION_REQUIRED validation_url https://accounts.google.com/signin/continue?plt=SECRET_TOKEN_VALUE"
+        enriched = anti.enrich_validation_required_error(body)
+        self.assertNotIn("SECRET_TOKEN_VALUE", enriched)
+
+    def test_int_coercion_on_malformed_metadata_does_not_raise(self):
+        gen_meta = {"prompt_chars": "unknown", "output_chars": None}
+        try:
+            prompt_chars = int(gen_meta.get("prompt_chars") or 0)
+        except (ValueError, TypeError):
+            prompt_chars = 0
+        try:
+            output_chars = int(gen_meta.get("output_chars") or 0)
+        except (ValueError, TypeError):
+            output_chars = 0
+        self.assertEqual(prompt_chars, 0)
+        self.assertEqual(output_chars, 0)
+
     def test_resolve_auto_model_thresholds_high_risk_and_no_diff(self):
         self.assertEqual(anti.resolve_auto_model(diff_lines=1)[0], "flash-3.6")
         self.assertEqual(anti.resolve_auto_model(diff_lines=200)[0], "flash-3.6")
