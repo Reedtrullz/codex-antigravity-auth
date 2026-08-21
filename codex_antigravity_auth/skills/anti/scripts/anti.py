@@ -33,6 +33,7 @@ from anti_lib.ledger import execution_entry, prompts_as_text
 from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
 from anti_lib.runner import presentable_result
 from anti_lib.verifier import verify_findings
+from anti_lib.reflections import record_review, get_summary, list_records, clear_records
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:51122/v1"
@@ -4791,6 +4792,20 @@ def command_panel(args: argparse.Namespace) -> int:
         caveats=caveats,
         metadata=metadata,
     )
+    # Phase 8: passively record reflection data
+    try:
+        review_ctx = metadata.get("_review_context") or {}
+        workspace = Path(review_ctx.get("workspace_root") or Path.cwd())
+        record_review(
+            repo_path=workspace,
+            findings=findings.get("findings", []) if isinstance(findings, dict) else [],
+            models=list(dict.fromkeys([*panel_models, str(judge_model)])),
+            panel_status=panel_status,
+            mode=args.mode,
+            scope=metadata.get("scope", ""),
+        )
+    except Exception:
+        pass  # Reflection recording is best-effort
     print_panel_result(
         panel_mode=args.mode,
         base_url=args.base_url,
@@ -5069,6 +5084,20 @@ def command_review(args: argparse.Namespace) -> int:
         metadata=metadata,
         execution_ledger=execution_ledger,
     )
+    # Phase 8: passively record reflection data
+    try:
+        scope_line = metadata.get("scope", "")
+        workspace = Path.cwd()
+        record_review(
+            repo_path=workspace,
+            findings=[],  # Reviews don't produce structured findings
+            models=[str(model_used)],
+            panel_status="single_model",
+            mode="review",
+            scope=scope_line,
+        )
+    except Exception:
+        pass
     print_result(
         mode="review",
         model=str(model_used),
@@ -5921,6 +5950,42 @@ def command_runs(args: argparse.Namespace) -> int:
         verb = "Would remove" if args.dry_run else "Removed"
         print(f"[+] {verb} {removed} Anti run record(s) older than {args.older_than} day(s)")
         return 0
+    if args.runs_command == "reflections":
+        repo = Path(args.repo).resolve()
+        if args.clear:
+            count = clear_records(repo)
+            print(f"[+] Cleared {count} reflection record(s) for {repo}")
+            return 0
+        summary = get_summary(repo)
+        if summary.get("records", 0) == 0:
+            print(f"[*] No reflection records for {repo}")
+            return 0
+        print(f"## Reflection Summary: {repo.name}")
+        print(f"- Records: {summary['records']}")
+        print(f"- Total findings: {summary['total_findings']}")
+        print(f"- Recurring fingerprints: {summary['recurring_fingerprints']}")
+        if summary.get("date_range"):
+            print(f"- Date range: {summary['date_range'][0]} to {summary['date_range'][1]}")
+        if summary.get("top_recurring"):
+            print(f"- Most recurring findings:")
+            for fp, count in summary["top_recurring"]:
+                print(f"  - {fp[:16]}... ({count} times)")
+        if summary.get("most_reviewed_files"):
+            print(f"- Most reviewed files:")
+            for fname, count in summary["most_reviewed_files"][:5]:
+                print(f"  - {fname} ({count} findings)")
+        if summary.get("severity_distribution"):
+            print(f"- Severity distribution: {summary['severity_distribution']}")
+        if summary.get("models_used"):
+            print(f"- Models used: {summary['models_used']}")
+        # Show recent records
+        records = list_records(repo, limit=args.limit)
+        if records:
+            print(f"\n## Recent Records (last {len(records)})")
+            for r in records:
+                ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(r.get("timestamp", 0)))
+                print(f"  [{ts}] {r.get('mode','?')} | {r.get('panel_status','?')} | {r.get('findings_count',0)} findings | models: {', '.join(r.get('models',[]))}")
+        return 0
     raise AntiError(f"unknown runs command: {args.runs_command}")
 
 
@@ -6187,6 +6252,10 @@ def build_parser() -> argparse.ArgumentParser:
     runs_clean = runs_sub.add_parser("clean")
     runs_clean.add_argument("--older-than", type=positive_int, required=True, help="Delete records older than N days")
     runs_clean.add_argument("--dry-run", action="store_true", help="List records that would be removed without deleting")
+    runs_reflections = runs_sub.add_parser("reflections", help="Show repo-level reflection history")
+    runs_reflections.add_argument("--repo", default=".", help="Repository path (default: cwd)")
+    runs_reflections.add_argument("--limit", type=positive_int, default=10)
+    runs_reflections.add_argument("--clear", action="store_true", help="Delete all reflection records for this repo")
     runs.set_defaults(func=command_runs)
 
     smoke = sub.add_parser("smoke", help="Check CLI, gateway, models, and doctor readiness")
