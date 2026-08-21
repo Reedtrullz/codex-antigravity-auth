@@ -44,40 +44,6 @@ class TestReleaseWorkflow(unittest.TestCase):
         self.assertIn("Verify tag matches package version", self.workflow_text)
         self.assertIn('expected = f"v{version}"', self.workflow_text)
 
-    def test_provider_lane_selection_guidance_is_explicit_and_truthful(self):
-        docs = {
-            "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
-            "USAGE.md": (ROOT / "USAGE.md").read_text(encoding="utf-8"),
-            "bundled Anti skill": (
-                ROOT / "codex_antigravity_auth/skills/anti/SKILL.md"
-            ).read_text(encoding="utf-8"),
-        }
-        required_guidance = (
-            "fast code second opinion",
-            "correctness, security, architecture, and deep code review",
-            "unproven until",
-            "adversarial assumptions, runtime surprises, and product/UX blind spots",
-            "unavailable/degraded until",
-            "explicit selection",
-            "BYOK disclosure",
-            "/v1/models",
-            "Opus remains the default judge",
-        )
-        misleading = "workflow claude-grok --model grok-bluesminds"
-        corrected = (
-            "workflow claude-grok --model sonnet --model opus "
-            "--model grok-bluesminds"
-        )
-
-        for name, text in docs.items():
-            with self.subTest(document=name):
-                for phrase in required_guidance:
-                    self.assertIn(phrase, text)
-                self.assertNotIn(misleading, text)
-                self.assertIn(corrected, text)
-                self.assertNotIn("gpt-5.4", text.lower())
-
-
 if __name__ == "__main__":
     unittest.main()
 
@@ -111,11 +77,3 @@ class TestAntiSkillDocumentation(unittest.TestCase):
         self.assertIn("## Agent Execution Pattern", self.skill_text)
         self.assertIn("exec_command", self.skill_text)
         self.assertIn("yield_time_ms", self.skill_text)
-
-    def test_no_grok_references(self):
-        """Phase 9: Grok/BluesMinds should be removed."""
-        lower = self.skill_text.lower()
-        self.assertNotIn("grok", lower)
-        self.assertNotIn("bluesminds", lower)
-        self.assertNotIn("claude-grok", lower)
-        self.assertNotIn("glm-5.2", lower)

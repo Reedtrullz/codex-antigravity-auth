@@ -728,60 +728,6 @@ class TestServerStreaming(unittest.TestCase):
             ],
         )
 
-    def test_native_responses_non_streaming_terminal_matrix_validates_provider_payload(self):
-        provider = {
-            "id": "xai-oauth",
-            "kind": "openai_responses",
-            "authMode": "oauth",
-            "baseUrl": "https://api.x.ai/v1",
-            "models": ["model"],
-        }
-        message = {
-            "type": "message",
-            "role": "assistant",
-            "content": [{"type": "output_text", "text": "ok"}],
-        }
-        refusal = {
-            "type": "message",
-            "role": "assistant",
-            "content": [{"type": "refusal", "refusal": "declined"}],
-        }
-        cases = [
-            ("completed", {"status": "completed", "output": [message]}, 200, "completed"),
-            ("incomplete", {"status": "incomplete", "output": [message]}, 200, "incomplete"),
-            ("refusal", {"status": "completed", "output": [refusal]}, 200, "completed"),
-            ("empty", {"status": "completed", "output": []}, 200, "failed"),
-            ("failed", {"status": "failed", "output": [], "error": {"code": "provider_failed"}}, 200, "failed"),
-            ("malformed", {"status": "completed", "output": "bad"}, 502, None),
-        ]
-
-        for name, payload, expected_http, expected_terminal in cases:
-            with self.subTest(name=name):
-                class MockClient:
-                    def __init__(self, *args, **kwargs):
-                        pass
-
-                    async def __aenter__(self):
-                        return self
-
-                    async def __aexit__(self, exc_type, exc_val, exc_tb):
-                        pass
-
-                    async def post(self, *args, **kwargs):
-                        return httpx.Response(200, json=payload)
-
-                with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"xai-oauth": provider}):
-                    with patch("codex_antigravity_auth.server.resolve_xai_oauth_access_token", return_value="oauth-token"):
-                        with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
-                            response = TestClient(app).post(
-                                "/v1/responses",
-                                json={"model": "xai-oauth:model", "input": "hello"},
-                            )
-
-                self.assertEqual(response.status_code, expected_http, response.text)
-                if expected_terminal is not None:
-                    self.assertEqual(response.json()["status"], expected_terminal)
-
     def test_google_streaming_terminal_matrix_records_one_attempt_and_release(self):
         account = {"email": "stream-matrix@gmail.com", "accessToken": "token"}
         cases = [

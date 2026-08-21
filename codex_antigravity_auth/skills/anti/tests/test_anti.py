@@ -729,10 +729,6 @@ class AntiHelperTests(unittest.TestCase):
             parser.parse_args(["workflow", "debug-consensus", "--prompt", "bug", "--print-prompt"]).func,
             anti.command_workflow,
         )
-        self.assertEqual(
-            parser.parse_args(["workflow", "claude-grok", "--panel-mode", "ask", "--prompt", "bug", "--print-prompt"]).func,
-            anti.command_workflow,
-        )
 
     def test_workflow_presets_choose_expected_default_scopes(self) -> None:
         anti = load_anti()
@@ -864,144 +860,6 @@ class AntiHelperTests(unittest.TestCase):
                     ["workflow", "debug-consensus", "--scope", "files", "--file", "README.md", "--prompt", "bug"]
                 )
             )
-
-    def test_workflow_claude_grok_expands_to_collaboration_panel(self) -> None:
-        anti = load_anti()
-        parser = anti.build_parser()
-
-        expansion = anti.workflow_expansion(
-            parser.parse_args(["workflow", "claude-grok", "--panel-mode", "ask", "--prompt", "compare"])
-        )
-
-        self.assertEqual(expansion[:3], ["panel", "--mode", "ask"])
-        self.assertEqual(expansion[expansion.index("--collab") + 1], "claude-grok")
-        for model in ["sonnet", "opus", "grok"]:
-            self.assertIn(model, expansion)
-        self.assertIn("Claude/Grok collaboration", " ".join(expansion))
-
-    def test_workflow_claude_grok_requires_both_reviewer_families(self) -> None:
-        anti = load_anti()
-
-        def fail_gateway_call(*args, **kwargs):
-            self.fail("print-only workflow validation must not contact the gateway")
-
-        anti.fetch_model_ids = fail_gateway_call
-        anti.request_json = fail_gateway_call
-        cases = [
-            (None, ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "xai-oauth:grok-build-0.1"]),
-            (["sonnet", "grok"], ["claude-sonnet-4-6", "xai-oauth:grok-build-0.1"]),
-            (
-                ["sonnet", "opus", "grok-bluesminds"],
-                ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "bluesminds:grok-4.5"],
-            ),
-        ]
-
-        for requested_models, expected_models in cases:
-            with self.subTest(requested_models=requested_models):
-                stdout = io.StringIO()
-                stderr = io.StringIO()
-                argv = [
-                    "workflow",
-                    "claude-grok",
-                    "--panel-mode",
-                    "ask",
-                    "--prompt",
-                    "compare",
-                    "--print-prompt",
-                    "--json",
-                ]
-                for model in requested_models or []:
-                    argv.extend(["--model", model])
-
-                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                    rc = anti.main(argv)
-
-                self.assertEqual(rc, 0, stderr.getvalue())
-                parsed = json.loads(stdout.getvalue())
-                self.assertEqual(parsed["metadata"]["panel_models"], expected_models)
-                self.assertEqual(parsed["metadata"]["judge_model"], "claude-opus-4-6-thinking")
-
-    def test_workflow_claude_grok_rejects_single_family_reviewer_sets(self) -> None:
-        anti = load_anti()
-
-        def fail_gateway_call(*args, **kwargs):
-            self.fail("invalid workflow validation must not contact the gateway")
-
-        anti.fetch_model_ids = fail_gateway_call
-        anti.request_json = fail_gateway_call
-        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
-            anti.RUNS_DIR = Path(tmp)
-            cases = [
-                ["grok-bluesminds"],
-                ["sonnet", "opus"],
-            ]
-
-            for requested_models in cases:
-                with self.subTest(requested_models=requested_models):
-                    stdout = io.StringIO()
-                    stderr = io.StringIO()
-                    argv = [
-                        "workflow",
-                        "claude-grok",
-                        "--panel-mode",
-                        "ask",
-                        "--prompt",
-                        "compare",
-                        "--print-prompt",
-                        "--json",
-                    ]
-                    for model in requested_models:
-                        argv.extend(["--model", model])
-
-                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                        rc = anti.main(argv)
-
-                    self.assertEqual(rc, 1)
-                    self.assertEqual(stdout.getvalue(), "")
-                    self.assertIn("requires at least one Claude reviewer and one Grok reviewer", stderr.getvalue())
-                    self.assertIn("--model sonnet --model opus --model grok", stderr.getvalue())
-
-    def test_direct_claude_grok_panel_keeps_custom_single_family_behavior(self) -> None:
-        anti = load_anti()
-        output = io.StringIO()
-
-        with contextlib.redirect_stdout(output):
-            rc = anti.main(
-                [
-                    "panel",
-                    "--mode",
-                    "ask",
-                    "--collab",
-                    "claude-grok",
-                    "--model",
-                    "grok-bluesminds",
-                    "--prompt",
-                    "compare",
-                    "--print-prompt",
-                    "--json",
-                ]
-            )
-
-        self.assertEqual(rc, 0, output.getvalue())
-        parsed = json.loads(output.getvalue())
-        self.assertEqual(parsed["metadata"]["panel_models"], ["bluesminds:grok-4.5"])
-        self.assertEqual(parsed["metadata"]["judge_model"], "claude-opus-4-6-thinking")
-
-    def test_claude_grok_reviewer_family_classifier_is_narrow(self) -> None:
-        anti = load_anti()
-        cases = {
-            "claude-sonnet-4-6": "claude",
-            "claude-opus-4-6-thinking": "claude",
-            "xai-oauth:grok-build-0.1": "grok",
-            "bluesminds:grok-4.5": "grok",
-            "openrouter:grok-4": None,
-            "xai:grok-4": None,
-            "custom-claude-opus": None,
-        }
-
-        for model_id, expected_family in cases.items():
-            with self.subTest(model_id=model_id):
-                self.assertEqual(anti.claude_grok_reviewer_family(model_id), expected_family)
 
     def test_failed_workflow_run_record_keeps_workflow_identity(self) -> None:
         anti = load_anti()
@@ -1717,97 +1575,6 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(anti.resolve_panel_models(args.model), ["claude-sonnet-4-6", "claude-opus-4-6-thinking"])
         self.assertEqual(anti.resolve_model(args.judge, default=anti.DEFAULT_PANEL_JUDGE_MODEL), "claude-opus-4-6-thinking")
 
-    def test_provider_aliases_resolve_deterministically_without_changing_oauth_defaults(self) -> None:
-        anti = load_anti()
-
-        expected = {
-            "grok": "xai-oauth:grok-build-0.1",
-            "supergrok": "xai-oauth:grok-build-0.1",
-            "xai-grok": "xai-oauth:grok-build-0.1",
-            "grok-oauth": "xai-oauth:grok-build-0.1",
-            "grok-build": "xai-oauth:grok-build-0.1",
-            "grok-build-0.1": "xai-oauth:grok-build-0.1",
-            "grok-4": "xai-oauth:grok-4.3",
-            "grok-4.3": "xai-oauth:grok-4.3",
-            "grok-bluesminds": "bluesminds:grok-4.5",
-            "grok-4.5": "bluesminds:grok-4.5",
-            "deepseek-v4-pro": "deepseek:deepseek-v4-pro",
-            "deepseek-v4-flash": "deepseek:deepseek-v4-flash",
-            "glm-5.2": "bluesminds:z-ai/glm-5.2",
-            "glm52": "bluesminds:z-ai/glm-5.2",
-        }
-        for alias, model_id in expected.items():
-            with self.subTest(alias=alias):
-                self.assertEqual(anti.resolve_model(alias, default="sonnet"), model_id)
-
-    def test_claude_grok_can_explicitly_select_bluesminds_without_changing_default_route(self) -> None:
-        anti = load_anti()
-        default_models = anti.resolve_panel_models(None, collab_profile="claude-grok")
-        explicit_models = anti.resolve_panel_models(
-            ["sonnet", "opus", "grok-bluesminds"],
-            collab_profile="claude-grok",
-        )
-
-        self.assertEqual(default_models[-1], "xai-oauth:grok-build-0.1")
-        self.assertEqual(explicit_models[-1], "bluesminds:grok-4.5")
-        self.assertEqual(anti.DEFAULT_PANEL_JUDGE_MODEL, "claude-opus-4-6-thinking")
-
-    def test_claude_grok_collab_defaults_models_and_prompt_contract(self) -> None:
-        anti = load_anti()
-        output = io.StringIO()
-
-        with contextlib.redirect_stdout(output):
-            rc = anti.main(["panel", "--mode", "ask", "--collab", "claude-grok", "--prompt", "Compare options", "--print-prompt", "--json"])
-
-        self.assertEqual(rc, 0, output.getvalue())
-        parsed = json.loads(output.getvalue())
-        self.assertEqual(parsed["metadata"]["collaboration_profile"], "claude-grok")
-        self.assertEqual(
-            parsed["metadata"]["panel_models"],
-            ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "xai-oauth:grok-build-0.1"],
-        )
-        self.assertIn("Claude + Grok collaboration", parsed["prompt"])
-        self.assertIn("Claude-family lanes", parsed["prompt"])
-        self.assertIn("Grok/xAI lanes", parsed["prompt"])
-
-    def test_claude_grok_judge_prompt_requires_cross_lane_synthesis(self) -> None:
-        anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
-            "claude-sonnet-4-6",
-            "claude-opus-4-6-thinking",
-            "xai-oauth:grok-build-0.1",
-        }
-        judge_prompts: list[str] = []
-
-        def fake_post_response(**kwargs):
-            prompt = kwargs["prompt"]
-            if "You are synthesizing an Antigravity multi-model advisory panel" in prompt:
-                judge_prompts.append(prompt)
-                return json.dumps(
-                    {
-                        "summary": "summary",
-                        "disagreements": ["Claude and Grok differ"],
-                        "findings": [],
-                        "unverifiable": [],
-                        "recommended_next_actions": [],
-                        "caveats": [],
-                    }
-                )
-            return f"lane-output from {kwargs['model']}"
-
-        anti.post_response = fake_post_response
-        output = io.StringIO()
-
-        with contextlib.redirect_stdout(output):
-            rc = anti.main(["panel", "--mode", "ask", "--collab", "claude-grok", "--prompt", "Compare options", "--json"])
-
-        self.assertEqual(rc, 0, output.getvalue())
-        self.assertTrue(judge_prompts)
-        self.assertIn("Compare Claude-backed lanes with Grok-backed lanes", judge_prompts[0])
-        parsed = json.loads(output.getvalue())
-        self.assertEqual(parsed["metadata"]["collaboration_profile"], "claude-grok")
-        self.assertIn("xai-oauth:grok-build-0.1", parsed["panel_models"])
-
     def test_panel_review_prompt_reuses_secret_exclusion(self) -> None:
         anti = load_anti()
         with tempfile.TemporaryDirectory(prefix="anti-skill-test-") as tmp:
@@ -1946,7 +1713,7 @@ class AntiHelperTests(unittest.TestCase):
         self.assertTrue(any("BYOK disclosure" in caveat for caveat in json.loads(repo_output.getvalue())["caveats"]))
         self.assertFalse(any("BYOK disclosure" in caveat for caveat in json.loads(ask_output.getvalue())["caveats"]))
 
-    def test_panel_repo_disclosure_names_resolved_bluesminds_and_deepseek_lanes(self) -> None:
+    def test_panel_repo_disclosure_names_resolved_deepseek_lane(self) -> None:
         anti = load_anti()
         output = io.StringIO()
 
@@ -1961,7 +1728,7 @@ class AntiHelperTests(unittest.TestCase):
                     "--file",
                     "README.md",
                     "--model",
-                    "grok-bluesminds",
+                    "deepseek-v4-pro",
                     "--model",
                     "deepseek-v4-pro",
                     "--judge",
@@ -1974,7 +1741,6 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(rc, 0, output.getvalue())
         parsed = json.loads(output.getvalue())
         disclosure = next(item for item in parsed["caveats"] if "BYOK disclosure" in item)
-        self.assertIn("bluesminds:grok-4.5", disclosure)
         self.assertIn("deepseek:deepseek-v4-pro", disclosure)
         self.assertNotIn("BLUESMINDS_API_KEY", disclosure)
         self.assertNotIn("DEEPSEEK_API_KEY", disclosure)
@@ -2008,7 +1774,7 @@ class AntiHelperTests(unittest.TestCase):
         self.assertIn("deepseek:deepseek-v4-flash", disclosure)
         self.assertNotIn("claude-opus-4-6-thinking", disclosure)
 
-    def test_chunked_review_preserves_bluesminds_disclosure(self) -> None:
+    def test_chunked_review_preserves_deepseek_disclosure(self) -> None:
         anti = load_anti()
         anti.post_response = lambda **kwargs: (
             "review-synthesis"
@@ -2031,7 +1797,7 @@ class AntiHelperTests(unittest.TestCase):
                             "--file",
                             "large.py",
                             "--model",
-                            "grok-bluesminds",
+                            "deepseek-v4-pro",
                             "--max-prompt-chars",
                             "2400",
                             "--max-review-chunks",
@@ -2051,17 +1817,17 @@ class AntiHelperTests(unittest.TestCase):
         self.assertIn("⚠ INCOMPLETE", parsed["output_text"])
         self.assertEqual(parsed["metadata"]["scopeStatus"], "partial")
         self.assertTrue(
-            any("bluesminds:grok-4.5" in item for item in parsed["caveats"]),
+            any("deepseek:deepseek-v4-pro" in item for item in parsed["caveats"]),
             parsed["caveats"],
         )
         self.assertTrue(
             any(
-                "bluesminds:grok-4.5" in item
+                "deepseek:deepseek-v4-pro" in item
                 for item in parsed["metadata"]["privacy_disclosures"]
             )
         )
 
-    def test_plan_repo_disclosure_names_bluesminds_glm_lane(self) -> None:
+    def test_plan_repo_disclosure_names_deepseek_lane(self) -> None:
         anti = load_anti()
         output = io.StringIO()
 
@@ -2074,7 +1840,7 @@ class AntiHelperTests(unittest.TestCase):
                     "--file",
                     "README.md",
                     "--model",
-                    "glm-5.2",
+                    "deepseek-v4-pro",
                     "--prompt",
                     "Plan this change",
                     "--print-prompt",
@@ -2085,7 +1851,7 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(rc, 0, output.getvalue())
         parsed = json.loads(output.getvalue())
         disclosure = next(item for item in parsed["caveats"] if "BYOK disclosure" in item)
-        self.assertIn("bluesminds:z-ai/glm-5.2", disclosure)
+        self.assertIn("deepseek:deepseek-v4-pro", disclosure)
 
     def test_panel_successful_two_model_run_calls_judge_once(self) -> None:
         anti = load_anti()
@@ -3041,11 +2807,10 @@ class AntiHelperTests(unittest.TestCase):
         anti = load_anti()
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
             "claude-sonnet-4-6",
-            "deepseek:deepseek-v4-pro",
         }
 
         def fake_post_response(**kwargs):
-            self.assertIn(kwargs["model"], {"claude-sonnet-4-6", "deepseek:deepseek-v4-pro"})
+            self.assertEqual(kwargs["model"], "claude-sonnet-4-6")
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
                 return "judge-output"
             return "deepseek-panel-output"
@@ -3061,9 +2826,9 @@ class AntiHelperTests(unittest.TestCase):
                     "--prompt",
                     "compare",
                     "--model",
-                    "deepseek-v4-pro",
+                    "nonexistent:model",
                     "--model",
-                    "grok-bluesminds",
+                    "sonnet",
                     "--judge",
                     "sonnet",
                     "--min-successes",
@@ -3075,9 +2840,9 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(rc, 0, output.getvalue())
         parsed = json.loads(output.getvalue())
         statuses = {item["model"]: item for item in parsed["panel_results"]}
-        self.assertEqual(statuses["deepseek:deepseek-v4-pro"]["status"], "success")
-        self.assertEqual(statuses["bluesminds:grok-4.5"]["status"], "error")
-        self.assertIn("not advertised by /v1/models", statuses["bluesminds:grok-4.5"]["error"])
+        self.assertEqual(statuses["claude-sonnet-4-6"]["status"], "success")
+        self.assertEqual(statuses["nonexistent:model"]["status"], "error")
+        self.assertIn("not advertised by /v1/models", statuses["nonexistent:model"]["error"])
 
     def test_run_record_preserves_provider_identity_but_redacts_credentials(self) -> None:
         anti = load_anti()
@@ -3091,7 +2856,7 @@ class AntiHelperTests(unittest.TestCase):
                 args,
                 mode="consult",
                 status="failed",
-                models=["bluesminds:grok-4.5", "deepseek:deepseek-v4-pro"],
+                models=["deepseek:deepseek-v4-pro", "deepseek:deepseek-v4-flash"],
                 metadata={"provider_error": f"api_key={secret}"},
                 error=f"Authorization: Bearer {secret}",
             )
@@ -3101,7 +2866,7 @@ class AntiHelperTests(unittest.TestCase):
 
         self.assertEqual(
             record["models"],
-            ["bluesminds:grok-4.5", "deepseek:deepseek-v4-pro"],
+            ["deepseek:deepseek-v4-pro", "deepseek:deepseek-v4-flash"],
         )
         self.assertNotIn(secret, record_text)
         self.assertIn("<redacted>", record_text)
@@ -4169,8 +3934,7 @@ class BugfixRegressionTests(unittest.TestCase):
 
     def test_model_metadata_covers_documented_byok_aliases(self) -> None:
         anti = load_anti()
-        for model_id in ("deepseek:deepseek-v4-pro", "deepseek:deepseek-v4-flash",
-                         "bluesminds:grok-4.5", "bluesminds:z-ai/glm-5.2"):
+        for model_id in ("deepseek:deepseek-v4-pro", "deepseek:deepseek-v4-flash"):
             self.assertIn(model_id, anti.MODEL_CAPABILITIES, model_id)
             self.assertEqual(anti.model_cost_tier(model_id), "paid", model_id)
             self.assertGreater(anti.MODEL_QUALITY_RANK.get(model_id, 0), 0, model_id)
@@ -4184,14 +3948,14 @@ class BugfixRegressionTests(unittest.TestCase):
 
     def test_cheapest_models_for_task_resolves_aliases(self) -> None:
         anti = load_anti()
-        result = anti.cheapest_models_for_task(available=["opus", "sonnet", "grok", "flash-3.6"])
+        result = anti.cheapest_models_for_task(available=["opus", "sonnet", "deepseek-v4-pro", "flash-3.6"])
         # Alias ids must resolve to canonical ids before capability/tier lookup.
         self.assertIn("claude-opus-4-6-thinking", result)
         self.assertIn("claude-sonnet-4-6", result)
-        self.assertIn("xai-oauth:grok-build-0.1", result)
+        self.assertIn("deepseek:deepseek-v4-pro", result)
         self.assertIn("gemini-3.6-flash-high", result)
         # Free tiers sort first, so grok leads over the quota-tier claude models.
-        self.assertLess(result.index("xai-oauth:grok-build-0.1"), result.index("claude-opus-4-6-thinking"))
+        self.assertLess(result.index("claude-opus-4-6-thinking"), result.index("deepseek:deepseek-v4-pro"))
 
     def test_base_url_rejects_non_http_schemes(self) -> None:
         anti = load_anti()

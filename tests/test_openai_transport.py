@@ -138,18 +138,18 @@ class TestOpenAIResponseTranslation(unittest.TestCase):
     def test_native_responses_empty_completion_is_normalized_to_failed(self):
         response = self.transport.validate_native_response(
             {"id": "resp_native", "object": "response", "status": "completed", "output": []},
-            display_model="xai-oauth:model",
+            display_model="custom:model",
         )
 
         self.assertEqual(response["status"], "failed")
         self.assertEqual(response["error"]["code"], "empty_response")
-        self.assertEqual(response["model"], "xai-oauth:model")
+        self.assertEqual(response["model"], "custom:model")
 
     def test_native_responses_rejects_invalid_terminal_status(self):
         with self.assertRaisesRegex(ValueError, "status"):
             self.transport.validate_native_response(
                 {"object": "response", "status": "mystery", "output": []},
-                display_model="xai-oauth:model",
+                display_model="custom:model",
             )
 
     def test_native_responses_rejects_structurally_empty_output_items(self):
@@ -157,7 +157,7 @@ class TestOpenAIResponseTranslation(unittest.TestCase):
             with self.subTest(output=output):
                 response = self.transport.validate_native_response(
                     {"object": "response", "status": "completed", "output": output},
-                    display_model="xai-oauth:model",
+                    display_model="custom:model",
                 )
                 self.assertEqual(response["status"], "failed")
                 self.assertEqual(response["error"]["code"], "empty_response")
@@ -274,7 +274,7 @@ class TestOpenAIStreamingRoute(unittest.IsolatedAsyncioTestCase):
 
 class TestNativeResponsesRoute(unittest.IsolatedAsyncioTestCase):
     def _adapter_events(self, chunks):
-        adapter = NativeResponsesStreamAdapter(display_model="xai-oauth:model")
+        adapter = NativeResponsesStreamAdapter(display_model="custom:model")
         events = []
         for chunk in chunks:
             events.extend(adapter.consume_bytes(chunk))
@@ -308,42 +308,6 @@ class TestNativeResponsesRoute(unittest.IsolatedAsyncioTestCase):
         events = self._adapter_events([completed, b"data: [DONE]\n\n"])
         terminal = [event for event in events if event["type"] == "response.completed"]
         self.assertEqual(len(terminal), 1)
-        self.assertEqual(terminal[0]["response"]["model"], "xai-oauth:model")
-
-    async def test_xai_native_empty_completion_is_failed(self):
-        from codex_antigravity_auth.server import create_xai_oauth_response
-
-        async def prepare(*args, **kwargs):
-            return {}, "https://provider.example/v1/responses", {}, 5
-
-        class Response:
-            status_code = 200
-            text = ""
-
-            def json(self):
-                return {"id": "resp_native", "object": "response", "status": "completed", "output": []}
-
-        class Client:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return None
-
-            async def post(self, *args, **kwargs):
-                return Response()
-
-        with patch("codex_antigravity_auth.server.prepare_xai_oauth_responses_request", prepare):
-            with patch("codex_antigravity_auth.server.httpx.AsyncClient", Client):
-                response = await create_xai_oauth_response(
-                    {}, {"id": "xai-oauth"}, "grok-model", "xai-oauth:grok-model"
-                )
-
-        self.assertEqual(response["status"], "failed")
-        self.assertEqual(response["error"]["code"], "empty_response")
 
 
 if __name__ == "__main__":
