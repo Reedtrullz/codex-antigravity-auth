@@ -67,6 +67,7 @@ MODEL_ALIASES = {
     # OpenRouter free tier (BYOK)
     "nemotron-super": "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
     "nemotron-ultra": "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free",
+    "free": "openrouter/free",
     "poolside": "openrouter:poolside/laguna-s-2.1:free",
     "gemma-4": "openrouter:google/gemma-4-31b-it:free",
     # OpenRouter free vision models (for vision sidecar / direct image tasks)
@@ -99,6 +100,7 @@ MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
     # OpenRouter free tier (BYOK)
     "openrouter:nvidia/nemotron-3-super-120b-a12b:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "openrouter/free": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "openrouter:poolside/laguna-s-2.1:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "openrouter:google/gemma-4-31b-it:free": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     # xAI OAuth
@@ -134,6 +136,7 @@ MODEL_COST_TIER: dict[str, str] = {
     "claude-opus-4-6": "quota",
     "openrouter:nvidia/nemotron-3-super-120b-a12b:free": "free",
     "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": "free",
+    "openrouter/free": "free",
     "openrouter:poolside/laguna-s-2.1:free": "free",
     "openrouter:google/gemma-4-31b-it:free": "free",
     "openrouter:nvidia/nemotron-nano-12b-v2-vl:free": "free",
@@ -182,6 +185,7 @@ MODEL_QUALITY_RANK: dict[str, int] = {
     "gemini-3.6-flash-medium": 70,
     "gemini-3.5-flash-high": 80,
     "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": 70,
+    "openrouter/free": 65,
     "gemini-3.5-flash-medium": 68,
     "openrouter:nvidia/nemotron-3-super-120b-a12b:free": 65,
     "openrouter:poolside/laguna-s-2.1:free": 60,

@@ -32,6 +32,7 @@ Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to mu
 - Use `nemotron-ultra` for `openrouter:nvidia/nemotron-3-ultra-550b-a55b:free` (550B, 1M ctx, vendor-reported). Large-context analysis and planning.
 - Use `nemotron-omni` for `openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` (30B MoE, 256K ctx, reasoning-capable, vision). Good for image tasks and reasoning.
 - Use `nemotron-vl` for `openrouter:nvidia/nemotron-nano-12b-v2-vl:free` (12B, 128K ctx, vision). Fast and reliable for image understanding — the default vision sidecar model.
+- Use `free` for `openrouter/free` (auto-selects the best available free model on OpenRouter). Good for quick checks when you want zero-cost and don't care which model answers.
 - Use `poolside` for `openrouter:poolside/laguna-s-2.1:free`. Coding-focused model for code generation and refactoring.
 - Use `gemma-4` for `openrouter:google/gemma-4-31b-it:free` (30.7B dense, 262K ctx, vision). Lightweight, fast for simple consults and image tasks.
 - Use `gpt-oss` for `ollama:gpt-oss:20b` (local). Private, offline inference.
