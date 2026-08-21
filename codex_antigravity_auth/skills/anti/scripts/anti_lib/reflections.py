@@ -57,7 +57,13 @@ def _save_records(path: Path, records: list[dict[str, Any]]) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         # Existing files keep their old mode through O_TRUNC, so enforce 600 here.
-        os.fchmod(handle.fileno(), 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(handle.fileno(), 0o600)
+        else:
+            # Windows: fchmod is unavailable; os.open's mode arg already set
+            # 600 for new files and chmod is a no-op on read-only attribute,
+            # so this is best-effort only.
+            pass
         handle.write(json.dumps(records, indent=2, sort_keys=True))
 
 
