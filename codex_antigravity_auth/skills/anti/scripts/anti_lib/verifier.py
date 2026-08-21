@@ -6,6 +6,7 @@ referenced by findings and attaches concrete evidence.
 from __future__ import annotations
 
 import re
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -83,6 +84,10 @@ def verify_finding(finding: dict[str, Any], workspace_root: Path) -> dict[str, A
     file_path = Path(file_path_str)
     if not file_path.is_absolute():
         file_path = workspace_root / file_path
+    file_path = file_path.resolve()
+    workspace_resolved = workspace_root.resolve()
+    if not str(file_path).startswith(str(workspace_resolved) + os.sep) and file_path != workspace_resolved:
+        return finding
     
     if not file_path.exists() or not file_path.is_file():
         return finding
@@ -110,7 +115,4 @@ def verify_finding(finding: dict[str, Any], workspace_root: Path) -> dict[str, A
 
 def verify_findings(findings: list[dict[str, Any]], workspace_root: Path) -> list[dict[str, Any]]:
     """Verify all findings that have a file path."""
-    for finding in findings:
-        if finding.get("file"):
-            verify_finding(finding, workspace_root)
-    return findings
+    return [verify_finding(f, workspace_root) if f.get("file") else f for f in findings]
