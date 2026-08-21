@@ -66,14 +66,6 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
             "X-Title": "Codex Antigravity Auth",
         },
     },
-    "bluesminds": {
-        "displayName": "BluesMinds",
-        "kind": "openai_chat",
-        "baseUrl": "https://api.bluesminds.com/v1",
-        "apiKeyEnv": "BLUESMINDS_API_KEY",
-        "authModes": [PROVIDER_AUTH_MODE_API_KEY],
-        "models": ["grok-4.5", "z-ai/glm-5.2"],
-    },
     "deepseek": {
         "displayName": "DeepSeek",
         "kind": "openai_chat",
@@ -88,20 +80,7 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "baseUrl": "https://api.x.ai/v1",
         "apiKeyEnv": "XAI_API_KEY",
         "authModes": [PROVIDER_AUTH_MODE_API_KEY],
-        "authNotes": (
-            "Use API-key auth for xAI console billing. "
-            "Use xai-oauth for SuperGrok/X Premium subscription OAuth."
-        ),
         "models": ["grok-build-0.1", "grok-4.3", "grok-code-fast-1"],
-    },
-    "xai-oauth": {
-        "displayName": "xAI Grok OAuth (SuperGrok)",
-        "kind": "openai_responses",
-        "baseUrl": "https://api.x.ai/v1",
-        "authModes": [PROVIDER_AUTH_MODE_OAUTH],
-        "authMode": PROVIDER_AUTH_MODE_OAUTH,
-        "authNotes": "Uses a SuperGrok/X Premium OAuth login; no XAI_API_KEY is required.",
-        "models": ["grok-build-0.1", "grok-4.3"],
     },
     "kimi": {
         "displayName": "Kimi",
@@ -330,12 +309,6 @@ def provider_capabilities(
 
 
 def provider_oauth_unsupported_message(provider_id: str) -> str:
-    if provider_id == "xai":
-        return (
-            "use xai-oauth for SuperGrok/X Premium OAuth. "
-            "Keep provider id `xai` for XAI_API_KEY API-key billing, for example "
-            "`codex-antigravity provider set xai --api-key-env XAI_API_KEY --model grok-build-0.1`."
-        )
     return (
         f"Provider '{provider_id}' does not support OAuth auth mode in this OpenAI-compatible BYOK gateway yet. "
         "Use --auth-mode api-key with an env var or stored provider key."
@@ -714,22 +687,6 @@ def has_provider_api_key_env(provider: dict[str, Any]) -> bool:
     return False
 
 
-def provider_has_oauth_tokens(provider: dict[str, Any], *, read_only: bool = False) -> bool:
-    if provider_auth_mode(provider) != PROVIDER_AUTH_MODE_OAUTH:
-        return False
-    if provider.get("id") != "xai-oauth":
-        return False
-    try:
-        from .xai_oauth import xai_oauth_status, xai_oauth_status_read_only
-
-        status = xai_oauth_status_read_only() if read_only else xai_oauth_status()
-        return bool(status.get("ready"))
-    except ImportError:
-        raise
-    except Exception:
-        return False
-
-
 def merged_provider_config(provider_id: str, stored: dict[str, Any] | None = None) -> dict[str, Any]:
     if provider_id in PROVIDER_PRESETS:
         merged = provider_preset(provider_id)
@@ -757,7 +714,6 @@ def _all_provider_configs_from_data(
             auto_enable_keyless = merged.get("autoEnable", True) is not False
             if (
                 has_provider_api_key_env(merged)
-                or provider_has_oauth_tokens(merged, read_only=read_only)
                 or (auto_enable_keyless and provider_allows_keyless_local_use(merged))
             ):
                 providers[provider_id] = merged

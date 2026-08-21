@@ -14,6 +14,8 @@ import signal
 import subprocess
 import sys
 import time
+import hashlib
+import random
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -30,6 +32,7 @@ from anti_lib.context import ordered_prompt
 from anti_lib.ledger import execution_entry, prompts_as_text
 from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
 from anti_lib.runner import presentable_result
+from anti_lib.verifier import verify_findings
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:51122/v1"
@@ -44,20 +47,8 @@ MODEL_ALIASES = {
     "claude-sonnet-4-6": "claude-sonnet-4-6",
     "claude-3.5-sonnet": "claude-sonnet-4-6",
     "claude-3-5-sonnet": "claude-sonnet-4-6",
-    "grok": "xai-oauth:grok-build-0.1",
-    "supergrok": "xai-oauth:grok-build-0.1",
-    "xai-grok": "xai-oauth:grok-build-0.1",
-    "grok-oauth": "xai-oauth:grok-build-0.1",
-    "grok-build": "xai-oauth:grok-build-0.1",
-    "grok-build-0.1": "xai-oauth:grok-build-0.1",
-    "grok-4.3": "xai-oauth:grok-4.3",
-    "grok-4": "xai-oauth:grok-4.3",
-    "grok-bluesminds": "bluesminds:grok-4.5",
-    "grok-4.5": "bluesminds:grok-4.5",
     "deepseek-v4-pro": "deepseek:deepseek-v4-pro",
     "deepseek-v4-flash": "deepseek:deepseek-v4-flash",
-    "glm-5.2": "bluesminds:z-ai/glm-5.2",
-    "glm52": "bluesminds:z-ai/glm-5.2",
     # Gemini Antigravity (free, fast, 1M context)
     "flash-3.7": "gemini-3.7-flash",
     "gemini-3.7-flash": "gemini-3.7-flash",
@@ -76,6 +67,7 @@ MODEL_ALIASES = {
     # OpenRouter free tier (BYOK)
     "nemotron-super": "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
     "nemotron-ultra": "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free",
+    "free": "openrouter/free",
     "poolside": "openrouter:poolside/laguna-s-2.1:free",
     "gemma-4": "openrouter:google/gemma-4-31b-it:free",
     # OpenRouter free vision models (for vision sidecar / direct image tasks)
@@ -108,17 +100,14 @@ MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
     # OpenRouter free tier (BYOK)
     "openrouter:nvidia/nemotron-3-super-120b-a12b:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+    "openrouter/free": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "openrouter:poolside/laguna-s-2.1:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "openrouter:google/gemma-4-31b-it:free": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     # xAI OAuth
-    "xai-oauth:grok-build-0.1": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "xai-oauth:grok-4.3": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     # Official DeepSeek API (metered, API-key route)
     "deepseek:deepseek-v4-pro": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "deepseek:deepseek-v4-flash": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     # BluesMinds API-key routes (metered; currently fail closed until live-health gate passes)
-    "bluesminds:grok-4.5": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "bluesminds:z-ai/glm-5.2": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     # OpenRouter free vision models (verified: support image input)
     "openrouter:nvidia/nemotron-nano-12b-v2-vl:free": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
     "openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
@@ -128,7 +117,7 @@ MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
 }
 
 # Cost tiers: free < quota < paid
-# free = no metering (OpenRouter free tier, Ollama local, SuperGrok OAuth)
+# free = no metering (OpenRouter free tier and Ollama local)
 # quota = Google Antigravity quota (shared across accounts)
 # paid = metered billing (not currently in rotation)
 MODEL_COST_TIER: dict[str, str] = {
@@ -147,19 +136,39 @@ MODEL_COST_TIER: dict[str, str] = {
     "claude-opus-4-6": "quota",
     "openrouter:nvidia/nemotron-3-super-120b-a12b:free": "free",
     "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": "free",
+    "openrouter/free": "free",
     "openrouter:poolside/laguna-s-2.1:free": "free",
     "openrouter:google/gemma-4-31b-it:free": "free",
     "openrouter:nvidia/nemotron-nano-12b-v2-vl:free": "free",
     "openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": "free",
-    "xai-oauth:grok-build-0.1": "free",
-    "xai-oauth:grok-4.3": "free",
     "deepseek:deepseek-v4-pro": "paid",
     "deepseek:deepseek-v4-flash": "paid",
-    "bluesminds:grok-4.5": "paid",
-    "bluesminds:z-ai/glm-5.2": "paid",
     "ollama:gpt-oss:20b": "free",
     "ollama:qwen3:8b": "free",
 }
+
+# Rough cost estimates per 1K tokens (prompt + output combined). These are
+# internal cost units, not USD, and are intentionally conservative defaults.
+COST_PER_1K_TOKENS: dict[str, float] = {
+    "free": 0.0,
+    "quota": 0.002,
+    "paid": 0.01,
+}
+
+def estimate_call_cost(model: str, prompt_chars: int, max_output_tokens: int) -> float:
+    """Estimate the cost of a single model call in arbitrary cost units."""
+    tier = MODEL_COST_TIER.get(model, "quota")
+    cost_per_1k = COST_PER_1K_TOKENS.get(tier, 0.002)
+    prompt_tokens = prompt_chars / 4
+    total_tokens = prompt_tokens + max_output_tokens
+    return (total_tokens / 1000) * cost_per_1k
+
+def actual_call_cost(model: str, generation: dict[str, Any] | None, *, prompt_chars: int, max_output_tokens: int) -> float:
+    usage = normalize_usage((generation or {}).get("usage"))
+    if usage and usage.get("total_tokens") is not None:
+        tier = MODEL_COST_TIER.get(model, "quota")
+        return (int(usage["total_tokens"]) / 1000) * COST_PER_1K_TOKENS.get(tier, 0.002)
+    return estimate_call_cost(model, prompt_chars, max_output_tokens)
 
 # Relative quality ranking for cost-aware selection (higher = better for code tasks)
 MODEL_QUALITY_RANK: dict[str, int] = {
@@ -175,9 +184,8 @@ MODEL_QUALITY_RANK: dict[str, int] = {
     "gemini-3.6-flash-high": 82,
     "gemini-3.6-flash-medium": 70,
     "gemini-3.5-flash-high": 80,
-    "xai-oauth:grok-4.3": 78,
-    "xai-oauth:grok-build-0.1": 75,
     "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": 70,
+    "openrouter/free": 65,
     "gemini-3.5-flash-medium": 68,
     "openrouter:nvidia/nemotron-3-super-120b-a12b:free": 65,
     "openrouter:poolside/laguna-s-2.1:free": 60,
@@ -187,18 +195,42 @@ MODEL_QUALITY_RANK: dict[str, int] = {
     "openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": 65,
     "deepseek:deepseek-v4-pro": 88,
     "deepseek:deepseek-v4-flash": 74,
-    "bluesminds:z-ai/glm-5.2": 80,
-    "bluesminds:grok-4.5": 78,
     "ollama:qwen3:8b": 40,
 }
+
+
+def resolve_auto_model(
+    *,
+    scope: str | None = None,
+    diff_lines: int = 0,
+    file_paths: list[str] | None = None,
+    default: str = "sonnet",
+) -> tuple[str, str]:
+    """Pick the cheapest adequate model from diff size and file risk."""
+    high_risk_patterns = [
+        "auth", "crypto", "security", "migration", "schema",
+        "oauth", "token", "credential",
+    ]
+    risk_level = "low"
+    for file_path in file_paths or []:
+        if any(pattern in file_path.lower() for pattern in high_risk_patterns):
+            risk_level = "high"
+            break
+
+    if diff_lines > 1000 or risk_level == "high":
+        return ("opus", f"large diff ({diff_lines} lines) or high-risk files")
+    if diff_lines > 200:
+        return ("sonnet", f"medium diff ({diff_lines} lines)")
+    if diff_lines > 0:
+        return ("flash-3.6", f"small diff ({diff_lines} lines), low risk")
+    return (default, "no diff context, using default")
 
 DEFAULT_REVIEW_MODEL = "claude-opus-4-6-thinking"
 DEFAULT_CONSULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_PLAN_MODEL = "claude-opus-4-6-thinking"
 DEFAULT_PANEL_MODELS = ["claude-sonnet-4-6", "claude-opus-4-6-thinking"]
 DEFAULT_PANEL_JUDGE_MODEL = "claude-opus-4-6-thinking"
-COLLAB_PROFILES = {"none", "claude-grok"}
-CLAUDE_GROK_PANEL_MODELS = ["sonnet", "opus", "grok"]
+COLLAB_PROFILES = {"none"}
 MAX_FILE_BYTES = 180_000
 DEFAULT_MAX_PROMPT_CHARS = 120_000
 DEFAULT_MAX_SYNTHESIS_CHARS = DEFAULT_MAX_PROMPT_CHARS
@@ -226,6 +258,71 @@ PANEL_LANE_INSTRUCTION = (
     "produce your independent review or answer directly from the supplied context. "
     "Do not ask for direction, restate the task, or ask clarifying questions."
 )
+
+# Phase 2: role-specific rubrics injected into panel lane prompts
+ROLE_RUBRICS: dict[str, str] = {
+    "correctness": (
+        "Focus on logic errors, edge cases, type mismatches, off-by-one mistakes, "
+        "null/undefined handling, race conditions, and incorrect algorithmic assumptions."
+    ),
+    "security": (
+        "Focus on injection surfaces (SQL, command, template, prompt), secret handling "
+        "(hardcoded keys, leaked env vars), authorization and trust boundaries, "
+        "dependency/config exposure, and insecure defaults."
+    ),
+    "tests": (
+        "Focus on missing test coverage for changed logic, untested edge cases, "
+        "testable contracts that are not asserted, regression risk from missing "
+        "or stale tests, and flaky test patterns."
+    ),
+    "performance": (
+        "Focus on algorithmic complexity (O(n^2) on unbounded input), unnecessary "
+        "allocations, N+1 queries, blocking I/O on hot paths, missing caching "
+        "opportunities, and memory pressure."
+    ),
+    "ux": (
+        "Focus on usability, accessibility (ARIA, keyboard nav, color contrast), "
+        "error messages that are unclear or missing, edge-case UX flows, "
+        "loading/empty/error states, and responsive layout issues."
+    ),
+    "protocol": (
+        "Focus on API contract adherence, schema validation, wire format correctness, "
+        "versioning, backward compatibility, and error response consistency."
+    ),
+    "install-docs": (
+        "Focus on install regressions, missing or outdated documentation, "
+        "broken examples, unclear setup instructions, and changelog accuracy."
+    ),
+    "injection": (
+        "Focus on prompt injection, SQL injection, command injection, template "
+        "injection, deserialization attacks, and untrusted input reaching dangerous sinks."
+    ),
+    "secrets-handling": (
+        "Focus on hardcoded secrets, leaked credentials in logs or output, "
+        "insecure secret storage, missing rotation, and env var exposure."
+    ),
+    "authz": (
+        "Focus on authorization bypass, privilege escalation, missing access "
+        "checks, insecure direct object references, and trust boundary violations."
+    ),
+    "dependency-surface": (
+        "Focus on vulnerable dependencies, unused or shadowed dependencies, "
+        "version pinning issues, and supply chain risk from lockfile drift."
+    ),
+    "root-cause": (
+        "Focus on identifying the most likely root cause of the reported issue, "
+        "distinguishing correlation from causation, and tracing the failure path."
+    ),
+    "regression-risk": (
+        "Focus on what existing functionality could break from this change, "
+        "identify affected code paths, and suggest regression tests."
+    ),
+    "discriminating-tests": (
+        "Focus on proposing the cheapest, most informative tests or checks that "
+        "would confirm or rule out each hypothesis."
+    ),
+}
+
 NON_ANSWER_PHRASES = (
     "what would you like",
     "please provide",
@@ -2751,15 +2848,8 @@ def normalize_collab_profile(value: str | None) -> str:
     return profile
 
 
-def default_panel_models_for_collab(profile: str) -> list[str]:
-    if normalize_collab_profile(profile) == "claude-grok":
-        return list(CLAUDE_GROK_PANEL_MODELS)
-    return list(DEFAULT_PANEL_MODELS)
-
-
 def resolve_panel_models(values: list[str] | None, *, collab_profile: str | None = None) -> list[str]:
-    profile = normalize_collab_profile(collab_profile)
-    raw_values = values or default_panel_models_for_collab(profile)
+    raw_values = values or list(DEFAULT_PANEL_MODELS)
     resolved: list[str] = []
     seen: set[str] = set()
     for value in raw_values:
@@ -2771,23 +2861,6 @@ def resolve_panel_models(values: list[str] | None, *, collab_profile: str | None
     if not resolved:
         raise AntiError("panel requires at least one model")
     return resolved
-
-
-def claude_grok_reviewer_family(model_id: str) -> str | None:
-    if model_id.startswith("claude-"):
-        return "claude"
-    if model_id.startswith(("xai-oauth:grok-", "bluesminds:grok-")):
-        return "grok"
-    return None
-
-
-def validate_claude_grok_workflow_reviewers(model_ids: list[str]) -> None:
-    families = {claude_grok_reviewer_family(model_id) for model_id in model_ids}
-    if not {"claude", "grok"}.issubset(families):
-        raise AntiError(
-            "workflow claude-grok requires at least one Claude reviewer and one Grok reviewer; "
-            "example: workflow claude-grok --model sonnet --model opus --model grok"
-        )
 
 
 def ensure_models_available(
@@ -2827,11 +2900,13 @@ def panel_role_instruction(roles: list[str] | None) -> str:
             clean_roles.append(role)
     if not clean_roles:
         return ""
-    return (
-        "Panel role lenses requested: "
-        + ", ".join(clean_roles)
-        + ". Apply these as review/planning perspectives, but do not invent findings just to fill a role."
-    )
+    lines = ["Panel role lenses requested: " + ", ".join(clean_roles) + "."]
+    for role in clean_roles:
+        rubric = ROLE_RUBRICS.get(role.lower())
+        if rubric:
+            lines.append(f"- {role}: {rubric}")
+    lines.append("Apply these as focused review/planning perspectives, but do not invent findings just to fill a role.")
+    return "\n".join(lines)
 
 
 def model_is_byok(model: str) -> bool:
@@ -2883,20 +2958,6 @@ def gpt_complement_instruction() -> str:
     return (
         "GPT-complement lens: prioritize observations, failure modes, ambiguity, and verification hints "
         "that a GPT-family acting agent might plausibly miss. Do not speculate beyond the supplied context."
-    )
-
-
-def panel_collaboration_instruction(profile: str, panel_models: list[str]) -> str:
-    if normalize_collab_profile(profile) != "claude-grok":
-        return ""
-    return "\n".join(
-        [
-            "Claude + Grok collaboration profile: use these lanes as complementary reviewers, not as a vote.",
-            "Claude-family lanes should emphasize codebase reasoning, long-context consistency, API/protocol contracts, and implementation risk.",
-            "Grok/xAI lanes should stress-test assumptions, challenge likely blind spots, look for runtime/user-workflow surprises, and propose discriminating checks.",
-            "All lanes must cite concrete evidence from the supplied context and turn disagreements into local verification steps.",
-            "Requested collaboration lanes: " + ", ".join(panel_models) + ".",
-        ]
     )
 
 
@@ -3018,12 +3079,33 @@ def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
     finding_id = clean_string(value.get("id"), max_chars=80) or f"F{index:03d}"
     finding_id = re.sub(r"[^A-Za-z0-9_.:-]+", "-", finding_id).strip("-._:") or f"F{index:03d}"
     lanes = clean_string_list(value.get("lanes"), max_items=12, max_chars=120)
+    # Phase 1: enriched findings schema
+    try:
+        confidence = float(value.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        confidence = 0.5
+    confidence = max(0.0, min(1.0, confidence))
+    file_path = clean_string(value.get("file"), max_chars=500) or None
+    line = value.get("line")
+    if isinstance(line, (int, float)) and line > 0:
+        line = int(line)
+    else:
+        line = None
+    evidence = clean_string(value.get("evidence"), max_chars=2000) or "unverified"
+    # Build fingerprint for cross-lane dedup
+    fp_key = f"{file_path or ''}:{line or ''}:{claim.lower().strip()}"
+    fingerprint = "sha256:" + hashlib.sha256(fp_key.encode("utf-8")).hexdigest()[:16]
     return {
         "id": finding_id,
         "claim": claim,
         "severity": severity,
         "lanes": lanes,
         "verify": verify,
+        "confidence": confidence,
+        "file": file_path,
+        "line": line,
+        "evidence": evidence,
+        "fingerprint": fingerprint,
     }
 
 
@@ -3066,6 +3148,30 @@ def parse_panel_findings(text: str) -> tuple[dict[str, Any] | None, str | None, 
             dropped += 1
         else:
             findings.append(normalized)
+    # Phase 1: dedup by fingerprint — merge lanes, keep highest severity, average confidence
+    if findings:
+        SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+        deduped: dict[str, dict[str, Any]] = {}
+        for f in findings:
+            fp = f.get("fingerprint", "")
+            if fp in deduped:
+                existing = deduped[fp]
+                # merge lanes
+                for lane in f.get("lanes", []):
+                    if lane not in existing["lanes"]:
+                        existing["lanes"].append(lane)
+                # keep highest severity
+                if SEVERITY_ORDER.get(f["severity"], 0) > SEVERITY_ORDER.get(existing["severity"], 0):
+                    existing["severity"] = f["severity"]
+                # average confidence
+                existing["confidence"] = round((existing["confidence"] + f["confidence"]) / 2, 2)
+                # prefer non-default evidence
+                if f.get("evidence", "unverified") != "unverified":
+                    existing["evidence"] = f["evidence"]
+                dropped += 1
+            else:
+                deduped[fp] = f
+        findings = list(deduped.values())
     parse_warning = None
     if diagnostics["repaired"]:
         parse_warning = (
@@ -3227,11 +3333,9 @@ def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[st
         prompt = "\n\n".join([role_instruction, prompt])
         prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
         metadata["prompt_chars"] = len(prompt)
-    collab_instruction = panel_collaboration_instruction(collab_profile, resolved_panel_models)
-    if collab_instruction:
-        prompt = "\n\n".join([collab_instruction, prompt])
-        prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
-        metadata["prompt_chars"] = len(prompt)
+    # Collaboration instructions removed (no active profiles); kept for future extensibility
+    # if collab_instruction:
+    #     prompt = "\n\n".join([collab_instruction, prompt])
     prompt = "\n\n".join([PANEL_LANE_INSTRUCTION, gpt_complement_instruction(), prompt])
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
     metadata["prompt_chars"] = len(prompt)
@@ -3249,6 +3353,7 @@ def build_panel_synthesis_prompt(
     roles: list[str],
     max_chars: int,
     output_mode: str = "prose",
+    anonymize: bool = True,
 ) -> tuple[str, list[str], dict[str, Any]]:
     panel_status = str(metadata.get("status") or metadata.get("panel_status") or "unknown")
     distinct_actual_models = list(metadata.get("distinct_actual_models") or [])
@@ -3301,10 +3406,41 @@ def build_panel_synthesis_prompt(
     }
 
     def render(source: str, outputs: list[str]) -> str:
+        # Phase 3: anonymize lane labels and shuffle before judging
+        render_results = list(panel_results)
+        render_outputs = list(outputs)
+        # H-3 fix: reuse existing mapping on retry to avoid inconsistent shuffle
+        anonymize_mapping = dict(metadata.get("anonymize_mapping", {}))
+        if anonymize and len(render_results) > 1:
+            if not anonymize_mapping:
+                paired = list(zip(render_results, render_outputs))
+                random.shuffle(paired)
+                render_results, render_outputs = zip(*paired) if paired else ([], [])
+                render_results = list(render_results)
+                render_outputs = list(render_outputs)
+                for i, result in enumerate(render_results):
+                    lane_label = chr(ord("A") + i)
+                    anonymize_mapping[f"Lane {lane_label}"] = result["model"]
+                metadata["anonymize_mapping"] = anonymize_mapping
+                metadata["anonymized"] = True
+            else:
+                # Reorder results to match existing mapping
+                reverse_map = {v: k for k, v in anonymize_mapping.items()}
+                reorder_key = lambda r: reverse_map.get(r["model"], "")
+                paired = sorted(zip(render_results, render_outputs), key=lambda p: reorder_key(p[0]))
+                if paired:
+                    render_results, render_outputs = zip(*paired)
+                    render_results = list(render_results)
+                    render_outputs = list(render_outputs)
         result_sections = []
-        for result, output in zip(panel_results, outputs):
+        for result, output in zip(render_results, render_outputs):
+            # Use anonymized label if anonymizing
+            display_model = result["model"]
+            if anonymize and len(render_results) > 1:
+                rev_map = {v: k for k, v in anonymize_mapping.items()}
+                display_model = rev_map.get(result["model"], result["model"])
             lines = [
-                f"## Panel Model (requested): {result['model']}",
+                f"## Panel Model (requested): {display_model}",
                 f"- status: {result['status']}",
                 f"- requested_model: {result.get('requested_model', result['model'])}",
                 f"- requested_provider: {result.get('requested_provider') or 'unknown'}",
@@ -3348,14 +3484,8 @@ def build_panel_synthesis_prompt(
                     "If status is degraded_single_model, explicitly state that no independent multi-model consensus was established "
                     "and never describe repeated fallback output as agreement."
                 ),
-                (
-                    "Collaboration profile claude-grok: Compare Claude-backed lanes with Grok-backed lanes. "
-                    "Name meaningful agreement, contradiction, and blind spots from each family, then give local checks that can adjudicate them."
-                    if metadata.get("collaboration_profile") == "claude-grok"
-                    else ""
-                ),
                 "Return one JSON object and no surrounding prose. The object must contain: summary (string), disagreements (array of strings), findings (array of objects), unverifiable (array of strings), recommended_next_actions (array of strings), and caveats (array of strings).",
-                "Each findings item must contain: id (stable short string), claim (specific claim), severity (critical|high|medium|low|info), lanes (array of model ids that support it), and verify (a concrete local check Codex should run before acting).",
+                "Each findings item must contain: id (stable short string), claim (specific claim), severity (critical|high|medium|low|info), lanes (array of model ids that support it), verify (a concrete local check Codex should run before acting), confidence (float 0.0-1.0 indicating how certain you are), file (path to the file if applicable), line (line number if applicable), and evidence (any concrete evidence like test output or type error, or 'unverified').",
                 "Put speculative or externally dependent observations in unverifiable, not findings. Do not include secrets, credentials, raw account identifiers, or provider keys.",
                 "## Panel Manifest\n```json\n" + json.dumps(manifest, indent=2, sort_keys=True) + "\n```",
                 "## Source Prompt / Context\n" + source.strip(),
@@ -3937,6 +4067,8 @@ def panel_lane_status_label(result: dict[str, Any]) -> str:
         return "non_answer: asked for direction instead of reviewing"
     if status == "empty":
         return "empty: returned no output"
+    if status == "skipped_budget":
+        return f"skipped_budget: {result.get('error', 'budget cap reached')}"
     return f"error: {result.get('error', 'unknown error')}"
 
 
@@ -4004,6 +4136,8 @@ def print_panel_result(
         print(f"- Distinct actual model/provider(s): {actual_models}")
     if metadata.get("collaboration_profile"):
         print(f"- Collaboration: {metadata['collaboration_profile']}")
+    if metadata.get("budget_limit") is not None:
+        print(f"- Estimated cost: {float(metadata.get('estimated_cost', metadata.get('estimated_total', 0.0))):.4f} / budget {float(metadata['budget_limit']):.4f}")
     for result in panel_results:
         stats = "; ".join(
             part
@@ -4107,6 +4241,22 @@ def command_panel(args: argparse.Namespace) -> int:
     if args.output not in PANEL_OUTPUT_MODES:
         raise AntiError(f"unsupported panel output mode: {args.output}")
     collab_profile = normalize_collab_profile(getattr(args, "collab", "none"))
+    auto_route_model = None
+    auto_route_reason = None
+    if getattr(args, "auto_route", False) and args.model is None:
+        diff_lines = 0
+        file_paths: list[str] = []
+        if args.mode == "review":
+            auto_context = collect_review_context(args)
+            diff_lines = len(auto_context["diff"].splitlines())
+            file_paths = list(auto_context["paths"])
+        auto_route_model, auto_route_reason = resolve_auto_model(
+            scope=getattr(args, "scope", None),
+            diff_lines=diff_lines,
+            file_paths=file_paths,
+            default="sonnet",
+        )
+        args.model = [auto_route_model]
     panel_models = resolve_panel_models(args.model, collab_profile=collab_profile)
     args.resolved_panel_models = panel_models
     judge_model = resolve_model(args.judge, default=DEFAULT_PANEL_JUDGE_MODEL)
@@ -4136,8 +4286,12 @@ def command_panel(args: argparse.Namespace) -> int:
             "min_successes": min_successes,
             "max_parallel": args.max_parallel,
             "prompt_chars": len(prompt),
+            "budget_limit": args.budget,
         }
     )
+    if auto_route_model:
+        metadata["auto_route_decision"] = auto_route_model
+        metadata["auto_route_reason"] = auto_route_reason
     if collab_profile != "none":
         metadata["collaboration_profile"] = collab_profile
     if args.dry_run:
@@ -4213,21 +4367,49 @@ def command_panel(args: argparse.Namespace) -> int:
         for model in panel_models
     ]
     max_workers = min(args.max_parallel, len(available_panel_models))
+    running_cost = 0.0
+    estimated_total = 0.0
+    budget_exceeded = False
+    futures: dict[concurrent.futures.Future, int] = {}
+    reserved_models: dict[int, str] = {}  # H-1: track reserved model per lane
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
+        for index, model in enumerate(panel_models):
+            if model in missing_panel_models:
+                continue
+            estimated = estimate_call_cost(model, len(prompt), args.max_output_tokens)
+            if args.budget is not None and running_cost + estimated > args.budget:
+                panel_results[index] = {
+                    "model": model,
+                    "requested_model": model,
+                    "status": "skipped_budget",
+                    "error": f"budget cap reached (estimated {running_cost + estimated:.4f} > {args.budget:.4f})",
+                }
+                budget_exceeded = True
+                continue
+            running_cost += estimated
+            estimated_total += estimated
+            reserved_models[index] = model  # H-1: remember reserved model
+            futures[executor.submit(
                 run_panel_call,
                 args=args,
                 model=model,
                 prompt=prompt,
                 max_output_tokens=args.max_output_tokens,
                 model_ids=model_ids,
-            ): index
-            for index, model in enumerate(panel_models)
-            if model not in missing_panel_models
-        }
+            )] = index
         for future in concurrent.futures.as_completed(futures):
-            panel_results[futures[future]] = future.result()
+            index = futures[future]
+            result = future.result()
+            panel_results[index] = result
+            # H-1 fix: use reserved model for subtraction (what was originally budgeted)
+            # and actual model for addition (what was actually consumed)
+            reserved = reserved_models.get(index, panel_models[index])
+            actual_model = panel_results[index].get("model", reserved)
+            running_cost -= estimate_call_cost(reserved, len(prompt), args.max_output_tokens)
+            running_cost += actual_call_cost(actual_model, result.get("generation"), prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens)
+    metadata["estimated_total"] = estimated_total
+    metadata["estimated_cost"] = running_cost
+    metadata["budget_exceeded"] = budget_exceeded
 
     successes = [result for result in panel_results if result["status"] == "success"]
     truncated = [result for result in panel_results if result["status"] == "truncated"]
@@ -4389,6 +4571,7 @@ def command_panel(args: argparse.Namespace) -> int:
         roles=args.role or [],
         max_chars=args.max_synthesis_chars,
         output_mode=args.output,
+        anonymize=not getattr(args, "no_anonymize", False),
     )
     caveats.extend(synthesis_caveats)
     metadata.update(synthesis_metadata)
@@ -4404,6 +4587,27 @@ def command_panel(args: argparse.Namespace) -> int:
         )
 
     judge_cap = args.judge_output_tokens
+    judge_estimate = estimate_call_cost(judge_model, len(synthesis_prompt), judge_cap)
+    if args.budget is not None and running_cost + judge_estimate > args.budget:
+        budget_exceeded = True
+        metadata["budget_exceeded"] = True
+        metadata["estimated_total"] = estimated_total + judge_estimate
+        metadata["estimated_cost"] = running_cost
+        metadata["budget_limit"] = args.budget
+        caveats.append(
+            f"Panel judge skipped: budget cap reached (estimated {running_cost + judge_estimate:.4f} > {args.budget:.4f})"
+        )
+        error = "panel judge skipped because the budget cap was reached"
+        metadata["panel_error"] = error
+        try:
+            write_run_record(args, mode="panel", status="failed", models=panel_models,
+                base_url=args.base_url, prompt_text=prompt, caveats=caveats,
+                metadata=metadata, error=error)
+        except AntiError:
+            pass
+        raise AntiError(error)
+    running_cost += judge_estimate
+    estimated_total += judge_estimate
     judge_text, judge_model_used, judge_generation = run_judge(synthesis_prompt, judge_cap)
     judge_attempts: list[dict[str, Any]] = [
         dict(judge_generation, attempt=1)
@@ -4420,7 +4624,15 @@ def command_panel(args: argparse.Namespace) -> int:
             "Prefer a few short high-signal findings over long prose so the response fits in the output budget.\n\n"
             + synthesis_prompt
         )
-        judge_text, judge_model_used, judge_generation = run_judge(retry_prompt, retry_cap)
+        retry_estimate = estimate_call_cost(judge_model, len(retry_prompt), retry_cap)
+        # H-2 fix: check budget before judge retry
+        if args.budget is not None and running_cost + retry_estimate > args.budget:
+            caveats.append("Judge retry skipped: budget cap reached")
+            progress(args, "panel judge: retry skipped due to budget cap")
+        else:
+            judge_text, judge_model_used, judge_generation = run_judge(retry_prompt, retry_cap)
+            running_cost += retry_estimate
+            estimated_total += retry_estimate
         judge_attempts.append(dict(judge_generation, attempt=2))
         judge_cap = retry_cap
         findings, findings_caveat, parse_diagnostics = parse_panel_findings(judge_text)
@@ -4494,6 +4706,9 @@ def command_panel(args: argparse.Namespace) -> int:
     metadata["judge_retried"] = judge_retried
     metadata["judge_json_repaired"] = bool(parse_diagnostics.get("repaired"))
     metadata["judge_truncated"] = judge_truncated
+    metadata["estimated_total"] = estimated_total
+    metadata["estimated_cost"] = running_cost
+    metadata["budget_exceeded"] = budget_exceeded
     metadata["panel_usage_totals"] = sum_usage([result.get("generation", {}) for result in panel_results])
     metadata["usage_totals"] = sum_usage([result.get("generation", {}) for result in panel_results], judge_generation)
     if findings_caveat:
@@ -4531,6 +4746,21 @@ def command_panel(args: argparse.Namespace) -> int:
         integrity_notice=integrity_notice,
         caveats=caveats,
     )
+    # Phase 6: evidence-linked verification of findings
+    if (
+        not getattr(args, "no_verify", False)
+        and isinstance(findings, dict)
+        and findings.get("findings")
+    ):
+        review_ctx = metadata.get("_review_context") or {}
+        workspace = Path(review_ctx.get("workspace_root") or Path.cwd())
+        raw_findings = findings.get("findings", [])
+        if isinstance(raw_findings, list):
+            verified = verify_findings(raw_findings, workspace)
+            findings["findings"] = verified
+            verified_count = sum(1 for f in verified if f.get("evidence", "unverified") != "unverified")
+            if verified_count:
+                caveats.append(f"Verification: {verified_count}/{len(verified)} findings received tool-backed evidence")
     if metadata.get("findings_status") == "parsed" and isinstance(findings, dict):
         display_text = render_panel_findings(findings, [])
 
@@ -4582,7 +4812,13 @@ def command_panel(args: argparse.Namespace) -> int:
 
 def command_consult(args: argparse.Namespace) -> int:
     progress(args, f"consult: querying model {getattr(args, 'model', 'sonnet')}")
-    model = resolve_model(args.model, default=DEFAULT_CONSULT_MODEL)
+    auto_route_model = None
+    auto_route_reason = None
+    if getattr(args, "auto_route", False) and args.model is None:
+        auto_route_model, auto_route_reason = resolve_auto_model(default="sonnet")
+        model = resolve_model(auto_route_model, default=DEFAULT_CONSULT_MODEL)
+    else:
+        model = resolve_model(args.model, default=DEFAULT_CONSULT_MODEL)
     prompt = read_prompt(args)
     caveats: list[str] = []
     
@@ -4599,6 +4835,7 @@ def command_consult(args: argparse.Namespace) -> int:
         progress(args, f"consult: pre-read {len(read_files)} file(s) for context")
     
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+    estimated_cost = estimate_call_cost(model, len(prompt), args.max_output_tokens)
     if args.dry_run:
         print(format_dry_run(mode="consult", model=model,
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
@@ -4607,6 +4844,10 @@ def command_consult(args: argparse.Namespace) -> int:
             print()
             print(prompt)
         return 0
+    if args.budget is not None and estimated_cost > args.budget:
+        raise AntiError(
+            f"budget cap reached (estimated {estimated_cost:.4f} > {args.budget:.4f}); consult skipped"
+        )
     ensure_run_id(args)
     text, model_used, generation_metadata = generate_with_fallback(
         args,
@@ -4644,9 +4885,15 @@ def command_consult(args: argparse.Namespace) -> int:
             )
     metadata = {
         "prompt_chars": last_prompt_chars,
+        "budget_limit": args.budget,
+        "estimated_total": actual_call_cost(model_used, attempts_metadata[-1], prompt_chars=last_prompt_chars, max_output_tokens=args.max_output_tokens),
+        "budget_exceeded": False,
         **attempts_metadata[-1],
         "consult_attempts": attempts_metadata,
     }
+    if auto_route_model:
+        metadata["auto_route_decision"] = auto_route_model
+        metadata["auto_route_reason"] = auto_route_reason
     if output_status != "success":
         metadata["status"] = output_status
     if read_files:
@@ -4683,16 +4930,32 @@ def command_consult(args: argparse.Namespace) -> int:
 
 def command_review(args: argparse.Namespace) -> int:
     progress(args, f"review: analyzing scope '{getattr(args, 'scope', 'working-tree')}' with {getattr(args, 'model', 'opus')}")
-    model = resolve_model(args.model, default=DEFAULT_REVIEW_MODEL)
+    auto_route_model = None
+    auto_route_reason = None
+    context = None
+    if getattr(args, "auto_route", False) and args.model is None:
+        context = collect_review_context(args)
+        auto_route_model, auto_route_reason = resolve_auto_model(
+            scope=args.scope,
+            diff_lines=len(context["diff"].splitlines()),
+            file_paths=list(context["paths"]),
+            default="sonnet",
+        )
+        model = resolve_model(auto_route_model, default=DEFAULT_REVIEW_MODEL)
+    else:
+        model = resolve_model(args.model, default=DEFAULT_REVIEW_MODEL)
     prompt_budget = prompt_budget_for_model(args, model)
     claude_guardrail_available = claude_guardrail_would_apply(args, model, prompt_budget)
-    context = collect_review_context(args)
+    context = context or collect_review_context(args)
     if not context["diff"].strip() and not context["file_texts"]:
         raise empty_review_scope_error(args.scope)
     prompt, _paths, caveats, metadata = assemble_review_prompt_from_context(
         context,
         max_prompt_chars=prompt_budget,
     )
+    if auto_route_model:
+        metadata["auto_route_decision"] = auto_route_model
+        metadata["auto_route_reason"] = auto_route_reason
     chunked_review = should_run_chunked_review(args, metadata)
     disclosure = byok_repo_context_disclosure(
         generation_models_for_disclosure([model], args),
@@ -5271,6 +5534,10 @@ def _panel_argv(
         argv.extend(["--model", model])
     if prompt:
         argv.extend(["--prompt", prompt])
+    if getattr(args, "no_anonymize", False):
+        argv.append("--no-anonymize")
+    if getattr(args, "no_verify", False):
+        argv.append("--no-verify")
     return argv
 
 
@@ -5291,6 +5558,8 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         "--save-output",
         args.save_output,
     ]
+    if args.budget is not None:
+        common.extend(["--budget", str(args.budget)])
     if args.max_output_tokens is not None:
         common.extend(["--max-output-tokens", str(args.max_output_tokens)])
     if args.fallback_model:
@@ -5415,62 +5684,56 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             argv.extend(["--role", role])
         for model in args.model or ["sonnet", "opus"]:
             argv.extend(["--model", model])
-    elif args.name == "claude-grok":
-        panel_mode = args.panel_mode
-        if panel_mode == "review":
-            scope = workflow_scope(args, default="staged")
-        elif panel_mode == "plan":
-            scope = workflow_scope(args, default="working-tree")
-            if scope == "diff":
-                raise AntiError("workflow claude-grok --panel-mode plan does not support --scope diff")
-            if args.base:
-                raise AntiError("workflow claude-grok --panel-mode plan does not support --base")
-            if args.changed_files_range:
-                raise AntiError("workflow claude-grok --panel-mode plan does not support --changed-files")
-            if args.files_from:
-                raise AntiError("workflow claude-grok --panel-mode plan does not support --files-from")
-        else:
-            scope = workflow_scope(args, default="none")
-            if args.base or args.changed_files_range or args.file or args.files_from or scope != "none":
-                raise AntiError(
-                    "workflow claude-grok --panel-mode ask is prompt-only; omit --scope/--base/--changed-files/--file/--files-from"
-                )
-        default_roles = {
-            "review": ["Claude/Grok collaboration", "code-correctness", "runtime-surprises", "verification-tests"],
-            "plan": ["Claude/Grok collaboration", "architecture", "execution-risk", "checkpoint-verification"],
-            "ask": ["Claude/Grok collaboration", "tradeoffs", "adversarial-cross-check", "verification"],
-        }[panel_mode]
+    elif args.name == "quick-check":
+        scope = workflow_scope(args, default="staged")
+        # Fast pre-commit gate: cheap models, short timeout, no opus
+        cheap_common = [a for a in common if a not in ("--timeout",)]
+        cheap_common.extend(["--timeout", "60", "--max-prompt-chars", "20000"])
+        argv = ["panel", "--mode", "review", "--scope", scope]
+        argv.extend(cheap_common)
+        argv.extend(["--judge", "nemotron-ultra",
+                      "--judge-output-tokens", "2048",
+                      "--max-parallel", "2",
+                      "--output", args.output])
+        if args.allow_partial:
+            argv.append("--allow-partial")
+        for role in ["correctness", "security"]:
+            argv.extend(["--role", role])
+        for model in args.model or ["flash-3.6", "poolside"]:
+            argv.extend(["--model", model])
+        prompt = args.prompt or "Quick pre-commit check. Flag only high-confidence blockers. Be terse."
+        argv.extend(["--prompt", prompt])
+        append_each(argv, "--file", args.file)
+        append_each(argv, "--files-from", args.files_from)
+        append_each(argv, "--priority-file", args.priority_file)
+    elif args.name == "consensus":
+        scope = workflow_scope(args, default="staged")
+        # H-5: consensus requires at least 2 models to detect disagreements
+        consensus_models = args.model or ["sonnet", "opus", "flash-3.6"]
+        # Don't pass prompt here; let post-expansion handle user prompt or default
         argv = _panel_argv(
-            mode=panel_mode, scope=scope if panel_mode in {"review", "plan"} else None,
-            common=common, args=args, roles=default_roles,
-            models=args.model or CLAUDE_GROK_PANEL_MODELS,
-            extra=["--collab", "claude-grok"],
+            mode="review", scope=scope, common=common, args=args,
+            roles=["correctness", "security", "tests"],
+            models=consensus_models,
         )
+        # Ensure min-successes is at least 2 for meaningful disagreement detection
+        if args.min_successes is None or args.min_successes < 2:
+            argv.extend(["--min-successes", "2"])
     else:
         raise AntiError(f"unknown workflow: {args.name}")
 
-    if args.name in {"review-ready", "ship-gate", "security-review"} or (
-        args.name == "claude-grok" and args.panel_mode == "review"
-    ):
+    if args.name in {"review-ready", "ship-gate", "security-review", "quick-check", "consensus"}:
         append_if_present(argv, "--base", args.base)
         append_if_present(argv, "--changed-files", args.changed_files_range)
         append_each(argv, "--file", args.file)
         append_each(argv, "--files-from", args.files_from)
         append_each(argv, "--priority-file", args.priority_file)
-    elif args.name == "plan-deep" or (args.name == "claude-grok" and args.panel_mode == "plan"):
+    elif args.name == "plan-deep":
         append_each(argv, "--file", args.file)
     if args.name != "debug-consensus":
         append_if_present(argv, "--prompt-file", args.prompt_file)
     prompt = args.prompt or " ".join(args.prompt_parts or []).strip()
-    if args.name == "claude-grok":
-        if args.panel_mode == "plan" and not prompt and not args.prompt_file:
-            prompt = (
-                "Create a Claude/Grok collaboration plan. Use Claude lanes for codebase architecture and execution sequencing, "
-                "Grok lanes for adversarial assumption checks and user/runtime surprises, and return verification checkpoints."
-            )
-        elif args.panel_mode == "ask" and not prompt and not args.prompt_file:
-            raise AntiError("workflow claude-grok --panel-mode ask requires --prompt, --prompt-file, or positional prompt text")
-    if args.name in {"plan-deep", "provider-compare", "debug-consensus"} and not prompt and not args.prompt_file:
+    if args.name in {"plan-deep", "provider-compare", "debug-consensus", "quick-check", "consensus"} and not prompt and not args.prompt_file:
         if args.name == "plan-deep":
             prompt = (
                 "Create a decision-complete autonomous implementation plan for the current Codex task. "
@@ -5478,6 +5741,10 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             )
         elif args.name == "provider-compare":
             raise AntiError("provider-compare requires --prompt, --prompt-file, or positional prompt text")
+        elif args.name == "quick-check":
+            prompt = "Quick pre-commit check. Flag only high-confidence blockers. Be terse."
+        elif args.name == "consensus":
+            prompt = "Focus on disagreements between reviewers. For consensus items, state briefly and move on. For unique insights from each perspective, elaborate."
         else:
             raise AntiError("debug-consensus requires --prompt, --prompt-file, or positional prompt text")
     if prompt and args.name != "debug-consensus":
@@ -5496,10 +5763,6 @@ def command_workflow(args: argparse.Namespace) -> int:
     progress(args, "workflow expands to: " + workflow_command_for_progress(expanded))
     parser = build_parser()
     expanded_args = parser.parse_args(expanded)
-    if args.name == "claude-grok":
-        validate_claude_grok_workflow_reviewers(
-            resolve_panel_models(expanded_args.model, collab_profile=expanded_args.collab)
-        )
     expanded_args.workflow_name = args.name
     if not getattr(expanded_args, "run_label", None):
         expanded_args.run_label = args.run_label or args.name
@@ -5681,6 +5944,7 @@ def add_generation_control_args(
     *,
     default_save_output: str = "never",
 ) -> None:
+    parser.add_argument("--auto-route", action="store_true", help="Automatically pick the cheapest adequate model based on diff size and risk")
     parser.add_argument("--fallback-model", help="Fallback model alias/id for retryable or timeout failures")
     parser.add_argument(
         "--fallback-policy",
@@ -5691,6 +5955,7 @@ def add_generation_control_args(
     parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True, help="Print long-call progress to stderr (default: true; use --no-progress to disable)")
     parser.add_argument("--run-label", help="Optional label for saved Anti run metadata")
     parser.add_argument("--run-id", help="Stable run/correlation id for saved and gateway records")
+    parser.add_argument("--budget", type=float, default=None, help="Maximum estimated cost for the entire run (cost units); skip remaining models if exceeded")
     parser.add_argument(
         "--save-output",
         choices=sorted(SAVE_OUTPUT_MODES),
@@ -5717,7 +5982,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_gateway_args(panel, default_timeout=120.0)
     add_generation_control_args(panel)
     panel.add_argument("--mode", choices=["review", "plan", "ask"], default="review")
-    panel.add_argument("--collab", choices=sorted(COLLAB_PROFILES), default="none", help="Optional collaboration profile such as claude-grok")
+    # --collab removed: no active collaboration profiles
     panel.add_argument("--model", action="append", help="Panel model alias/id; repeatable; defaults to sonnet + opus")
     panel.add_argument("--judge", default="opus", help="Judge model alias/id; defaults to opus")
     panel.add_argument("--role", action="append", help="Review/planning lens such as security, correctness, tests, ux")
@@ -5762,13 +6027,15 @@ def build_parser() -> argparse.ArgumentParser:
     panel.add_argument("--json", action="store_true", help="Emit structured JSON output")
     panel.add_argument("--print-prompt", action="store_true", help="Print assembled source prompt without contacting gateway")
     panel.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
+    panel.add_argument("--no-anonymize", action="store_true", help="Do not anonymize lane labels before judge synthesis")
+    panel.add_argument("--no-verify", action="store_true", help="Skip evidence-linked verification of findings")
     panel.add_argument("prompt_parts", nargs="*", help="Positional ask/planning prompt text")
     panel.set_defaults(func=command_panel)
 
     consult = sub.add_parser("consult", aliases=["ask"], help="Ask Antigravity an explicit prompt")
     add_gateway_args(consult, default_timeout=120.0)
     add_generation_control_args(consult)
-    consult.add_argument("--model", default="sonnet", help="opus, sonnet, or full model id")
+    consult.add_argument("--model", default=None, help="opus, sonnet, or full model id")
     consult.add_argument("--prompt", help="Prompt text")
     consult.add_argument("--prompt-file", help="Read prompt text from file")
     consult.add_argument("--no-pre-read", action="store_true", dest="no_pre_read", help="Disable automatic file pre-reading for consult prompts")
@@ -5808,7 +6075,7 @@ def build_parser() -> argparse.ArgumentParser:
     review = sub.add_parser("review", help="Review git diffs or selected files with Antigravity")
     add_gateway_args(review, default_timeout=120.0)
     add_generation_control_args(review)
-    review.add_argument("--model", default="opus", help="opus, sonnet, or full model id")
+    review.add_argument("--model", default=None, help="opus, sonnet, or full model id")
     review.add_argument("--scope", choices=["working-tree", "staged", "files", "diff"], default="working-tree")
     review.add_argument("--base", help="Base ref for --scope diff; uses <base>...HEAD")
     review.add_argument("--changed-files", dest="changed_files_range", help="Git revision range for --scope diff")
@@ -5863,10 +6130,13 @@ def build_parser() -> argparse.ArgumentParser:
             "provider-compare",
             "security-review",
             "debug-consensus",
-            "claude-grok",
+            "quick-check",
+            "consensus",
         ],
     )
     workflow.add_argument("--panel-mode", choices=["review", "plan", "ask"], default="review", help="Panel mode for collaboration workflows")
+    workflow.add_argument("--no-anonymize", action="store_true", help="Do not anonymize lane labels before judge synthesis")
+    workflow.add_argument("--no-verify", action="store_true", help="Skip evidence-linked verification of findings")
     workflow.add_argument("--model", action="append", help="Model alias/id for the workflow; repeatable for panels")
     workflow.add_argument("--judge", default="opus")
     workflow.add_argument("--role", action="append")

@@ -61,8 +61,6 @@ class TestBYOKProviders(unittest.TestCase):
             # No vendor path remains after the prefix, so it is preserved
             # (same rule that keeps openrouter/auto intact).
             ("deepseek/deepseek-chat", "deepseek"): "deepseek/deepseek-chat",
-            ("z-ai/glm-5.2", "bluesminds"): "z-ai/glm-5.2",
-            ("grok-build-0.1", "xai-oauth"): "grok-build-0.1",
             ("openrouter/google/gemma-4-31b-it:free", "openrouter"): "google/gemma-4-31b-it:free",
             # Non-self-referential multi-segment ids must never be rewritten.
             ("org/team/deployment", "custom"): "org/team/deployment",
@@ -216,20 +214,7 @@ class TestBYOKProviders(unittest.TestCase):
             self.assertIn(provider_id, PROVIDER_PRESETS)
             self.assertEqual(PROVIDER_PRESETS[provider_id]["kind"], "openai_chat")
             self.assertEqual(PROVIDER_PRESETS[provider_id]["authModes"], ["api_key"])
-        self.assertIn("xai-oauth", PROVIDER_PRESETS)
-        self.assertEqual(PROVIDER_PRESETS["xai-oauth"]["kind"], "openai_responses")
-        self.assertEqual(PROVIDER_PRESETS["xai-oauth"]["authModes"], ["oauth"])
-        self.assertIn("SuperGrok", PROVIDER_PRESETS["xai-oauth"]["displayName"])
-
-    def test_bluesminds_and_deepseek_v4_presets_are_first_class_chat_routes(self):
-        bluesminds = PROVIDER_PRESETS["bluesminds"]
-        self.assertEqual(bluesminds["displayName"], "BluesMinds")
-        self.assertEqual(bluesminds["kind"], "openai_chat")
-        self.assertEqual(bluesminds["baseUrl"], "https://api.bluesminds.com/v1")
-        self.assertEqual(bluesminds["apiKeyEnv"], "BLUESMINDS_API_KEY")
-        self.assertEqual(bluesminds["authModes"], ["api_key"])
-        self.assertEqual(bluesminds["models"], ["grok-4.5", "z-ai/glm-5.2"])
-
+    def test_deepseek_v4_preset_is_first_class_chat_route(self):
         deepseek = PROVIDER_PRESETS["deepseek"]
         self.assertEqual(deepseek["kind"], "openai_chat")
         self.assertEqual(deepseek["baseUrl"], "https://api.deepseek.com")
@@ -239,30 +224,7 @@ class TestBYOKProviders(unittest.TestCase):
             ["deepseek-v4-flash", "deepseek-v4-pro"],
         )
 
-    def test_models_catalog_advertises_only_the_requested_bluesminds_ids(self):
-        provider = {
-            **PROVIDER_PRESETS["bluesminds"],
-            "id": "bluesminds",
-            "apiKey": "synthetic-bluesminds-key-1234567890",
-        }
-        with patch(
-            "codex_antigravity_auth.server.all_provider_configs_read_only",
-            return_value={"bluesminds": provider},
-        ):
-            response = TestClient(app).get("/v1/models")
-
-        self.assertEqual(response.status_code, 200, response.text)
-        bluesminds_ids = {
-            model["id"]
-            for model in response.json()["data"]
-            if model["owned_by"] == "bluesminds"
-        }
-        self.assertEqual(
-            bluesminds_ids,
-            {"bluesminds:grok-4.5", "bluesminds:z-ai/glm-5.2"},
-        )
-
-    def test_provider_auth_mode_supports_xai_oauth_only_on_dedicated_provider(self):
+    def test_provider_auth_mode_validation_for_api_key_providers(self):
         self.assertEqual(validate_provider_auth_mode("api-key"), "api_key")
         self.assertEqual(validate_provider_auth_mode("api_key"), "api_key")
         self.assertEqual(validate_provider_auth_mode("oauth"), "oauth")
@@ -271,10 +233,8 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertIsNone(validate_provider_auth_mode(None))
         with self.assertRaisesRegex(ValueError, "auth mode"):
             validate_provider_auth_mode("browser")
-        self.assertEqual(validate_supported_provider_auth_mode("xai-oauth", "oauth"), "oauth")
-        with self.assertRaisesRegex(ValueError, "use xai-oauth"):
+        with self.assertRaisesRegex(ValueError, "does not support OAuth"):
             validate_supported_provider_auth_mode("xai", "oauth")
-        self.assertIn("xai-oauth", provider_oauth_unsupported_message("xai"))
 
     def test_oauth_mode_does_not_make_provider_key_usable(self):
         provider = {
@@ -1103,43 +1063,6 @@ class TestBYOKProviders(unittest.TestCase):
         model_ids = [m["id"] for m in response.json()["data"]]
         self.assertNotIn("deepseek:deepseek-chat", model_ids)
 
-    def test_models_endpoint_includes_xai_oauth_models_when_tokens_are_ready(self):
-        provider = {
-            "id": "xai-oauth",
-            "displayName": "xAI Grok OAuth (SuperGrok)",
-            "kind": "openai_responses",
-            "authMode": "oauth",
-            "baseUrl": "https://api.x.ai/v1",
-            "models": ["grok-build-0.1", "grok-4.3"],
-        }
-
-        with patch("codex_antigravity_auth.server.all_provider_configs_read_only", return_value={"xai-oauth": provider}):
-            with patch("codex_antigravity_auth.server.xai_oauth_status_read_only", return_value={"ready": True}):
-                response = TestClient(app).get("/v1/models")
-
-        self.assertEqual(response.status_code, 200)
-        model_ids = [m["id"] for m in response.json()["data"]]
-        self.assertIn("xai-oauth:grok-build-0.1", model_ids)
-        self.assertIn("xai-oauth:grok-4.3", model_ids)
-
-    def test_models_endpoint_hides_xai_oauth_models_without_tokens(self):
-        provider = {
-            "id": "xai-oauth",
-            "displayName": "xAI Grok OAuth (SuperGrok)",
-            "kind": "openai_responses",
-            "authMode": "oauth",
-            "baseUrl": "https://api.x.ai/v1",
-            "models": ["grok-build-0.1"],
-        }
-
-        with patch("codex_antigravity_auth.server.all_provider_configs_read_only", return_value={"xai-oauth": provider}):
-            with patch("codex_antigravity_auth.server.xai_oauth_status_read_only", return_value={"ready": False}):
-                response = TestClient(app).get("/v1/models")
-
-        self.assertEqual(response.status_code, 200)
-        model_ids = [m["id"] for m in response.json()["data"]]
-        self.assertNotIn("xai-oauth:grok-build-0.1", model_ids)
-
     def test_models_endpoint_includes_key_optional_byok_models(self):
         provider = {
             "id": "ollama",
@@ -1320,148 +1243,6 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(captured["json"]["model"], "deepseek-chat")
         self.assertEqual(response.json()["output"][0]["content"][0]["text"], "hello")
 
-    def test_non_streaming_xai_oauth_route_posts_responses_with_oauth_bearer(self):
-        provider = {
-            "id": "xai-oauth",
-            "displayName": "xAI Grok OAuth (SuperGrok)",
-            "kind": "openai_responses",
-            "authMode": "oauth",
-            "baseUrl": "https://api.x.ai/v1",
-            "models": ["grok-build-0.1"],
-        }
-        captured = {}
-
-        class MockClient:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-
-            async def post(self, url, json=None, headers=None):
-                captured["url"] = url
-                captured["json"] = json
-                captured["headers"] = headers
-                return httpx.Response(
-                    200,
-                    json={
-                        "id": "resp_xai",
-                        "object": "response",
-                        "created_at": 123,
-                        "model": "grok-build-0.1",
-                        "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello"}]}],
-                        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-                    },
-                )
-
-        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"xai-oauth": provider}):
-            with patch("codex_antigravity_auth.server.resolve_xai_oauth_access_token", return_value="oauth-access"):
-                with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
-                    response = TestClient(app).post(
-                        "/v1/responses",
-                        json={
-                            "model": "xai-oauth:grok-build-0.1",
-                            "input": "hello",
-                            "metadata": {"run_id": "run-123"},
-                        },
-                    )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(captured["url"], "https://api.x.ai/v1/responses")
-        self.assertEqual(captured["headers"]["Authorization"], "Bearer oauth-access")
-        self.assertEqual(captured["json"]["model"], "grok-build-0.1")
-        self.assertNotIn("metadata", captured["json"])
-        self.assertEqual(response.json()["model"], "xai-oauth:grok-build-0.1")
-
-    def test_non_streaming_xai_oauth_retries_once_after_pre_output_401(self):
-        provider = {
-            "id": "xai-oauth",
-            "displayName": "xAI Grok OAuth (SuperGrok)",
-            "kind": "openai_responses",
-            "authMode": "oauth",
-            "baseUrl": "https://api.x.ai/v1",
-            "models": ["grok-build-0.1"],
-        }
-        headers_seen = []
-
-        class MockClient:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-
-            async def post(self, url, json=None, headers=None):
-                headers_seen.append(headers["Authorization"])
-                if len(headers_seen) == 1:
-                    return httpx.Response(401, json={"error": {"message": "expired"}})
-                return httpx.Response(
-                    200,
-                    json={
-                        "id": "resp_xai",
-                        "object": "response",
-                        "created_at": 123,
-                        "model": "grok-build-0.1",
-                        "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
-                    },
-                )
-
-        def fake_access_token(*, force_refresh=False):
-            return "fresh-token" if force_refresh else "old-token"
-
-        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"xai-oauth": provider}):
-            with patch("codex_antigravity_auth.server.resolve_xai_oauth_access_token", side_effect=fake_access_token):
-                with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
-                    response = TestClient(app).post(
-                        "/v1/responses",
-                        json={"model": "xai-oauth:grok-build-0.1", "input": "hello"},
-                    )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(headers_seen, ["Bearer old-token", "Bearer fresh-token"])
-
-    def test_non_streaming_xai_oauth_403_reports_entitlement_fallback_hint(self):
-        provider = {
-            "id": "xai-oauth",
-            "displayName": "xAI Grok OAuth (SuperGrok)",
-            "kind": "openai_responses",
-            "authMode": "oauth",
-            "baseUrl": "https://api.x.ai/v1",
-            "models": ["grok-build-0.1"],
-        }
-
-        class MockClient:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-
-            async def post(self, url, json=None, headers=None):
-                return httpx.Response(403, json={"error": {"message": "forbidden"}})
-
-        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"xai-oauth": provider}):
-            with patch("codex_antigravity_auth.server.resolve_xai_oauth_access_token", return_value="oauth-access"):
-                with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
-                    response = TestClient(app).post(
-                        "/v1/responses",
-                        json={"model": "xai-oauth:grok-build-0.1", "input": "hello"},
-                    )
-
-        self.assertEqual(response.status_code, 403)
-        detail = response.json()["detail"]
-        self.assertIn("SuperGrok", detail)
-        self.assertIn("xai:grok-build-0.1", detail)
-
     def test_unconfigured_custom_provider_prefix_is_not_implicitly_routed(self):
         class MockClient:
             def __init__(self, *args, **kwargs):
@@ -1584,83 +1365,6 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual(done_response["output"][0]["step_by_step_summary"], "Think ")
         self.assertEqual(done_response["output"][1]["content"][0]["text"], "Hello")
         self.assertEqual(done_response["output"][2]["name"], "lookup")
-
-    def test_streaming_xai_oauth_route_proxies_responses_sse_with_oauth_bearer(self):
-        provider = {
-            "id": "xai-oauth",
-            "displayName": "xAI Grok OAuth (SuperGrok)",
-            "kind": "openai_responses",
-            "authMode": "oauth",
-            "baseUrl": "https://api.x.ai/v1",
-            "models": ["grok-build-0.1"],
-        }
-        captured = {}
-        chunks = [
-            'data: {"type":"response.created","response":{"id":"resp_xai","model":"grok-build-0.1"}}\n\n',
-            'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
-            'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n',
-            "data: [DONE]\n\n",
-        ]
-
-        class AsyncAiterBytes:
-            def __init__(self, text_chunks):
-                self.chunks = [chunk.encode("utf-8") for chunk in text_chunks]
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                if not self.chunks:
-                    raise StopAsyncIteration
-                return self.chunks.pop(0)
-
-        mock_response = MagicMock(spec=httpx.Response)
-        mock_response.status_code = 200
-        mock_response.aiter_bytes = MagicMock(return_value=AsyncAiterBytes(chunks))
-
-        class StreamContext:
-            async def __aenter__(self):
-                return mock_response
-
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-
-        class MockClient:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-
-            def stream(self, method, url, json=None, headers=None):
-                captured["method"] = method
-                captured["url"] = url
-                captured["json"] = json
-                captured["headers"] = headers
-                return StreamContext()
-
-        records = []
-        with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"xai-oauth": provider}):
-            with patch("codex_antigravity_auth.server.resolve_xai_oauth_access_token", return_value="oauth-access") as token_resolver:
-                with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
-                    with patch("codex_antigravity_auth.server.write_request_record", side_effect=records.append):
-                        response = TestClient(app).post(
-                            "/v1/responses",
-                            json={"model": "xai-oauth:grok-build-0.1", "input": "hello", "stream": True},
-                        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("response.output_text.delta", response.text)
-        self.assertEqual(captured["method"], "POST")
-        self.assertEqual(captured["url"], "https://api.x.ai/v1/responses")
-        self.assertEqual(captured["headers"]["Authorization"], "Bearer oauth-access")
-        self.assertEqual(captured["json"]["model"], "grok-build-0.1")
-        token_resolver.assert_called_once_with()
-        self.assertEqual([record["status"] for record in records], ["stream_started", "success"])
-        self.assertEqual(records[-1]["usage"], {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})
 
     def test_streaming_byok_tool_only_response_has_no_empty_message(self):
         provider = {

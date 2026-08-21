@@ -1,63 +1,86 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+## v2.0.0 — Anti Skill Overhaul (Aug 21, 2026)
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+### Breaking Changes
 
-## [Unreleased]
+**Grok/xAI OAuth and BluesMinds removed as first-class providers.**
 
-## [1.8.1] - 2026-08-20
+The `grok`, `supergrok`, `xai-grok`, `grok-oauth`, `grok-build`, `grok-4.3`,
+`grok-bluesminds`, `grok-4.5`, `glm-5.2`, and `glm52` model aliases no longer
+exist. The `xai-oauth` provider preset, `bluesminds` provider preset, and
+`workflow claude-grok` preset have been removed.
 
-### Added
-- Per-account token refresh locking to prevent concurrent refresh attempts
-- Explicit VALIDATION_REQUIRED error detection and messaging (auth issues no longer misreported as rate limits)
-- Project discovery logging for better debugging of account setup issues
-- Error classification helpers (classify_backend_status, is_validation_required_error)
-- CHANGELOG.md
+xAI models are still available via the standard BYOK flow:
+```bash
+codex-antigravity provider set xai --api-key-env XAI_API_KEY --model grok-build-0.1
+```
 
-### Changed
-- Improved error messages for VALIDATION_REQUIRED errors now include re-auth instructions
-- Project discovery failures during token refresh are now logged instead of silently swallowed
+Existing users with xai-oauth configs will see a deprecation warning with
+migration instructions instead of a hard crash.
 
-## [1.8.0] - 2026-08-20
+The `--collab` flag has been removed (no active collaboration profiles).
 
-### Fixed
-- Resolved HTTP 403 VALIDATION_REQUIRED errors from Google Cloud Code Assist API
-- Switched to correct endpoint: daily-cloudcode-pa.googleapis.com
-- Fixed User-Agent fingerprint to match real Antigravity IDE (antigravity/ide/2.5.5)
-- Removed extra headers (X-Goog-Api-Client, Client-Metadata) that caused fingerprint mismatches
-- Added project discovery via loadCodeAssist/onboardUser during login and token refresh
+### New Features
 
-### Added
-- Gemini 3.7 Flash (tiered wire ID with thinkingLevel support)
-- Gemini 3.1 Flash Image generation model
-- GPT-OSS 120B medium model
-- Backward-compatible model aliases for retired Flash generations
-- Anti skill updated with new model catalog and capabilities
+**Enriched Findings Schema** — Panel findings now include `confidence`,
+`file`, `line`, `evidence`, and `fingerprint` fields. Cross-lane dedup is
+automatic: findings with the same fingerprint (same file+line+claim) are
+merged, keeping the highest severity and averaging confidence.
 
-### Changed
-- Model catalog now matches current Antigravity API (7 models)
-- Default model changed to claude-sonnet-4-6
-- Context windows updated: 1M for Gemini, 250K for Claude
+**Role-Specialized Panel Prompts** — Each panel lane receives a role-specific
+rubric when `--role` is passed. Available roles: correctness, security, tests,
+performance, ux, protocol, install-docs, injection, secrets-handling, authz,
+dependency-surface, root-cause, regression-risk, discriminating-tests.
 
-### Deprecated
-- Gemini 3.5 Flash (routes to Gemini 3.7 Flash via backward-compat alias)
-- Gemini 3.6 Flash (routes to Gemini 3.7 Flash via backward-compat alias)
+**Anonymized Panel Judging** — Lane labels are anonymized and shuffled before
+the judge synthesizes to reduce brand bias. Use `--no-anonymize` to disable.
 
-## [1.7.0] - 2026-08-16
+**Smart Auto-Routing** — `--auto-route` picks the cheapest adequate model
+based on diff size and file risk. Small diffs → flash-3.6, medium → sonnet,
+large or high-risk → opus. Only activates when `--model` is not passed.
 
-### Fixed
-- Anti panel fallback identity and truthful multi-model consensus
-- Installed skill sync and shipped PR workflow
+**Budget Cap** — `--budget <cost>` fails gracefully when estimated cost
+exceeds a cap. Tracks estimated vs actual per lane. Judge retries respect
+the budget.
 
-### Added
-- Diversity accounting for actual provider/model identities
-- Fallback evidence even when fail-closed
+**Evidence-Linked Verification** — `anti_lib/verifier.py` runs syntax checks,
+secrets scanning, and eslint on files referenced by findings. Use
+`--no-verify` to skip. Path traversal is blocked with workspace containment
+checks.
 
-## [1.6.0] - 2026-08-14
+**New Workflow Presets:**
+- `workflow quick-check` — Fast pre-commit gate using free models (flash-3.6,
+  poolside, nemotron-ultra judge). 60-second budget, 20k prompt cap.
+- `workflow consensus` — Disagreement-focused 3-model panel with
+  min-successes 2. Default models: sonnet, opus, flash-3.6.
 
-### Fixed
-- Deep LP Tracker audit and remediation
-- Trusted refresh and rerun commands
-- FIFO tax lots and XIRR calculations
+**`openrouter/free` Model Alias** — `free` resolves to `openrouter/free`,
+which auto-selects the best available free model on OpenRouter.
+
+### Fixes
+
+- Fixed `normalize_finding_item` nested scope bug (was inside
+  `strip_fenced_json_blocks`, caused `NameError` on every panel run)
+- Fixed budget double-counting in panel fan-out (subtracted estimate using
+  wrong model when fallback occurred)
+- Fixed judge retry bypassing budget cap
+- Fixed anonymize mapping overwrite on synthesis retry
+- Fixed consensus workflow duplicate `--prompt` in expansion
+- Fixed verifier path traversal (symlink-safe `Path.relative_to()`)
+- Fixed verifier credential leak in secrets scan output
+- Fixed verifier `verify_findings` discarding return values
+
+### Tests
+
+- 8 new unit tests for enriched findings, dedup, auto-routing, cost
+  estimation, and verifier behavior
+- SKILL.md content assertions to prevent documentation drift
+- Removed ~800 lines of stale Grok/xAI OAuth/BluesMinds test coverage
+- Full suite: 702 passed, 204 subtests
+
+---
+
+## v1.8.1 — Hardening Release (Aug 16, 2026)
+
+Previous release. See git history for details.

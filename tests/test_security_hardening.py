@@ -170,29 +170,6 @@ class TestProviderStorage(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         read_only.assert_called()
 
-    def test_models_oauth_readiness_probe_is_read_only(self):
-        from codex_antigravity_auth.server import app
-
-        provider = {
-            "id": "xai-oauth",
-            "kind": "openai_responses",
-            "authMode": "oauth",
-            "models": ["grok-build-0.1"],
-        }
-        with patch(
-            "codex_antigravity_auth.server.all_provider_configs_read_only",
-            return_value={"xai-oauth": provider},
-        ):
-            with patch(
-                "codex_antigravity_auth.server.xai_oauth_status_read_only",
-                return_value={"ready": True},
-            ) as read_only_status:
-                response = TestClient(app).get("/v1/models")
-
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertIn("xai-oauth:grok-build-0.1", [m["id"] for m in response.json()["data"]])
-        read_only_status.assert_called()
-
     def test_read_only_provider_diagnostics_do_not_create_parent_directory(self):
         from codex_antigravity_auth.byok import load_provider_config_read_only
 
@@ -203,19 +180,6 @@ class TestProviderStorage(unittest.TestCase):
 
             self.assertEqual(data, {"providers": {}})
             self.assertFalse(path.parent.exists())
-
-    def test_read_only_provider_catalog_does_not_create_xai_oauth_lock(self):
-        from codex_antigravity_auth.byok import all_provider_configs_read_only
-
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "clean-home"
-            with patch("codex_antigravity_auth.constants.get_codex_home", return_value=home / ".codex"):
-                with patch("codex_antigravity_auth.storage.get_codex_home", return_value=home / ".codex"):
-                    with patch("codex_antigravity_auth.xai_oauth.get_codex_home", return_value=home / ".codex"):
-                        providers = all_provider_configs_read_only()
-
-            self.assertIsInstance(providers, dict)
-            self.assertFalse(home.exists())
 
     def test_account_store_diagnostics_detect_pending_migration_without_mutation(self):
         from codex_antigravity_auth.storage import account_store_diagnostics

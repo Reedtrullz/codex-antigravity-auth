@@ -20,7 +20,6 @@ from .accounts import AccountManager, classify_backend_status, is_validation_req
 from .account_state import scoped_cooldown_expiry
 from .byok import (
     PROVIDER_AUTH_MODE_API_KEY,
-    PROVIDER_AUTH_MODE_OAUTH,
     all_provider_configs,
     all_provider_configs_read_only,
     normalize_byok_model_id,
@@ -52,7 +51,6 @@ from .google_transport import (
     outcome_for_http_status,
 )
 from .openai_transport import (
-    NativeResponsesStreamAdapter,
     OpenAICompatibleTransport,
     PreparedOpenAIRequest,
     TransportConfigError,
@@ -66,10 +64,6 @@ from .response_protocol import (
     validate_capabilities,
 )
 from .storage import load_accounts, load_accounts_read_only
-from .xai_oauth import (
-    resolve_xai_oauth_access_token,
-    xai_oauth_status_read_only,
-)
 
 
 @asynccontextmanager
@@ -461,12 +455,7 @@ def google_failure_detail(
 
 
 def provider_has_usable_key(provider: dict) -> bool:
-    auth_mode = provider_auth_mode(provider)
-    if auth_mode == PROVIDER_AUTH_MODE_OAUTH:
-        return provider.get("id") == "xai-oauth" and bool(
-            xai_oauth_status_read_only().get("ready")
-        )
-    if auth_mode != PROVIDER_AUTH_MODE_API_KEY:
+    if provider_auth_mode(provider) != PROVIDER_AUTH_MODE_API_KEY:
         return False
     try:
         return bool(validate_provider_api_key(resolve_api_key(provider)))
@@ -711,20 +700,6 @@ def chat_completions_url(provider: dict) -> str:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-def responses_api_url(provider: dict) -> str:
-    try:
-        return OpenAICompatibleTransport(timeout=120.0).responses_url(provider)
-    except TransportConfigError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-
-def openai_compatible_timeout(provider: dict) -> float:
-    try:
-        return OpenAICompatibleTransport(timeout=120.0).provider_timeout(provider)
-    except TransportConfigError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-
 def reject_unsupported_previous_response(codex_req: dict) -> None:
     if codex_req.get("previous_response_id"):
         raise HTTPException(
@@ -952,37 +927,6 @@ def prepare_openai_compatible_request(
     return prepared.payload, prepared.url, prepared.headers, prepared.timeout
 
 
-async def xai_oauth_headers(*, force_refresh: bool = False) -> dict:
-    try:
-        if force_refresh:
-            token = await run_in_threadpool(resolve_xai_oauth_access_token, force_refresh=True)
-        else:
-            token = await run_in_threadpool(resolve_xai_oauth_access_token)
-    except RuntimeError as e:
-        raise HTTPException(status_code=401, detail=redact_secret_text(str(e))) from e
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-
-
-async def prepare_xai_oauth_responses_request(
-    codex_req: dict,
-    provider: dict,
-    provider_model: str,
-    *,
-    stream: bool,
-    force_refresh: bool = False,
-) -> tuple[dict, str, dict, float]:
-    payload = dict(codex_req)
-    payload["model"] = provider_model
-    payload["stream"] = stream
-    headers = await xai_oauth_headers(force_refresh=force_refresh)
-    url = responses_api_url(provider)
-    timeout = openai_compatible_timeout(provider)
-    return payload, url, headers, timeout
-
 @app.post("/v1/responses")
 async def create_response(request: Request):
     request_id = f"req_{secrets.token_hex(8)}"
@@ -1093,107 +1037,6 @@ async def create_response(request: Request):
             )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         provider_kind = provider.get("kind")
-        if provider_kind == "openai_responses":
-            if provider_id != "xai-oauth" or provider_auth_mode(provider) != PROVIDER_AUTH_MODE_OAUTH:
-                await log_request(
-                    "failed",
-                    model=model,
-                    route="byok",
-                    provider=provider_id,
-                    stream=stream,
-                    http_status=500,
-                    error_class="unsupported_provider_auth",
-                    error=f"Unsupported Responses provider auth mode: {provider_auth_mode(provider)}",
-                )
-                raise HTTPException(
-                    status_code=500,
-                    detail="Unsupported Responses provider auth mode for this route",
-                )
-            if stream:
-                payload, url, headers, timeout = await prepare_xai_oauth_responses_request(
-                    codex_req,
-                    provider,
-                    provider_model,
-                    stream=True,
-                )
-                await log_request("stream_started", model=model, route="byok", provider=provider_id, stream=True)
-
-                async def logged_xai_oauth_stream() -> AsyncGenerator[str, None]:
-                    terminal_status = "ended"
-                    terminal_http_status = None
-                    terminal_error_class = None
-                    terminal_error = None
-                    terminal_usage = None
-                    try:
-                        async for chunk in xai_oauth_responses_sse_generator(payload, url, headers, timeout, provider, provider_model, codex_req):
-                            for line in chunk.splitlines():
-                                if not line.startswith("data: ") or line == "data: [DONE]":
-                                    continue
-                                try:
-                                    event = json.loads(line[6:])
-                                except json.JSONDecodeError:
-                                    continue
-                                event_type = event.get("type")
-                                if event_type == "response.completed":
-                                    terminal_status = "success"
-                                    terminal_http_status = 200
-                                    response_payload = event.get("response", {})
-                                    if isinstance(response_payload, dict):
-                                        terminal_usage = response_payload.get("usage")
-                                elif event_type == "response.failed":
-                                    terminal_status = "failed"
-                                    response_payload = event.get("response", {})
-                                    error_payload = response_payload.get("error", {}) if isinstance(response_payload, dict) else {}
-                                    if isinstance(error_payload, dict):
-                                        terminal_error_class = error_payload.get("code")
-                                        terminal_error = error_payload.get("message")
-                            yield chunk
-                    except Exception as exc:
-                        terminal_status = "failed"
-                        terminal_error_class = "stream_exception"
-                        terminal_error = exc
-                        raise
-                    finally:
-                        await log_request(
-                            terminal_status,
-                            model=model,
-                            route="byok",
-                            provider=provider_id,
-                            stream=True,
-                            http_status=terminal_http_status,
-                            usage=terminal_usage,
-                            error_class=terminal_error_class,
-                            error=terminal_error,
-                        )
-
-                return StreamingResponse(
-                    logged_xai_oauth_stream(),
-                    media_type="text/event-stream",
-                )
-            try:
-                response = await create_xai_oauth_response(codex_req, provider, provider_model, model)
-            except HTTPException as exc:
-                await log_request(
-                    "failed",
-                    model=model,
-                    route="byok",
-                    provider=provider_id,
-                    stream=False,
-                    http_status=exc.status_code,
-                    error_class="xai_oauth_error",
-                    error=exc.detail,
-                )
-                raise
-            await log_request(
-                "success",
-                model=model,
-                route="byok",
-                provider=provider_id,
-                stream=False,
-                http_status=200,
-                usage=response.get("usage") if isinstance(response, dict) else None,
-            )
-            return response
         if provider_kind != "openai_chat":
             await log_request(
                 "failed",
@@ -1960,168 +1803,6 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{provider['id']} response translation failed: {safe_error_detail(e)}") from e
-
-
-def xai_oauth_entitlement_detail(provider_model: str, body: str | None = None) -> str:
-    suffix = f": {safe_error_detail(body)}" if body else ""
-    return (
-        f"xAI OAuth returned HTTP 403 for {provider_model}{suffix}. "
-        "Your SuperGrok/X Premium account may not be entitled for this OAuth API surface, "
-        "or the grant may need to be refreshed. Run `codex-antigravity provider login xai-oauth` "
-        f"again, or use the API-key route `xai:{provider_model}` with XAI_API_KEY."
-    )
-
-
-async def create_xai_oauth_response(codex_req: dict, provider: dict, provider_model: str, display_model: str) -> dict:
-    payload, url, headers, timeout = await prepare_xai_oauth_responses_request(
-        codex_req,
-        provider,
-        provider_model,
-        stream=False,
-    )
-
-    async def post_once(request_headers: dict) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            return await client.post(url, json=payload, headers=request_headers)
-
-    try:
-        res = await post_once(headers)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"{provider['id']} connection error: {safe_error_detail(e)}") from e
-    if res.status_code == 401:
-        _payload, _url, refreshed_headers, _timeout = await prepare_xai_oauth_responses_request(
-            codex_req,
-            provider,
-            provider_model,
-            stream=False,
-            force_refresh=True,
-        )
-        try:
-            res = await post_once(refreshed_headers)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"{provider['id']} connection error after refresh: {safe_error_detail(e)}") from e
-    if res.status_code == 403:
-        raise HTTPException(status_code=403, detail=xai_oauth_entitlement_detail(provider_model, res.text))
-    if res.status_code != 200:
-        raise HTTPException(status_code=res.status_code, detail=f"{provider['id']} API error: {safe_error_detail(res.text)}")
-    try:
-        payload = res.json()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"{provider['id']} response parsing failed: {safe_error_detail(e)}") from e
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=500, detail=f"{provider['id']} response parsing failed: response was not an object")
-    try:
-        return OpenAICompatibleTransport(timeout=timeout).validate_native_response(
-            payload,
-            display_model=display_model,
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"{provider['id']} returned an invalid Responses payload: {safe_error_detail(e)}",
-        ) from e
-
-
-async def xai_oauth_responses_sse_generator(
-    payload: dict,
-    url: str,
-    headers: dict,
-    timeout: float,
-    provider: dict,
-    provider_model: str,
-    codex_req: dict,
-) -> AsyncGenerator[str, None]:
-    emitted_output = False
-    retried = False
-    active_headers = headers
-    display_model = str(codex_req.get("model") or f"xai-oauth:{provider_model}")
-    adapter = NativeResponsesStreamAdapter(display_model=display_model)
-
-    def serialize(event: dict) -> str:
-        return "data: " + json.dumps(event) + "\n\n"
-
-    while True:
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream("POST", url, json=payload, headers=active_headers) as res:
-                    if res.status_code == 401 and not emitted_output and not retried:
-                        retried = True
-                        _payload, _url, active_headers, _timeout = await prepare_xai_oauth_responses_request(
-                            codex_req,
-                            provider,
-                            provider_model,
-                            stream=True,
-                            force_refresh=True,
-                        )
-                        continue
-                    if res.status_code == 403:
-                        yield (
-                            "data: "
-                            + json.dumps(
-                                {
-                                    "type": "response.failed",
-                                    "response": {
-                                        "status": "failed",
-                                        "model": payload.get("model"),
-                                        "error": {
-                                            "code": "xai_oauth_forbidden",
-                                            "message": xai_oauth_entitlement_detail(provider_model, (await res.aread()).decode("utf-8", errors="ignore")),
-                                        },
-                                    },
-                                }
-                            )
-                            + "\n\n"
-                        )
-                        yield "data: [DONE]\n\n"
-                        return
-                    if res.status_code != 200:
-                        body = (await res.aread()).decode("utf-8", errors="ignore")
-                        yield (
-                            "data: "
-                            + json.dumps(
-                                {
-                                    "type": "response.failed",
-                                    "response": {
-                                        "status": "failed",
-                                        "model": payload.get("model"),
-                                        "error": {
-                                            "code": "backend_error",
-                                            "message": f"{provider['id']} returned HTTP {res.status_code}: {safe_error_detail(body)}",
-                                        },
-                                    },
-                                }
-                            )
-                            + "\n\n"
-                        )
-                        yield "data: [DONE]\n\n"
-                        return
-                    async for raw_chunk in res.aiter_bytes():
-                        for event in adapter.consume_bytes(raw_chunk):
-                            if event.get("type", "").startswith(("response.output", "response.reasoning")):
-                                emitted_output = True
-                            yield serialize(event)
-                    for event in adapter.finish():
-                        yield serialize(event)
-                    yield "data: [DONE]\n\n"
-                    return
-        except Exception as e:
-            yield (
-                "data: "
-                + json.dumps(
-                    {
-                        "type": "response.failed",
-                        "response": {
-                            "status": "failed",
-                            "model": payload.get("model"),
-                            "error": {"code": "connection_error", "message": safe_error_detail(e)},
-                        },
-                    }
-                )
-                + "\n\n"
-            )
-            yield "data: [DONE]\n\n"
-            return
-
 
 async def openai_compatible_sse_generator(
     payload: dict,
