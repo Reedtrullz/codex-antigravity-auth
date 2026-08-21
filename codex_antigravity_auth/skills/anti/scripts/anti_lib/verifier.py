@@ -6,7 +6,6 @@ referenced by findings and attaches concrete evidence.
 from __future__ import annotations
 
 import re
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -49,10 +48,14 @@ def _check_secrets(file_path: Path) -> str | None:
         for pattern in patterns:
             match = re.search(pattern, content)
             if match:
-                # Redact the actual matched value to avoid leaking credentials
+                # Fully redact matched value to avoid leaking any credential content
                 matched = match.group()
-                key_part = matched.split("=")[0] if "=" in matched else matched[:30]
-                return f"Potential secret pattern detected in: {key_part}=***"
+                # Extract only the key/label portion, redact everything after the delimiter
+                for delim in ("=", ":", " "):
+                    if delim in matched:
+                        key_part = matched.split(delim, 1)[0].strip()
+                        return f"Potential secret pattern: {key_part}=<REDACTED>"
+                return "Potential secret pattern detected (no key delimiter found)"
     except Exception:
         pass
     return None
@@ -84,14 +87,18 @@ def verify_finding(finding: dict[str, Any], workspace_root: Path) -> dict[str, A
     if not file_path_str:
         return finding
     
+    # Resolve workspace_root to handle relative paths from callers
+    workspace_resolved = Path(workspace_root).resolve(strict=False)
+    
     file_path = Path(file_path_str)
     if not file_path.is_absolute():
         file_path = workspace_root / file_path
-    file_path = file_path.resolve()
-    workspace_resolved = workspace_root.resolve()
+    file_path = file_path.resolve(strict=False)
     try:
         file_path.relative_to(workspace_resolved)
     except ValueError:
+        finding = dict(finding)
+        finding["evidence"] = "verification_skipped: path escapes workspace root"
         return finding
     
     if not file_path.exists() or not file_path.is_file():

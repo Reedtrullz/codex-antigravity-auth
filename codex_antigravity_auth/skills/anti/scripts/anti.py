@@ -5706,11 +5706,11 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         scope = workflow_scope(args, default="staged")
         # H-5: consensus requires at least 2 models to detect disagreements
         consensus_models = args.model or ["sonnet", "opus", "flash-3.6"]
+        # Don't pass prompt here; let post-expansion handle user prompt or default
         argv = _panel_argv(
             mode="review", scope=scope, common=common, args=args,
             roles=["correctness", "security", "tests"],
             models=consensus_models,
-            prompt="Focus on disagreements between reviewers. For consensus items, state briefly and move on.",
         )
         # Ensure min-successes is at least 2 for meaningful disagreement detection
         if args.min_successes is None or args.min_successes < 2:
@@ -5740,7 +5740,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         elif args.name == "quick-check":
             prompt = "Quick pre-commit check. Flag only high-confidence blockers. Be terse."
         elif args.name == "consensus":
-            prompt = "Review for bugs and issues. Focus on disagreements between reviewers."
+            prompt = "Focus on disagreements between reviewers. For consensus items, state briefly and move on. For unique insights from each perspective, elaborate."
         else:
             raise AntiError("debug-consensus requires --prompt, --prompt-file, or positional prompt text")
     if prompt and args.name != "debug-consensus":
