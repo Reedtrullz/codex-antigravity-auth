@@ -58,6 +58,13 @@ checks.
 **`openrouter/free` Model Alias** — `free` resolves to `openrouter/free`,
 which auto-selects the best available free model on OpenRouter.
 
+**Repo-Level Reflection Memory** — Passively tracks review findings per
+repo for pattern analysis. Records findings, models, panel status after
+each review. `runs reflections --repo <path>` shows summary with
+recurring fingerprints, severity distribution, and most-reviewed files.
+Use `--clear` to reset. Does NOT suppress findings — only tracks and
+surfaces patterns for periodic review.
+
 ### Fixes
 
 - Fixed `normalize_finding_item` nested scope bug (was inside
