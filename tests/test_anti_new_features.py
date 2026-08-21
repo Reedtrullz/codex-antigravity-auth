@@ -237,6 +237,8 @@ class ReflectionTests(unittest.TestCase):
         )
 
     def test_record_review_creates_file_with_correct_permissions(self):
+        if sys.platform == "win32":
+            self.skipTest("POSIX permission bits not enforceable on Windows")
         repo = Path(self._temp_dir.name) / "repo-a"
         record = self._record(repo)
 
@@ -247,6 +249,8 @@ class ReflectionTests(unittest.TestCase):
         self.assertEqual(saved, [record])
 
     def test_directory_created_with_700_permissions(self):
+        if sys.platform == "win32":
+            self.skipTest("POSIX permission bits not enforceable on Windows")
         repo = Path(self._temp_dir.name) / "repo-b"
         self.assertFalse(reflections.REFLECTIONS_DIR.exists())
 
@@ -331,6 +335,8 @@ class ReflectionTests(unittest.TestCase):
             reflections.MAX_ENTRIES_PER_REPO = original_limit
 
     def test_existing_files_migrated_to_600_on_next_write(self):
+        if sys.platform == "win32":
+            self.skipTest("POSIX permission bits not enforceable on Windows")
         legacy_path = reflections.REFLECTIONS_DIR / "legacy.json"
         legacy_path.parent.mkdir(parents=True, exist_ok=True)
         legacy_path.write_text("[]", encoding="utf-8")
