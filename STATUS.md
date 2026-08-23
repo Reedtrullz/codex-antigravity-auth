@@ -1,4 +1,6 @@
-# Current Integration Status — 12 July 2026
+# Integration Status — historical baseline 12 July 2026
+
+> **Current snapshot — 2026-08-24:** The canonical `main` checkout is released at v2.2.0 (`499ff436c311638ebe67cea6ad2de354a309e6ec`). CI run `32522720655` and Publish run `32522720637` both passed for that exact SHA; the GitHub release is public. The July 1.7.0 release-candidate notes below are historical evidence and are not current release state. No fresh credentialed live generation was run in this audit.
 
 ## Build & Test Health
 - **local pytest**: the `1.7.0` release-hardening worktree passes `577` tests plus `193` subtests on Python 3.10.4 and Python 3.14.5 ✅
@@ -133,12 +135,12 @@
 - Helper-level MoA/Fusion remains advisory; virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not implemented.
 
 ## Release State
-- Current release-candidate package metadata: `1.7.0` on `codex/release-hardening-1.7.0`.
-- Latest public GitHub release verified on 2026-07-12: [v1.6.4](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v1.6.4).
-- Latest public PyPI version verified on 2026-07-12: `codex-antigravity-auth==1.6.4`. `1.7.0` is not tagged or published.
+- Current package metadata: `2.2.0` on canonical `main` at `499ff436c311638ebe67cea6ad2de354a309e6ec`.
+- Latest public GitHub release verified on 2026-08-24: [v2.2.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v2.2.0), published 2026-08-21; CI run `32522720655` and Publish run `32522720637` passed for the exact release SHA.
+- PyPI `codex-antigravity-auth==2.2.0` was directly verified on 2026-08-24; the published wheel and sdist match the release metadata. No fresh credentialed provider generation was run in this audit.
 
 ## Next Priorities
-1. Complete the non-credentialed `1.7.0` release matrix and review the resulting branch.
+1. Keep current v2.2.0 release/docs truth synchronized; treat the July 1.7.0 release-hardening artifacts as historical.
 2. Add `/v1/responses/compact` support.
 3. Expand live backend smoke coverage beyond DeepSeek/OpenRouter to additional BYOK providers.
 4. Add a documented credentialed smoke-test profile for 1Password-backed BYOK providers without persisting raw API keys.

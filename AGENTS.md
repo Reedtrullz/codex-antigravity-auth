@@ -1,5 +1,7 @@
 # AGENTS.md — Codex Antigravity Auth
 
+**Current verification snapshot:** 2026-08-24 — `main`/`v2.2.0` at `499ff436c311638ebe67cea6ad2de354a309e6ec`; CI run `32522720655` and Publish run `32522720637` passed for that SHA. The historical release-candidate notes elsewhere in this repository are not current release claims.
+
 Guidance for AI coding agents (Codex, Claude Code, OpenCode, etc.) working on this project.
 
 ## Overview
@@ -51,7 +53,7 @@ Codex Desktop/CLI  ←  Responses API formatted response
 - **Python 3.10+** — use `python3` or activate venv
 - **Virtual env**: `source .venv/bin/activate`
 - **Install**: `uv pip install -e .`
-- **Test**: `python3 -m pytest` (current suite: 710 tests plus 260 subtests, all must pass)
+- **Test**: `python3 -m pytest` (current suite: 719 tests plus 204 subtests, all must pass)
 - **Run server**: `codex-antigravity start --port 51122`
 - **Credentials**: `~/.codex/antigravity-credentials.json` or env vars
 - **Accounts**: `~/.codex/antigravity-accounts.json` (Fernet-encrypted)
