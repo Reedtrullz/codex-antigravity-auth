@@ -2,6 +2,8 @@
 
 > **Current snapshot — 2026-08-24:** The canonical `main` checkout is released at v2.2.0 (`499ff436c311638ebe67cea6ad2de354a309e6ec`). CI run `32522720655` and Publish run `32522720637` both passed for that exact SHA; the GitHub release is public. The July 1.7.0 release-candidate notes below are historical evidence and are not current release state. No fresh credentialed live generation was run in this audit.
 
+> The Build & Test Health, Core Features, and Known Limitations sections below retain the July 1.7.0 evidence record. Use the current v2.2.0 source, changelog, and release snapshot above for present capability/catalog claims.
+
 ## Build & Test Health
 - **local pytest**: the `1.7.0` release-hardening worktree passes `577` tests plus `193` subtests on Python 3.10.4 and Python 3.14.5 ✅
 - **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
