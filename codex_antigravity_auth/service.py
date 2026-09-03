@@ -90,6 +90,7 @@ def service_command(
     *,
     op_env_file: str | None = None,
     op_environment: str | None = None,
+    unified_model_picker: bool = False,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -101,6 +102,8 @@ def service_command(
         "--host",
         str(host),
     ]
+    if unified_model_picker:
+        command.append("--unified-model-picker")
     return wrap_with_onepassword(command, op_env_file=op_env_file, op_environment=op_environment)
 
 
@@ -118,11 +121,14 @@ def render_macos_launch_agent(
     *,
     op_env_file: str | None = None,
     op_environment: str | None = None,
+    unified_model_picker: bool = False,
 ) -> str:
     stdout, stderr = service_log_paths(port)
     args = "\n".join(
         f"    <string>{_xml_escape(arg)}</string>"
-        for arg in service_command(port, host, op_env_file=op_env_file, op_environment=op_environment)
+        for arg in service_command(
+            port, host, op_env_file=op_env_file, op_environment=op_environment, unified_model_picker=unified_model_picker
+        )
     )
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -156,11 +162,14 @@ def render_linux_systemd_unit(
     *,
     op_env_file: str | None = None,
     op_environment: str | None = None,
+    unified_model_picker: bool = False,
 ) -> str:
     stdout, stderr = service_log_paths(port)
     command = " ".join(
         shlex.quote(part).replace('%', '%%')
-        for part in service_command(port, host, op_env_file=op_env_file, op_environment=op_environment)
+        for part in service_command(
+            port, host, op_env_file=op_env_file, op_environment=op_environment, unified_model_picker=unified_model_picker
+        )
     )
     return f"""[Unit]
 Description=Codex Antigravity Gateway ({port})
@@ -195,6 +204,7 @@ def install_service(
     platform_name: str | None = None,
     op_env_file: str | None = None,
     op_environment: str | None = None,
+    unified_model_picker: bool = False,
 ) -> dict[str, Any]:
     platform_name = platform_name or service_platform()
     if platform_name == "macos":
@@ -203,7 +213,9 @@ def install_service(
             raise RuntimeError(f"Refusing to overwrite symlinked service file: {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            render_macos_launch_agent(port, host, op_env_file=op_env_file, op_environment=op_environment),
+            render_macos_launch_agent(
+                port, host, op_env_file=op_env_file, op_environment=op_environment, unified_model_picker=unified_model_picker
+            ),
             encoding="utf-8",
         )
         os.chmod(path, 0o600)
@@ -222,7 +234,9 @@ def install_service(
             raise RuntimeError(f"Refusing to overwrite symlinked service file: {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            render_linux_systemd_unit(port, host, op_env_file=op_env_file, op_environment=op_environment),
+            render_linux_systemd_unit(
+                port, host, op_env_file=op_env_file, op_environment=op_environment, unified_model_picker=unified_model_picker
+            ),
             encoding="utf-8",
         )
         os.chmod(path, 0o600)
@@ -236,7 +250,9 @@ def install_service(
     if platform_name == "windows":
         command = " ".join(
             _windows_quote(part)
-            for part in service_command(port, host, op_env_file=op_env_file, op_environment=op_environment)
+            for part in service_command(
+                port, host, op_env_file=op_env_file, op_environment=op_environment, unified_model_picker=unified_model_picker
+            )
         )
         create_result = _run(
             [

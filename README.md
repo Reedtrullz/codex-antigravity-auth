@@ -344,6 +344,64 @@ model_provider = "antigravity"
 wire_api = "responses"
 ```
 
+## Unified Codex model picker
+
+Allows Codex to display and use OpenAI, Claude and Gemini models from a
+single configured provider by routing requests through the local gateway.
+
+This is opt-in and does not change classic behaviour unless you enable it:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+codex-antigravity configure-codex --write --unified-model-picker --model gpt-5.6
+codex-antigravity start --unified-model-picker
+# Or durably:
+codex-antigravity service install --port 51122 --host 127.0.0.1 --unified-model-picker
+```
+
+Unified mode writes a separate provider block so classic configs are preserved:
+
+```toml
+[model_providers.antigravity-unified]
+name = "Antigravity Unified"
+base_url = "http://localhost:51122/v1"
+wire_api = "responses"
+```
+
+```toml
+model = "gpt-5.6"
+model_provider = "antigravity-unified"
+wire_api = "responses"
+```
+
+When enabled, `GET /v1/models` advertises Antigravity native models, OpenAI/Codex
+ids (`gpt-5.6`, `gpt-5.6-codex`, …), and configured BYOK `provider:model` ids in
+one picker. The gateway routes per model (BYOK → existing provider, OpenAI →
+OpenAI upstream, Claude/Gemini → Antigravity) and returns provider-qualified
+errors for unknown models, missing OpenAI auth, or unreachable upstreams. OpenAI
+requests never fall through to Antigravity and vice versa.
+
+OpenAI authentication, in order of preference:
+
+1. Explicit `OPENAI_API_KEY` (env) proxied to `https://api.openai.com/v1/responses`
+   (override base with `OPENAI_BASE_URL`; file alternative
+   `~/.codex/antigravity-openai.json` with `{"api_key": ...}`).
+2. Optional ChatGPT-subscription reuse: `ANTIGRAVITY_OPENAI_USE_CODEX_AUTH=1`
+   reads `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`) read-only after
+   `codex login` and proxies to `https://chatgpt.com/backend-api/codex/responses`.
+   No token refresh is attempted; an expired token returns a clear 401 telling
+   you to run `codex login` again. This path is explicit because the auth file
+   format is owned by Codex and may change.
+
+Extend the OpenAI registry without code changes:
+
+```bash
+export ANTIGRAVITY_OPENAI_MODELS="gpt-5.6,gpt-5.6-codex,my-codex-model"
+```
+
+Disable unified mode at any time to restore historical behaviour
+(`ANTIGRAVITY_UNIFIED_MODEL_PICKER` unset, classic `antigravity` provider).
+
 ## Verification
 
 To run connection check diagnostics and verify token security:
@@ -408,6 +466,22 @@ If project IDs are not being discovered:
 codex-antigravity doctor --codex-ready
 codex-antigravity start --port 51122
 ```
+
+### Unified picker: OpenAI 401 / unknown model
+
+If `gpt-5.6` returns 401, the OpenAI upstream has no credentials:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+codex-antigravity start --unified-model-picker
+curl http://127.0.0.1:51122/health
+```
+
+If it returns 404 `Unknown model`, the id is not in the OpenAI registry,
+native catalog, or BYOK config. Check `/v1/models`, extend
+`ANTIGRAVITY_OPENAI_MODELS` if needed, and ensure the gateway was restarted
+with `--unified-model-picker`. Classic mode never advertises OpenAI ids; use
+the `antigravity-unified` provider block for unified pickers.
 
 ## Release Automation
 

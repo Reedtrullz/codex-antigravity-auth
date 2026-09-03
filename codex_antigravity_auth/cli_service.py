@@ -289,6 +289,7 @@ def run_service_command(args) -> dict:
                 args.host,
                 op_env_file=getattr(args, "op_env_file", None),
                 op_environment=getattr(args, "op_environment", None),
+                unified_model_picker=bool(getattr(args, "unified_model_picker", False)),
             )
             action = "installed"
         elif args.service_command == "uninstall":
@@ -435,6 +436,7 @@ def run_logs_command(args) -> None:
 
 def start_gateway_background(args) -> dict:
     _cli.require_safe_gateway_host(args.host, args.allow_remote)
+    _cli.ensure_unified_env_for_gateway(args)
     pid_path, log_path = _cli.gateway_runtime_paths(args.port)
     base_url = _cli.local_gateway_base_url(args.host, args.port)
     current = _cli.gateway_status_info(args.port)
