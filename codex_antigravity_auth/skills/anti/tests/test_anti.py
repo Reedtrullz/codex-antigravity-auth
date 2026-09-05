@@ -2473,7 +2473,7 @@ class AntiHelperTests(unittest.TestCase):
                     "--model",
                     "opus",
                     "--model",
-                    "flash-high",
+                    "flash-3.7",
                     "--model",
                     "nemotron-ultra",
                     "--judge",
@@ -2529,7 +2529,7 @@ class AntiHelperTests(unittest.TestCase):
         """A single fallback model cannot satisfy a two-model panel minimum."""
         anti = load_anti()
         fallback = "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
-        requested = {"claude-opus-4-6-thinking", "gemini-3.5-flash-high", fallback}
+        requested = {"claude-opus-4-6-thinking", "gemini-3.8-flash-high", fallback}
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: set(requested)
         judge_called = False
 
@@ -2538,7 +2538,7 @@ class AntiHelperTests(unittest.TestCase):
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
                 judge_called = True
                 return "judge-output"
-            if kwargs["model"] in {"claude-opus-4-6-thinking", "gemini-3.5-flash-high"}:
+            if kwargs["model"] in {"claude-opus-4-6-thinking", "gemini-3.8-flash-high"}:
                 raise anti.AntiError("HTTP 502: requested backend unavailable retryable=true")
             return "nemotron-output"
 
@@ -2583,7 +2583,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_failed_fallback_keeps_both_errors_and_identity(self) -> None:
         anti = load_anti()
-        fallback = "gemini-3.7-flash"
+        fallback = "gemini-3.8-flash-high"
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
             "claude-opus-4-6-thinking",
             "claude-sonnet-4-6",

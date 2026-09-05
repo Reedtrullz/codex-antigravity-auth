@@ -31,14 +31,25 @@ class NativeModel:
 
 
 DEFAULT_CLAUDE_MODEL_ID = "claude-sonnet-4-6"
-DEFAULT_GEMINI_MODEL_ID = "gemini-3.7-flash"
+DEFAULT_GEMINI_MODEL_ID = "gemini-3.8-flash"
 DEFAULT_CODEX_MODEL_ID = DEFAULT_CLAUDE_MODEL_ID
 
 
 NATIVE_MODELS: tuple[NativeModel, ...] = (
-    # ── Gemini Flash (current generation: 3.7) ──
-    # CCA serves 3.7 Flash as a single "tiered" wire id; effort is carried via
+    # ── Gemini Flash (current generation: 3.8) ──
+    # CCA serves 3.8 Flash as a single "tiered" wire id; effort is carried via
     # thinkingConfig.thinkingLevel rather than suffixed wire ids.
+    NativeModel(
+        id="gemini-3.8-flash",
+        backend_id="gemini-3.8-flash-tiered",
+        display_name="Gemini 3.8 Flash",
+        context_window=1_048_576,
+        family="gemini",
+        default_reasoning_level="medium",
+        aliases=("gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"),
+    ),
+    # ── Gemini Flash (also supported: 3.7) ──
+    # 3.7 Flash uses the same tiered request shape as 3.8.
     NativeModel(
         id="gemini-3.7-flash",
         backend_id="gemini-3.7-flash-tiered",
@@ -91,12 +102,11 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         context_window=131_072,
         family="gemini",
     ),
-    # ── Retired Flash generations (route to current 3.7) ──
-    # Google takes previous Flash models offline quickly; these aliases ensure
-    # saved configs continue to work by routing to the current generation.
+    # ── Compatibility Flash generations ──
+    # Keep saved configs working while the current catalog moves forward.
     NativeModel(
         id="gemini-3.6-flash-high",
-        backend_id="gemini-3.6-flash-high",
+        backend_id="gemini-3.7-flash-tiered",
         display_name="Gemini 3.6 Flash (High)",
         context_window=1_048_576,
         family="gemini",

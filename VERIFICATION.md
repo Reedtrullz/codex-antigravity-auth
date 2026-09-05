@@ -55,7 +55,7 @@ codex-antigravity configure-codex --write --model deepseek:deepseek-chat
 Equivalent manual TOML:
 
 ```toml
-model = "gemini-3.7-flash"
+model = "gemini-3.8-flash"
 model_provider = "antigravity"
 wire_api = "responses"
 
@@ -87,7 +87,7 @@ The `1.7.0` release-candidate paragraph below is historical and must not be used
 ```bash
 curl -s -X POST http://localhost:51122/v1/responses \
   -H "Content-Type: application/json" \
-  -d '{"model":"gemini-3.7-flash","input":"Say hello!"}'
+  -d '{"model":"gemini-3.8-flash","input":"Say hello!"}'
 # Expect: 200 with output containing text
 ```
 
@@ -118,11 +118,14 @@ OpenRouter was also smoke-tested with a transient `OPENROUTER_API_KEY` environme
 - **Use Antigravity**: Add `model_provider = "antigravity"`, ensure gateway is running
 
 ## Available Models
-- `gemini-3.7-flash` → Gemini 3.5 Flash (Agent High)
-- `gemini-3.7-flash` → Gemini 3.5 Flash (General)
+- `gemini-3.8-flash` → Gemini 3.8 Flash (Low/Medium/High)
+- `gemini-3.7-flash` → Gemini 3.7 Flash (Low/Medium/High)
+- `gemini-3.6-flash-high` → Gemini 3.6 Flash compatibility ID
 - `gemini-3.1-pro` → Gemini 3.1 Pro (Reasoning)
+- `gemini-3.1-flash-image` → Gemini 3.1 Flash Image generation
 - `claude-sonnet-4-6` → Claude Sonnet 4.6 (Google)
 - `claude-opus-4-6-thinking` → Claude Opus 4.6 (Google)
+- `gpt-oss-120b-medium` → GPT-OSS 120B (text-only)
 - `deepseek:deepseek-v4-flash` → DeepSeek V4 Flash BYOK
 - `deepseek:deepseek-chat` → DeepSeek BYOK
 - `openrouter:openrouter/auto` → OpenRouter BYOK auto-router

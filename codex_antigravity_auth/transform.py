@@ -10,7 +10,7 @@ import os
 import copy
 import re
 from typing import Any
-from .models import resolve_backend_model
+from .models import DEFAULT_GEMINI_MODEL_ID, resolve_backend_model
 from .schema import clean_json_schema
 
 FUNCTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -184,25 +184,31 @@ def positive_int_value(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
-def _is_gemini_37_thinking_model(backend_model: str) -> bool:
-    """Gemini 3.7 Flash uses thinkingLevel (string) rather than thinking_budget (int)."""
+def _is_gemini_thinking_level_model(backend_model: str) -> bool:
+    """Gemini 3.7+ Flash uses thinkingLevel rather than thinking_budget."""
     lower = backend_model.lower()
-    return "gemini-3.7" in lower or "gemini-3.7-flash" in lower
+    return "gemini-3.7" in lower or "gemini-3.8" in lower
 
 
 def thinking_level_for_request(codex_req: dict[str, Any], backend_model: str) -> str | None:
     """Return the thinkingLevel string for Gemini 3.7+ models, or None."""
-    if not _is_gemini_37_thinking_model(backend_model):
+    if not _is_gemini_thinking_level_model(backend_model):
         return None
     reasoning = codex_req.get("reasoning")
-    effort = reasoning.get("effort", "medium") if isinstance(reasoning, dict) else "medium"
     valid_levels = {"low", "medium", "high"}
+    if isinstance(reasoning, dict) and reasoning.get("effort") in valid_levels:
+        return reasoning["effort"]
+    model = str(codex_req.get("model", "")).lower()
+    for level in ("low", "medium", "high"):
+        if model.endswith(f"-{level}"):
+            return level
+    effort = reasoning.get("effort", "medium") if isinstance(reasoning, dict) else "medium"
     return effort if effort in valid_levels else "medium"
 
 
 def thinking_budget_for_request(codex_req: dict[str, Any], backend_model: str) -> int | None:
-    if _is_gemini_37_thinking_model(backend_model):
-        return None  # Gemini 3.7 uses thinkingLevel, not thinking_budget
+    if _is_gemini_thinking_level_model(backend_model):
+        return None  # Gemini 3.7+ uses thinkingLevel, not thinking_budget
     if "thinking" not in backend_model.lower() and "claude" not in backend_model.lower():
         return None
     reasoning = codex_req.get("reasoning")
@@ -272,7 +278,7 @@ def normalize_chat_response_format(value: Any) -> dict[str, Any]:
 
 def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     """Translate standard Codex Responses API request body to Antigravity format."""
-    model = codex_req.get("model", "gemini-3.5-flash-high")
+    model = codex_req.get("model", DEFAULT_GEMINI_MODEL_ID)
     backend_model = resolve_backend_model(model)
     
     # 1. Parse Codex input.

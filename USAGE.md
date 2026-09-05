@@ -176,13 +176,16 @@ You can use standard, developer-friendly names in your `~/.codex/config.toml` th
 
 | OpenAI Codex Model ID | Antigravity Backend Model |
 | --- | --- |
-| `gemini-3.7-flash` | `gemini-3.7-flash-tiered` (DeepMind Agentic Flash) |
-| `gemini-3.7-flash` | `gemini-3.5-flash-low` (General Purpose Flash) |
-| `gemini-3.1-pro` | `gemini-3.1-pro` (Advanced Reasoning Pro) |
+| `gemini-3.8-flash` | `gemini-3.8-flash-tiered` (current Flash; low/medium/high via `thinkingLevel`) |
+| `gemini-3.7-flash` | `gemini-3.7-flash-tiered` (supported Flash) |
+| `gemini-3.1-pro` | `gemini-3.1-pro-low` (Advanced Reasoning Pro) |
+| `gemini-3.1-flash-image` | `gemini-3.1-flash-image` (image generation) |
 | `claude-sonnet-4-6` | `claude-sonnet-4-6` (High-Fidelity Anthropic Sonnet) |
 | `claude-opus-4-6-thinking` | `claude-opus-4-6-thinking` (Deep Anthropic Opus Reasoning) |
 
-Claude-first setup aliases are accepted anywhere the CLI accepts a Codex model id:
+The older `gemini-3.6-flash-*` and `gemini-3.5-flash-*` IDs remain accepted for saved configurations and backward compatibility.
+
+Common setup aliases are accepted anywhere the CLI accepts a Codex model id:
 
 | Alias | Canonical Codex Model ID |
 | --- | --- |
@@ -190,6 +193,10 @@ Claude-first setup aliases are accepted anywhere the CLI accepts a Codex model i
 | `claude-sonnet` | `claude-sonnet-4-6` |
 | `opus` | `claude-opus-4-6-thinking` |
 | `claude-opus` | `claude-opus-4-6-thinking` |
+| `flash` | `gemini-3.8-flash` |
+| `flash-low` / `flash-medium` / `flash-high` | `gemini-3.8-flash` with the matching `thinkingLevel` |
+| `flash-3.8-low` / `flash-3.8-medium` / `flash-3.8-high` | `gemini-3.8-flash` with the matching `thinkingLevel` |
+| `flash-3.7` | `gemini-3.7-flash` |
 
 `codex-antigravity models doctor` also prints the Claude thinking-budget mapping for `low`, `medium`, `high`, and `xhigh` so advertised reasoning metadata can be compared with runtime request transforms.
 

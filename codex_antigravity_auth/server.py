@@ -33,6 +33,7 @@ from .byok import (
 from .transform import safe_project_id, transform_chat_response, valid_function_name
 from .constants import get_platform, is_loopback_host, validate_gateway_token_strength
 from .models import (
+    DEFAULT_GEMINI_MODEL_ID,
     NATIVE_MODELS,
     canonical_model_id,
     native_model_capabilities,
@@ -818,7 +819,7 @@ def response_stream_flag(codex_req: dict) -> bool:
 
 
 def response_model_id(codex_req: dict) -> str:
-    raw_model = codex_req.get("model", "gemini-3.5-flash-high")
+    raw_model = codex_req.get("model", DEFAULT_GEMINI_MODEL_ID)
     if not isinstance(raw_model, str):
         raise HTTPException(status_code=400, detail="model must be a string")
     model = raw_model.strip()

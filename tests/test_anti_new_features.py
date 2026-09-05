@@ -61,6 +61,45 @@ class NormalizeAndFindingsTests(unittest.TestCase):
 
 
 class RoutingAndCostTests(unittest.TestCase):
+    def test_current_gemini_flash_aliases_target_38(self):
+        self.assertEqual(anti.resolve_model("claude-opus", default="sonnet"), "claude-opus-4-6-thinking")
+        self.assertEqual(anti.resolve_model("flash", default="sonnet"), "gemini-3.8-flash")
+        self.assertEqual(anti.resolve_model("flash-3.8", default="sonnet"), "gemini-3.8-flash")
+        self.assertTrue(anti.model_supports("gemini-3.8-flash", "tools"))
+        self.assertEqual(anti.model_cost_tier("gemini-3.8-flash"), "quota")
+        self.assertTrue(anti.catalog_model_matches("gemini-3.6-flash-medium", "gemini-3.6-flash-high"))
+
+    def test_flash_effort_alias_is_forwarded_to_gateway(self):
+        self.assertEqual(anti.resolve_model("flash-high", default="sonnet"), "gemini-3.8-flash-high")
+        sent: list[dict] = []
+
+        def fake_request_json(method, url, *, payload=None, timeout=10.0, token_env=anti.DEFAULT_TOKEN_ENV):
+            if method == "POST":
+                sent.append(payload or {})
+            return 200, {
+                "model": "gemini-3.8-flash",
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+            }
+
+        old_request_json = anti.request_json
+        anti.request_json = fake_request_json
+        try:
+            result = anti.post_response(
+                base_url="http://127.0.0.1:51122/v1",
+                model=anti.resolve_model("flash-high", default="sonnet"),
+                prompt="x",
+                max_output_tokens=10,
+                timeout=5,
+                token_env=anti.DEFAULT_TOKEN_ENV,
+                model_ids={"gemini-3.8-flash"},
+            )
+        finally:
+            anti.request_json = old_request_json
+
+        self.assertEqual(str(result), "ok")
+        self.assertEqual(sent[0]["model"], "gemini-3.8-flash")
+        self.assertEqual(sent[0]["reasoning"], {"effort": "high"})
+
     def test_extract_validation_url_from_403_body(self):
         body = 'HTTP 403: {"error": {"reason": "VALIDATION_REQUIRED", "metadata": {"validation_url": "https://accounts.google.com/signin/continue?sarp=1&plt=abc"}}}'
         url = anti.extract_validation_url(body)
@@ -122,8 +161,8 @@ class RoutingAndCostTests(unittest.TestCase):
         self.assertEqual(output_chars, 0)
 
     def test_resolve_auto_model_thresholds_high_risk_and_no_diff(self):
-        self.assertEqual(anti.resolve_auto_model(diff_lines=1)[0], "flash-3.6")
-        self.assertEqual(anti.resolve_auto_model(diff_lines=200)[0], "flash-3.6")
+        self.assertEqual(anti.resolve_auto_model(diff_lines=1)[0], "flash-3.8")
+        self.assertEqual(anti.resolve_auto_model(diff_lines=200)[0], "flash-3.8")
         self.assertEqual(anti.resolve_auto_model(diff_lines=201)[0], "sonnet")
         self.assertEqual(anti.resolve_auto_model(diff_lines=1001)[0], "opus")
         self.assertEqual(anti.resolve_auto_model(diff_lines=1, file_paths=["src/oauth.py"])[0], "opus")

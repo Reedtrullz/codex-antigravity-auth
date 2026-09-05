@@ -71,6 +71,25 @@ class TestTransform(unittest.TestCase):
         self.assertEqual(generation_config["maxOutputTokens"], 4096)
         self.assertEqual(generation_config["thinkingConfig"]["thinking_budget"], 4095)
 
+    def test_gemini_38_flash_uses_thinking_level(self):
+        res = transform_request(
+            {"model": "gemini-3.8-flash", "input": "Hello", "reasoning": {"effort": "high"}}
+        )
+
+        self.assertEqual(res["model"], "gemini-3.8-flash-tiered")
+        self.assertEqual(res["request"]["generationConfig"]["thinkingConfig"], {"thinkingLevel": "high"})
+
+    def test_gemini_flash_effort_alias_sets_default_thinking_level(self):
+        high = transform_request({"model": "gemini-3.8-flash-high", "input": "Hello"})
+        low = transform_request({"model": "gemini-3.8-flash-low", "input": "Hello"})
+        override = transform_request(
+            {"model": "gemini-3.8-flash-high", "input": "Hello", "reasoning": {"effort": "low"}}
+        )
+
+        self.assertEqual(high["request"]["generationConfig"]["thinkingConfig"], {"thinkingLevel": "high"})
+        self.assertEqual(low["request"]["generationConfig"]["thinkingConfig"], {"thinkingLevel": "low"})
+        self.assertEqual(override["request"]["generationConfig"]["thinkingConfig"], {"thinkingLevel": "low"})
+
     def test_claude_xhigh_reasoning_budget_is_not_lower_than_high(self):
         high = transform_request(
             {"model": "claude-opus-4-6", "input": "Hello", "reasoning": {"effort": "high"}}

@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import cli as _cli
+from .models import DEFAULT_GEMINI_MODEL_ID, resolve_backend_model
 
 
 _orig_load_accounts = _cli.load_accounts
@@ -764,7 +765,7 @@ def run_doctor(
             import urllib.error
             # cloudcode-pa.googleapis.com returns 404 on HEAD; POST to keepalive-health endpoint
             req = urllib.request.Request("https://cloudcode-pa.googleapis.com/v1internal:generateContent", method="POST",
-                                         data=b'{"model":"gemini-3.5-flash-low","request":{"contents":[]}}',
+                                         data=json.dumps({"model": resolve_backend_model(DEFAULT_GEMINI_MODEL_ID), "request": {"contents": []}}).encode("utf-8"),
                                          headers={"Content-Type": "application/json"})
             try:
                 resp_ctx = urllib.request.urlopen(req, timeout=5.0)

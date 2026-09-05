@@ -22,9 +22,9 @@ Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to mu
 - Use `opus` for deep review. It maps to `claude-opus-4-6-thinking` (the `claude-opus-4-6` name remains a compatibility alias).
 - Use `sonnet` for faster focused consults. It maps to `claude-sonnet-4-6` (the `claude-3.5-sonnet` name remains a compatibility alias).
 - Use `deepseek-v4-pro` for `deepseek:deepseek-v4-pro` and `deepseek-v4-flash` for `deepseek:deepseek-v4-flash` through the official DeepSeek API key.
-- Use `flash-3.7` or `flash-high` for `gemini-3.7-flash` (current Gemini Flash generation). Fast agent-tuned reasoning, 1M context.
-- Use `flash` or `flash-medium` for `gemini-3.5-flash-medium` (Gemini Flash General). Balanced speed and quality, 1M context.
-- Use `flash-3.6` for `gemini-3.6-flash-high` and `flash-3.6-medium` for `gemini-3.6-flash-medium` (newer Flash line; more token-efficient than 3.5).
+- Use `flash` for `gemini-3.8-flash` (current Gemini Flash generation), or use `flash-low`, `flash-medium`, and `flash-high` to select the thinking level. The explicit `flash-3.8-low`, `flash-3.8-medium`, and `flash-3.8-high` aliases are equivalent; the model has adjustable thinking levels and 1M context.
+- Use `flash-3.7` for `gemini-3.7-flash` (supported Flash generation), or use the explicit `gemini-3.7-flash` ID.
+- Use `flash-3.6` for the retained `gemini-3.6-flash-*` compatibility IDs.
 - Use `gemini-pro` for `gemini-3.1-pro` (Gemini Pro). Deep reasoning and analysis, 1M context.
 - Use `gpt-oss-120b` for `gpt-oss-120b-medium` (text-only, 131K context).
 - Use `gemini-3.1-flash-image` for image generation; it is image-only and does not support tools.
@@ -55,6 +55,8 @@ confusing two-layer error.
 
 BYOK providers use the gateway's OpenAI Chat Completions adapter. Native Responses streaming, structured output, tool-call, usage, and model-identity fidelity are not claimed until successful live probes prove them. Opus remains the default judge for DeepSeek advisory lanes.
 
+DeepSeek and OpenRouter rows are optional BYOK routes and are expected to be absent from `/v1/models` until configured; `smoke --check-documented` reports that state as a warning.
+
 ### Model capabilities and cost tiers
 
 The helper tracks per-model capabilities and cost tiers to make cost-aware decisions. When Opus/Sonnet quota is limited, prefer free models for simple tasks.
@@ -64,14 +66,15 @@ The helper tracks per-model capabilities and cost tiers to make cost-aware decis
 | `claude-opus-4-6-thinking` | `opus` | quota | 250K | yes | no | no | yes | 100 |
 | `gemini-3.1-pro` | `gemini-pro` | quota | 1M | yes | yes | yes | yes | 90 |
 | `claude-sonnet-4-6` | `sonnet` | quota | 250K | yes | no | no | yes | 85 |
-| `gemini-3.7-flash` | `flash-3.7`, `flash-high` | quota | 1M | yes | yes | yes | yes | 85 |
+| `gemini-3.8-flash` | `flash`, `flash-low`, `flash-medium`, `flash-high`, `flash-3.8[-low\|medium\|high]` | quota | 1M | yes | yes | yes | yes | 85 |
+| `gemini-3.7-flash` | `flash-3.7` | quota | 1M | yes | yes | yes | yes | 85 |
 | `gemini-3.1-flash-image` | — | quota | 1M | yes (generation) | no | no | no | 50 |
 | `gpt-oss-120b-medium` | `gpt-oss-120b` | quota | 131K | no | no | no | no | 65 |
-| `gemini-3.6-flash-high` | `flash-3.6` | quota | 1M | yes | yes | yes | yes | 82 |
-| `gemini-3.5-flash-high` | retired alias | quota | 1M | yes | yes | yes | yes | 80 |
+| `gemini-3.6-flash-high` | `flash-3.6` (compatibility) | quota | 1M | yes | yes | yes | yes | 82 |
+| `gemini-3.5-flash-high` | retired compatibility alias | quota | 1M | yes | yes | yes | yes | 80 |
 | `gemini-3.6-flash-medium` | `flash-3.6-medium` | quota | 1M | yes | yes | yes | yes | 70 |
 | `openrouter:nvidia/nemotron-3-ultra-550b-a55b:free` | `nemotron-ultra` | free | 1M | no | no | no | yes | 70 |
-| `gemini-3.5-flash-medium` | `flash` | quota | 1M | yes | yes | yes | yes | 68 |
+| `gemini-3.5-flash-medium` | retired compatibility alias | quota | 1M | yes | yes | yes | yes | 68 |
 | `openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | `nemotron-omni` | free | 256K | yes | no | no | yes | 65 |
 | `openrouter:nvidia/nemotron-3-super-120b-a12b:free` | `nemotron-super` | free | 262K | no | no | no | yes | 65 |
 | `openrouter:nvidia/nemotron-nano-12b-v2-vl:free` | `nemotron-vl` | free | 128K | yes | no | no | yes | 60 |
@@ -97,10 +100,10 @@ gateway); re-verify the OpenRouter spec when a route is enabled.
 
 **Cost-aware selection strategy:**
 - When Opus quota is low, use `nemotron-ultra` (70 quality, free, 1M) for broad scans and planning.
-- For quick consults, prefer `flash-3.6` (82 quality, quota, 1M, more efficient than 3.5).
+- For quick consults, prefer `flash-3.8` (current Flash, quota, 1M).
 - For code review, prefer `poolside` (60 quality, free, coding-focused) first, then fall back to quota models.
 - For image/video/audio tasks, Gemini and Claude families support full multimodal. Free OpenRouter vision models (nemotron-vl, nemotron-omni, gemma-4) also support images, making them cost-effective for image tasks when Gemini/Claude quota is low. For video/audio, only Gemini models support those modalities.
-- Gemini 3.6 Flash is more token-efficient than 3.5 Flash (17% fewer output tokens) at a lower cost. Prefer it over 3.5 Flash for new workflows.
+- Gemini 3.8 Flash is the current default; use explicit 3.7/3.6 IDs only when a pinned workflow requires them.
 - The helper's `cheapest_models_for_task()` function automates this: it filters by capability requirements, then sorts free models first, then by quality.
 
 ### Choosing complementary reviewer lanes
@@ -162,7 +165,7 @@ python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope files -
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope diff --base origin/main
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope files --files-from /tmp/anti-files.zlist --max-review-chunks 0 --priority-file src/prices.ts --priority-file src/scanner.ts
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope files --files-from /tmp/anti-files.zlist --max-review-chunks 10 --allow-partial --json
-python3 ~/.codex/skills/anti/scripts/anti.py consult --model gemini-3.6-flash-high --prompt "Explain this" --max-output-tokens 8192 --save-output summary
+python3 ~/.codex/skills/anti/scripts/anti.py consult --model gemini-3.8-flash --prompt "Explain this" --max-output-tokens 8192 --save-output summary
 git diff -z --name-only origin/main...HEAD > /tmp/anti-files.zlist
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope files --files-from /tmp/anti-files.zlist --json
 python3 ~/.codex/skills/anti/scripts/anti.py review --model opus --scope diff --base origin/main --chunked auto --max-review-chunks 8 --max-synthesis-chars 120000 --json
@@ -223,7 +226,7 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 
 ## New Flags
 
-- `--auto-route` — Automatically pick the cheapest adequate model based on diff size and file risk. Small diffs use flash-3.6, medium use sonnet, large or high-risk files use opus. Only activates when `--model` is not explicitly passed.
+- `--auto-route` — Automatically pick the cheapest adequate model based on diff size and file risk. Small diffs use flash-3.8, medium use sonnet, large or high-risk files use opus. Only activates when `--model` is not explicitly passed.
 - `--budget <cost>` — Maximum estimated cost for a run. Skips remaining panel lanes when the cap is exceeded. Cost is in arbitrary units (not real USD), tracked per lane with estimated vs actual.
 - `--no-verify` — Skip evidence-linked verification of findings (syntax, secrets, eslint checks on referenced files).
 - `--no-anonymize` — Preserve original model names and lane order in judge synthesis (default: anonymize and shuffle).
