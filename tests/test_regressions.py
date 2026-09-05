@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from codex_antigravity_auth.accounts import AccountManager
 from codex_antigravity_auth.cli import run_doctor
 from codex_antigravity_auth.models import (
+    DEFAULT_GEMINI_MODEL_ID,
     NativeModel,
     add_model_overlay,
     canonical_model_id,
@@ -48,6 +49,18 @@ from tests.conftest import _legacy_transform_response as transform_response
 
 
 class TestRegressionFixes(unittest.TestCase):
+    def test_current_gemini_flash_catalog_entry_routes_to_tiered_backend(self):
+        self.assertEqual(DEFAULT_GEMINI_MODEL_ID, "gemini-3.8-flash")
+        entry = next(model for model in native_model_catalog() if model["id"] == "gemini-3.8-flash")
+        self.assertEqual(entry["backend_id"], "gemini-3.8-flash-tiered")
+        self.assertEqual(entry["default_reasoning_level"], "medium")
+        self.assertEqual(resolve_backend_model("gemini-3.8-flash-high"), "gemini-3.8-flash-tiered")
+
+    def test_compatibility_flash_catalog_entry_matches_effective_backend(self):
+        entry = next(model for model in native_model_catalog() if model["id"] == "gemini-3.6-flash-high")
+        self.assertEqual(entry["backend_id"], "gemini-3.7-flash-tiered")
+        self.assertEqual(resolve_backend_model(entry["id"]), entry["backend_id"])
+
     def test_health_endpoint_is_sanitized_and_loopback_only(self):
         account_state = {
             "accounts": [

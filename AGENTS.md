@@ -6,7 +6,7 @@ Guidance for AI coding agents (Codex, Claude Code, OpenCode, etc.) working on th
 
 ## Overview
 
-Local gateway server that allows OpenAI Codex (CLI and Desktop) to use Google Antigravity models (Gemini 3.7/3.1, Claude Sonnet/Opus 4.6) via Google OAuth PKCE and multi-account rotation, plus BYOK OpenAI-compatible providers such as OpenRouter, DeepSeek, xAI, Kimi/Moonshot, Ollama, and OpenCode-compatible endpoints.
+Local gateway server that allows OpenAI Codex (CLI and Desktop) to use Google Antigravity models (Gemini 3.8/3.7/3.1, Claude Sonnet/Opus 4.6) via Google OAuth PKCE and multi-account rotation, plus BYOK OpenAI-compatible providers such as OpenRouter, DeepSeek, xAI, Kimi/Moonshot, Ollama, and OpenCode-compatible endpoints.
 
 ## Architecture
 
@@ -62,11 +62,12 @@ Codex Desktop/CLI  ←  Responses API formatted response
 ## Model Name Mapping
 
 User-facing aliases → Google backend models (`models.py`):
-- `gemini-3.7-flash` → `gemini-3.7-flash-tiered` (current Flash generation)
+- `gemini-3.8-flash` → `gemini-3.8-flash-tiered` (current Flash generation)
+- `gemini-3.7-flash` → `gemini-3.7-flash-tiered` (supported Flash generation)
 - `gemini-3.1-pro` → `gemini-3.1-pro-low` (alias: `gemini-pro-agent` → `gemini-pro-agent`)
 - `gemini-3.1-flash-image` → `gemini-3.1-flash-image` (image generation)
 - `gemini-3.5-flash-high` → `gemini-3-flash-agent` (retired, backward compat)
-- `gemini-3.6-flash-high` → `gemini-3.6-flash-high` (retired, backward compat)
+- `gemini-3.6-flash-high` → `gemini-3.7-flash-tiered` (backward compat)
 - `claude-sonnet-4-6` → `claude-sonnet-4-6` (alias: `claude-3.5-sonnet`)
 - `claude-opus-4-6-thinking` → `claude-opus-4-6-thinking` (alias: `claude-opus-4-6`)
 - `gpt-oss-120b-medium` → `gpt-oss-120b-medium` (open-source, text-only)
@@ -96,7 +97,7 @@ BYOK provider models use a provider prefix:
 
 `~/.codex/config.toml`:
 ```toml
-model = "gemini-3.5-flash-high"
+model = "gemini-3.8-flash"
 model_provider = "antigravity"
 wire_api = "responses"
 

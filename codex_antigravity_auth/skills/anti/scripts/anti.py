@@ -40,7 +40,7 @@ DEFAULT_BASE_URL = "http://127.0.0.1:51122/v1"
 DEFAULT_TOKEN_ENV = "ANTIGRAVITY_GATEWAY_TOKEN"
 MODEL_ALIASES = {
     "opus": "claude-opus-4-6-thinking",
-    "claude-opus": "claude-opus-4-6",
+    "claude-opus": "claude-opus-4-6-thinking",
     "claude-opus-4-6": "claude-opus-4-6-thinking",
     "claude-opus-4-6-thinking": "claude-opus-4-6-thinking",
     "sonnet": "claude-sonnet-4-6",
@@ -51,12 +51,21 @@ MODEL_ALIASES = {
     "deepseek-v4-pro": "deepseek:deepseek-v4-pro",
     "deepseek-v4-flash": "deepseek:deepseek-v4-flash",
     # Gemini Antigravity (free, fast, 1M context)
+    "flash-3.8": "gemini-3.8-flash",
+    "flash-3.8-high": "gemini-3.8-flash-high",
+    "flash-3.8-medium": "gemini-3.8-flash-medium",
+    "flash-3.8-low": "gemini-3.8-flash-low",
+    "gemini-3.8-flash": "gemini-3.8-flash",
+    "gemini-3.8-flash-high": "gemini-3.8-flash-high",
+    "gemini-3.8-flash-medium": "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-low": "gemini-3.8-flash-low",
     "flash-3.7": "gemini-3.7-flash",
     "gemini-3.7-flash": "gemini-3.7-flash",
-    "flash-high": "gemini-3.7-flash",
-    "flash": "gemini-3.5-flash-medium",
-    "flash-medium": "gemini-3.5-flash-medium",
-    "gemini-flash": "gemini-3.5-flash-medium",
+    "flash-high": "gemini-3.8-flash-high",
+    "flash": "gemini-3.8-flash",
+    "flash-low": "gemini-3.8-flash-low",
+    "flash-medium": "gemini-3.8-flash-medium",
+    "gemini-flash": "gemini-3.8-flash",
     "gemini-pro": "gemini-3.1-pro",
     "gemini-3.1-pro": "gemini-3.1-pro",
     "gpt-oss-120b": "gpt-oss-120b-medium",
@@ -80,10 +89,13 @@ MODEL_ALIASES = {
     "gpt-oss": "ollama:gpt-oss:20b",
     "qwen3": "ollama:qwen3:8b",
 }
+GEMINI_FLASH_EFFORT_RE = re.compile(r"^(gemini-3\.[78]-flash)-(low|medium|high)$")
+LEGACY_GEMINI_FLASH_RE = re.compile(r"^(gemini-3\.[56]-flash)(?:-(low|medium|high|extra-low))?$")
 
 # Model capabilities: what each model supports
 MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
     # Gemini Antigravity (Google backend)
+    "gemini-3.8-flash": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
     "gemini-3.7-flash": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
     "gemini-3.1-flash-image": {"images": True, "video": False, "audio": False, "tools": False, "streaming": True, "json_mode": False},
     "gemini-3.5-flash-high": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
@@ -122,6 +134,7 @@ MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
 # quota = Google Antigravity quota (shared across accounts)
 # paid = metered billing (not currently in rotation)
 MODEL_COST_TIER: dict[str, str] = {
+    "gemini-3.8-flash": "quota",
     "gemini-3.7-flash": "quota",
     "gemini-3.1-flash-image": "quota",
     "gemini-3.5-flash-high": "quota",
@@ -158,7 +171,7 @@ COST_PER_1K_TOKENS: dict[str, float] = {
 
 def estimate_call_cost(model: str, prompt_chars: int, max_output_tokens: int) -> float:
     """Estimate the cost of a single model call in arbitrary cost units."""
-    tier = MODEL_COST_TIER.get(model, "quota")
+    tier = MODEL_COST_TIER.get(base_model_id(model), "quota")
     cost_per_1k = COST_PER_1K_TOKENS.get(tier, 0.002)
     prompt_tokens = prompt_chars / 4
     total_tokens = prompt_tokens + max_output_tokens
@@ -167,7 +180,7 @@ def estimate_call_cost(model: str, prompt_chars: int, max_output_tokens: int) ->
 def actual_call_cost(model: str, generation: dict[str, Any] | None, *, prompt_chars: int, max_output_tokens: int) -> float:
     usage = normalize_usage((generation or {}).get("usage"))
     if usage and usage.get("total_tokens") is not None:
-        tier = MODEL_COST_TIER.get(model, "quota")
+        tier = MODEL_COST_TIER.get(base_model_id(model), "quota")
         return (int(usage["total_tokens"]) / 1000) * COST_PER_1K_TOKENS.get(tier, 0.002)
     return estimate_call_cost(model, prompt_chars, max_output_tokens)
 
@@ -179,6 +192,7 @@ MODEL_QUALITY_RANK: dict[str, int] = {
     "gemini-3.1-pro-high": 90,
     "claude-sonnet-4-6": 85,
     "claude-3.5-sonnet": 85,
+    "gemini-3.8-flash": 85,
     "gemini-3.7-flash": 85,
     "gemini-3.1-flash-image": 50,
     "gpt-oss-120b-medium": 65,
@@ -223,7 +237,7 @@ def resolve_auto_model(
     if diff_lines > 200:
         return ("sonnet", f"medium diff ({diff_lines} lines)")
     if diff_lines > 0:
-        return ("flash-3.6", f"small diff ({diff_lines} lines), low risk")
+        return ("flash-3.8", f"small diff ({diff_lines} lines), low risk")
     return (default, "no diff context, using default")
 
 DEFAULT_REVIEW_MODEL = "claude-opus-4-6-thinking"
@@ -778,6 +792,22 @@ def resolve_model(value: str | None, *, default: str) -> str:
     return MODEL_ALIASES.get(raw.lower(), raw)
 
 
+def base_model_id(model_id: str) -> str:
+    model = str(model_id).strip().lower()
+    match = GEMINI_FLASH_EFFORT_RE.fullmatch(model)
+    if match:
+        return match.group(1)
+    legacy = LEGACY_GEMINI_FLASH_RE.fullmatch(model)
+    return f"{legacy.group(1)}-high" if legacy else model
+
+
+def effort_for_model(model_id: str) -> str | None:
+    model = str(model_id).strip().lower()
+    match = GEMINI_FLASH_EFFORT_RE.fullmatch(model) or LEGACY_GEMINI_FLASH_RE.fullmatch(model)
+    effort = match.group(2) if match else None
+    return effort if effort in {"low", "medium", "high"} else None
+
+
 def provider_for_model(model: str | None) -> str | None:
     """Return the provider portion of a model id.
 
@@ -854,13 +884,17 @@ def panel_model_identity(
 
 def model_cost_tier(model_id: str) -> str:
     """Return cost tier: 'free', 'quota', or 'paid'."""
-    return MODEL_COST_TIER.get(model_id, "paid")
+    return MODEL_COST_TIER.get(base_model_id(model_id), "paid")
 
 
 def model_supports(model_id: str, feature: str) -> bool:
     """Check if a model supports a feature (images, video, audio, tools, streaming, json_mode)."""
-    caps = MODEL_CAPABILITIES.get(model_id, {})
+    caps = MODEL_CAPABILITIES.get(base_model_id(model_id), {})
     return caps.get(feature, False)
+
+
+def model_quality_rank(model_id: str) -> int:
+    return MODEL_QUALITY_RANK.get(base_model_id(model_id), 0)
 
 
 def cheapest_models_for_task(
@@ -887,7 +921,7 @@ def cheapest_models_for_task(
             continue
         if require_audio and not model_supports(model_id, "audio"):
             continue
-        quality = MODEL_QUALITY_RANK.get(model_id, 0)
+        quality = model_quality_rank(model_id)
         if quality < min_quality:
             continue
         tier = model_cost_tier(model_id)
@@ -914,7 +948,7 @@ def estimate_cost(
     input_tokens = max(1, prompt_chars // 4) if prompt_chars > 0 else 0
     total_tokens = input_tokens + estimated_output_tokens
     tier = model_cost_tier(model)
-    quality = MODEL_QUALITY_RANK.get(model, 0)
+    quality = model_quality_rank(model)
     return {
         "model": model,
         "cost_tier": tier,
@@ -1020,7 +1054,7 @@ def normalize_catalog_model_id(model_id: str) -> str:
         while model.startswith("openrouter/") and "/" in model[len("openrouter/") :]:
             model = model[len("openrouter/") :]
         return "openrouter:" + model
-    return model_id
+    return base_model_id(model_id)
 
 
 def catalog_model_matches(requested: str, advertised: str) -> bool:
@@ -1244,6 +1278,7 @@ def post_response(
     model_ids: set[str] | None = None,
     run_id: str | None = None,
 ) -> ResponseText:
+    requested_model = model
     available_model_ids = model_ids
     if available_model_ids is None:
         available_model_ids = fetch_model_ids(base_url, timeout=timeout, token_env=token_env)
@@ -1265,6 +1300,9 @@ def post_response(
         "max_output_tokens": max_output_tokens,
         "stream": False,
     }
+    effort = effort_for_model(requested_model) or effort_for_model(matched_model or model)
+    if effort:
+        payload["reasoning"] = {"effort": effort}
     metadata: dict[str, Any] = {}
     if run_id:
         metadata["run_id"] = run_id
@@ -1360,14 +1398,14 @@ def _pre_flight_cost_suggestion(
         return
     if not model_ids:
         return
-    quality = MODEL_QUALITY_RANK.get(model, 0)
+    quality = model_quality_rank(model)
     alternatives = [
         m for m in model_ids
-        if model_cost_tier(m) == "free" and MODEL_QUALITY_RANK.get(m, 0) >= quality - 15
+        if model_cost_tier(m) == "free" and model_quality_rank(m) >= quality - 15
     ]
     if not alternatives:
         return
-    alternatives.sort(key=lambda m: -MODEL_QUALITY_RANK.get(m, 0))
+    alternatives.sort(key=lambda m: -model_quality_rank(m))
     top = alternatives[:3]
     eprint(
         f"[anti] cost hint: {model} is {tier}-tier. "
@@ -5876,7 +5914,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             argv.append("--allow-partial")
         for role in ["correctness", "security"]:
             argv.extend(["--role", role])
-        for model in args.model or ["flash-3.6", "poolside"]:
+        for model in args.model or ["flash-3.8", "poolside"]:
             argv.extend(["--model", model])
         prompt = args.prompt or "Quick pre-commit check. Flag only high-confidence blockers. Be terse."
         argv.extend(["--prompt", prompt])
@@ -5886,7 +5924,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
     elif args.name == "consensus":
         scope = workflow_scope(args, default="staged")
         # H-5: consensus requires at least 2 models to detect disagreements
-        consensus_models = args.model or ["sonnet", "opus", "flash-3.6"]
+        consensus_models = args.model or ["sonnet", "opus", "flash-3.8"]
         # Don't pass prompt here; let post-expansion handle user prompt or default
         argv = _panel_argv(
             mode="review", scope=scope, common=common, args=args,
