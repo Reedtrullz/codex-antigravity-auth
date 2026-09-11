@@ -532,24 +532,44 @@ def codex_ready_report(
                 else:
                     add("model_route", "warn", f"{selected_for_catalog} routes to BYOK, but the exact model is not listed")
     elif selected_for_catalog:
-        route = "google"
-        definition = _cli.native_model_definition(selected_for_catalog)
-        if definition:
-            add("model_route", "pass", f"{selected_for_catalog} routes to Google Antigravity backend {definition.backend_id}")
-        else:
-            add("model_route", "warn", f"{selected_for_catalog} is not a known built-in Google Antigravity model")
-        family = _cli.native_model_family(selected_for_catalog)
+        # Unified OpenAI ids route to the OpenAI upstream, not Google.
         try:
-            rotation = _cli.google_family_rotation_status(_cli._diagnostic_load_accounts(), family)
-        except Exception as exc:
-            add("google_rotation", "fail", f"Could not load Google account rotation state: {_cli.redact_secret_text(str(exc))}", family=family)
-        else:
-            if rotation["available_count"] > 0:
-                add("google_rotation", "pass", f"{rotation['available_count']} {family} account(s) available", **rotation)
-            elif rotation["account_count"] > 0:
-                add("google_rotation", "fail", f"All {family} accounts are cooling down", **rotation)
+            from .unified import is_openai_model as _is_openai_model
+            from .unified import openai_auth_status as _openai_auth_status
+
+            _is_openai = _is_openai_model(selected_for_catalog)
+        except Exception:
+            _is_openai = False
+        if _is_openai:
+            route = "openai"
+            try:
+                _oai_status = _openai_auth_status()
+            except Exception as exc:
+                _oai_status = {"configured": False, "detail": _cli.redact_secret_text(str(exc))}
+            if _oai_status.get("configured"):
+                add("model_route", "pass", f"{selected_for_catalog} routes to OpenAI upstream ({_oai_status.get('kind')})")
             else:
-                add("google_rotation", "fail", f"No Google accounts configured for {family}", **rotation)
+                add("model_route", "fail", f"OpenAI upstream is not configured: {_oai_status.get('detail')}")
+            add("google_rotation", "skip", f"{selected_for_catalog} routes to OpenAI; Google rotation not required")
+        else:
+            route = "google"
+            definition = _cli.native_model_definition(selected_for_catalog)
+            if definition:
+                add("model_route", "pass", f"{selected_for_catalog} routes to Google Antigravity backend {definition.backend_id}")
+            else:
+                add("model_route", "warn", f"{selected_for_catalog} is not a known built-in Google Antigravity model")
+            family = _cli.native_model_family(selected_for_catalog)
+            try:
+                rotation = _cli.google_family_rotation_status(_cli._diagnostic_load_accounts(), family)
+            except Exception as exc:
+                add("google_rotation", "fail", f"Could not load Google account rotation state: {_cli.redact_secret_text(str(exc))}", family=family)
+            else:
+                if rotation["available_count"] > 0:
+                    add("google_rotation", "pass", f"{rotation['available_count']} {family} account(s) available", **rotation)
+                elif rotation["account_count"] > 0:
+                    add("google_rotation", "fail", f"All {family} accounts are cooling down", **rotation)
+                else:
+                    add("google_rotation", "fail", f"No Google accounts configured for {family}", **rotation)
 
     if live:
         probe_model = live_model or selected_for_catalog or _cli.DEFAULT_CODEX_MODEL_ID

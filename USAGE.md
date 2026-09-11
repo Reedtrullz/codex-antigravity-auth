@@ -141,6 +141,25 @@ codex-antigravity configure-codex --write --model deepseek:deepseek-v4-pro
 codex-antigravity doctor --byok-only
 ```
 
+For the unified OpenAI + Antigravity picker (opt-in, one provider for Codex):
+
+```bash
+export OPENAI_API_KEY="sk-..."
+codex-antigravity setup --write --unified-model-picker --model gpt-5.6 --activate
+codex-antigravity start --unified-model-picker
+codex-antigravity configure-codex --write --unified-model-picker --model gpt-5.6-codex
+codex-antigravity service install --port 51122 --host 127.0.0.1 --unified-model-picker
+```
+
+Unified mode advertises `gpt-5.6`, `gpt-5.6-codex`, native Claude/Gemini, and
+BYOK `provider:model` ids through `[model_providers.antigravity-unified]` so
+Codex keeps a single `model_provider` while the gateway routes per model.
+Classic `[model_providers.antigravity]` configs are left untouched. OpenAI auth
+prefers explicit `OPENAI_API_KEY` (or `~/.codex/antigravity-openai.json`); set
+`ANTIGRAVITY_OPENAI_USE_CODEX_AUTH=1` after `codex login` only if you explicitly
+want ChatGPT-subscription reuse via read-only `~/.codex/auth.json` (no refresh
+attempted). Extend ids with `ANTIGRAVITY_OPENAI_MODELS="gpt-5.6,my-model"`.
+
 The current presets are API-key based. xAI uses `XAI_API_KEY` and exposes `xai:grok-build-0.1`, `xai:grok-4.3`, and `xai:grok-code-fast-1`; DeepSeek exposes `deepseek-v4-flash`, `deepseek-v4-pro`, `deepseek-chat`, and `deepseek-reasoner`. A model must be advertised by `/v1/models` before Codex can select it, and catalog visibility is not proof that live generation will succeed.
 
 BYOK provider ids may contain only letters, numbers, underscores, and hyphens. Provider model ids may contain `/` or `:`, but not whitespace or control characters. Unknown `provider:model` prefixes are rejected as BYOK routing errors before any Google account selection. Non-preset custom BYOK providers must provide a base URL, and the generic `custom` preset is not auto-enabled until `provider set custom ...` is run. `--api-key-env` is preferred because it avoids persisting keys; `--api-key` stores a key in encrypted provider config. Stored/env BYOK keys and extra provider header values must be printable ASCII without control characters. Model-picker display names must not contain control characters. Provider API-key env var names must contain only letters, numbers, and underscores and must not start with a number. Custom provider and Codex gateway base URLs must be absolute `http` or `https` URLs without embedded credentials, whitespace/control characters, query strings, fragments, invalid ports, or malformed bracketed hosts. Plain `http` base URLs are accepted only for loopback/local hosts; remote providers and remote gateway URLs must use `https`. Extra BYOK provider headers may not override gateway-managed auth, content, host, or transport headers; malformed provider config is rejected before it is written and before streaming begins. Key-optional providers are only keyless on loopback/local hosts; remote custom or cloud URLs need a stored/env API key before they appear in Codex's picker or route requests. BYOK streams surface provider error frames as failed Responses API streams, ignore never-named tool-call deltas, and wait for complete streamed function names before emitting function-call items.

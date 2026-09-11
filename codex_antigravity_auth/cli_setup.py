@@ -290,11 +290,16 @@ def run_login(args) -> None:
 
 def run_setup_google(args) -> None:
     base_url = args.base_url or f"http://localhost:{args.port}/v1"
+    unified = bool(getattr(args, "unified_model_picker", False))
+    provider_id, provider_name = _cli.unified_provider_defaults(args)
+    # Keep the namespace coherent for downstream configure-codex echo.
+    args.provider = provider_id
+    args.provider_name = provider_name
     try:
         _cli.render_codex_config_snippet(
             model=args.model,
-            provider_id=args.provider,
-            provider_name=args.provider_name,
+            provider_id=provider_id,
+            provider_name=provider_name,
             base_url=base_url,
         )
     except (OSError, RuntimeError, ValueError) as e:
@@ -315,10 +320,11 @@ def run_setup_google(args) -> None:
                 write=True,
                 config=args.config,
                 model=args.model,
-                provider=args.provider,
-                provider_name=args.provider_name,
+                provider=provider_id,
+                provider_name=provider_name,
                 base_url=base_url,
                 activate=getattr(args, "activate", False),
+                unified_model_picker=unified,
             )
         )
     else:
@@ -326,12 +332,15 @@ def run_setup_google(args) -> None:
 
     if not args.skip_doctor and getattr(args, "activate", False):
         print("[*] Running post-setup doctor...")
-        if not _cli.run_doctor(expected_base_url=base_url, config=args.config, provider_id=args.provider):
+        if not _cli.run_doctor(expected_base_url=base_url, config=args.config, provider_id=provider_id):
             raise SystemExit("Google setup completed, but doctor found hard failures. Review the diagnostics above.")
     elif not args.skip_doctor:
         print("[*] Skipping active-provider doctor because --activate was not used.")
     print("[+] Google Antigravity OAuth setup is ready.")
-    print(f"    Start the gateway with: codex-antigravity start --port {args.port}")
+    start_cmd = f"codex-antigravity start --port {args.port}"
+    if unified:
+        start_cmd += " --unified-model-picker"
+    print(f"    Start the gateway with: {start_cmd}")
     print("    Optional Codex sidecar skill: codex-antigravity install-skill")
 
 
@@ -353,6 +362,8 @@ def setup_service_followup_command(args) -> str:
         parts.extend(["--op-env-file", str(op_env_file)])
     if op_environment:
         parts.extend(["--op-environment", str(op_environment)])
+    if getattr(args, "unified_model_picker", False):
+        parts.append("--unified-model-picker")
     return " ".join(shlex.quote(part) for part in parts)
 
 
@@ -494,6 +505,12 @@ def run_setup(args) -> dict:
     provider_prefix = None
     provider_model = ""
     google_route = True
+    openai_route = False
+    unified = bool(getattr(args, "unified_model_picker", False))
+    # Unified provider defaults preserve classic [model_providers.antigravity].
+    provider_id, provider_name = _cli.unified_provider_defaults(args)
+    args.provider = provider_id
+    args.provider_name = provider_name
 
     try:
         base_url = _cli.setup_effective_base_url(args)
@@ -501,11 +518,31 @@ def run_setup(args) -> dict:
         provider_prefix, provider_model = _cli.split_provider_model(model)
         if provider_prefix is not None and not provider_model:
             raise ValueError(f"BYOK model must include a model id after '{provider_prefix}:'")
-        google_route = provider_prefix is None
+        # Central router decides Google vs BYOK vs OpenAI (unified opt-in).
+        try:
+            from .unified import classify_route as _classify_route
+
+            _route = _classify_route(model, unified_enabled=unified or False)
+        except Exception:
+            _route = "byok" if provider_prefix is not None else "google"
+        if _route == "openai":
+            google_route = False
+            openai_route = True
+        elif _route == "byok":
+            google_route = False
+            openai_route = False
+        elif _route in {"unknown", "openai-disabled"}:
+            raise ValueError(
+                f"Model '{model}' is not routable in this mode"
+                + ("; enable --unified-model-picker for OpenAI models" if _route == "openai-disabled" else "")
+            )
+        else:
+            google_route = True
+            openai_route = False
         _cli.render_codex_config_snippet(
             model=model,
-            provider_id=args.provider,
-            provider_name=args.provider_name,
+            provider_id=provider_id,
+            provider_name=provider_name,
             base_url=base_url,
         )
         definition = _cli.native_model_definition(model)
@@ -533,10 +570,11 @@ def run_setup(args) -> dict:
                 write=True,
                 config=args.config,
                 model=model,
-                provider=args.provider,
-                provider_name=args.provider_name,
+                provider=provider_id,
+                provider_name=provider_name,
                 base_url=base_url,
                 activate=getattr(args, "activate", False),
+                unified_model_picker=unified,
             )
         )
         _cli._setup_check(checks, "codex_config_repair", "pass", f"repaired {Path(os.path.expanduser(args.config))}")
@@ -567,7 +605,32 @@ def run_setup(args) -> dict:
             raise SystemExit(f"Setup repair completed with readiness failures. Next command: {report['next_command']}")
         return report
 
-    if google_route:
+    if openai_route:
+        _cli._setup_check(checks, "google_oauth_credentials", "skip", f"{model} routes to OpenAI upstream")
+        try:
+            from .unified import openai_auth_status as _openai_auth_status
+
+            _oai_status = _openai_auth_status()
+        except Exception as exc:
+            _oai_status = {"configured": False, "detail": _cli.redact_secret_text(str(exc))}
+        if _oai_status.get("configured"):
+            _cli._setup_check(
+                checks, "openai_upstream", "pass", f"OpenAI upstream ready ({_oai_status.get('kind')})"
+            )
+        else:
+            _cli._setup_check(checks, "openai_upstream", "fail", str(_oai_status.get("detail") or "not configured"))
+            if args.write:
+                report = {
+                    "ok": False,
+                    "mode": "write",
+                    "model": model,
+                    "base_url": base_url,
+                    "checks": checks,
+                    "next_command": "export OPENAI_API_KEY=...; codex-antigravity setup --write --unified-model-picker --model gpt-5.6",
+                }
+                _cli._print_setup_report(report)
+                raise SystemExit("OpenAI upstream is not configured; Codex config was not modified.")
+    elif google_route:
         cid, csec = _cli.resolve_oauth_credentials()
         if args.write and (not cid or not csec):
             prompted_cid, prompted_csec = _cli.maybe_prompt_and_save_oauth_credentials(args, checks)
@@ -638,7 +701,7 @@ def run_setup(args) -> dict:
             _cli._setup_check(checks, "gateway_start", "skip", "--start is only applied when --write is used")
         readiness = _cli.codex_ready_report(
             config=args.config,
-            provider_id=args.provider,
+            provider_id=provider_id,
             expected_base_url=base_url,
             gateway_timeout=args.gateway_timeout,
             gateway_token_env=args.gateway_token_env,
@@ -671,16 +734,19 @@ def run_setup(args) -> dict:
     if google_route:
         _cli.run_login(argparse.Namespace(count=args.accounts, select_account=True))
         _cli._setup_check(checks, "google_login", "pass", f"completed {args.accounts} OAuth login flow(s)")
+    elif openai_route:
+        _cli._setup_check(checks, "google_login", "skip", f"{model} routes to OpenAI; Google login not required")
 
     _cli.run_configure_codex(
         argparse.Namespace(
             write=True,
             config=args.config,
             model=model,
-            provider=args.provider,
-            provider_name=args.provider_name,
+            provider=provider_id,
+            provider_name=provider_name,
             base_url=base_url,
             activate=getattr(args, "activate", False),
+            unified_model_picker=unified,
         )
     )
     _cli._setup_check(checks, "codex_config_write", "pass", f"updated {Path(os.path.expanduser(args.config))}")
@@ -708,6 +774,7 @@ def run_setup(args) -> dict:
                     allow_remote=args.allow_remote,
                     op_env_file=getattr(args, "op_env_file", None),
                     op_environment=getattr(args, "op_environment", None),
+                    unified_model_picker=unified,
                 )
             )
             gateway_ids = _cli.wait_for_gateway_model_ids(
@@ -760,7 +827,7 @@ def run_setup(args) -> dict:
 
     readiness = _cli.codex_ready_report(
         config=args.config,
-        provider_id=args.provider,
+        provider_id=provider_id,
         expected_base_url=base_url,
         gateway_timeout=args.gateway_timeout,
         gateway_token_env=args.gateway_token_env,

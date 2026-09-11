@@ -87,6 +87,8 @@ _DEFAULT_GET_CODEX_HOME = get_codex_home
 
 DEFAULT_CODEX_PROVIDER_ID = "antigravity"
 DEFAULT_CODEX_PROVIDER_NAME = "Google Antigravity"
+DEFAULT_UNIFIED_CODEX_PROVIDER_ID = "antigravity-unified"
+DEFAULT_UNIFIED_CODEX_PROVIDER_NAME = "Antigravity Unified"
 DEFAULT_CODEX_BASE_URL = "http://localhost:51122/v1"
 DEFAULT_CODEX_SKILLS_DIR = "~/.codex/skills"
 BUNDLED_CODEX_SKILL_NAME = "anti"
@@ -758,6 +760,57 @@ def validate_codex_provider_name(provider_name: str) -> str:
     return value
 
 
+def is_unified_model_picker_arg(args) -> bool:
+    """Return True when --unified-model-picker was passed explicitly."""
+    return bool(getattr(args, "unified_model_picker", False))
+
+
+def is_unified_model_picker_enabled() -> bool:
+    """Return True when unified mode is enabled via env (single source: unified)."""
+    try:
+        from .unified import is_unified_mode_enabled as _unified_enabled
+
+        return bool(_unified_enabled())
+    except Exception:
+        import os as _os
+
+        return _os.environ.get("ANTIGRAVITY_UNIFIED_MODEL_PICKER", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+
+def unified_provider_defaults(args) -> tuple[str, str]:
+    """Resolve (provider_id, provider_name) honouring --unified-model-picker.
+
+    Explicit --provider / --provider-name always win; otherwise unified mode
+    defaults to the ``antigravity-unified`` provider block so classic
+    ``[model_providers.antigravity]`` configs are left untouched.
+    """
+    provider = getattr(args, "provider", None) or DEFAULT_CODEX_PROVIDER_ID
+    provider_name = getattr(args, "provider_name", None) or DEFAULT_CODEX_PROVIDER_NAME
+    # Detect whether the caller left provider defaults untouched: argparse
+    # fills defaults, so compare against classic defaults before overriding.
+    provider_is_default = provider == DEFAULT_CODEX_PROVIDER_ID
+    name_is_default = provider_name == DEFAULT_CODEX_PROVIDER_NAME
+    if is_unified_model_picker_arg(args):
+        if provider_is_default:
+            provider = DEFAULT_UNIFIED_CODEX_PROVIDER_ID
+        if name_is_default:
+            provider_name = DEFAULT_UNIFIED_CODEX_PROVIDER_NAME
+    return provider, provider_name
+
+
+def ensure_unified_env_for_gateway(args) -> None:
+    """Export ANTIGRAVITY_UNIFIED_MODEL_PICKER=1 for the gateway process."""
+    import os as _os
+
+    if is_unified_model_picker_arg(args):
+        _os.environ["ANTIGRAVITY_UNIFIED_MODEL_PICKER"] = "1"
+
+
 def render_codex_provider_table(
     *,
     provider_id: str = DEFAULT_CODEX_PROVIDER_ID,
@@ -1118,6 +1171,8 @@ def configure_codex_write_command(args) -> str:
     parts = ["codex-antigravity", "configure-codex", "--write"]
     if getattr(args, "activate", False):
         parts.append("--activate")
+    if getattr(args, "unified_model_picker", False):
+        parts.append("--unified-model-picker")
     if args.config != "~/.codex/config.toml":
         parts.extend(["--config", args.config])
     if args.model != DEFAULT_CODEX_MODEL_ID:
@@ -1131,24 +1186,30 @@ def configure_codex_write_command(args) -> str:
     return " ".join(shlex.quote(part) for part in parts)
 
 
-def gateway_start_command(base_url: str) -> str:
+def gateway_start_command(base_url: str, *, unified: bool = False) -> str:
     parsed = urlparse(validate_http_base_url(base_url, label="Codex gateway base URL"))
     parts = ["codex-antigravity", "start"]
     if parsed.hostname and parsed.hostname not in {"localhost", "127.0.0.1"}:
         parts.extend(["--host", parsed.hostname])
     if parsed.port and parsed.port != 51122:
         parts.extend(["--port", str(parsed.port)])
+    if unified:
+        parts.append("--unified-model-picker")
     return " ".join(shlex.quote(part) for part in parts)
 
 
 def run_configure_codex(args) -> None:
     config_path = Path(os.path.expanduser(args.config))
     activate = bool(getattr(args, "activate", False))
+    provider_id, provider_name = unified_provider_defaults(args)
+    # Keep argparse namespace coherent for the write-command echo.
+    args.provider = provider_id
+    args.provider_name = provider_name
     try:
         snippet = render_codex_config_snippet(
             model=args.model,
-            provider_id=args.provider,
-            provider_name=args.provider_name,
+            provider_id=provider_id,
+            provider_name=provider_name,
             base_url=args.base_url,
             activate=activate,
         )
@@ -1159,14 +1220,17 @@ def run_configure_codex(args) -> None:
         print(snippet, end="")
         print(f"# To write this into {config_path}, run:")
         print(configure_codex_write_command(args))
+        if is_unified_model_picker_arg(args):
+            print("# Unified picker: also restart the gateway with --unified-model-picker")
+            print(f"# {gateway_start_command(args.base_url, unified=True)}")
         return
 
     try:
         changed, backup_path = write_codex_config(
             config_path,
             model=args.model,
-            provider_id=args.provider,
-            provider_name=args.provider_name,
+            provider_id=provider_id,
+            provider_name=provider_name,
             base_url=args.base_url,
             activate=activate,
         )
@@ -1179,11 +1243,13 @@ def run_configure_codex(args) -> None:
     else:
         print(f"[*] Codex provider block already points at this gateway: {config_path}")
     if activate:
-        print(f"[*] Active Codex default set to {args.model} via provider {args.provider}.")
+        print(f"[*] Active Codex default set to {args.model} via provider {provider_id}.")
     else:
         print("[*] Installed provider block only; existing top-level model/model_provider were left unchanged.")
         print("[*] Add --activate only when you explicitly want this gateway to become the active Codex default.")
-    print(f"[*] Start the gateway with: {gateway_start_command(args.base_url)}")
+    print(f"[*] Start the gateway with: {gateway_start_command(args.base_url, unified=is_unified_model_picker_arg(args))}")
+    if is_unified_model_picker_arg(args):
+        print("[*] Unified picker: OpenAI + Antigravity share one provider; set OPENAI_API_KEY for OpenAI models.")
     print("[*] Optional sidecar skill: codex-antigravity install-skill")
 
 
@@ -1246,6 +1312,11 @@ def main():
         default="ANTIGRAVITY_GATEWAY_TOKEN",
         help="Environment variable holding the gateway bearer token for remote gateways",
     )
+    setup_parser.add_argument(
+        "--unified-model-picker",
+        action="store_true",
+        help="Opt in to the unified picker: advertise OpenAI + Antigravity + BYOK via one provider (antigravity-unified)",
+    )
 
     setup_google_parser = subparsers.add_parser(
         "setup-google",
@@ -1265,6 +1336,11 @@ def main():
     setup_google_parser.add_argument("--provider-name", default=DEFAULT_CODEX_PROVIDER_NAME, help="Provider display name")
     setup_google_parser.add_argument("--base-url", default=None, help="Gateway base URL; defaults to --port")
     setup_google_parser.add_argument("--port", type=int, default=51122, help="Gateway server port to show in next-step output")
+    setup_google_parser.add_argument(
+        "--unified-model-picker",
+        action="store_true",
+        help="Opt in to the unified picker (antigravity-unified provider with OpenAI routing)",
+    )
 
     setup_v2_parser = subparsers.add_parser(
         "setup-v2",
@@ -1329,6 +1405,11 @@ def main():
     configure_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id")
     configure_parser.add_argument("--provider-name", default=DEFAULT_CODEX_PROVIDER_NAME, help="Provider display name")
     configure_parser.add_argument("--base-url", default=DEFAULT_CODEX_BASE_URL, help="Gateway base URL")
+    configure_parser.add_argument(
+        "--unified-model-picker",
+        action="store_true",
+        help="Write the antigravity-unified provider block for OpenAI + Antigravity in one picker (opt-in)",
+    )
 
     install_skill_parser = subparsers.add_parser(
         "install-skill",
@@ -1355,6 +1436,11 @@ def main():
     service_install.add_argument(
         "--op-environment",
         help="Wrap the service command with `op run --environment ID -- ...` for 1Password Environments beta",
+    )
+    service_install.add_argument(
+        "--unified-model-picker",
+        action="store_true",
+        help="Run the durable gateway with the unified OpenAI + Antigravity picker",
     )
     service_install.add_argument("--json", action="store_true", help="Print service status as JSON")
     service_uninstall = service_sub.add_parser("uninstall", help="Uninstall the per-user gateway service")
@@ -1433,6 +1519,11 @@ def main():
     start_parser.add_argument(
         "--op-environment",
         help="With --background, run the gateway through `op run --environment ID -- ...` for 1Password Environments beta",
+    )
+    start_parser.add_argument(
+        "--unified-model-picker",
+        action="store_true",
+        help="Opt in to the unified picker: route OpenAI + Antigravity + BYOK through one provider",
     )
 
     stop_parser = subparsers.add_parser("stop", help="Stop a background gateway started by codex-antigravity")
@@ -1568,6 +1659,7 @@ def main():
             else:
                 print(f"[*] No stored BYOK provider named {args.provider}")
     elif args.command == "start":
+        ensure_unified_env_for_gateway(args)
         if args.background:
             start_gateway_background(args)
         else:
@@ -1575,6 +1667,8 @@ def main():
                 raise SystemExit("1Password gateway options require `codex-antigravity start --background`.")
             import uvicorn
             require_safe_gateway_host(args.host, args.allow_remote)
+            if is_unified_model_picker_arg(args):
+                print("[*] Unified model picker enabled: OpenAI + Antigravity + BYOK via one provider.")
             print(f"[*] Starting local Responses API compatible gateway server on {args.host}:{args.port}...")
             uvicorn.run("codex_antigravity_auth.server:app", host=args.host, port=args.port, log_level="info")
     elif args.command == "stop":
