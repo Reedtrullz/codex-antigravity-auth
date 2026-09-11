@@ -247,6 +247,98 @@ class TestUnifiedResponsesRouting(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["model"], "gpt-5.6")
 
+    def test_openai_streaming_preserves_http_failures_and_closes_successfully(self):
+        import os
+        from codex_antigravity_auth import server
+
+        class FakeResponse:
+            def __init__(self, status_code, *, body="", headers=None, chunks=()):
+                self.status_code = status_code
+                self.headers = headers or {}
+                self._body = body.encode("utf-8") if isinstance(body, str) else body
+                self._chunks = list(chunks)
+                self.closed = False
+                self.read = False
+
+            async def aread(self):
+                self.read = True
+                return self._body
+
+            def aiter_text(self):
+                async def iterator():
+                    for chunk in self._chunks:
+                        yield chunk
+
+                return iterator()
+
+        class FakeStreamContext:
+            def __init__(self, response):
+                self.response = response
+                self.entered = False
+                self.exited = False
+
+            async def __aenter__(self):
+                self.entered = True
+                return self.response
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                self.exited = True
+                self.response.closed = True
+                return False
+
+        class FakeClient:
+            def __init__(self, response):
+                self.response = response
+                self.context = FakeStreamContext(response)
+                self.closed = False
+
+            def stream(self, *args, **kwargs):
+                return self.context
+
+            async def aclose(self):
+                self.closed = True
+
+        for status_code, headers in ((429, {"retry-after": "30"}), (401, {})):
+            with self.subTest(status_code=status_code):
+                upstream = FakeResponse(status_code, body='{"error":{"message":"upstream failure"}}', headers=headers)
+                client = FakeClient(upstream)
+                with patch.dict(os.environ, {"ANTIGRAVITY_UNIFIED_MODEL_PICKER": "1", "OPENAI_API_KEY": "test-key"}):
+                    with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
+                        with patch("codex_antigravity_auth.server.httpx.AsyncClient", return_value=client):
+                            with patch("codex_antigravity_auth.server.write_request_record"):
+                                response = TestClient(server.app).post(
+                                    "/v1/responses",
+                                    json={"model": "gpt-5.6", "input": "hi", "stream": True},
+                                )
+                self.assertEqual(response.status_code, status_code)
+                self.assertEqual(response.headers.get("retry-after"), headers.get("retry-after"))
+                self.assertTrue(upstream.read)
+                self.assertTrue(upstream.closed)
+                self.assertTrue(client.context.exited)
+                self.assertTrue(client.closed)
+                self.assertNotIn("response.failed", response.text)
+
+        chunks = (
+            'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6"}}\n\n',
+            'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.6","usage":{"total_tokens":2}}}\n\n',
+            "data: [DONE]\n\n",
+        )
+        upstream = FakeResponse(200, chunks=chunks)
+        client = FakeClient(upstream)
+        with patch.dict(os.environ, {"ANTIGRAVITY_UNIFIED_MODEL_PICKER": "1", "OPENAI_API_KEY": "test-key"}):
+            with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
+                with patch("codex_antigravity_auth.server.httpx.AsyncClient", return_value=client):
+                    with patch("codex_antigravity_auth.server.write_request_record"):
+                        response = TestClient(server.app).post(
+                            "/v1/responses",
+                            json={"model": "gpt-5.6", "input": "hi", "stream": True},
+                        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("response.completed", response.text)
+        self.assertTrue(upstream.closed)
+        self.assertTrue(client.context.exited)
+        self.assertTrue(client.closed)
+
     def test_antigravity_success_does_not_touch_openai(self):
         import os
         from codex_antigravity_auth import server
@@ -371,6 +463,24 @@ class TestUnifiedAuth(unittest.TestCase):
                 auth = resolve_openai_auth()
         self.assertEqual(auth.kind, "codex_oauth")
         self.assertEqual(auth.account_id, "acc1")
+    def test_codex_oauth_reads_standard_tokens_shape(self):
+        import os
+        from codex_antigravity_auth.unified import resolve_openai_auth
+
+        fake_auth = {
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": None,
+            "tokens": {
+                "access_token": "test-token",
+                "account_id": "test-account",
+            },
+        }
+        with patch.dict(os.environ, {"ANTIGRAVITY_OPENAI_USE_CODEX_AUTH": "1", "OPENAI_API_KEY": ""}):
+            with patch("codex_antigravity_auth.unified._read_json_file", return_value=fake_auth):
+                auth = resolve_openai_auth()
+        self.assertEqual(auth.kind, "codex_oauth")
+        self.assertEqual(auth.access_token, "test-token")
+        self.assertEqual(auth.account_id, "test-account")
 
 
 if __name__ == "__main__":

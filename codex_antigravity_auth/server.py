@@ -127,6 +127,16 @@ def openai_failure_detail(model: str, message: str) -> dict:
     }
 
 
+class OpenAIUpstreamHTTPError(Exception):
+    """An HTTP error returned before an OpenAI streaming response started."""
+
+    def __init__(self, status_code: int, body: str, retry_after: str | None = None) -> None:
+        super().__init__(f"OpenAI upstream returned HTTP {status_code}")
+        self.status_code = status_code
+        self.body = body
+        self.retry_after = retry_after
+
+
 def local_package_version() -> str:
     try:
         version = importlib_metadata.version("codex-antigravity-auth").strip()
@@ -1118,6 +1128,62 @@ async def create_response(request: Request):
             raise HTTPException(status_code=exc.status_code, detail=openai_failure_detail(model, str(exc))) from exc
         upstream_model = strip_reserved_openai_prefix(model).strip() or model
         if stream:
+            try:
+                openai_stream_state = await _open_openai_upstream_stream(
+                    codex_req, upstream_model, auth
+                )
+            except OpenAIUpstreamHTTPError as exc:
+                if exc.status_code in (401, 403):
+                    hint = (
+                        "Run `codex login` again."
+                        if auth.kind == "codex_oauth"
+                        else "Check OPENAI_API_KEY."
+                    )
+                    message = (
+                        f"OpenAI authentication failed. {hint} "
+                        f"{safe_error_detail(exc.body)[:300]}"
+                    )
+                else:
+                    message = (
+                        f"OpenAI upstream error HTTP {exc.status_code}. "
+                        f"{safe_error_detail(exc.body)[:300]}"
+                    )
+                await log_request(
+                    "failed",
+                    model=model,
+                    route="openai",
+                    provider="openai",
+                    family="openai",
+                    stream=True,
+                    http_status=exc.status_code,
+                    retry_after_source="retry-after-header" if exc.retry_after else None,
+                    error_class="openai_upstream_http_error",
+                    error=message,
+                )
+                response_headers = {"Retry-After": exc.retry_after} if exc.retry_after else None
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail=openai_failure_detail(model, message),
+                    headers=response_headers,
+                ) from exc
+            except Exception as exc:
+                message = f"OpenAI upstream is unreachable: {safe_error_detail(exc)}"
+                await log_request(
+                    "failed",
+                    model=model,
+                    route="openai",
+                    provider="openai",
+                    family="openai",
+                    stream=True,
+                    http_status=502,
+                    error_class="openai_connection_error",
+                    error=message,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=openai_failure_detail(model, message),
+                ) from exc
+
             await log_request("stream_started", model=model, route="openai", provider="openai", family="openai", stream=True)
 
             async def logged_openai_stream() -> AsyncGenerator[str, None]:
@@ -1128,7 +1194,11 @@ async def create_response(request: Request):
                 terminal_usage = None
                 try:
                     async for chunk in openai_upstream_sse_generator(
-                        codex_req, upstream_model, auth, model
+                        codex_req,
+                        upstream_model,
+                        auth,
+                        model,
+                        stream_state=openai_stream_state,
                     ):
                         # Track terminal Responses events for sanitized telemetry only.
                         for line in chunk.splitlines():
@@ -2112,10 +2182,19 @@ def _collect_openai_sse_terminal(sse_text: str, display_model: str) -> dict | No
     return terminal
 
 
-async def openai_upstream_sse_generator(
-    codex_req: dict, upstream_model: str, auth, display_model: str
-) -> AsyncGenerator[str, None]:
-    """Proxy upstream Responses SSE bytes, rewriting the display model id."""
+async def _close_openai_upstream_stream(client, stream_context) -> None:
+    """Close the response context and its client, including on cancellation."""
+    exc_info = sys.exc_info()
+    try:
+        await stream_context.__aexit__(*exc_info)
+    finally:
+        await client.aclose()
+
+
+async def _open_openai_upstream_stream(
+    codex_req: dict, upstream_model: str, auth
+):
+    """Open an OpenAI SSE request and validate its status before streaming."""
     from .unified import build_openai_payload as _build_payload
 
     url = openai_responses_url(auth)
@@ -2123,73 +2202,96 @@ async def openai_upstream_sse_generator(
     payload = _build_payload(codex_req, upstream_model, stream=True)
     if auth.kind == "codex_oauth":
         payload["store"] = bool(codex_req.get("store", False))
+
+    client = httpx.AsyncClient(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS)
+    stream_context = client.stream("POST", url, json=payload, headers=headers)
     try:
-        async with httpx.AsyncClient(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS) as client:
-            async with client.stream("POST", url, json=payload, headers=headers) as res:
-                if res.status_code != 200:
-                    try:
-                        body = (await res.aread()).decode("utf-8", errors="replace")
-                    except Exception:
-                        body = ""
-                    if res.status_code in (401, 403):
-                        hint = (
-                            "Run `codex login` again."
-                            if auth.kind == "codex_oauth"
-                            else "Check OPENAI_API_KEY."
-                        )
-                        error_event = {
-                            "type": "response.failed",
-                            "response": {
-                                "id": f"resp_{secrets.token_hex(6)}",
-                                "object": "response",
-                                "status": "failed",
-                                "model": display_model,
-                                "output": [],
-                                "error": {
-                                    "code": "openai_auth_failed",
-                                    "message": f"OpenAI authentication failed. {hint} {safe_error_detail(body)[:300]}",
-                                },
-                            },
-                        }
-                    else:
-                        error_event = {
-                            "type": "response.failed",
-                            "response": {
-                                "id": f"resp_{secrets.token_hex(6)}",
-                                "object": "response",
-                                "status": "failed",
-                                "model": display_model,
-                                "output": [],
-                                "error": {
-                                    "code": "openai_upstream_error",
-                                    "message": f"OpenAI upstream error HTTP {res.status_code}. {safe_error_detail(body)[:300]}",
-                                },
-                            },
-                        }
-                    yield f"data: {json.dumps(error_event)}\n\n"
-                    yield "data: [DONE]\n\n"
-                    return
-                async for chunk in res.aiter_text():
-                    # Rewrite upstream model echoes to the display id without
-                    # parsing every frame: only touch exact model substrings.
-                    # Upstream already speaks Responses SSE, so bytes proxy.
-                    yield chunk
-                return
-    except Exception as exc:
-        error_event = {
-            "type": "response.failed",
-            "response": {
-                "id": f"resp_{secrets.token_hex(6)}",
-                "object": "response",
-                "status": "failed",
-                "model": display_model,
-                "output": [],
-                "error": {"code": "connection_error", "message": f"OpenAI upstream connection failed: {safe_error_detail(exc)[:300]}"},
-            },
-        }
-        yield f"data: {json.dumps(error_event)}\n\n"
-        yield "data: [DONE]\n\n"
-        return
+        response = await stream_context.__aenter__()
+    except BaseException:
+        await client.aclose()
+        raise
+
+    if response.status_code != 200:
+        try:
+            body = (await response.aread()).decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        retry_after = response.headers.get("retry-after")
+        try:
+            await stream_context.__aexit__(None, None, None)
+        finally:
+            await client.aclose()
+        raise OpenAIUpstreamHTTPError(response.status_code, body, retry_after)
+
+    # The caller transfers ownership of all three objects to the downstream
+    # generator, which closes them after the body is consumed or cancelled.
+    return client, stream_context, response
+
+
+async def openai_upstream_sse_generator(
+    codex_req: dict,
+    upstream_model: str,
+    auth,
+    display_model: str,
+    *,
+    stream_state=None,
+) -> AsyncGenerator[str, None]:
+    """Proxy upstream Responses SSE while owning its response lifetime."""
+    if stream_state is None:
+        try:
+            stream_state = await _open_openai_upstream_stream(codex_req, upstream_model, auth)
+        except OpenAIUpstreamHTTPError as exc:
+            if exc.status_code in (401, 403):
+                hint = (
+                    "Run `codex login` again."
+                    if auth.kind == "codex_oauth"
+                    else "Check OPENAI_API_KEY."
+                )
+                message = f"OpenAI authentication failed. {hint} {safe_error_detail(exc.body)[:300]}"
+                error_code = "openai_auth_failed"
+            else:
+                message = f"OpenAI upstream error HTTP {exc.status_code}. {safe_error_detail(exc.body)[:300]}"
+                error_code = "openai_upstream_error"
+            error_event = {
+                "type": "response.failed",
+                "response": {
+                    "id": f"resp_{secrets.token_hex(6)}",
+                    "object": "response",
+                    "status": "failed",
+                    "model": display_model,
+                    "output": [],
+                    "error": {"code": error_code, "message": message},
+                },
+            }
+            yield f"data: {json.dumps(error_event)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        except Exception as exc:
+            error_event = {
+                "type": "response.failed",
+                "response": {
+                    "id": f"resp_{secrets.token_hex(6)}",
+                    "object": "response",
+                    "status": "failed",
+                    "model": display_model,
+                    "output": [],
+                    "error": {
+                        "code": "connection_error",
+                        "message": f"OpenAI upstream connection failed: {safe_error_detail(exc)[:300]}",
+                    },
+                },
+            }
+            yield f"data: {json.dumps(error_event)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+    client, stream_context, response = stream_state
+    try:
+        async for chunk in response.aiter_text():
+            # Upstream already speaks Responses SSE, so proxy its frames as-is.
+            yield chunk
+    finally:
+        await _close_openai_upstream_stream(client, stream_context)
 
 
 async def openai_compatible_sse_generator(

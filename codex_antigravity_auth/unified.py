@@ -328,8 +328,11 @@ def _resolve_codex_oauth_auth() -> OpenAIAuth:
             "Codex ChatGPT auth was requested (ANTIGRAVITY_OPENAI_USE_CODEX_AUTH=1) "
             "but no readable ~/.codex/auth.json was found. Run `codex login` first.",
         )
-    # Observed shape: {"OPENAI_API_KEY": {"access_token": ..., "account_id": ...}}.
-    nested = data.get("OPENAI_API_KEY")
+    # Codex currently stores credentials under ``tokens``. Keep the older
+    # observed ``OPENAI_API_KEY`` dictionary shape as a compatibility fallback.
+    nested = data.get("tokens")
+    if not isinstance(nested, dict):
+        nested = data.get("OPENAI_API_KEY")
     if isinstance(nested, dict):
         data = {**data, **nested}
     access_token = data.get("access_token") or data.get("accessToken")
