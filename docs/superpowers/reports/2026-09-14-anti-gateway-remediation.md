@@ -618,3 +618,48 @@ timeout helpers `180 -> 170`.
 The previous `ef0a2b8` CI is stale for this correction. The branch must be
 rebuilt and current-head CI must pass for `b746b9b` (plus its forward report
 commit) before any separately authorized live validation. Live remains held.
+
+## 2026-09-14 — Offline three-chunk live preflight
+
+The reproducible representative fixture is committed at source head `f2079d2`
+under `scratch/t15-representative-3chunk/`; the older
+`scratch/t15-multichunk-fixture.md` and all prior artifacts remain untouched.
+The three non-overlapping source files are complete and AST-parseable:
+
+- `parser_contract.py`: 5,710 bytes,
+  `62ede283c7dd7b8ba8f7222a2ea5422a3759e88c8f4da084e3512fd3963ee227`.
+- `storage_contract.py`: 6,707 bytes,
+  `a6cf1a2c14cc34f15547bf8387e5d611d7518475a31cdb1e78e5e15040706bc4`.
+- `transport_contract.py`: 4,941 bytes,
+  `eb10d9971b1d0366176ac7f213c8abed2780a35974722b9eb2e38978dcbd4123`.
+
+Total source delivery is 17,358 bytes. The exact CLI dry-run uses all three
+paths as required files, `--max-prompt-chars 12000`, `--max-synthesis-chars
+64000`, `--chunked always`, and `--max-review-chunks 3`. It plans exactly three
+complete chunks with no omissions: parser 6,753 prompt chars / 5,710 source
+bytes; storage 7,752 / 6,707; transport 5,990 / 4,941. The chunk IDs are
+`files-088de10e6a1793f5`, `files-8accf10819a92682`, and
+`files-3a91c46210c0b66c`.
+
+The planned stages are three Sonnet review chunks, one Sonnet review synthesis,
+one Sonnet lane, one Opus lane, and one Opus judge. The release-bound command
+uses helper timeout `180` (gateway mapping `170`), `--retry 0`,
+`--fallback-policy never`, `--max-parallel 2`, lane/chunk output ceilings of
+2,048 tokens, judge output ceiling 4,096, and a finite 64,000-character judge
+budget. Primary calls are 7; Anti's fixed second logical attempt for each lane
+and judge raises the hard provider-call ceiling to 10 even with retry0; fallback
+adds zero calls. An external 20-minute watchdog remains required because the
+CLI's 180-second timeout is per provider call, not a whole-run deadline.
+
+The 12,000-character fan-out budget leaves 2,557 characters over a 9,193-
+character bounded-summary prompt. An offline structured-payload headroom probe
+with two ~8.2k-character lane outputs produced a 41,675-character judge prompt,
+leaving 22,325 characters under the 64,000 cap, with
+`judge_input_status=complete` and no lossy lanes.
+
+Candidate parity was rebuilt from `f2079d2` without installation: wheel SHA256
+`aefb736273a9872178de8c772bd5ee3f5650303068465bd65bae28d75358fa6b`, sdist
+SHA256 `d70bd93bbaf57783911a4281aba99fad527a7279e29e5d7938fa30f8886ff99a`,
+and packaged Anti/server hashes match the worktree (`ba75a8a3...2eb44a` and
+`c3567ba9...c4fcc`). This is plan-ready offline evidence only; no live switch
+or provider request has been made.
