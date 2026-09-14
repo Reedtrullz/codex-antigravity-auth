@@ -214,6 +214,21 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         mock_schedule.assert_not_called()
 
+    def test_responses_endpoint_rejects_malformed_tool_schema_before_provider(self):
+        malformed = [
+            {"type": "function", "function": {"name": "lookup", "parameters": {"$ref": 7}}},
+            {"type": "function", "function": {"name": "lookup", "parameters": {"properties": []}}},
+        ]
+        for tools in malformed:
+            with self.subTest(tools=tools):
+                with patch("codex_antigravity_auth.server.select_active_account_for_request") as select:
+                    response = TestClient(app).post(
+                        "/v1/responses",
+                        json={"model": "gemini-3.8-flash", "input": "hello", "tools": [tools]},
+                    )
+                self.assertEqual(response.status_code, 400)
+                select.assert_not_called()
+
     def test_byok_stream_writes_terminal_request_log_record(self):
         provider = {
             "id": "mock",
@@ -227,8 +242,9 @@ class TestRegressionFixes(unittest.TestCase):
 
         async def fake_sse_generator(*args, **kwargs):
             yield (
-                'data: {"id":"chatcmpl-1","choices":[{"finish_reason":"stop","delta":{}}],'
-                '"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}\n\n'
+                'data: {"type":"response.completed","response":{"status":"completed",'
+                '"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3},'
+                '"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}\n\n'
             )
             yield "data: [DONE]\n\n"
 
@@ -241,7 +257,7 @@ class TestRegressionFixes(unittest.TestCase):
                     )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("finish_reason", response.text)
+        self.assertIn("response.completed", response.text)
         self.assertEqual([record["status"] for record in records], ["stream_started", "success"])
         self.assertEqual(records[-1]["usage"], {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3})
 

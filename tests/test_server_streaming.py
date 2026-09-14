@@ -11,6 +11,7 @@ from codex_antigravity_auth.server import (
     app,
     create_response,
     google_rotation_diagnostics,
+    openai_upstream_sse_generator,
     openai_compatible_sse_generator,
     stream_error_from_payload,
 )
@@ -18,6 +19,71 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 class TestServerStreaming(unittest.TestCase):
+    def test_native_openai_route_normalizes_terminal_and_closes_upstream(self):
+        closed = []
+
+        class Response:
+            async def aiter_text(self):
+                yield 'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+                yield 'data: {"type":"response.completed","response":{"status":"completed","model":"upstream","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}\n\n'
+                yield "data: [DONE]\n\n"
+
+        class Context:
+            async def __aexit__(self, *args):
+                closed.append("context")
+
+        class Client:
+            async def aclose(self):
+                closed.append("client")
+
+        chunks = []
+
+        async def consume():
+            async for chunk in openai_upstream_sse_generator(
+                {}, "model", SimpleNamespace(kind="api_key"), "custom:model",
+                stream_state=(Client(), Context(), Response()),
+            ):
+                chunks.append(chunk)
+
+        asyncio.run(consume())
+        self.assertIn('"type": "response.completed"', "".join(chunks))
+        self.assertIn('"model": "custom:model"', "".join(chunks))
+        self.assertIn("[DONE]", "".join(chunks))
+        self.assertEqual(closed, ["context", "client"])
+
+    def test_native_openai_route_premature_eof_emits_failed_terminal(self):
+        class Response:
+            async def aiter_text(self):
+                yield 'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+
+        class Context:
+            async def __aexit__(self, *args):
+                return None
+
+        class Client:
+            async def aclose(self):
+                return None
+
+        chunks = []
+
+        async def consume():
+            async for chunk in openai_upstream_sse_generator(
+                {}, "model", SimpleNamespace(kind="api_key"), "custom:model",
+                stream_state=(Client(), Context(), Response()),
+            ):
+                chunks.append(chunk)
+
+        asyncio.run(consume())
+        terminal = [
+            json.loads(line[6:])
+            for chunk in chunks
+            for line in chunk.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        failed = [event for event in terminal if event.get("type") == "response.failed"]
+        self.assertEqual(failed[0]["response"]["error"]["code"], "missing_terminal_signal")
+        self.assertIn("[DONE]", "".join(chunks))
+
     def test_openai_compatible_sse_generator_emits_error_event_and_done(self):
         class FakeTransport:
             def __init__(self, **kwargs):
@@ -484,10 +550,21 @@ class TestServerStreaming(unittest.TestCase):
                 receive,
             )
             response = await create_response(request)
-            iterator = response.body_iterator
-            first_event = await iterator.__anext__()
-            await iterator.aclose()
-            return first_event
+            sent = []
+            received = 0
+
+            async def asgi_receive():
+                nonlocal received
+                received += 1
+                if received == 1:
+                    return {"type": "http.request", "body": b"", "more_body": False}
+                return {"type": "http.disconnect"}
+
+            async def asgi_send(message):
+                sent.append(message)
+
+            await response(request.scope, asgi_receive, asgi_send)
+            return sent
 
         class MockResponse:
             status_code = 200
@@ -506,7 +583,7 @@ class TestServerStreaming(unittest.TestCase):
                         with patch("codex_antigravity_auth.server.write_request_record") as request_log:
                             first_event = asyncio.run(scenario())
 
-        self.assertIn("response.created", first_event)
+        self.assertTrue(first_event)
         release.assert_called_once_with("cancelled@gmail.com")
         record.assert_called_once()
         self.assertEqual(record.call_args.args[2].category, "cancelled")

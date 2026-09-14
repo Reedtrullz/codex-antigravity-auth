@@ -17,6 +17,10 @@ from typing import Any
 try:
     from codex_antigravity_auth.secure_store import file_lock
 except ImportError:  # standalone copied skill
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows uses the package lock.
+        fcntl = None
     _locks: dict[str, threading.RLock] = {}
     _locks_guard = threading.Lock()
 
@@ -26,7 +30,17 @@ except ImportError:  # standalone copied skill
         with _locks_guard:
             lock = _locks.setdefault(key, threading.RLock())
         with lock:
-            yield
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            lock_path = path.with_name(f".{path.name}.lock")
+            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                if fcntl is not None:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
 
 REFLECTIONS_DIR = Path.home() / ".codex" / "anti-runs" / "reflections"
 MAX_ENTRIES_PER_REPO = 500
@@ -198,11 +212,14 @@ def get_summary(repo_path: Path) -> dict[str, Any]:
 def clear_records(repo_path: Path) -> int:
     """Delete all reflection records for a repo. Returns count deleted."""
     path = _reflection_path(repo_path)
-    records = _load_records(path)
-    count = len(records)
-    if path.exists():
-        path.unlink()
-    return count
+    with file_lock(path):
+        if path.is_symlink():
+            raise RuntimeError(f"Refusing to delete symlinked reflection file: {path}")
+        records = _load_records(path)
+        count = len(records)
+        if path.exists() and not path.is_symlink():
+            path.unlink()
+        return count
 
 
 def prune_reflections_older_than(cutoff_epoch: float, *, dry_run: bool = False) -> int:
@@ -216,12 +233,13 @@ def prune_reflections_older_than(cutoff_epoch: float, *, dry_run: bool = False) 
         return 0
     removed = 0
     for path in REFLECTIONS_DIR.glob("*.json"):
-        records = _load_records(path)
-        if not records:
-            continue
-        newest = max(r.get("timestamp", 0) for r in records)
-        if newest < cutoff_epoch:
-            if not dry_run:
-                path.unlink()
-            removed += 1
+        with file_lock(path):
+            records = _load_records(path)
+            if not records:
+                continue
+            newest = max(r.get("timestamp", 0) for r in records)
+            if newest < cutoff_epoch:
+                if not dry_run and path.exists() and not path.is_symlink():
+                    path.unlink()
+                removed += 1
     return removed

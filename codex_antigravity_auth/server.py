@@ -810,6 +810,7 @@ def validate_response_request_body(value: object) -> dict:
         value["metadata"] = normalized_metadata
     validate_response_generation_options(value)
     validate_response_tool_choice(value)
+    validate_response_tool_schemas(value)
     try:
         validate_capabilities(value, REQUEST_BOUNDARY_CAPABILITIES)
     except CapabilityError as exc:
@@ -879,6 +880,41 @@ def validate_response_tool_choice(codex_req: dict) -> None:
             status_code=400,
             detail="tool_choice function name must contain only letters, numbers, underscores, and hyphens, and be 1-64 characters",
         )
+
+
+def validate_response_tool_schemas(codex_req: dict) -> None:
+    """Reject malformed tool schemas before any provider/account work."""
+    tools = codex_req.get("tools")
+    if not isinstance(tools, list):
+        return
+
+    def visit(schema: object, path: str) -> None:
+        if not isinstance(schema, dict):
+            raise HTTPException(status_code=400, detail=f"{path} must be an object")
+        if "$ref" in schema and not isinstance(schema["$ref"], str):
+            raise HTTPException(status_code=400, detail=f"{path}.$ref must be a string")
+        if "properties" in schema:
+            properties = schema["properties"]
+            if not isinstance(properties, dict):
+                raise HTTPException(status_code=400, detail=f"{path}.properties must be an object")
+            for name, child in properties.items():
+                visit(child, f"{path}.properties[{name!r}]")
+        if "items" in schema:
+            visit(schema["items"], f"{path}.items")
+        for key in ("anyOf", "oneOf", "allOf"):
+            if key in schema:
+                options = schema[key]
+                if not isinstance(options, list):
+                    raise HTTPException(status_code=400, detail=f"{path}.{key} must be an array")
+                for index, option in enumerate(options):
+                    visit(option, f"{path}.{key}[{index}]")
+
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        function = tool.get("function")
+        if isinstance(function, dict) and "parameters" in function:
+            visit(function["parameters"], f"tools[{index}].function.parameters")
 
 
 def response_stream_flag(codex_req: dict) -> bool:
@@ -1350,22 +1386,31 @@ async def create_response(request: Request):
                                 continue
                             if not isinstance(event, dict):
                                 continue
-                            # This lane streams OpenAI chat-completions events,
-                            # not Responses-API events: completion is signaled
-                            # by finish_reason, failure by an "error" object.
-                            error_payload = event.get("error")
-                            if isinstance(error_payload, dict):
+                            # openai_compatible_sse_generator normalizes chat
+                            # completions into Responses events before yielding.
+                            event_type = event.get("type")
+                            response_payload = event.get("response")
+                            if event_type == "response.failed":
+                                error_payload = response_payload.get("error") if isinstance(response_payload, dict) else None
+                                terminal_status = "failed"
+                                terminal_error_class = error_payload.get("code") if isinstance(error_payload, dict) else "stream_error"
+                                terminal_error = error_payload.get("message") if isinstance(error_payload, dict) else None
+                            elif event_type in {"response.completed", "response.incomplete"}:
+                                terminal_status = "success" if event_type == "response.completed" else "incomplete"
+                                terminal_http_status = 200
+                            elif event_type is None and isinstance(event.get("error"), dict):
+                                error_payload = event["error"]
                                 terminal_status = "failed"
                                 terminal_error_class = error_payload.get("code") or "stream_error"
                                 terminal_error = error_payload.get("message")
-                                continue
-                            choices = event.get("choices")
-                            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-                                finish_reason = choices[0].get("finish_reason")
-                                if finish_reason:
+                            usage = response_payload.get("usage") if isinstance(response_payload, dict) else None
+                            if not isinstance(usage, dict):
+                                usage = event.get("usage")
+                            if event_type is None:
+                                choices = event.get("choices")
+                                if isinstance(choices, list) and choices and isinstance(choices[0], dict) and choices[0].get("finish_reason"):
                                     terminal_status = "success"
                                     terminal_http_status = 200
-                            usage = event.get("usage")
                             if isinstance(usage, dict):
                                 terminal_usage = usage
                         yield chunk
@@ -2031,39 +2076,42 @@ async def create_response(request: Request):
                     used_account.get("email", "") not in recorded_stream_attempts
                     for used_account in stream_attempts
                 )
-                if cancelled:
-                    try:
-                        await log_request(
-                            "cancelled",
-                            model=model,
-                            route="google",
-                            family=family,
-                            stream=True,
-                            terminal_kind="failed",
-                            terminal_reason="cancelled",
-                            attempt_count=len(stream_attempts),
-                            rotation_count=max(0, len(stream_attempts) - 1),
-                            outcome_category="cancelled",
-                            cancelled=True,
-                            error_class="cancelled",
-                        )
-                    except Exception:
-                        pass
+                try:
+                    with anyio.fail_after(1.0):
+                        if cancelled:
+                            await log_request(
+                                "cancelled",
+                                model=model,
+                                route="google",
+                                family=family,
+                                stream=True,
+                                terminal_kind="failed",
+                                terminal_reason="cancelled",
+                                attempt_count=len(stream_attempts),
+                                rotation_count=max(0, len(stream_attempts) - 1),
+                                outcome_category="cancelled",
+                                cancelled=True,
+                                error_class="cancelled",
+                            )
+                except Exception:
+                    pass
                 released_emails = set()
                 for used_account in stream_attempts:
                     try:
-                        await record_stream_attempt(
-                            used_account,
-                            AttemptOutcome(scope="none", category="cancelled"),
-                            error_class="cancelled",
-                        )
+                        with anyio.fail_after(1.0):
+                            await record_stream_attempt(
+                                used_account,
+                                AttemptOutcome(scope="none", category="cancelled"),
+                                error_class="cancelled",
+                            )
                     except Exception:
                         pass
                     email = used_account.get("email")
                     if email and email not in released_emails:
                         released_emails.add(email)
                         try:
-                            await release_account_for_request(email)
+                            with anyio.fail_after(2.0):
+                                await release_account_for_request(email)
                         except Exception:
                             pass
 

@@ -35,9 +35,11 @@ def clean_json_schema(
     seen_refs = _seen_refs or set()
     if "$ref" in schema:
         ref = schema["$ref"]
-        if ref in seen_refs:
+        if not isinstance(ref, str):
+            ref = None
+        if ref is not None and ref in seen_refs:
             schema = {k: v for k, v in schema.items() if k != "$ref"}
-        else:
+        elif ref is not None:
             resolved = _resolve_local_ref(ref, root)
             if resolved is not None:
                 merged = {**resolved, **{k: v for k, v in schema.items() if k != "$ref"}}

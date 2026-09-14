@@ -3851,8 +3851,22 @@ class BugfixRegressionTests(unittest.TestCase):
         ])
         calls: list[str] = []
 
-        def fake_generate(_args, *, model, prompt, **_kwargs):
+        def fake_generate(fake_args, *, model, prompt, **_kwargs):
+            reservation = anti.reserve_budget_call(
+                fake_args,
+                model=model,
+                prompt_chars=len(prompt),
+                max_output_tokens=fake_args.chunk_output_tokens,
+                purpose="test plan chunk",
+            )
             calls.append(prompt)
+            anti.settle_budget_call(
+                reservation,
+                model=model,
+                generation={},
+                prompt_chars=len(prompt),
+                max_output_tokens=fake_args.chunk_output_tokens,
+            )
             return "chunk-note", model, {}
 
         anti.generate_with_fallback = fake_generate

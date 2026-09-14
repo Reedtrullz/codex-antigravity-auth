@@ -334,7 +334,10 @@ class TestUnifiedResponsesRouting(unittest.TestCase):
                             json={"model": "gpt-5.6", "input": "hi", "stream": True},
                         )
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertIn("response.completed", response.text)
+        # A native terminal without meaningful output is normalized to a
+        # failed Responses terminal instead of advertising a false success.
+        self.assertIn("response.failed", response.text)
+        self.assertIn("empty_response", response.text)
         self.assertTrue(upstream.closed)
         self.assertTrue(client.context.exited)
         self.assertTrue(client.closed)

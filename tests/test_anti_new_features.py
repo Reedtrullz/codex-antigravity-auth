@@ -2,6 +2,7 @@ import argparse
 import json
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 import time
 import unittest
 from pathlib import Path
@@ -17,6 +18,27 @@ from anti_lib.verifier import verify_finding  # noqa: E402
 
 
 class NormalizeAndFindingsTests(unittest.TestCase):
+    def test_budget_admission_allows_only_one_concurrent_last_allowance(self):
+        args = argparse.Namespace(budget=anti.estimate_call_cost("claude-sonnet-4-6", 4000, 1000))
+
+        def attempt(_index):
+            try:
+                return anti.reserve_budget_call(
+                    args,
+                    model="claude-sonnet-4-6",
+                    prompt_chars=4000,
+                    max_output_tokens=1000,
+                    purpose="test attempt",
+                )
+            except anti.AntiError as exc:
+                return exc
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(attempt, range(4)))
+        self.assertEqual(sum(result is not None and not isinstance(result, Exception) for result in results), 1)
+        self.assertEqual(sum(isinstance(result, anti.AntiError) for result in results), 3)
+        self.assertTrue(all(getattr(result, "submitted", False) is False for result in results if isinstance(result, anti.AntiError)))
+
     def test_panel_identity_preserves_requested_actual_and_fallback_defaults(self):
         identity = anti.panel_model_identity(requested_model="sonnet", actual_model="deepseek:deepseek-v4-pro", fallback_used=True)
         self.assertEqual(identity["requestedModel"], "sonnet")
@@ -372,6 +394,25 @@ class ReflectionTests(unittest.TestCase):
             self.assertEqual([r["findings"][0]["fingerprint"] for r in records], [f"fp-{i}" for i in range(5, 10)])
         finally:
             reflections.MAX_ENTRIES_PER_REPO = original_limit
+
+    def test_concurrent_writers_keep_all_records(self):
+        repo = Path(self._temp_dir.name) / "repo-concurrent"
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(lambda index: self._record(repo, fingerprint=f"fp-{index}"), range(8)))
+        records = reflections._load_records(reflections._reflection_path(repo))
+        self.assertEqual({record["findings"][0]["fingerprint"] for record in records}, {f"fp-{i}" for i in range(8)})
+
+    def test_clear_and_prune_do_not_follow_symlinks(self):
+        repo = Path(self._temp_dir.name) / "repo-symlink"
+        self._record(repo)
+        path = reflections._reflection_path(repo)
+        target = Path(self._temp_dir.name) / "target.json"
+        target.write_text("[]", encoding="utf-8")
+        path.unlink()
+        path.symlink_to(target)
+        with self.assertRaises((RuntimeError, OSError)):
+            reflections.clear_records(repo)
+        self.assertEqual(target.read_text(encoding="utf-8"), "[]")
 
     def test_existing_files_migrated_to_600_on_next_write(self):
         if sys.platform == "win32":

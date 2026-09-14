@@ -200,6 +200,12 @@ def reserve_budget_call(
     if getattr(args, "budget", None) is None:
         return None
     estimate = estimate_call_cost(model, prompt_chars, max_output_tokens)
+    if getattr(args, "budget", None) is not None and base_model_id(model) not in MODEL_COST_TIER:
+        error = AntiError(
+            f"budget admission refused for {purpose}; price for model {model!r} is unknown"
+        )
+        error.submitted = False  # type: ignore[attr-defined]
+        raise error
     state = getattr(args, "_anti_budget_state", None)
     if state is None:
         state = {"lock": threading.Lock(), "reserved": 0.0, "committed": 0.0, "unknown": False, "attempts": []}
@@ -1539,6 +1545,8 @@ def post_response(
     retries: int = 0,
     model_ids: set[str] | None = None,
     run_id: str | None = None,
+    budget_args: argparse.Namespace | None = None,
+    budget_purpose: str | None = None,
 ) -> ResponseText:
     requested_model = model
     available_model_ids = model_ids
@@ -1579,6 +1587,15 @@ def post_response(
     response_url = f"{normalize_base_url(base_url)}/responses"
     started = time.monotonic()
     for attempt in range(1, attempts + 1):
+        retry_reservation = None
+        if budget_args is not None:
+            retry_reservation = reserve_budget_call(
+                budget_args,
+                model=model,
+                prompt_chars=len(prompt),
+                max_output_tokens=max_output_tokens,
+                purpose=f"{budget_purpose or model} retry {attempt - 1}",
+            )
         try:
             status, decoded = request_json(
                 "POST",
@@ -1588,6 +1605,14 @@ def post_response(
                 token_env=token_env,
             )
         except AntiError as exc:
+            exc.submitted = True  # type: ignore[attr-defined]
+            settle_budget_call(
+                retry_reservation,
+                model=model,
+                generation=None,
+                prompt_chars=len(prompt),
+                max_output_tokens=max_output_tokens,
+            )
             last_error = str(exc)
             if attempt < attempts:
                 time.sleep(min(4.0, 0.75 * attempt))
@@ -1599,6 +1624,13 @@ def post_response(
             ) from exc
 
         if status == 200:
+            settle_budget_call(
+                retry_reservation,
+                model=model,
+                generation={"usage": extract_usage(decoded)},
+                prompt_chars=len(prompt),
+                max_output_tokens=max_output_tokens,
+            )
             text = extract_response_text(decoded)
             # Guard: model-level failure signalled via status field
             if isinstance(decoded, dict) and decoded.get("status") == "failed":
@@ -1653,6 +1685,13 @@ def post_response(
             )
 
         detail = decoded.get("detail") or decoded.get("error") or decoded
+        settle_budget_call(
+            retry_reservation,
+            model=model,
+            generation={"usage": extract_usage(decoded)},
+            prompt_chars=len(prompt),
+            max_output_tokens=max_output_tokens,
+        )
         last_error = f"HTTP {status}: {detail}"
         if status in retryable_statuses and attempt < attempts:
             time.sleep(min(4.0, 0.75 * attempt))
@@ -1775,6 +1814,8 @@ def generate_with_fallback(
             retries=args.retry,
             model_ids=model_ids,
             run_id=getattr(args, "run_id", None),
+            budget_args=args,
+            budget_purpose=purpose,
         )
         text = str(raw_text)
         call_metadata = response_call_metadata(raw_text)
@@ -1813,6 +1854,8 @@ def generate_with_fallback(
                 retries=args.retry,
                 model_ids=model_ids,
                 run_id=getattr(args, "run_id", None),
+                budget_args=args,
+                budget_purpose=f"{purpose} fallback",
             )
         except AntiError as fallback_exc:
             fallback_error = redact_sensitive_text(str(fallback_exc))
@@ -3259,15 +3302,7 @@ def run_chunked_review(
         chunk_metadata["incomplete_chunks"] = list(incomplete_chunks)
 
     for index, chunk in enumerate(chunks, start=1):
-        reservation = None
         try:
-            reservation = reserve_budget_call(
-                args,
-                model=model,
-                prompt_chars=len(chunk["prompt"]),
-                max_output_tokens=args.chunk_output_tokens,
-                purpose=f"review chunk {index}/{len(chunks)}",
-            )
             chunk_text, chunk_model, generation_metadata = generate_with_fallback(
                 args,
                 model=model,
@@ -3276,13 +3311,6 @@ def run_chunked_review(
                 purpose=f"review chunk {index}/{len(chunks)}",
             )
         except AntiError as exc:
-            settle_budget_call(
-                reservation,
-                model=model,
-                generation=getattr(exc, "generation_metadata", None),
-                prompt_chars=len(chunk["prompt"]),
-                max_output_tokens=args.chunk_output_tokens,
-            )
             incomplete_chunks.append(chunk["label"])
             chunk_generation.append(
                 {
@@ -3306,13 +3334,6 @@ def run_chunked_review(
                 "_execution_ledger": execution_ledger,
             }  # type: ignore[attr-defined]
             raise
-        settle_budget_call(
-            reservation,
-            model=chunk_model,
-            generation=generation_metadata,
-            prompt_chars=len(chunk["prompt"]),
-            max_output_tokens=args.chunk_output_tokens,
-        )
         chunk_status = lane_output_status(
             chunk_text,
             generation_metadata.get("usage"),
@@ -3393,13 +3414,6 @@ def run_chunked_review(
     ]
     caveats.extend(synthesis_caveats)
     try:
-        synthesis_reservation = reserve_budget_call(
-            args,
-            model=model,
-            prompt_chars=len(synthesis_prompt),
-            max_output_tokens=args.max_output_tokens,
-            purpose="review synthesis",
-        )
         synthesis, synthesis_model, synthesis_generation = generate_with_fallback(
             args,
             model=model,
@@ -3408,13 +3422,6 @@ def run_chunked_review(
             purpose="review synthesis",
         )
     except AntiError as exc:
-        settle_budget_call(
-            locals().get("synthesis_reservation"),
-            model=model,
-            generation=getattr(exc, "generation_metadata", None),
-            prompt_chars=len(synthesis_prompt),
-            max_output_tokens=args.max_output_tokens,
-        )
         exc.run_metadata = {
             **base_metadata,
             **chunk_metadata,
@@ -3424,13 +3431,6 @@ def run_chunked_review(
             "planned_chunk_count": planned_chunk_count,
         }  # type: ignore[attr-defined]
         raise
-    settle_budget_call(
-        synthesis_reservation,
-        model=synthesis_model,
-        generation=synthesis_generation,
-        prompt_chars=len(synthesis_prompt),
-        max_output_tokens=args.max_output_tokens,
-    )
     execution_ledger.append(
         execution_entry(
             stage="review_synthesis",
@@ -3709,15 +3709,7 @@ def run_chunked_plan(
         if chunk_caveats:
             caveats.extend(f"Plan chunk {index}: {caveat}" for caveat in chunk_caveats)
         sent_chunk_prompt_chars.append(len(chunk_prompt))
-        reservation = None
         try:
-            reservation = reserve_budget_call(
-                args,
-                model=model,
-                prompt_chars=len(chunk_prompt),
-                max_output_tokens=args.chunk_output_tokens,
-                purpose=f"plan chunk {index}/{len(prompt_chunks)}",
-            )
             text, model_used, generation_metadata = generate_with_fallback(
                 args,
                 model=model,
@@ -3727,22 +3719,8 @@ def run_chunked_plan(
             )
         except AntiError as exc:
             incomplete_chunks.append(index)
-            settle_budget_call(
-                reservation,
-                model=model,
-                generation=getattr(exc, "generation_metadata", None),
-                prompt_chars=len(chunk_prompt),
-                max_output_tokens=args.chunk_output_tokens,
-            )
             exc.run_metadata = plan_failure_metadata(str(exc), failed_chunk=index)  # type: ignore[attr-defined]
             raise
-        settle_budget_call(
-            reservation,
-            model=model_used,
-            generation=generation_metadata,
-            prompt_chars=len(chunk_prompt),
-            max_output_tokens=args.chunk_output_tokens,
-        )
         chunk_status = lane_output_status(
             text,
             generation_metadata.get("usage"),
@@ -3784,15 +3762,7 @@ def run_chunked_plan(
         failure.run_metadata = plan_failure_metadata(error, synthesis_status="not_sent")  # type: ignore[attr-defined]
         raise failure
     caveats = [*caveats, *synthesis_caveats]
-    synthesis_reservation = None
     try:
-        synthesis_reservation = reserve_budget_call(
-            args,
-            model=model,
-            prompt_chars=len(synthesis_prompt),
-            max_output_tokens=args.max_output_tokens,
-            purpose="plan synthesis",
-        )
         text, synthesis_model, synthesis_generation = generate_with_fallback(
             args,
             model=model,
@@ -3801,25 +3771,11 @@ def run_chunked_plan(
             purpose="plan synthesis",
         )
     except AntiError as exc:
-        settle_budget_call(
-            synthesis_reservation,
-            model=model,
-            generation=getattr(exc, "generation_metadata", None),
-            prompt_chars=len(synthesis_prompt),
-            max_output_tokens=args.max_output_tokens,
-        )
         exc.run_metadata = plan_failure_metadata(
             str(exc),
             synthesis_status="not_sent" if not getattr(exc, "submitted", True) else "failed",
         )  # type: ignore[attr-defined]
         raise
-    settle_budget_call(
-        synthesis_reservation,
-        model=synthesis_model,
-        generation=synthesis_generation,
-        prompt_chars=len(synthesis_prompt),
-        max_output_tokens=args.max_output_tokens,
-    )
     synthesis_status = lane_output_status(
         text,
         synthesis_generation.get("usage"),
@@ -3916,6 +3872,19 @@ def format_dry_run(
         estimates.append(estimate_cost(model=m, prompt_chars=prompt_chars,
                                        estimated_output_tokens=max_output_tokens))
     stages = stage_plan or [{"name": "primary", "calls": 1, "max_output_tokens": max_output_tokens}]
+    stages = [
+        {
+            **stage,
+            "max_attempts": int(stage.get("calls", 1) or 0) + int(stage.get("possible_retries", 0) or 0),
+            "estimated_cost": estimate_call_cost(
+                stage.get("model", model),
+                prompt_chars,
+                int(stage.get("max_output_tokens", max_output_tokens) or 0),
+            ) * (int(stage.get("calls", 1) or 0) + int(stage.get("possible_retries", 0) or 0)),
+            "price_known": base_model_id(stage.get("model", model)) in MODEL_COST_TIER,
+        }
+        for stage in stages
+    ]
     known_prices = {tier: COST_PER_1K_TOKENS[tier] for tier in ("free", "quota", "paid")}
     payload = {
         "mode": mode,
@@ -3923,7 +3892,14 @@ def format_dry_run(
         "stages": stages,
         "token_ceilings": {stage["name"]: stage.get("max_output_tokens") for stage in stages},
         "known_prices": known_prices,
-        "unknowns": ["provider billing and missing runtime usage are not known at dry-run time"],
+        "unknowns": [
+            "provider billing and missing runtime usage are not known at dry-run time",
+            *[
+                f"price for {estimate['model']} is unknown"
+                for estimate in estimates
+                if base_model_id(estimate["model"]) not in MODEL_COST_TIER
+            ],
+        ],
         "possible_retries": sum(int(stage.get("possible_retries", 0) or 0) for stage in stages),
         "budget_limit": budget_limit,
     }
@@ -5915,18 +5891,6 @@ def command_panel(args: argparse.Namespace) -> int:
         for index, model in enumerate(panel_models):
             if model in missing_panel_models:
                 continue
-            estimated = estimate_call_cost(model, len(prompt), args.max_output_tokens)
-            if args.budget is not None and running_cost + estimated > args.budget:
-                panel_results[index] = {
-                    "model": model,
-                    "requested_model": model,
-                    "status": "skipped_budget",
-                    "error": f"budget cap reached (estimated {running_cost + estimated:.4f} > {args.budget:.4f})",
-                }
-                budget_exceeded = True
-                continue
-            running_cost += estimated
-            estimated_total += estimated
             reserved_models[index] = model  # H-1: remember reserved model
             futures[executor.submit(
                 run_panel_call,
@@ -5940,11 +5904,8 @@ def command_panel(args: argparse.Namespace) -> int:
             index = futures[future]
             result = future.result()
             panel_results[index] = result
-            # H-1 fix: use reserved model for subtraction (what was originally budgeted)
-            # and actual model for addition (what was actually consumed)
             reserved = reserved_models.get(index, panel_models[index])
             actual_model = panel_results[index].get("model", reserved)
-            running_cost -= estimate_call_cost(reserved, len(prompt), args.max_output_tokens)
             running_cost += actual_call_cost(actual_model, result.get("generation"), prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens)
     metadata["estimated_total"] = estimated_total
     metadata["estimated_cost"] = running_cost
@@ -6169,26 +6130,6 @@ def command_panel(args: argparse.Namespace) -> int:
 
     judge_cap = args.judge_output_tokens
     judge_estimate = estimate_call_cost(judge_model, len(synthesis_prompt), judge_cap)
-    if args.budget is not None and running_cost + judge_estimate > args.budget:
-        budget_exceeded = True
-        metadata["budget_exceeded"] = True
-        metadata["estimated_total"] = estimated_total + judge_estimate
-        metadata["estimated_cost"] = running_cost
-        metadata["budget_limit"] = args.budget
-        caveats.append(
-            f"Panel judge skipped: budget cap reached (estimated {running_cost + judge_estimate:.4f} > {args.budget:.4f})"
-        )
-        error = "panel judge skipped because the budget cap was reached"
-        metadata["panel_error"] = error
-        try:
-            write_run_record(args, mode="panel", status="failed", models=panel_models,
-                base_url=args.base_url, prompt_text=prompt, caveats=caveats,
-                metadata=metadata, error=error)
-        except AntiError:
-            pass
-        raise AntiError(error)
-    running_cost += judge_estimate
-    estimated_total += judge_estimate
     judge_text, judge_model_used, judge_generation = run_judge(synthesis_prompt, judge_cap)
     judge_attempts: list[dict[str, Any]] = [
         dict(judge_generation, attempt=1)
@@ -6205,15 +6146,7 @@ def command_panel(args: argparse.Namespace) -> int:
             "Prefer a few short high-signal findings over long prose so the response fits in the output budget.\n\n"
             + synthesis_prompt
         )
-        retry_estimate = estimate_call_cost(judge_model, len(retry_prompt), retry_cap)
-        # H-2 fix: check budget before judge retry
-        if args.budget is not None and running_cost + retry_estimate > args.budget:
-            caveats.append("Judge retry skipped: budget cap reached")
-            progress(args, "panel judge: retry skipped due to budget cap")
-        else:
-            judge_text, judge_model_used, judge_generation = run_judge(retry_prompt, retry_cap)
-            running_cost += retry_estimate
-            estimated_total += retry_estimate
+        judge_text, judge_model_used, judge_generation = run_judge(retry_prompt, retry_cap)
         judge_attempts.append(dict(judge_generation, attempt=2))
         judge_cap = retry_cap
         findings, findings_caveat, parse_diagnostics = parse_panel_findings(judge_text)
@@ -6515,13 +6448,6 @@ def command_consult(args: argparse.Namespace) -> int:
             print()
             print(prompt)
         return 0
-    reservation = reserve_budget_call(
-        args,
-        model=model,
-        prompt_chars=len(prompt),
-        max_output_tokens=args.max_output_tokens,
-        purpose="consult",
-    )
     ensure_run_id(args)
     try:
         text, model_used, generation_metadata = generate_with_fallback(
@@ -6532,21 +6458,7 @@ def command_consult(args: argparse.Namespace) -> int:
             purpose="consult",
         )
     except AntiError as exc:
-        settle_budget_call(
-            reservation,
-            model=model,
-            generation=getattr(exc, "generation_metadata", None),
-            prompt_chars=len(prompt),
-            max_output_tokens=args.max_output_tokens,
-        )
         raise
-    settle_budget_call(
-        reservation,
-        model=model_used,
-        generation=generation_metadata,
-        prompt_chars=len(prompt),
-        max_output_tokens=args.max_output_tokens,
-    )
     attempts_metadata: list[dict[str, Any]] = [generation_metadata]
     usage = generation_metadata.get("usage")
     output_status = lane_output_status(text, usage, args.max_output_tokens, generation_metadata)
@@ -6559,13 +6471,6 @@ def command_consult(args: argparse.Namespace) -> int:
         )
         retry_prompt = prompt + "\n\n" + lane_retry_instruction()
         last_prompt_chars = len(retry_prompt)
-        retry_reservation = reserve_budget_call(
-            args,
-            model=model,
-            prompt_chars=len(retry_prompt),
-            max_output_tokens=retry_cap,
-            purpose="consult (retry)",
-        )
         try:
             text, model_used, retry_metadata = generate_with_fallback(
                 args,
@@ -6575,21 +6480,7 @@ def command_consult(args: argparse.Namespace) -> int:
                 purpose="consult (retry)",
             )
         except AntiError as exc:
-            settle_budget_call(
-                retry_reservation,
-                model=model,
-                generation=getattr(exc, "generation_metadata", None),
-                prompt_chars=len(retry_prompt),
-                max_output_tokens=retry_cap,
-            )
             raise
-        settle_budget_call(
-            retry_reservation,
-            model=model_used,
-            generation=retry_metadata,
-            prompt_chars=len(retry_prompt),
-            max_output_tokens=retry_cap,
-        )
         attempts_metadata.append(retry_metadata)
         usage = retry_metadata.get("usage")
         output_status = lane_output_status(text, usage, retry_cap, retry_metadata)
