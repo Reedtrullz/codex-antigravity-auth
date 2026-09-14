@@ -4901,6 +4901,10 @@ class ScopeIntegrityContractTests(unittest.TestCase):
 
     def test_incomplete_synthesis_does_not_mark_reviewed_file_omitted(self) -> None:
         anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+        }
         source = "".join(f"LINE_{index:03d} = '{index:03d}-" + ("x" * 44) + "'\n" for index in range(100))
 
         def generate(_args, *, model, prompt, **_kwargs):
