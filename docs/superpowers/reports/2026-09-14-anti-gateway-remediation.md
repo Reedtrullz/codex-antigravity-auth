@@ -663,3 +663,66 @@ SHA256 `d70bd93bbaf57783911a4281aba99fad527a7279e29e5d7938fa30f8886ff99a`,
 and packaged Anti/server hashes match the worktree (`ba75a8a3...2eb44a` and
 `c3567ba9...c4fcc`). This is plan-ready offline evidence only; no live switch
 or provider request has been made.
+
+## 2026-09-14 — Authorized e058f06 live trial: terminal synthesis partial
+
+Parent released exactly one live trial using the retained candidate built from
+source head `e058f06` in
+`/Users/reidar/.codex/antigravity-builds/anti-gateway-remediation-e058f06/`.
+The retained candidate wheel SHA256 is
+`340bf88e4dfd7f4d6d9ae5b6d421dfb96e276a86b0e81365b182506ebf6a18fe`; sdist
+SHA256 is `fd9bd8c1c0a79782eb0603bec19b9ba4c5e7e9b42ecbea5d4e2fcad129d8ed20`.
+Wheel, extracted, and source Anti helper SHA256 all match
+`ba75a8a347c2f853338811f57ebd332ae06a44c726ff7152ee35d832dd2eb44a`; server
+SHA256 all match `c3567ba9806ebece827274c71f74006cb9ae06b946af40abd6d81592447c4fcc`.
+Candidate timeout helpers verified `180 -> 170` before switching.
+
+Run ID `t15-remediation-e058f06-3chunk-full` used the reviewed exact command:
+three required synthetic files, 12,000-character fan-out budget, 64,000
+synthesis budget, chunk/lane/synthesis output ceiling 2,048, judge 4,096,
+helper timeout 180, retry 0, fallback never, max parallel 2, full sanitized
+save, and an external 20-minute watchdog. The candidate was the sole writer
+on `127.0.0.1:51122`, with `/v1/models` HTTP 200 before generation.
+
+The trial reached all three review chunks successfully and stopped terminally
+at review synthesis: the synthesis returned HTTP 200 but ended at the 2,048
+output-token ceiling (`terminal_kind=incomplete`, `terminal_reason=max_tokens`).
+No panel lane or judge was called. Request-log evidence records exactly four
+helper `/v1/responses` generation requests, four underlying attempts, zero
+rotations, and zero fallback calls:
+
+- chunk 1: Sonnet HTTP 200, 30.027s, 1,450 output tokens;
+- chunk 2: Sonnet HTTP 200, 25.086s, 1,071 output tokens;
+- chunk 3: Sonnet HTTP 200, 17.484s, 781 output tokens;
+- synthesis: Sonnet HTTP 200, 37.699s, 2,048 output tokens, incomplete at cap.
+
+The sanitized artifacts are preserved at:
+
+- `/Users/reidar/.codex/anti-runs/t15-remediation-e058f06-3chunk-full/result.json`
+- `/Users/reidar/.codex/anti-runs/t15-remediation-e058f06-3chunk-full.json`
+- `/Users/reidar/.codex/antigravity-requests.jsonl` (correlated request rows)
+
+All three files have complete coverage: 17,358/17,358 bytes, 3/3 chunks,
+zero failed/not-sent chunks, and matching per-file hashes. No lane or judge
+artifact exists because those stages were never reached; the failed run cannot
+provide full summary/lane bodies for later validation. The result is
+`runStatus=failed`, `scopeStatus=partial`, with no acceptance evidence.
+
+The failed artifact also exposed a deterministic provenance defect: the saved
+top-level coverage retained a stale single-prompt omitted-file entry despite
+all three chunk files being complete. Commit `40bfc80` fixes the incomplete
+synthesis branch to use the same chunk-authoritative failure metadata as other
+synthesis failures and adds a regression. Post-trial offline evidence is Anti
+`207 passed, 9 subtests`, full `825 passed, 220 subtests, 2 warnings`, and
+Python 3.10 targeted regressions `3 passed`. This fix was not live-tested and
+does not authorize another trial.
+
+Rollback completed after the terminal result: launchd PID 73857 is the sole
+listener, `/v1/models` is HTTP 200, the plist SHA256 is unchanged at
+`391297d7fa13990a69e2ff29453957779956e6da11e9b1af29a074cfc9b7db09`, and
+providers remain `1959f85e8a68235ab04bb885ccb904f1eaa41c116cf81d2b193214873e416b94`.
+The refreshed accounts state was preserved at post-trial SHA256
+`f4cc7aa47dafb50339a4973791f37e2053a54cac4099b21ae7b86c3e0174699f9`; it was
+not rolled back to the pre-trial hash. No second live trial, retry, install,
+merge, force-push, tag, PyPI action, or credential/provider/cooldown edit was
+made.
