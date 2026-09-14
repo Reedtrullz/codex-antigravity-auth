@@ -4639,6 +4639,10 @@ def parse_panel_findings(text: str) -> tuple[dict[str, Any] | None, str | None, 
             "Judge structured findings JSON did not contain a findings list; falling back to prose synthesis",
             diagnostics,
         )
+    # Keep a redacted, uncapped copy for the judge input. The normalized
+    # contract below intentionally caps fields for display and provenance;
+    # those caps must not silently discard content before synthesis.
+    diagnostics["safe_structured"] = sanitize_json(parsed)
 
     findings: list[dict[str, Any]] = []
     dropped = 0
@@ -5054,6 +5058,9 @@ def build_panel_synthesis_prompt(
                 "recommended_next_actions": parsed.get("recommended_next_actions", []),
                 "caveats": parsed.get("caveats", []),
             }
+            safe_structured = diagnostics.get("safe_structured")
+            if isinstance(safe_structured, dict):
+                material["structuredOutput"] = safe_structured
             if warning:
                 material["caveats"] = [*material["caveats"], warning]
         else:

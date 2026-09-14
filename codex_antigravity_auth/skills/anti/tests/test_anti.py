@@ -2157,6 +2157,66 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(metadata["synthesis_truncated_source"], False)
         self.assertEqual(metadata["synthesis_truncated_models"], [])
 
+    def test_panel_synthesis_preserves_full_structured_lane_material_and_fails_closed(self) -> None:
+        anti = load_anti()
+        summary_tail = "STRUCTURED_SUMMARY_TAIL"
+        finding_tail = "STRUCTURED_FINDING_TAIL"
+        list_tail = "STRUCTURED_LIST_TAIL"
+        structured = {
+            "summary": "structured summary\n" + ("s" * 9000) + summary_tail,
+            "disagreements": ["disagreement " + ("d" * 700) + list_tail],
+            "findings": [
+                {
+                    "id": "F1",
+                    "claim": "finding claim " + ("c" * 2300) + finding_tail,
+                    "severity": "high",
+                    "lanes": ["claude-opus-4-6-thinking"],
+                    "verify": "run the focused regression",
+                }
+            ],
+            "unverifiable": [],
+            "recommended_next_actions": [],
+            "caveats": [],
+        }
+        results = [
+            {
+                "model": "claude-opus-4-6-thinking",
+                "status": "success",
+                "output_text": json.dumps(structured),
+                "actual_model": "claude-opus-4-6-thinking",
+                "provider": "google-antigravity",
+            }
+        ]
+        metadata = {"status": "complete_multi_model"}
+
+        prompt, _caveats, _synthesis_metadata = anti.build_panel_synthesis_prompt(
+            panel_mode="review",
+            source_prompt="source",
+            panel_results=results,
+            metadata=metadata,
+            caveats=[],
+            roles=[],
+            max_chars=64000,
+            anonymize=False,
+        )
+
+        self.assertIn(summary_tail, prompt)
+        self.assertIn(finding_tail, prompt)
+        self.assertIn(list_tail, prompt)
+        self.assertEqual(metadata["judge_input_status"], "complete")
+        self.assertEqual(metadata["judge_input_lossy_lanes"], [])
+        with self.assertRaisesRegex(anti.AntiError, "exact budget"):
+            anti.build_panel_synthesis_prompt(
+                panel_mode="review",
+                source_prompt="source",
+                panel_results=results,
+                metadata=metadata,
+                caveats=[],
+                roles=[],
+                max_chars=len(prompt) - 1,
+                anonymize=False,
+            )
+
     def test_panel_review_preserves_large_summary_through_actual_panel_path(self) -> None:
         anti = load_anti()
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
