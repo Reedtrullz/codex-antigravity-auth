@@ -9,7 +9,7 @@ import httpx
 import anyio
 import email.utils
 import re
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
 from urllib.parse import urlparse
@@ -17,6 +17,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.requests import ClientDisconnect
 from .accounts import AccountManager, classify_backend_status, is_validation_required_error
 from .account_state import scoped_cooldown_expiry
 from .byok import (
@@ -100,6 +101,10 @@ GOOGLE_BACKEND_TIMEOUT_SECONDS = 60.0
 GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS = 1.0
 GOOGLE_BACKEND_TIMEOUT_MAX_SECONDS = 600.0
 GOOGLE_BACKEND_TIMEOUT_METADATA_KEY = "antigravity_backend_timeout_seconds"
+GOOGLE_REQUEST_TIMEOUT_METADATA_KEY = "antigravity_request_timeout_seconds"
+GOOGLE_REQUEST_TIMEOUT_MIN_SECONDS = 1.0
+GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS = 600.0
+CLIENT_DISCONNECT_POLL_SECONDS = 0.1
 TEST_CLIENT_HOSTS = {"testserver"}
 REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
     native_responses=True,
@@ -138,6 +143,10 @@ class OpenAIUpstreamHTTPError(Exception):
         self.status_code = status_code
         self.body = body
         self.retry_after = retry_after
+
+
+class RequestDeadlineExceeded(Exception):
+    """The bounded native non-stream request budget expired."""
 
 
 def local_package_version() -> str:
@@ -807,6 +816,15 @@ def validate_response_request_body(value: object) -> dict:
                 maximum=GOOGLE_BACKEND_TIMEOUT_MAX_SECONDS,
             )
             normalized_metadata[GOOGLE_BACKEND_TIMEOUT_METADATA_KEY] = float(backend_timeout)
+        request_timeout = metadata.get(GOOGLE_REQUEST_TIMEOUT_METADATA_KEY)
+        if request_timeout is not None:
+            validate_finite_number_option(
+                request_timeout,
+                f"metadata.{GOOGLE_REQUEST_TIMEOUT_METADATA_KEY}",
+                minimum=GOOGLE_REQUEST_TIMEOUT_MIN_SECONDS,
+                maximum=GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS,
+            )
+            normalized_metadata[GOOGLE_REQUEST_TIMEOUT_METADATA_KEY] = float(request_timeout)
         value["metadata"] = normalized_metadata
     validate_response_generation_options(value)
     validate_response_tool_choice(value)
@@ -825,6 +843,17 @@ def google_backend_timeout_from_metadata(metadata: object) -> float:
             return max(
                 GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS,
                 min(GOOGLE_BACKEND_TIMEOUT_MAX_SECONDS, float(value)),
+            )
+    return GOOGLE_BACKEND_TIMEOUT_SECONDS
+
+
+def google_request_timeout_from_metadata(metadata: object) -> float:
+    if isinstance(metadata, dict):
+        value = metadata.get(GOOGLE_REQUEST_TIMEOUT_METADATA_KEY)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+            return max(
+                GOOGLE_REQUEST_TIMEOUT_MIN_SECONDS,
+                min(GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS, float(value)),
             )
     return GOOGLE_BACKEND_TIMEOUT_SECONDS
 
@@ -1093,6 +1122,13 @@ async def create_response(request: Request):
             "cancelled": cancelled,
         }
         await run_in_threadpool(write_request_record, record)
+
+    async def best_effort_diagnostic(awaitable) -> None:
+        try:
+            with anyio.fail_after(2.0):
+                await awaitable
+        except Exception:
+            pass
 
     try:
         codex_req = await request.json()
@@ -1481,7 +1517,112 @@ async def create_response(request: Request):
 
     # 1. Select account automatically from pool
     family = native_model_family(model)
-    account = await acquire_active_account_for_request(model)
+    operation_deadline = time.monotonic() + google_request_timeout_from_metadata(request_metadata)
+
+    async def wait_for_disconnect() -> bool:
+        while True:
+            try:
+                if await asyncio.wait_for(
+                    request.is_disconnected(),
+                    timeout=CLIENT_DISCONNECT_POLL_SECONDS,
+                ):
+                    return True
+            except asyncio.TimeoutError:
+                pass
+            await asyncio.sleep(CLIENT_DISCONNECT_POLL_SECONDS)
+
+    def release_late_account(task: asyncio.Task) -> None:
+        async def cleanup() -> None:
+            if task.cancelled():
+                return
+            try:
+                late_account = task.result()
+            except Exception:
+                return
+            if isinstance(late_account, dict):
+                try:
+                    with anyio.fail_after(2.0):
+                        await release_account_for_request(late_account.get("email"))
+                except Exception:
+                    pass
+
+        asyncio.create_task(cleanup())
+
+    async def run_bounded_operation(awaitable, *, release_late_result: bool = False):
+        operation_task = asyncio.create_task(awaitable)
+        disconnect_task = asyncio.create_task(wait_for_disconnect())
+        deadline_task = asyncio.create_task(
+            asyncio.sleep(max(0.0, operation_deadline - time.monotonic()))
+        )
+        abandoned = False
+
+        async def abandon_operation() -> None:
+            nonlocal abandoned
+            abandoned = True
+            if release_late_result:
+                operation_task.add_done_callback(release_late_account)
+                return
+            operation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await operation_task
+
+        try:
+            done, _ = await asyncio.wait(
+                {operation_task, disconnect_task, deadline_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if disconnect_task in done:
+                await abandon_operation()
+                raise ClientDisconnect()
+            if deadline_task in done or time.monotonic() >= operation_deadline:
+                await abandon_operation()
+                raise RequestDeadlineExceeded()
+            return await operation_task
+        except asyncio.CancelledError:
+            await abandon_operation()
+            raise
+        finally:
+            for task in (disconnect_task, deadline_task):
+                if not task.done():
+                    task.cancel()
+                with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(task), timeout=0.2)
+            if not operation_task.done() and not abandoned:
+                await abandon_operation()
+
+    if stream:
+        account = await acquire_active_account_for_request(model)
+    else:
+        try:
+            account = await run_bounded_operation(
+                acquire_active_account_for_request(model),
+                release_late_result=True,
+            )
+        except ClientDisconnect:
+            await best_effort_diagnostic(log_request(
+                "cancelled",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                error_class="cancelled",
+                outcome_category="cancelled",
+                cancelled=True,
+                error="Client disconnected before account acquisition completed",
+            ))
+            raise
+        except RequestDeadlineExceeded:
+            await best_effort_diagnostic(log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=504,
+                error_class="request_deadline_exceeded",
+                error="Native non-stream request deadline expired during account acquisition",
+            ))
+            raise HTTPException(status_code=504, detail="Antigravity request deadline exceeded")
     if not account:
         await log_request(
             "failed",
@@ -1538,6 +1679,9 @@ async def create_response(request: Request):
             )
             raise
 
+    async def request_backend_with_boundary(selected_account: dict) -> httpx.Response | None:
+        return await run_bounded_operation(request_backend(selected_account))
+
     # Handle standard non-streaming response path
     if not stream:
         response_account = account
@@ -1546,9 +1690,12 @@ async def create_response(request: Request):
         cooldown_scope: str | None = None
         cooldown_category: str | None = None
         try:
-            res = await request_backend(response_account)
+            res = await request_backend_with_boundary(response_account)
             if not res:
-                new_account = await acquire_active_account_for_request(model)
+                new_account = await run_bounded_operation(
+                    acquire_active_account_for_request(model),
+                    release_late_result=True,
+                )
                 rotation_attempted = True
                 if new_account:
                     await record_attempt_outcome(
@@ -1560,7 +1707,7 @@ async def create_response(request: Request):
                     )
                     response_attempts.append(new_account)
                     response_account = new_account
-                    res = await request_backend(response_account)
+                    res = await request_backend_with_boundary(response_account)
 
             if not res:
                 await record_attempt_outcome(
@@ -1611,12 +1758,15 @@ async def create_response(request: Request):
                     status_code=res.status_code,
                     error_class="validation_required" if is_validation else None,
                 )
-                new_account = await acquire_active_account_for_request(model)
+                new_account = await run_bounded_operation(
+                    acquire_active_account_for_request(model),
+                    release_late_result=True,
+                )
                 rotation_attempted = True
                 if new_account:
                     response_attempts.append(new_account)
                     response_account = new_account
-                    res = await request_backend(response_account)
+                    res = await request_backend_with_boundary(response_account)
                 if not res:
                     await record_attempt_outcome(
                         response_account.get("email", ""),
@@ -1850,9 +2000,55 @@ async def create_response(request: Request):
                     error=safe_error_detail(e),
                 )
                 raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
+        except RequestDeadlineExceeded:
+            await best_effort_diagnostic(log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=504,
+                rotation_attempted=rotation_attempted,
+                error_class="request_deadline_exceeded",
+                error="Native non-stream request deadline expired before completion",
+                attempt_count=len(response_attempts),
+                rotation_count=max(0, len(response_attempts) - 1),
+            ))
+            raise HTTPException(status_code=504, detail="Antigravity request deadline exceeded")
+        except ClientDisconnect:
+            await best_effort_diagnostic(record_attempt_outcome(
+                response_account.get("email", ""),
+                model,
+                AttemptOutcome(scope="none", category="cancelled"),
+                error_class="cancelled",
+            ))
+            await best_effort_diagnostic(log_request(
+                "cancelled",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                error_class="cancelled",
+                terminal_kind="failed",
+                terminal_reason="cancelled",
+                attempt_count=len(response_attempts),
+                rotation_count=max(0, len(response_attempts) - 1),
+                outcome_category="cancelled",
+                cancelled=True,
+                error="Client disconnected before the Antigravity response completed",
+            ))
+            raise
         finally:
-            for used_account in response_attempts:
-                await release_account_for_request(used_account.get("email"))
+            async def release_response_accounts() -> None:
+                for used_account in response_attempts:
+                    try:
+                        with anyio.fail_after(2.0):
+                            await release_account_for_request(used_account.get("email"))
+                    except Exception:
+                        pass
+
+            with anyio.CancelScope(shield=True):
+                await release_response_accounts()
 
     # Handle standard SSE streaming response path
     stream_attempts = [account]

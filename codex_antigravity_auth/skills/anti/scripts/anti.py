@@ -469,6 +469,9 @@ BACKEND_TIMEOUT_METADATA_KEY = "antigravity_backend_timeout_seconds"
 BACKEND_TIMEOUT_HINT_THRESHOLD_SECONDS = 120.0
 BACKEND_TIMEOUT_HINT_BUFFER_SECONDS = 10.0
 BACKEND_TIMEOUT_HINT_MAX_SECONDS = 600.0
+REQUEST_TIMEOUT_METADATA_KEY = "antigravity_request_timeout_seconds"
+REQUEST_TIMEOUT_HINT_BUFFER_SECONDS = 10.0
+REQUEST_TIMEOUT_HINT_MAX_SECONDS = 600.0
 
 
 EXCLUDED_DIRS = {
@@ -1021,6 +1024,16 @@ def backend_timeout_hint(timeout: float) -> float | None:
     if not math.isfinite(value) or value <= BACKEND_TIMEOUT_HINT_THRESHOLD_SECONDS:
         return None
     return min(BACKEND_TIMEOUT_HINT_MAX_SECONDS, max(1.0, value - BACKEND_TIMEOUT_HINT_BUFFER_SECONDS))
+
+
+def request_timeout_hint(timeout: float) -> float | None:
+    try:
+        value = float(timeout)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= REQUEST_TIMEOUT_HINT_BUFFER_SECONDS:
+        return None
+    return min(REQUEST_TIMEOUT_HINT_MAX_SECONDS, max(1.0, value - REQUEST_TIMEOUT_HINT_BUFFER_SECONDS))
 
 
 def is_claude_model(model: str) -> bool:
@@ -1621,6 +1634,9 @@ def post_response(
     backend_timeout = backend_timeout_hint(timeout)
     if backend_timeout is not None:
         metadata[BACKEND_TIMEOUT_METADATA_KEY] = backend_timeout
+    request_timeout = request_timeout_hint(timeout)
+    if request_timeout is not None:
+        metadata[REQUEST_TIMEOUT_METADATA_KEY] = request_timeout
     if metadata:
         payload["metadata"] = metadata
     attempts = max(0, retries) + 1

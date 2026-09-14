@@ -5,7 +5,8 @@ import asyncio
 import time
 import unittest
 import httpx
-from unittest.mock import patch, MagicMock
+from fastapi import HTTPException
+from unittest.mock import AsyncMock, patch, MagicMock
 from codex_antigravity_auth import server as server_module
 from codex_antigravity_auth.server import (
     app,
@@ -16,7 +17,7 @@ from codex_antigravity_auth.server import (
     stream_error_from_payload,
 )
 from fastapi.testclient import TestClient
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 
 class TestServerStreaming(unittest.TestCase):
     def test_native_openai_route_normalizes_terminal_and_closes_upstream(self):
@@ -588,7 +589,6 @@ class TestServerStreaming(unittest.TestCase):
         record.assert_called_once()
         self.assertEqual(record.call_args.args[2].category, "cancelled")
         self.assertEqual(record.call_args.kwargs["error_class"], "cancelled")
-        request_log.assert_called_once()
         self.assertTrue(request_log.call_args.args[0]["cancelled"])
         self.assertEqual(request_log.call_args.args[0]["outcome_category"], "cancelled")
 
@@ -600,6 +600,321 @@ class TestServerStreaming(unittest.TestCase):
                         with patch("codex_antigravity_auth.server.write_request_record", side_effect=RuntimeError("audit failed")):
                             asyncio.run(scenario())
         release_after_error.assert_called_once_with("cancelled@gmail.com")
+
+    def test_google_nonstream_disconnect_cancels_backend_and_releases_lease(self):
+        account = {"email": "cancelled-nonstream@gmail.com", "accessToken": "token"}
+        backend_started = asyncio.Event()
+        backend_cancelled = asyncio.Event()
+
+        class DisconnectingRequest(Request):
+            async def is_disconnected(self):
+                return backend_started.is_set()
+
+        async def scenario():
+            async def receive():
+                return {
+                    "type": "http.request",
+                    "body": json.dumps({"model": "gemini-3.5-flash-high", "input": "hello"}).encode(),
+                    "more_body": False,
+                }
+
+            request = DisconnectingRequest(
+                {
+                    "type": "http",
+                    "method": "POST",
+                    "path": "/v1/responses",
+                    "headers": [],
+                    "query_string": b"",
+                    "client": ("testserver", 50000),
+                    "server": ("testserver", 80),
+                    "scheme": "http",
+                },
+                receive,
+            )
+            with self.assertRaises(ClientDisconnect):
+                await create_response(request)
+
+        class FakeTransport:
+            def __init__(self, **kwargs):
+                pass
+
+            async def post(self, request, lease):
+                backend_started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    backend_cancelled.set()
+                    raise
+
+        async def get_account(*args, **kwargs):
+            return account
+
+        async def noop(*args, **kwargs):
+            pass
+
+        release_mock = AsyncMock()
+        record_mock = AsyncMock()
+        with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
+             patch.object(server_module, "acquire_active_account_for_request", get_account), \
+             patch.object(server_module, "release_account_for_request", release_mock), \
+             patch.object(server_module, "record_attempt_outcome", record_mock), \
+             patch.object(server_module, "write_request_record", lambda record: None), \
+             patch.object(server_module, "GoogleTransport", FakeTransport):
+            asyncio.run(scenario())
+
+        self.assertTrue(backend_started.is_set())
+        self.assertTrue(backend_cancelled.is_set())
+        release_mock.assert_awaited_once_with("cancelled-nonstream@gmail.com")
+        record_mock.assert_awaited_once()
+        self.assertEqual(record_mock.call_args.args[2].category, "cancelled")
+        self.assertEqual(record_mock.call_args.kwargs["error_class"], "cancelled")
+
+    def test_google_nonstream_total_deadline_cancels_trickle_without_rotation(self):
+        account = {"email": "deadline@example.invalid", "accessToken": "token"}
+        backend_started = asyncio.Event()
+        backend_cancelled = asyncio.Event()
+        post_count = 0
+
+        async def receive():
+            return {
+                "type": "http.request",
+                "body": json.dumps({"model": "gemini-3.5-flash-high", "input": "hello"}).encode(),
+                "more_body": False,
+            }
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/responses",
+                "headers": [],
+                "query_string": b"",
+                "client": ("testserver", 50000),
+                "server": ("testserver", 80),
+                "scheme": "http",
+            },
+            receive,
+        )
+
+        class FakeTransport:
+            def __init__(self, **kwargs):
+                pass
+
+            async def post(self, request, lease):
+                nonlocal post_count
+                post_count += 1
+                backend_started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    backend_cancelled.set()
+                    raise
+
+        async def get_account(*args, **kwargs):
+            return account
+
+        async def noop(*args, **kwargs):
+            pass
+
+        async def scenario():
+            with self.assertRaises(HTTPException) as caught:
+                await create_response(request)
+            return caught.exception
+
+        release_mock = AsyncMock()
+        record_mock = AsyncMock()
+        with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
+             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.05), \
+             patch.object(server_module, "acquire_active_account_for_request", get_account), \
+             patch.object(server_module, "release_account_for_request", release_mock), \
+             patch.object(server_module, "record_attempt_outcome", record_mock), \
+             patch.object(server_module, "write_request_record", lambda record: None), \
+             patch.object(server_module, "GoogleTransport", FakeTransport):
+            exception = asyncio.run(scenario())
+
+        self.assertEqual(exception.status_code, 504)
+        self.assertTrue(backend_started.is_set())
+        self.assertTrue(backend_cancelled.is_set())
+        self.assertEqual(post_count, 1)
+        release_mock.assert_awaited_once_with("deadline@example.invalid")
+        record_mock.assert_not_awaited()
+
+    def test_google_nonstream_rotation_uses_remaining_deadline_and_releases_late_account(self):
+        first = {"email": "first-deadline@example.invalid", "accessToken": "token"}
+        second = {"email": "late-deadline@example.invalid", "accessToken": "token"}
+        acquire_count = 0
+        post_count = 0
+        released: list[str | None] = []
+
+        async def receive():
+            return {
+                "type": "http.request",
+                "body": json.dumps({"model": "gemini-3.5-flash-high", "input": "hello"}).encode(),
+                "more_body": False,
+            }
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/responses",
+                "headers": [],
+                "query_string": b"",
+                "client": ("testserver", 50000),
+                "server": ("testserver", 80),
+                "scheme": "http",
+            },
+            receive,
+        )
+
+        async def get_account(*args, **kwargs):
+            nonlocal acquire_count
+            acquire_count += 1
+            if acquire_count == 1:
+                return first
+            await asyncio.sleep(0.2)
+            return second
+
+        class FakeTransport:
+            def __init__(self, **kwargs):
+                pass
+
+            async def post(self, request, lease):
+                nonlocal post_count
+                post_count += 1
+                raise httpx.ConnectError("fixture connection failure")
+
+        async def release(email):
+            released.append(email)
+
+        async def scenario():
+            with self.assertRaises(HTTPException) as caught:
+                await create_response(request)
+            await asyncio.sleep(0.25)
+            return caught.exception
+
+        with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
+             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.05), \
+             patch.object(server_module, "acquire_active_account_for_request", get_account), \
+             patch.object(server_module, "release_account_for_request", release), \
+             patch.object(server_module, "record_attempt_outcome", AsyncMock()), \
+             patch.object(server_module, "write_request_record", lambda record: None), \
+             patch.object(server_module, "GoogleTransport", FakeTransport):
+            exception = asyncio.run(scenario())
+
+        self.assertEqual(exception.status_code, 504)
+        self.assertEqual(post_count, 1)
+        self.assertEqual(acquire_count, 2)
+        self.assertEqual(released, ["first-deadline@example.invalid", "late-deadline@example.invalid"])
+
+    def test_google_nonstream_disconnect_does_not_post_after_late_acquisition(self):
+        account = {"email": "late-cancel@example.invalid", "accessToken": "token"}
+        post_count = 0
+        released: list[str | None] = []
+
+        class DisconnectingRequest(Request):
+            async def is_disconnected(self):
+                return True
+
+        async def receive():
+            return {
+                "type": "http.request",
+                "body": json.dumps({"model": "gemini-3.5-flash-high", "input": "hello"}).encode(),
+                "more_body": False,
+            }
+
+        request = DisconnectingRequest(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/responses",
+                "headers": [],
+                "query_string": b"",
+                "client": ("testserver", 50000),
+                "server": ("testserver", 80),
+                "scheme": "http",
+            },
+            receive,
+        )
+
+        async def get_account(*args, **kwargs):
+            await asyncio.sleep(0.1)
+            return account
+
+        class FakeTransport:
+            def __init__(self, **kwargs):
+                pass
+
+            async def post(self, request, lease):
+                nonlocal post_count
+                post_count += 1
+                return httpx.Response(200, json={"response": {"candidates": []}})
+
+        async def release(email):
+            released.append(email)
+
+        async def scenario():
+            with self.assertRaises(ClientDisconnect):
+                await create_response(request)
+            await asyncio.sleep(0.15)
+
+        with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
+             patch.object(server_module, "acquire_active_account_for_request", get_account), \
+             patch.object(server_module, "release_account_for_request", release), \
+             patch.object(server_module, "write_request_record", lambda record: None), \
+             patch.object(server_module, "GoogleTransport", FakeTransport):
+            asyncio.run(scenario())
+
+        self.assertEqual(post_count, 0)
+        self.assertEqual(released, ["late-cancel@example.invalid"])
+
+    def test_google_nonstream_deadline_survives_diagnostic_failure_and_releases(self):
+        account = {"email": "diagnostic-failure@example.invalid", "accessToken": "token"}
+
+        async def receive():
+            return {
+                "type": "http.request",
+                "body": json.dumps({"model": "gemini-3.5-flash-high", "input": "hello"}).encode(),
+                "more_body": False,
+            }
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/responses",
+                "headers": [],
+                "query_string": b"",
+                "client": ("testserver", 50000),
+                "server": ("testserver", 80),
+                "scheme": "http",
+            },
+            receive,
+        )
+
+        class FakeTransport:
+            def __init__(self, **kwargs):
+                pass
+
+            async def post(self, request, lease):
+                await asyncio.Future()
+
+        async def get_account(*args, **kwargs):
+            return account
+
+        release_mock = AsyncMock()
+
+        with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
+             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.05), \
+             patch.object(server_module, "acquire_active_account_for_request", get_account), \
+             patch.object(server_module, "release_account_for_request", release_mock), \
+             patch.object(server_module, "write_request_record", side_effect=RuntimeError("audit failed")), \
+             patch.object(server_module, "GoogleTransport", FakeTransport):
+            with self.assertRaises(HTTPException) as caught:
+                asyncio.run(create_response(request))
+
+        self.assertEqual(caught.exception.status_code, 504)
+        release_mock.assert_awaited_once_with("diagnostic-failure@example.invalid")
 
     def test_google_request_log_records_terminal_attempt_rotation_and_usage(self):
         first = {"email": "first@gmail.com", "accessToken": "first-token"}

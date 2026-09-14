@@ -33,9 +33,12 @@ from codex_antigravity_auth.schema import clean_json_schema
 from codex_antigravity_auth.server import (
     GOOGLE_BACKEND_TIMEOUT_MAX_SECONDS,
     GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS,
+    GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS,
+    GOOGLE_REQUEST_TIMEOUT_MIN_SECONDS,
     app,
     build_headers,
     google_backend_timeout_from_metadata,
+    google_request_timeout_from_metadata,
     retry_after_seconds_from_response,
     select_active_account_for_request,
 )
@@ -1251,6 +1254,22 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertIn("metadata.antigravity_backend_timeout_seconds", response.json()["detail"])
         mock_acquire.assert_not_called()
 
+    def test_responses_endpoint_rejects_invalid_google_request_timeout_metadata(self):
+        client = TestClient(app)
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_acquire:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "model": "claude-opus-4-6-thinking",
+                    "input": "hello",
+                    "metadata": {"antigravity_request_timeout_seconds": "slow"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("metadata.antigravity_request_timeout_seconds", response.json()["detail"])
+        mock_acquire.assert_not_called()
+
     def test_google_backend_timeout_reader_clamps_internal_metadata(self):
         self.assertEqual(
             google_backend_timeout_from_metadata({"antigravity_backend_timeout_seconds": 9999}),
@@ -1259,6 +1278,16 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(
             google_backend_timeout_from_metadata({"antigravity_backend_timeout_seconds": -5}),
             GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS,
+        )
+
+    def test_google_request_timeout_reader_clamps_internal_metadata(self):
+        self.assertEqual(
+            google_request_timeout_from_metadata({"antigravity_request_timeout_seconds": 9999}),
+            GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS,
+        )
+        self.assertEqual(
+            google_request_timeout_from_metadata({"antigravity_request_timeout_seconds": -5}),
+            GOOGLE_REQUEST_TIMEOUT_MIN_SECONDS,
         )
 
     def test_responses_endpoint_rejects_malformed_tool_choice_before_routing(self):

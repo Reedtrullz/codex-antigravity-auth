@@ -1030,7 +1030,10 @@ class AntiHelperTests(unittest.TestCase):
 
         self.assertEqual(text, "ok")
         self.assertEqual(model_used, "claude-sonnet-4-6")
-        self.assertEqual(payloads[0]["metadata"], {"run_id": "anti-run_123"})
+        self.assertEqual(
+            payloads[0]["metadata"],
+            {"run_id": "anti-run_123", "antigravity_request_timeout_seconds": 110.0},
+        )
         self.assertEqual(metadata["usage"], {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3})
 
     def test_long_generation_sends_backend_timeout_metadata(self) -> None:
@@ -1054,7 +1057,35 @@ class AntiHelperTests(unittest.TestCase):
 
         self.assertEqual(text, "ok")
         self.assertEqual(model_used, "claude-opus-4-6-thinking")
-        self.assertEqual(payloads[0]["metadata"], {"antigravity_backend_timeout_seconds": 230.0})
+        self.assertEqual(
+            payloads[0]["metadata"],
+            {
+                "antigravity_backend_timeout_seconds": 230.0,
+                "antigravity_request_timeout_seconds": 230.0,
+            },
+        )
+
+    def test_generation_sends_total_request_timeout_below_client_timeout(self) -> None:
+        anti = load_anti()
+        args = anti.build_parser().parse_args(["consult", "--prompt", "hello", "--timeout", "90"])
+        payloads: list[dict] = []
+
+        def fake_request_json(method, url, *, payload=None, timeout=10.0, token_env=anti.DEFAULT_TOKEN_ENV):
+            payloads.append(payload or {})
+            return 200, {"output_text": "ok"}
+
+        anti.request_json = fake_request_json
+        text, _model_used, _metadata = anti.generate_with_fallback(
+            args,
+            model="claude-sonnet-4-6",
+            prompt="hello",
+            max_output_tokens=16,
+            purpose="consult",
+            model_ids={"claude-sonnet-4-6"},
+        )
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(payloads[0]["metadata"]["antigravity_request_timeout_seconds"], 80.0)
 
     def test_base_url_rejects_userinfo_without_echoing_secret(self) -> None:
         anti = load_anti()
