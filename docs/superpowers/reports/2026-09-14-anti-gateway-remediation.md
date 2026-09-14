@@ -388,3 +388,53 @@ Owner options: keep the fail-closed gate and do not merge/install; or separately
 authorize a new bounded experiment with a smaller synthesis payload/latency
 surface or an explicitly reviewed timeout/rotation policy change. No further
 live attempt was made in this turn.
+
+## 2026-09-14 — Current-head longer live trial
+
+The one separately authorized longer trial used the rebuilt current-head
+candidate at `af47e6c73d7000dd473730dda015865b8d2f8d85`, extracted from wheel
+SHA256
+`334d92c743fdbc90b5c134155feaf6795baf77f6ac858eda926a8b21574d8343`.
+Candidate-only import parity matched (`bundleTreeHash=treeHash=
+276d36da1b8feb4cce0d9689d925089d27858ff7319025f0f88b73a6c38b9487`). The
+helper mapping was verified as `--timeout 180 -> request/backend hint 170`.
+
+Run ID `t15-remediation-af47e6c-multichunk180` used fallback `never`, retry `0`,
+no `--allow-partial`, three real-content chunks, two panel lanes, and an Opus
+judge. All three chunks completed with HTTP 200 and exact complete coverage:
+`bytesDeclared=bytesSent=bytesReviewed=5186`, `chunksExpected=chunksCompleted=3`,
+zero failed/not-sent/omitted chunks, and source SHA256
+`480423e2c050ecab0a14f5935439c29774ad951eaf4841e20a1eac47d916fc06`.
+The intermediate review synthesis and both panel lanes also returned HTTP 200;
+request-log latencies were 19.071s, 21.155s, 15.517s, 38.633s, 26.544s, and
+30.450s respectively. No retry or fallback occurred.
+
+The final panel-synthesis stage then failed closed before sending another
+request: its exact input was 46,741 characters against the configured
+`--max-synthesis-chars 16000`. The Opus judge therefore did not run. The
+artifact is `runStatus=failed`, `scopeStatus=complete`,
+`panelStatus=partial_multi_model`, with truthful complete chunk coverage:
+
+- `/Users/reidar/.codex/anti-runs/t15-remediation-af47e6c-multichunk180/result.json`
+- `/Users/reidar/.codex/anti-runs/t15-remediation-af47e6c-multichunk180.json`
+
+This live gate is failed on final panel-synthesis budget fit, not source
+coverage, chunk identity, provider HTTP failure, or the 180-second timeout
+mapping. Per authorization, no repeat was attempted.
+
+The candidate was stopped and the old launchd service restored. Final rollback
+state is PID 16780, Python 3.10, sole listener on `127.0.0.1:51122`, and
+`/v1/models` HTTP 200. The editable launchd mapping remains the primary
+checkout `/Users/reidar/Projectos/codex-antigravity-auth` at
+`117b496db568a7c222dd1698912224c36f8264da`, not this worktree. Providers remain
+SHA256 `1959f85e8a68235ab04bb885ccb904f1eaa41c116cf81d2b193214873e416b94`.
+The post-trial canonical accounts SHA256 is
+`1250e212a8ef749a6d9619fbd375a524950f80a1b21135694e4ad8ded39ce648`; this
+current refreshed state was preserved rather than restoring the pre-trial hash.
+
+PR #27 remains draft/open. The candidate code commit `af47e6c` has green PR
+and push CI runs `34880417584` and `34880421722` across all 12 jobs; the report
+commit `164988f` is now the PR head and its fresh CI runs `34882780406` and
+`34882787612` were pending at capture time. PR #26 remains open and unchanged.
+No candidate installation, skill update, merge, close, or production-readiness
+claim was made.
