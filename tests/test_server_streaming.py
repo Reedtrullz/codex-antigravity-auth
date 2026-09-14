@@ -676,6 +676,10 @@ class TestServerStreaming(unittest.TestCase):
         backend_cancelled = asyncio.Event()
         post_count = 0
 
+        class ConnectedRequest(Request):
+            async def is_disconnected(self):
+                return False
+
         async def receive():
             return {
                 "type": "http.request",
@@ -683,7 +687,7 @@ class TestServerStreaming(unittest.TestCase):
                 "more_body": False,
             }
 
-        request = Request(
+        request = ConnectedRequest(
             {
                 "type": "http",
                 "method": "POST",
@@ -744,6 +748,10 @@ class TestServerStreaming(unittest.TestCase):
         account = {"email": "expired@example.invalid", "accessToken": "token"}
         post_count = 0
 
+        class ConnectedRequest(Request):
+            async def is_disconnected(self):
+                return False
+
         async def receive():
             return {
                 "type": "http.request",
@@ -751,7 +759,7 @@ class TestServerStreaming(unittest.TestCase):
                 "more_body": False,
             }
 
-        request = Request(
+        request = ConnectedRequest(
             {
                 "type": "http",
                 "method": "POST",
@@ -849,6 +857,10 @@ class TestServerStreaming(unittest.TestCase):
         post_count = 0
         released: list[str | None] = []
 
+        class ConnectedRequest(Request):
+            async def is_disconnected(self):
+                return False
+
         async def receive():
             return {
                 "type": "http.request",
@@ -856,7 +868,7 @@ class TestServerStreaming(unittest.TestCase):
                 "more_body": False,
             }
 
-        request = Request(
+        request = ConnectedRequest(
             {
                 "type": "http",
                 "method": "POST",
