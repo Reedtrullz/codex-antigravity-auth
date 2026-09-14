@@ -209,6 +209,12 @@ Fresh focused evidence:
 No live install, restart, canonical account-store write, push, PR, or merge has
 been performed for this remediation yet.
 
+Post-review correction commit coverage adds pre-expiry zero-POST behavior,
+rotated-lease registration before record awaits, bounded cancellation drain,
+remaining-budget diagnostics, and a blocked synchronous log-worker test. The
+authoritative suite after these corrections is `815 passed, 220 subtests, 2
+warnings`.
+
 Retained build artifacts for the candidate are in
 `/Users/reidar/.codex/antigravity-builds/anti-gateway-remediation-bea624e/`:
 

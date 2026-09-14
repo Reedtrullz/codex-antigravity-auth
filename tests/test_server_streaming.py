@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 import json
 import asyncio
+import threading
 import time
 import unittest
 import httpx
@@ -739,6 +740,108 @@ class TestServerStreaming(unittest.TestCase):
         release_mock.assert_awaited_once_with("deadline@example.invalid")
         record_mock.assert_not_awaited()
 
+    def test_google_nonstream_expired_deadline_does_not_start_provider_post(self):
+        account = {"email": "expired@example.invalid", "accessToken": "token"}
+        post_count = 0
+
+        async def receive():
+            return {
+                "type": "http.request",
+                "body": json.dumps({"model": "gemini-3.5-flash-high", "input": "hello"}).encode(),
+                "more_body": False,
+            }
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/responses",
+                "headers": [],
+                "query_string": b"",
+                "client": ("testserver", 50000),
+                "server": ("testserver", 80),
+                "scheme": "http",
+            },
+            receive,
+        )
+
+        class FakeTransport:
+            def __init__(self, **kwargs):
+                pass
+
+            async def post(self, request, lease):
+                nonlocal post_count
+                post_count += 1
+                return httpx.Response(200, json={"response": {"candidates": []}})
+
+        acquire_mock = AsyncMock(return_value=account)
+        with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
+             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.0), \
+             patch.object(server_module, "acquire_active_account_for_request", acquire_mock), \
+             patch.object(server_module, "write_request_record", lambda record: None), \
+             patch.object(server_module, "GoogleTransport", FakeTransport):
+            with self.assertRaises(HTTPException) as caught:
+                asyncio.run(create_response(request))
+
+        self.assertEqual(caught.exception.status_code, 504)
+        self.assertEqual(post_count, 0)
+        acquire_mock.assert_not_awaited()
+
+    def test_google_nonstream_rotated_lease_is_registered_before_record_failure(self):
+        first = {"email": "first-record@example.invalid", "accessToken": "token"}
+        second = {"email": "second-record@example.invalid", "accessToken": "token"}
+        accounts = iter((first, second))
+        released: list[str | None] = []
+        post_count = 0
+
+        async def receive():
+            return {
+                "type": "http.request",
+                "body": json.dumps({"model": "gemini-3.5-flash-high", "input": "hello"}).encode(),
+                "more_body": False,
+            }
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/responses",
+                "headers": [],
+                "query_string": b"",
+                "client": ("testserver", 50000),
+                "server": ("testserver", 80),
+                "scheme": "http",
+            },
+            receive,
+        )
+
+        async def get_account(*args, **kwargs):
+            return next(accounts)
+
+        class FakeTransport:
+            def __init__(self, **kwargs):
+                pass
+
+            async def post(self, request, lease):
+                nonlocal post_count
+                post_count += 1
+                raise httpx.ConnectError("fixture connection failure")
+
+        async def release(email):
+            released.append(email)
+
+        with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
+             patch.object(server_module, "acquire_active_account_for_request", get_account), \
+             patch.object(server_module, "release_account_for_request", release), \
+             patch.object(server_module, "record_attempt_outcome", AsyncMock(side_effect=RuntimeError("record failed"))), \
+             patch.object(server_module, "write_request_record", lambda record: None), \
+             patch.object(server_module, "GoogleTransport", FakeTransport):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(create_response(request))
+
+        self.assertEqual(post_count, 1)
+        self.assertEqual(released, ["first-record@example.invalid", "second-record@example.invalid"])
+
     def test_google_nonstream_rotation_uses_remaining_deadline_and_releases_late_account(self):
         first = {"email": "first-deadline@example.invalid", "accessToken": "token"}
         second = {"email": "late-deadline@example.invalid", "accessToken": "token"}
@@ -811,10 +914,11 @@ class TestServerStreaming(unittest.TestCase):
         account = {"email": "late-cancel@example.invalid", "accessToken": "token"}
         post_count = 0
         released: list[str | None] = []
+        acquire_started = asyncio.Event()
 
         class DisconnectingRequest(Request):
             async def is_disconnected(self):
-                return True
+                return acquire_started.is_set()
 
         async def receive():
             return {
@@ -838,6 +942,7 @@ class TestServerStreaming(unittest.TestCase):
         )
 
         async def get_account(*args, **kwargs):
+            acquire_started.set()
             await asyncio.sleep(0.1)
             return account
 
@@ -915,6 +1020,64 @@ class TestServerStreaming(unittest.TestCase):
 
         self.assertEqual(caught.exception.status_code, 504)
         release_mock.assert_awaited_once_with("diagnostic-failure@example.invalid")
+
+    def test_google_nonstream_blocked_sync_log_is_abandoned_at_deadline(self):
+        account = {"email": "diagnostic-hang@example.invalid", "accessToken": "token"}
+        unblock_log = threading.Event()
+
+        async def receive():
+            return {
+                "type": "http.request",
+                "body": json.dumps({"model": "gemini-3.5-flash-high", "input": "hello"}).encode(),
+                "more_body": False,
+            }
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/responses",
+                "headers": [],
+                "query_string": b"",
+                "client": ("testserver", 50000),
+                "server": ("testserver", 80),
+                "scheme": "http",
+            },
+            receive,
+        )
+
+        class FakeTransport:
+            parse_response = server_module.GoogleTransport.parse_response
+
+            def __init__(self, **kwargs):
+                pass
+
+            async def post(self, request, lease):
+                return httpx.Response(200, json={"response": {"candidates": []}})
+
+        async def get_account(*args, **kwargs):
+            return account
+
+        def blocked_log(record):
+            unblock_log.wait(5)
+
+        release_mock = AsyncMock()
+        started = time.monotonic()
+        with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
+             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.1), \
+             patch.object(server_module, "acquire_active_account_for_request", get_account), \
+             patch.object(server_module, "release_account_for_request", release_mock), \
+             patch.object(server_module, "record_attempt_outcome", AsyncMock()), \
+             patch.object(server_module, "write_request_record", blocked_log), \
+             patch.object(server_module, "GoogleTransport", FakeTransport):
+            with self.assertRaises(HTTPException) as caught:
+                asyncio.run(create_response(request))
+        elapsed = time.monotonic() - started
+        unblock_log.set()
+
+        self.assertEqual(caught.exception.status_code, 504)
+        self.assertLess(elapsed, 1.0)
+        release_mock.assert_awaited_once_with("diagnostic-hang@example.invalid")
 
     def test_google_request_log_records_terminal_attempt_rotation_and_usage(self):
         first = {"email": "first@gmail.com", "accessToken": "first-token"}

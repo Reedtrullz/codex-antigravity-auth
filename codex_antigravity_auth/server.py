@@ -257,7 +257,11 @@ async def acquire_active_account_for_request(model: str) -> dict | None:
 
 
 async def release_account_for_request(email: str | None) -> None:
-    await run_in_threadpool(account_manager.release_account, email)
+    await anyio.to_thread.run_sync(
+        account_manager.release_account,
+        email,
+        abandon_on_cancel=True,
+    )
 
 
 async def record_attempt_outcome(
@@ -269,16 +273,18 @@ async def record_attempt_outcome(
     usage: dict | None = None,
     error_class: str | None = None,
 ) -> None:
-    await run_in_threadpool(
-        account_manager.record_attempt,
-        email,
-        model,
-        outcome,
-        status_code=status_code,
-        error_class=(
-            None if outcome.category == "success" else (error_class or outcome.category)
+    await anyio.to_thread.run_sync(
+        lambda: account_manager.record_attempt(
+            email,
+            model,
+            outcome,
+            status_code=status_code,
+            error_class=(
+                None if outcome.category == "success" else (error_class or outcome.category)
+            ),
+            usage=usage,
         ),
-        usage=usage,
+        abandon_on_cancel=True,
     )
 
 
@@ -1072,6 +1078,7 @@ async def create_response(request: Request):
     request_id = f"req_{secrets.token_hex(8)}"
     request_started = time.monotonic()
     request_run_id: str | None = None
+    diagnostic_deadline: float | None = None
 
     async def log_request(
         status: str,
@@ -1121,11 +1128,30 @@ async def create_response(request: Request):
             "outcome_category": outcome_category,
             "cancelled": cancelled,
         }
-        await run_in_threadpool(write_request_record, record)
-
-    async def best_effort_diagnostic(awaitable) -> None:
+        if diagnostic_deadline is None:
+            await run_in_threadpool(write_request_record, record)
+            return
+        remaining = diagnostic_deadline - time.monotonic()
+        if remaining <= 0:
+            raise RequestDeadlineExceeded()
         try:
-            with anyio.fail_after(2.0):
+            with anyio.fail_after(min(2.0, remaining)):
+                await anyio.to_thread.run_sync(
+                    write_request_record,
+                    record,
+                    abandon_on_cancel=True,
+                )
+        except TimeoutError as exc:
+            raise RequestDeadlineExceeded() from exc
+
+    async def best_effort_diagnostic(awaitable, *, deadline: float | None = None) -> None:
+        timeout = 2.0
+        if deadline is not None:
+            timeout = min(timeout, max(0.0, deadline - time.monotonic()))
+        if timeout <= 0:
+            return
+        try:
+            with anyio.fail_after(timeout):
                 await awaitable
         except Exception:
             pass
@@ -1518,17 +1544,12 @@ async def create_response(request: Request):
     # 1. Select account automatically from pool
     family = native_model_family(model)
     operation_deadline = time.monotonic() + google_request_timeout_from_metadata(request_metadata)
+    diagnostic_deadline = operation_deadline if not stream else None
 
     async def wait_for_disconnect() -> bool:
         while True:
-            try:
-                if await asyncio.wait_for(
-                    request.is_disconnected(),
-                    timeout=CLIENT_DISCONNECT_POLL_SECONDS,
-                ):
-                    return True
-            except asyncio.TimeoutError:
-                pass
+            if await request_disconnected_now():
+                return True
             await asyncio.sleep(CLIENT_DISCONNECT_POLL_SECONDS)
 
     def release_late_account(task: asyncio.Task) -> None:
@@ -1548,8 +1569,21 @@ async def create_response(request: Request):
 
         asyncio.create_task(cleanup())
 
-    async def run_bounded_operation(awaitable, *, release_late_result: bool = False):
-        operation_task = asyncio.create_task(awaitable)
+    async def request_disconnected_now() -> bool:
+        try:
+            return await asyncio.wait_for(
+                request.is_disconnected(),
+                timeout=CLIENT_DISCONNECT_POLL_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return False
+
+    async def run_bounded_operation(operation_factory, *, release_late_result: bool = False):
+        if await request_disconnected_now():
+            raise ClientDisconnect()
+        if time.monotonic() >= operation_deadline:
+            raise RequestDeadlineExceeded()
+        operation_task = asyncio.create_task(operation_factory())
         disconnect_task = asyncio.create_task(wait_for_disconnect())
         deadline_task = asyncio.create_task(
             asyncio.sleep(max(0.0, operation_deadline - time.monotonic()))
@@ -1563,8 +1597,13 @@ async def create_response(request: Request):
                 operation_task.add_done_callback(release_late_account)
                 return
             operation_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await operation_task
+            try:
+                await asyncio.wait_for(asyncio.shield(operation_task), timeout=0.2)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                if not operation_task.done():
+                    operation_task.add_done_callback(
+                        lambda task: task.exception() if not task.cancelled() else None
+                    )
 
         try:
             done, _ = await asyncio.wait(
@@ -1595,7 +1634,7 @@ async def create_response(request: Request):
     else:
         try:
             account = await run_bounded_operation(
-                acquire_active_account_for_request(model),
+                lambda: acquire_active_account_for_request(model),
                 release_late_result=True,
             )
         except ClientDisconnect:
@@ -1680,7 +1719,10 @@ async def create_response(request: Request):
             raise
 
     async def request_backend_with_boundary(selected_account: dict) -> httpx.Response | None:
-        return await run_bounded_operation(request_backend(selected_account))
+        return await run_bounded_operation(lambda: request_backend(selected_account))
+
+    async def run_nonstream_diagnostic(function, *args, **kwargs):
+        return await run_bounded_operation(lambda: function(*args, **kwargs))
 
     # Handle standard non-streaming response path
     if not stream:
@@ -1693,24 +1735,27 @@ async def create_response(request: Request):
             res = await request_backend_with_boundary(response_account)
             if not res:
                 new_account = await run_bounded_operation(
-                    acquire_active_account_for_request(model),
+                    lambda: acquire_active_account_for_request(model),
                     release_late_result=True,
                 )
                 rotation_attempted = True
                 if new_account:
-                    await record_attempt_outcome(
-                        response_account.get("email", ""),
+                    previous_account = response_account
+                    response_attempts.append(new_account)
+                    response_account = new_account
+                    await run_nonstream_diagnostic(
+                        record_attempt_outcome,
+                        previous_account.get("email", ""),
                         model,
                         AttemptOutcome(scope="none", category="transport"),
                         status_code=502,
                         error_class="connection_error",
                     )
-                    response_attempts.append(new_account)
-                    response_account = new_account
                     res = await request_backend_with_boundary(response_account)
 
             if not res:
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     AttemptOutcome(scope="none", category="transport"),
@@ -1747,7 +1792,8 @@ async def create_response(request: Request):
                 is_validation = is_validation_required_error(res.status_code, res.text)
                 cooldown_scope = "family" if error_category == "rate_limit" else "account"
                 cooldown_category = error_category
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     AttemptOutcome(
@@ -1759,7 +1805,7 @@ async def create_response(request: Request):
                     error_class="validation_required" if is_validation else None,
                 )
                 new_account = await run_bounded_operation(
-                    acquire_active_account_for_request(model),
+                    lambda: acquire_active_account_for_request(model),
                     release_late_result=True,
                 )
                 rotation_attempted = True
@@ -1768,7 +1814,8 @@ async def create_response(request: Request):
                     response_account = new_account
                     res = await request_backend_with_boundary(response_account)
                 if not res:
-                    await record_attempt_outcome(
+                    await run_nonstream_diagnostic(
+                        record_attempt_outcome,
                         response_account.get("email", ""),
                         model,
                         AttemptOutcome(scope="none", category="transport"),
@@ -1804,7 +1851,8 @@ async def create_response(request: Request):
                 retry_after_source = retry_after_source_from_response(res)
                 is_validation = is_validation_required_error(res.status_code, res.text)
                 error_class = "validation_required" if is_validation else "auth_failure"
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     outcome_for_http_status(res.status_code),
@@ -1845,7 +1893,8 @@ async def create_response(request: Request):
             if res.status_code == 429:
                 retry_after_seconds = retry_after_seconds_from_response(res)
                 retry_after_source = retry_after_source_from_response(res)
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     outcome_for_http_status(429),
@@ -1876,7 +1925,8 @@ async def create_response(request: Request):
                 )
 
             if res.status_code != 200:
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     outcome_for_http_status(res.status_code),
@@ -1913,7 +1963,8 @@ async def create_response(request: Request):
                 backend_error = backend_error_from_payload(gemini_resp)
                 if backend_error:
                     code, message = backend_error
-                    await record_attempt_outcome(
+                    await run_nonstream_diagnostic(
+                        record_attempt_outcome,
                         response_account.get("email", ""),
                         model,
                         outcome_for_backend_error(code, message),
@@ -1947,7 +1998,8 @@ async def create_response(request: Request):
                     created_at=int(time.time()),
                 )
                 request_succeeded = provider_result.terminal.kind is not TerminalKind.FAILED
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     AttemptOutcome(
@@ -1981,7 +2033,8 @@ async def create_response(request: Request):
             except HTTPException:
                 raise
             except Exception as e:
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     AttemptOutcome(scope="none", category="transport"),
