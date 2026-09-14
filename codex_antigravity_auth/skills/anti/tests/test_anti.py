@@ -4154,6 +4154,69 @@ class BugfixRegressionTests(unittest.TestCase):
 class ScopeIntegrityContractTests(unittest.TestCase):
     """Regression coverage for the 2026-09-14 scope-integrity report."""
 
+    def test_staged_git_scope_is_nul_safe_and_includes_deletions_renames(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-git-scope-") as tmp:
+            root = Path(tmp)
+
+            def git(*args: str) -> None:
+                subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+
+            git("init", "-q")
+            git("config", "user.name", "Anti fixture")
+            git("config", "user.email", "anti-fixture@example.invalid")
+            names = ["keep.py", "deleted.py", "føø.py", "space name.py", "line\nname.py", "rename-old.py"]
+            for name in names:
+                (root / name).write_text("VALUE = 1\n", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            (root / "keep.py").write_text("VALUE = 2\n", encoding="utf-8")
+            (root / "deleted.py").unlink()
+            (root / "føø.py").write_text("VALUE = 2\n", encoding="utf-8")
+            (root / "space name.py").write_text("VALUE = 2\n", encoding="utf-8")
+            (root / "line\nname.py").write_text("VALUE = 2\n", encoding="utf-8")
+            git("mv", "rename-old.py", "rename-new.py")
+            git("add", "-A")
+
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                args = anti.build_parser().parse_args(["review", "--scope", "staged"])
+                context = anti.collect_review_context(args)
+            finally:
+                os.chdir(old_cwd)
+
+        paths = set(context["paths"])
+        self.assertTrue({"keep.py", "deleted.py", "føø.py", "space name.py", "line\nname.py"} <= paths)
+        self.assertTrue({"rename-old.py", "rename-new.py"} <= paths)
+        self.assertIn("deleted.py", context["diff"])
+        self.assertIn("føø.py", context["diff"])
+        self.assertTrue(any(record["path"] == "deleted.py" for record in context["file_records"]))
+
+    def test_review_context_uses_one_source_snapshot(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-snapshot-") as tmp:
+            root = Path(tmp)
+            path = root / "fixture.py"
+            path.write_text("BEFORE\n", encoding="utf-8")
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                args = anti.build_parser().parse_args(["review", "--scope", "files", "--file", "fixture.py"])
+                context = anti.collect_review_context(args)
+                path.write_text("AFTER\n", encoding="utf-8")
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(context["file_texts"], [("fixture.py", "BEFORE\n")])
+        self.assertEqual(context["file_records"][0]["sha256"], __import__("hashlib").sha256(b"BEFORE\n").hexdigest())
+
     def test_file_manifest_records_content_coverage_and_hash(self) -> None:
         anti = load_anti()
         with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:

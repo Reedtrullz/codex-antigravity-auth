@@ -1740,6 +1740,24 @@ def run_git(root: Path, args: list[str], *, check: bool = True) -> str:
     return proc.stdout
 
 
+def run_git_bytes(root: Path, args: list[str], *, check: bool = True) -> bytes:
+    """Run Git without decoding path bytes through its quoted text format."""
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            timeout=60,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.TimeoutExpired:
+        raise AntiError(f"git {' '.join(args)} timed out after 60s")
+    if check and proc.returncode != 0:
+        error = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise AntiError(error or f"git {' '.join(args)} failed")
+    return proc.stdout
+
+
 def path_is_excluded(rel_path: str) -> bool:
     path = rel_path.replace("\\", "/")
     path_lower = path.lower()
@@ -1844,33 +1862,55 @@ def changed_paths(
 ) -> tuple[list[str], list[str]]:
     if selected:
         return filter_paths(selected, root=root)
+    diff_args: list[str]
     if scope == "staged":
-        raw = run_git(root, ["diff", "--cached", "--name-only", "--diff-filter=ACMRT"])
+        diff_args = ["diff", "--cached"]
     elif scope == "working-tree":
-        raw = run_git(root, ["diff", "HEAD", "--name-only", "--diff-filter=ACMRT"])
+        diff_args = ["diff", "HEAD"]
     elif scope == "diff":
         if not rev_range:
             raise AntiError("--scope diff requires --base or --changed-files")
         rev_range = validate_git_rev_range(rev_range, source="revision range")
-        raw = run_git(root, ["diff", "--name-only", "--diff-filter=ACMRT", rev_range])
+        diff_args = ["diff", rev_range]
     elif scope == "files":
         raise AntiError("--scope files requires at least one --file")
     else:
         raise AntiError(f"unsupported review scope: {scope}")
-    return filter_paths(raw.splitlines(), root=root)
+    raw = run_git_bytes(
+        root,
+        [*diff_args, "--name-status", "--diff-filter=ACMRTD", "-z"],
+    )
+    fields = raw.split(b"\0")
+    names: list[str] = []
+    index = 0
+    while index < len(fields) - 1:
+        status = fields[index].decode("ascii", errors="replace")
+        index += 1
+        if not status:
+            continue
+        count = 2 if status.startswith(("R", "C")) else 1
+        for _ in range(count):
+            if index >= len(fields):
+                break
+            try:
+                names.append(fields[index].decode("utf-8"))
+            except UnicodeDecodeError as exc:
+                raise AntiError("git returned a non-UTF-8 changed path") from exc
+            index += 1
+    return filter_paths(names, root=root)
 
 
 def diff_for_paths(root: Path, scope: str, paths: list[str], *, rev_range: str | None = None) -> str:
     if not paths or scope == "files":
         return ""
     if scope == "staged":
-        return run_git(root, ["diff", "--cached", "--no-ext-diff", "--", *paths], check=False)
+        return run_git(root, ["-c", "core.quotePath=false", "diff", "--cached", "--no-ext-diff", "--", *paths], check=False)
     if scope == "diff":
         if not rev_range:
             raise AntiError("--scope diff requires --base or --changed-files")
         rev_range = validate_git_rev_range(rev_range, source="revision range")
-        return run_git(root, ["diff", "--no-ext-diff", rev_range, "--", *paths], check=False)
-    return run_git(root, ["diff", "HEAD", "--no-ext-diff", "--", *paths], check=False)
+        return run_git(root, ["-c", "core.quotePath=false", "diff", "--no-ext-diff", rev_range, "--", *paths], check=False)
+    return run_git(root, ["-c", "core.quotePath=false", "diff", "HEAD", "--no-ext-diff", "--", *paths], check=False)
 
 
 def file_is_tracked(root: Path, rel_path: str) -> bool:
@@ -1897,7 +1937,19 @@ def read_text_file(
     path = root / rel_path
     if not path.is_file():
         return "", f"{rel_path}: not a regular file"
-    raw = path.read_bytes()
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return "", f"{rel_path}: {exc}"
+    return decode_source_bytes(rel_path, raw, truncate=truncate)
+
+
+def decode_source_bytes(
+    rel_path: str,
+    raw: bytes,
+    *,
+    truncate: bool = True,
+) -> tuple[str, str | None]:
     if b"\0" in raw:
         return "", f"{rel_path}: binary file skipped"
     note = None
@@ -1929,23 +1981,25 @@ def file_coverage_record(
     note: str | None,
     *,
     source_kind: str = "file",
+    raw: bytes | None = None,
 ) -> dict[str, Any]:
     """Describe the exact source bytes available to the review planner."""
-    path = root / rel_path
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        return {
-            "path": rel_path,
-            "sha256": None,
-            "bytesDeclared": 0,
-            "bytesSent": 0,
-            "chunksExpected": 0,
-            "chunksSent": 0,
-            "contentStatus": "omitted",
-            "reason": str(exc),
-            "sourceKind": source_kind,
-        }
+    if raw is None:
+        path = root / rel_path
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            return {
+                "path": rel_path,
+                "sha256": None,
+                "bytesDeclared": 0,
+                "bytesSent": 0,
+                "chunksExpected": 0,
+                "chunksSent": 0,
+                "contentStatus": "omitted",
+                "reason": str(exc),
+                "sourceKind": source_kind,
+            }
     status = "complete"
     if note:
         status = "omitted" if any(word in note.lower() for word in ("binary", "non-utf", "not a regular")) else "truncated"
@@ -2404,11 +2458,39 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
         if include_file_text or not file_is_tracked(root, rel):
             # Review planning must chunk the complete source from disk. The
             # smaller read limit remains for consult/plan pre-reads.
-            text, note = read_text_file(root, rel, truncate=False)
+            path = root / rel
+            try:
+                raw = path.read_bytes()
+                text, note = decode_source_bytes(rel, raw, truncate=False)
+            except OSError as exc:
+                raw = None
+                text, note = "", f"{rel}: {exc}"
             if note:
                 notes.append(note)
             file_texts.append((rel, text))
-            file_records.append(file_coverage_record(root, rel, text, note))
+            file_records.append(file_coverage_record(root, rel, text, note, raw=raw))
+
+    # A diff is the selected review payload for tracked changes. Keep every
+    # path in the manifest, including deletions and renames, without rereading
+    # a possibly changed working tree as source evidence.
+    recorded_paths = {str(record.get("path")) for record in file_records}
+    if args.scope != "files":
+        for rel in paths:
+            if rel in recorded_paths:
+                continue
+            file_records.append(
+                {
+                    "path": rel,
+                    "sha256": None,
+                    "bytesDeclared": 0,
+                    "bytesSent": 0,
+                    "chunksExpected": 0,
+                    "chunksSent": 0,
+                    "contentStatus": "complete" if diff else "omitted",
+                    "reason": "selected diff payload captured once" if diff else "no diff payload",
+                    "sourceKind": "diff",
+                }
+            )
 
     scope_line = args.scope
     if rev_range:
