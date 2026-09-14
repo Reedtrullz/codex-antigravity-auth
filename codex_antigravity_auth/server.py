@@ -1633,7 +1633,8 @@ async def create_response(request: Request):
         finally:
             disconnect_stop.set()
             await drain_task(disconnect_task, 0.2, cancel=True)
-            await drain_task(deadline_task, 0.2, cancel=True)
+            deadline_task.cancel()
+            await drain_task(deadline_task, 0.2)
             if not operation_task.done() and not abandoned:
                 await abandon_operation()
 
