@@ -223,3 +223,26 @@ Retained build artifacts for the candidate are in
 
 - wheel SHA256 `c7199ab919437c6b049b1b925d1601014fdc7d87e13cd6f1aff92d8a0bdb5b60`;
 - source distribution SHA256 `551c50fb1aebf47819cc9c7ffc7d5ea21ea6709854141056eaf4ca3bedcd9ddf`.
+
+## Final offline gate and retained candidate
+
+The final source candidate is `e01e118102f32a529e3e898bd3bce896b46441a9`.
+Both fresh CI workflows passed all 12 jobs: PR run `34874242908` and push run
+`34874237839` (Ubuntu Python 3.10, 3.11, 3.12, 3.14; Windows Python 3.12;
+package). The coordinator account-module rerun was `42 passed, 4 subtests` in
+1.49 seconds. The authoritative local suite remains `816 passed, 220
+subtests, 2 warnings`.
+
+The retained candidate was rebuilt from the e01e118 source into
+`/Users/reidar/.codex/antigravity-builds/anti-gateway-remediation-e01e118/`:
+
+- wheel SHA256 `3f8a70e790763a2e1a05c83af8db6601486e956dfcff92663a2679930c2e3889`;
+- source distribution SHA256 `2829610aecf2a10005c2483bc7a84a44d5ce4034293f39d04e1dfd5de9e06160`;
+- artifact import identity: Python `/Users/reidar/.codex/worktrees/dfb9/codex-antigravity-auth/.venv/bin/python`, package version `2.2.0`, imported package/server/Anti helper from the extracted retained wheel;
+- extracted `server.py` SHA256 `c3567ba9806ebece827274c71f74006cb9ae06b946af40abd6d81592447c4fcc`;
+- extracted Anti helper SHA256 `c7e0eb32d8e81c86726d9253e3c941e55cb341762522fe9ca139b77374f3af6c`.
+
+Offline gate status: clear. The authorized next gate is a reversible single-writer
+live candidate trial with preserved canonical refreshed state, Sonnet + Opus +
+judge, and representative multi-chunk acceptance. Merge remains blocked until
+that live gate passes.
