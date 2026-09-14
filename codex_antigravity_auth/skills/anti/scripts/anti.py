@@ -657,7 +657,8 @@ def write_run_record(
             record["output_text"] = output_text
     elif output_mode == "full":
         if prompt_text is not None:
-            record["prompt_text"] = prompt_text
+            record["prompt_sha256"] = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+            record["prompt_chars"] = len(prompt_text)
         if output_text is not None:
             record["output_text"] = output_text
         if execution_ledger is not None:
@@ -3130,7 +3131,7 @@ def run_chunked_review(
             record["bytesSent"] = sum(
                 int(planned_chunk.get("metadata", {}).get("source_bytes", {}).get(path, 0) or 0)
                 for item, planned_chunk in zip(chunk_generation, chunks)
-                if item.get("status") != "not_sent"
+                if item.get("submitted") is True
             )
             record["bytesReviewed"] = sum(
                 int(planned_chunk.get("metadata", {}).get("source_bytes", {}).get(path, 0) or 0)
@@ -3170,6 +3171,7 @@ def run_chunked_review(
                     "id": chunk.get("id"),
                     "model_used": model,
                     "status": "failed",
+                    "submitted": bool(getattr(exc, "submitted", False)),
                     "error": str(exc),
                 }
             )
@@ -3200,6 +3202,7 @@ def run_chunked_review(
                 "id": chunk.get("id"),
                 "model_used": chunk_model,
                 "status": chunk_status,
+                "submitted": True,
                 **generation_metadata,
             }
         )
@@ -3519,6 +3522,30 @@ def run_chunked_plan(
     incomplete_chunks: list[int] = []
     sent_chunk_prompt_chars: list[int] = []
     execution_ledger: list[dict[str, Any]] = []
+
+    def plan_failure_metadata(
+        error: str,
+        *,
+        failed_chunk: int | None = None,
+        synthesis_status: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "chunked": True,
+            "planned_chunk_count": planned_chunk_count,
+            "completed_chunk_count": sum(
+                1 for item in chunk_generation if item.get("status") == "success"
+            ),
+            "failed_chunk_count": len(incomplete_chunks),
+            "not_sent_chunk_count": max(0, planned_chunk_count - len(chunk_generation) - (1 if failed_chunk else 0)),
+            "chunk_generation": chunk_generation,
+            "synthesis_status": synthesis_status,
+            "failed_chunk": failed_chunk,
+            "_execution_ledger": execution_ledger,
+            "status": "partial",
+            "scope_status": "partial",
+            "error": error,
+        }
+
     for index, chunk in enumerate(prompt_chunks, start=1):
         chunk_prompt = "\n\n".join(
             [
@@ -3543,20 +3570,7 @@ def run_chunked_plan(
             )
         except AntiError as exc:
             incomplete_chunks.append(index)
-            exc.run_metadata = {
-                "chunked": True,
-                "planned_chunk_count": planned_chunk_count,
-                "completed_chunk_count": sum(
-                    1 for item in chunk_generation if item.get("status") == "success"
-                ),
-                "failed_chunk_count": len(incomplete_chunks),
-                "not_sent_chunk_count": max(0, planned_chunk_count - len(chunk_generation) - 1),
-                "chunk_generation": chunk_generation,
-                "_execution_ledger": execution_ledger,
-                "status": "partial",
-                "scope_status": "partial",
-                "error": str(exc),
-            }  # type: ignore[attr-defined]
+            exc.run_metadata = plan_failure_metadata(str(exc), failed_chunk=index)  # type: ignore[attr-defined]
             raise
         chunk_status = lane_output_status(
             text,
@@ -3567,7 +3581,7 @@ def run_chunked_plan(
         if chunk_status != "success":
             incomplete_chunks.append(index)
         chunk_outputs.append(text)
-        chunk_generation.append({"index": index, "model_used": model_used, "status": chunk_status, **generation_metadata})
+        chunk_generation.append({"index": index, "model_used": model_used, "status": chunk_status, "submitted": True, **generation_metadata})
         execution_ledger.append(
             execution_entry(
                 stage=f"plan_chunk_{index}",
@@ -3591,10 +3605,13 @@ def run_chunked_plan(
     )
     synthesis_caveats: list[str] = []
     if args.max_synthesis_chars > 0 and len(synthesis_prompt) > args.max_synthesis_chars:
-        raise AntiError(
+        error = (
             f"plan synthesis requires {len(synthesis_prompt)} characters but the exact budget is "
             f"{args.max_synthesis_chars}; narrow the prompt, raise --max-synthesis-chars, or allow more chunks"
         )
+        failure = AntiError(error)
+        failure.run_metadata = plan_failure_metadata(error, synthesis_status="not_sent")  # type: ignore[attr-defined]
+        raise failure
     caveats = [*caveats, *synthesis_caveats]
     try:
         text, synthesis_model, synthesis_generation = generate_with_fallback(
@@ -3605,20 +3622,7 @@ def run_chunked_plan(
             purpose="plan synthesis",
         )
     except AntiError as exc:
-        exc.run_metadata = {
-            "chunked": True,
-            "planned_chunk_count": planned_chunk_count,
-            "completed_chunk_count": sum(
-                1 for item in chunk_generation if item.get("status") == "success"
-            ),
-            "failed_chunk_count": len(incomplete_chunks),
-            "not_sent_chunk_count": max(0, planned_chunk_count - len(prompt_chunks)),
-            "chunk_generation": chunk_generation,
-            "_execution_ledger": execution_ledger,
-            "status": "partial",
-            "scope_status": "partial",
-            "error": str(exc),
-        }  # type: ignore[attr-defined]
+        exc.run_metadata = plan_failure_metadata(str(exc), synthesis_status="failed")  # type: ignore[attr-defined]
         raise
     synthesis_status = lane_output_status(
         text,
@@ -3627,11 +3631,13 @@ def run_chunked_plan(
         synthesis_generation,
     )
     if synthesis_status != "success":
-        incomplete_chunks.append(0)
         if not getattr(args, "allow_partial", False):
-            raise AntiError(
+            error = (
                 f"plan synthesis output was {synthesis_status}; pass --allow-partial to continue with an explicitly partial result"
             )
+            failure = AntiError(error)
+            failure.run_metadata = plan_failure_metadata(error, synthesis_status=synthesis_status)  # type: ignore[attr-defined]
+            raise failure
     execution_ledger.append(
         execution_entry(
             stage="plan_synthesis",
@@ -3652,8 +3658,8 @@ def run_chunked_plan(
         "synthesis_model_used": synthesis_model,
         "synthesis_generation": synthesis_generation,
         "prompt_budget_chars": max_prompt_chars,
-        "status": "partial" if planned_chunk_count > len(prompt_chunks) or incomplete_chunks else "complete",
-        "scope_status": "partial" if planned_chunk_count > len(prompt_chunks) or incomplete_chunks else "complete",
+        "status": "partial" if planned_chunk_count > len(prompt_chunks) or incomplete_chunks or synthesis_status != "success" else "complete",
+        "scope_status": "partial" if planned_chunk_count > len(prompt_chunks) or incomplete_chunks or synthesis_status != "success" else "complete",
         "planned_chunk_count": planned_chunk_count,
         "completed_chunk_count": sum(1 for item in chunk_generation if item.get("status") == "success"),
         "failed_chunk_count": len(incomplete_chunks),
@@ -4234,19 +4240,20 @@ def enrich_finding_provenance(
     for chunk in metadata.get("chunk_prompts", []):
         if not isinstance(chunk, dict) or not chunk.get("id"):
             continue
-        label = str(chunk.get("label") or "")
         ranges = chunk.get("source_ranges") or {}
-        for item in label.split(", "):
-            path = CHUNK_PART_SUFFIX_RE.sub("", item)
-            if path:
-                range_info = ranges.get(path) if isinstance(ranges, dict) else None
-                actual_chunks.setdefault(path, []).append(
-                    (
-                        str(chunk["id"]),
-                        range_info.get("lineStart") if isinstance(range_info, dict) else None,
-                        range_info.get("lineEnd") if isinstance(range_info, dict) else None,
-                    )
-                )
+        # The structured manifest is authoritative; labels are display text
+        # and cannot be split safely when a filename contains `, `.
+        if not isinstance(ranges, dict):
+            continue
+        for raw_path, range_info in ranges.items():
+            path = CHUNK_PART_SUFFIX_RE.sub("", str(raw_path))
+            if not path or not isinstance(range_info, dict):
+                continue
+            line_start = range_info.get("lineStart")
+            line_end = range_info.get("lineEnd")
+            if not isinstance(line_start, int) or not isinstance(line_end, int):
+                continue
+            actual_chunks.setdefault(path, []).append((str(chunk["id"]), line_start, line_end))
     for finding in findings["findings"]:
         if not isinstance(finding, dict):
             continue
@@ -4268,16 +4275,6 @@ def enrich_finding_provenance(
             finding["verificationStatus"] = "needs-runtime-check"
         else:
             finding["verificationStatus"] = "unverified"
-        if str(finding.get("file")) in actual_chunks:
-            line_hint = finding.get("line")
-            matching = [
-                chunk_id
-                for chunk_id, line_start, line_end in actual_chunks[str(finding.get("file"))]
-                if not isinstance(line_hint, int) or line_start is None or line_end is None
-                or line_start <= line_hint <= line_end
-            ]
-            if matching:
-                finding["chunkId"] = matching[0]
         line = finding.get("line")
         rel_path = finding.get("file")
         if isinstance(line, int) and line > 0 and isinstance(rel_path, str) and record:
@@ -4291,7 +4288,19 @@ def enrich_finding_provenance(
             else:
                 finding["line"] = None
         else:
+            finding["line"] = None
             finding["excerptSha256"] = None
+        # Match only after the snapshot-backed line has been validated.  An
+        # unknown line must not wildcard-match a chunk.
+        line = finding.get("line")
+        if isinstance(line, int) and str(finding.get("file")) in actual_chunks:
+            matching = [
+                chunk_id
+                for chunk_id, line_start, line_end in actual_chunks[str(finding.get("file"))]
+                if line_start <= line <= line_end
+            ]
+            if matching:
+                finding["chunkId"] = matching[0]
     return findings
 
 
@@ -5922,8 +5931,11 @@ def command_panel(args: argparse.Namespace) -> int:
         if integrity_notice and integrity_notice not in caveats:
             caveats.append(integrity_notice)
 
+    judge_call_prompts: list[str] = []
+    judge_call_outputs: list[str] = []
+
     def run_judge(prompt: str, max_output_tokens: int) -> tuple[str, str, dict[str, Any]]:
-        return generate_with_fallback(
+        result = generate_with_fallback(
             args,
             model=judge_model,
             prompt=prompt,
@@ -5931,6 +5943,9 @@ def command_panel(args: argparse.Namespace) -> int:
             model_ids=model_ids,
             purpose="panel judge",
         )
+        judge_call_prompts.append(prompt)
+        judge_call_outputs.append(result[0])
+        return result
 
     judge_cap = args.judge_output_tokens
     judge_estimate = estimate_call_cost(judge_model, len(synthesis_prompt), judge_cap)
@@ -6189,15 +6204,16 @@ def command_panel(args: argparse.Namespace) -> int:
                 generation=result.get("generation") if isinstance(result.get("generation"), dict) else {},
             )
         )
-    execution_ledger.append(
-        execution_entry(
-            stage="panel_judge",
-            prompt=prompt,
-            output=judge_text,
-            model=str(judge_model_used),
-            generation=judge_generation,
+    for index, (attempt, call_prompt) in enumerate(zip(judge_attempts, judge_call_prompts), start=1):
+        execution_ledger.append(
+            execution_entry(
+                stage=f"panel_judge_{index}",
+                prompt=call_prompt,
+                output=judge_call_outputs[index - 1],
+                model=str(judge_model_used),
+                generation=attempt,
+            )
         )
-    )
     metadata.pop("_review_context", None)
     write_run_record(
         args,

@@ -1445,11 +1445,15 @@ class AntiHelperTests(unittest.TestCase):
             self.assertEqual(rc, 1, output.getvalue())
             record = json.loads(next(Path(tmp).glob("*.json")).read_text(encoding="utf-8"))
             ledger = record["execution_ledger"]
-            self.assertEqual([entry["prompt"] for entry in ledger], calls)
+            self.assertEqual(
+                [entry["promptSha256"] for entry in ledger],
+                [hashlib.sha256(prompt.encode("utf-8")).hexdigest() for prompt in calls],
+            )
+            self.assertTrue(all("prompt" not in entry for entry in ledger))
             self.assertEqual([entry["stage"] for entry in ledger], ["plan_chunk_1", "plan_chunk_2", "plan_synthesis"])
             self.assertEqual(record["id"], "deterministic-run-7")
             self.assertEqual(record["metadata"]["request_log_correlation_id"], "deterministic-run-7")
-            self.assertNotEqual(record["prompt_text"], ("x" * 1800))
+            self.assertNotIn("prompt_text", record)
 
     def test_default_claude_plan_auto_chunks_before_large_single_call(self) -> None:
         anti = load_anti()
@@ -4650,6 +4654,38 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertIsNone(result["findings"][0]["line"])
         self.assertIsNone(result["findings"][0]["excerptSha256"])
         self.assertEqual(result["findings"][1]["excerptSha256"], hashlib.sha256(b"one").hexdigest())
+
+    def test_enrich_finding_provenance_uses_structured_ranges_for_comma_path(self) -> None:
+        anti = load_anti()
+        findings = {"findings": [{"file": "a, b.py", "line": 1}]}
+        result = anti.enrich_finding_provenance(findings, {
+            "sourceCommit": "commit-1",
+            "scopeStatus": "complete",
+            "coverage": [{"path": "a, b.py", "contentStatus": "complete"}],
+            "chunk_prompts": [{
+                "id": "chunk-real",
+                "label": "a, b.py",
+                "source_ranges": {"a, b.py": {"lineStart": 1, "lineEnd": 1}},
+            }],
+            "_review_context": {"file_texts": [("a, b.py", "one\n")]},
+        })
+        assert result is not None
+        self.assertEqual(result["findings"][0]["chunkId"], "chunk-real")
+
+    def test_enrich_finding_provenance_does_not_wildcard_chunk_without_range(self) -> None:
+        anti = load_anti()
+        result = anti.enrich_finding_provenance(
+            {"findings": [{"file": "a.py", "line": 99}]},
+            {
+                "sourceCommit": "commit-1",
+                "scopeStatus": "complete",
+                "coverage": [{"path": "a.py", "contentStatus": "complete"}],
+                "chunk_prompts": [{"id": "chunk-real", "label": "a.py"}],
+                "_review_context": {"file_texts": [("a.py", "one\n")]},
+            },
+        )
+        assert result is not None
+        self.assertIsNone(result["findings"][0]["chunkId"])
 
     def test_plan_chunked_off_refuses_before_provider_call(self) -> None:
         anti = load_anti()
