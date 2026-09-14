@@ -556,3 +556,38 @@ present, `judge_input_status=complete`, no lossy lanes, and prompt length below
 `AntiError` rather than silent lane compaction. A separate small test should
 document that `retry=0` still permits the existing non-answer logical second
 attempt, while a judge parse-success path has exactly one judge call.
+
+## 2026-09-14 — Offline shared-boundary remediation checkpoint
+
+Commit `dee9b8a` fixes both confirmed local content-loss boundaries in the Anti
+panel path. `build_panel_synthesis_prompt` no longer applies the fixed 8,000
+character lane-material compaction. Complete successful or upstream-truncated
+lane material is retained until the existing assembled judge-prompt
+`max_chars` guard; an over-budget complete prompt fails closed. The chunked
+review fan-out boundary likewise no longer silently compacts a complete review
+summary: when the exact configured fan-out budget is too small, it raises before
+any panel lane call with `summary_input_status=not_sent`,
+`summary_input_lossy=false`, and truthful scope/status metadata.
+
+Deterministic regressions cover: a >8,000-character lane tail preserved when a
+64,000-character synthesis budget fits; a >9,000-character summary preserved
+through the actual panel path at a 12,000-character fan-out budget; rejection of
+the same summary at a 3,000-character budget with zero provider calls; and the
+existing incomplete/non-answer/truncated metadata contracts. The retry
+regression explicitly records that `--retry 0` means zero provider retries but
+does not disable Anti's existing second logical attempt after a non-answer.
+
+Evidence from this checkpoint:
+
+- Anti helper suite: `205 passed, 9 subtests`.
+- Authoritative repository suite: `823 passed, 220 subtests, 2 warnings`.
+- Python 3.10 focused regression: `4 passed, 201 deselected`.
+- Wheel parity: extracted packaged `anti.py` SHA256 equals source
+  `beeeeff9417336a256b1bb9802153b334efdf398d6b6f514d7eeddb33673764b`; the
+  packaged request/backend timeout helpers both return `170` for `180`.
+- `git diff --check` passed and disk free space was 58 GiB at validation.
+
+This is an offline parent-review checkpoint only. No live gateway switch,
+credential/provider mutation, install, restart, merge, or release claim was
+made in this turn. The authorized live validation described above remains
+pending parent review of `dee9b8a` and current-head CI.
