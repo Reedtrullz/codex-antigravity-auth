@@ -348,3 +348,43 @@ restart; its final SHA256 is
 Decision: the corrected-source live gate is failed on synthesis liveness, not
 source coverage or chunk-manifest integrity. Do not merge or install the
 candidate. No additional live retry was started.
+
+## 2026-09-14 — Synthesis failure provenance fix and timeout correlation
+
+The failed synthesis artifact exposed one remaining reporting defect: the same
+file appeared in both `coverage.includedFiles` and `coverage.omittedFiles`, even
+though its content status was complete and all three chunks were reviewed.
+Commit `6e9c63e` fixes the shared synthesis-failure metadata merge so the
+chunked coverage manifest replaces stale single-prompt omission fields. The
+new panel CLI regression asserts `includedFiles=[fixture.py]`,
+`omittedFiles=[]`, complete file status, full bytes reviewed, and 3/3 completed
+chunks when synthesis fails. Evidence: Anti/new-feature suite `238 passed, 9
+subtests`; full local suite `820 passed, 220 subtests, 2 warnings`; exact
+Python 3.10 focused gate `4 passed, 32 deselected`; fresh PR CI
+`34880141830` and push CI `34880138134` passed all 12 jobs.
+
+Read-only request-log correlation for run
+`t15-remediation-7b24b27-multichunk`:
+
+- chunk 1: `latency_ms=22328`, HTTP 200, success;
+- chunk 2: `latency_ms=23778`, HTTP 200, success;
+- chunk 3: `latency_ms=18110`, HTTP 200, success;
+- synthesis: `latency_ms=80008`, `attempt_count=3`, `rotation_count=2`,
+  `rotation_attempted=true`, `cancelled=false`, `http_status=504`,
+  `error_class=request_deadline_exceeded`, error `Native non-stream request
+  deadline expired before completion`.
+
+The helper command used `--timeout 90` and `--retry 0`. Its request-timeout
+hint subtracts the 10-second cleanup margin, so the gateway received an
+80-second total request budget; the recorded 80,008 ms server latency matches
+that total deadline. The helper only sends a backend-timeout hint above 120
+seconds, so this run used the gateway's default 60-second backend inactivity/
+phase timeout. The evidence therefore identifies bounded gateway total-deadline
+expiry during account rotation, not an upstream HTTP response or a client
+inactivity timeout. Candidate PID 26237 is gone; launchd PID 53238 is the only
+listener on 51122 and `/v1/models` remains HTTP 200.
+
+Owner options: keep the fail-closed gate and do not merge/install; or separately
+authorize a new bounded experiment with a smaller synthesis payload/latency
+surface or an explicitly reviewed timeout/rotation policy change. No further
+live attempt was made in this turn.
