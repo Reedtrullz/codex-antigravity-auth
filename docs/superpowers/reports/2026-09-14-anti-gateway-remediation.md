@@ -498,6 +498,63 @@ remains open and unchanged. No candidate installation, local skill update,
 merge, close, credential/provider change, or production-readiness claim was
 made.
 
+## 2026-09-14 — Authorized larger-budget trial: synthesis still incomplete
+
+The fixture-fit correction was committed as `372687a` and both PR/push CI runs
+`34900584916`/`34900580576` passed all package and platform jobs. The separate
+synthetic files are AST-valid, nonoverlapping, and fully recorded:
+
+- `parser_contract_large.py`: 18,829 bytes,
+  `8e1c8655eea6490a41d2791aece7d6e9095f486c86a62a7b6d713b719fbd62c2`.
+- `storage_contract_large.py`: 21,228 bytes,
+  `0f04ebe1d8fafeba3cd5039489d6a4c2b965dbc1aec26e5a43fc9e515568bb85`.
+- `transport_contract_large.py`: 19,414 bytes,
+  `4c5c0ee6334e7ed964c27d264c585db12b6e97e6a6b24296fd1d3a08661be1ae`.
+
+The exact planner produced three required chunks with prompt sizes 19,882,
+22,283, and 20,473 characters; every pair independently planned as two chunks.
+Offline synthesis/judge probes fit: chunk synthesis 26,182 characters and
+worst-case judge input 62,977/128,000, leaving 65,023 characters. The exact
+current-head candidate was retained at
+`/Users/reidar/.codex/antigravity-builds/anti-gateway-remediation-372687a/`:
+wheel SHA256 `d62bb73bef23856f48e6133823b493d072e7e2ab2d73918e617c401e8f45b7a3`,
+sdist SHA256 `a3519d8f7f6d18d865334ac1df01e6b657399e4f1370fcc33c7e12a74f07a606`,
+Anti helper source/extracted SHA256
+`cc50efa30ae2666fab2fddceb1093e0b2a2ff507a50f2bfdb5e6557c0efb2bae`, server
+SHA256 `c3567ba9806ebece827274c71f74006cb9ae06b946af40abd6d81592447c4fcc`,
+and timeout helpers `180 -> 170`.
+
+The one authorized live run was
+`t15-remediation-372687a-3chunk-4096-largefixture`, with synthesis/lane output
+4,096, judge output 8,192, source/fanout 30,000, synthesis/judge input 128,000,
+chunk output 2,048, retry 0, fallback never, max parallel 2, helper timeout
+180, and an external 20-minute watchdog. All three chunks completed with exact
+coverage: 59,471/59,471 bytes, 3/3 chunks, zero failed/not-sent/omitted files,
+and matching hashes. Review synthesis returned HTTP 200 but ended incomplete at
+the 4,096-token ceiling (`terminal_kind=incomplete`, `terminal_reason=max_tokens`).
+No panel lane or judge ran; the result is `runStatus=failed`,
+`scopeStatus=partial`.
+
+Request-log correlation records exactly four helper `/v1/responses` generation
+requests, four underlying attempts, zero rotations, and zero fallback calls:
+three Sonnet chunks succeeded with 1,102/1,546/1,446 output tokens, and
+synthesis returned 4,096 output tokens after 72.041 seconds. Sanitized artifacts:
+
+- `/Users/reidar/.codex/anti-runs/t15-remediation-372687a-3chunk-4096-largefixture/result.json`
+- `/Users/reidar/.codex/anti-runs/t15-remediation-372687a-3chunk-4096-largefixture.json`
+- correlated rows in `/Users/reidar/.codex/antigravity-requests.jsonl`
+
+Because synthesis terminated incomplete, no full summary, panel-lane, or judge
+body exists to validate; only complete source/chunk coverage and terminal
+metadata are available. The candidate was stopped and launchd restored as PID
+29630, sole listener on `127.0.0.1:51122`; `/v1/models` returned HTTP 200. The
+plist hash remains `391297d7fa13990a69e2ff29453957779956e6da11e9b1af29a074cfc9b7db09`,
+providers remain `1959f85e8a68235ab04bb885ccb904f1eaa41c116cf81d2b193214873e416b94`,
+and refreshed accounts state was preserved at
+`05079e2775db1e0fc6ae721893fa68270441324dd4b78301787e4ad8f009b63d`. No second
+trial, retry, merge, install, tag, PyPI action, force-push, credential/provider/
+cooldown edit, or production-correctness claim was made.
+
 ## 2026-09-14 — Hermetic regression and CI closure
 
 The first forward-report push exposed a CI-only failure in the new incomplete-
