@@ -3377,10 +3377,21 @@ def run_chunked_review(
                 )
             )
             attempted_for_file = completed_for_file + failed_for_file
+            attempted_chunks = [
+                planned_chunk
+                for index, planned_chunk in enumerate(chunks)
+                if index < len(chunk_generation)
+                and any(
+                    CHUNK_PART_SUFFIX_RE.sub("", str(included)) == path
+                    for included in planned_chunk.get("metadata", {}).get("included_files", [])
+                )
+            ]
             record["chunksCompleted"] = completed_for_file
             record["chunksSent"] = attempted_for_file
             record["chunksAttempted"] = attempted_for_file
             record["chunksFailed"] = failed_for_file
+            record["sentFirstChunkId"] = attempted_chunks[0].get("id") if attempted_chunks else None
+            record["sentLastChunkId"] = attempted_chunks[-1].get("id") if attempted_chunks else None
             record["chunksOmitted"] = max(0, int(record.get("chunksExpected") or 0) - attempted_for_file)
             record["bytesSent"] = sum(
                 int(planned_chunk.get("metadata", {}).get("source_bytes", {}).get(path, 0) or 0)

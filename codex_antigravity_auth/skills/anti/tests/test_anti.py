@@ -4452,6 +4452,110 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertEqual(coverage["status"], "partial")
         self.assertEqual(coverage["partialFiles"], ["large.py"])
 
+    def test_chunk_payloads_equal_source_at_tight_budgets(self) -> None:
+        anti = load_anti()
+        source = "".join(f"LINE_{index:03d} = '{index:03d}-" + ("x" * 44) + "'\n" for index in range(100))
+        with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:
+            root = Path(tmp)
+            (root / "fixture.py").write_text(source, encoding="utf-8")
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                args = anti.build_parser().parse_args(
+                    ["review", "--scope", "files", "--file", "fixture.py"]
+                )
+                context = anti.collect_review_context(args)
+                for cap in (1000, 3000):
+                    chunks, metadata = anti.build_review_chunk_prompts(
+                        context, max_prompt_chars=cap, max_chunks=0
+                    )
+                    payload = []
+                    for chunk in chunks:
+                        block = chunk["prompt"].split("```text\n", 1)[1].split("\n```", 1)[0]
+                        payload.append(block)
+                        self.assertLessEqual(chunk["prompt_chars"], cap)
+                    self.assertEqual("".join(payload), source)
+                    self.assertEqual(metadata["coverage"][0]["bytesSent"], len(source.encode()))
+            finally:
+                os.chdir(old_cwd)
+
+    def test_cli_chunk_artifact_matches_plan_and_failure_ledger(self) -> None:
+        anti = load_anti()
+        source = "".join(f"LINE_{index:03d} = '{index:03d}-" + ("x" * 44) + "'\n" for index in range(100))
+        with tempfile.TemporaryDirectory(prefix="anti-artifact-") as tmp:
+            root = Path(tmp) / "workspace"
+            root.mkdir()
+            (root / "fixture.py").write_text(source, encoding="utf-8")
+            anti.RUNS_DIR = Path(tmp) / "runs"
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                for cap in (1000, 3000):
+                    dry_output = io.StringIO()
+                    with contextlib.redirect_stdout(dry_output), contextlib.redirect_stderr(io.StringIO()):
+                        dry_rc = anti.main([
+                            "review", "--scope", "files", "--file", "" + "fixture.py",
+                            "--max-prompt-chars", str(cap), "--max-review-chunks", "0",
+                            "--chunked", "always", "--dry-run", "--json", "--no-progress",
+                        ])
+                    self.assertEqual(dry_rc, 0)
+                    dry_plan = json.loads(dry_output.getvalue())
+                    chunk_stage = next(stage for stage in dry_plan["stages"] if stage["name"] == "review_chunk")
+
+                    calls: list[str] = []
+                    attempts = {"count": 0}
+
+                    def fake_generate(_args, *, model, prompt, **_kwargs):
+                        calls.append(prompt)
+                        attempts["count"] += 1
+                        if cap == 1000 and attempts["count"] == 2:
+                            raise anti.AntiError("provider broke at chunk 2")
+                        return (
+                            "synthesis" if "Chunked Review Manifest" in prompt else "chunk",
+                            model,
+                            {"usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}},
+                        )
+
+                    anti.generate_with_fallback = fake_generate
+                    run_id = f"tight-cap-{cap}"
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                        rc = anti.main([
+                            "review", "--scope", "files", "--file", "fixture.py",
+                            "--max-prompt-chars", str(cap), "--max-review-chunks", "0",
+                            "--chunked", "always", "--run-id", run_id,
+                            "--save-output", "summary", "--json", "--no-progress",
+                        ])
+
+                    artifact = json.loads((anti.RUNS_DIR / run_id / "result.json").read_text(encoding="utf-8"))
+                    planned = chunk_stage["planned_calls"]
+                    if cap == 1000:
+                        self.assertEqual(rc, 1)
+                        self.assertEqual(len(calls), 2)
+                        record = json.loads((anti.RUNS_DIR / f"{run_id}.json").read_text(encoding="utf-8"))
+                        generation = record["metadata"]["chunk_generation"]
+                        self.assertEqual(record["metadata"]["failed_chunk"], record["metadata"]["chunk_prompts"][1]["label"])
+                        self.assertEqual(artifact["coverage"]["chunksExpected"], planned)
+                        self.assertEqual(artifact["coverage"]["chunksCompleted"], 1)
+                        self.assertEqual(artifact["coverage"]["chunksFailed"], 1)
+                        self.assertEqual(len(artifact["coverage"]["chunks"]), planned)
+                        self.assertEqual(artifact["coverage"]["chunks"][1]["status"], "failed")
+                        self.assertTrue(all(item["status"] == "not_sent" for item in artifact["coverage"]["chunks"][2:]))
+                    else:
+                        self.assertEqual(rc, 0)
+                        self.assertEqual(len(calls), planned + 1)
+                        self.assertEqual(artifact["coverage"]["chunksExpected"], planned)
+                        self.assertEqual(artifact["coverage"]["chunksCompleted"], planned)
+
+                    file_record = artifact["coverage"]["files"][0]
+                    self.assertEqual(artifact["coverage"]["includedFiles"], ["fixture.py"])
+                    self.assertEqual(file_record["bytesDeclared"], len(source.encode()))
+                    self.assertEqual(file_record["firstChunkId"], artifact["coverage"]["chunks"][0]["id"])
+                    self.assertEqual(file_record["lastChunkId"], artifact["coverage"]["chunks"][-1]["id"])
+                    self.assertEqual(file_record["sentFirstChunkId"], artifact["coverage"]["chunks"][0]["id"])
+            finally:
+                os.chdir(old_cwd)
+
     def test_chunk_failure_separates_failed_from_never_sent_chunks(self) -> None:
         anti = load_anti()
         with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:
