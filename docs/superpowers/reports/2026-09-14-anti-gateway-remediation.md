@@ -63,14 +63,30 @@ Baseline evidence (2026-09-14):
 
 ## Verification boundary
 
-Offline closure is verified, but live generation is not healthy in the currently
-reachable gateway. A bounded live panel attempt on `README.md` used Sonnet and
-Opus lanes with `--fallback-policy never`, `--max-parallel 2`, `--retry 1`, and
-`--timeout 45`. The gateway catalog probe returned HTTP 200 and advertised both
-requested Claude models; Sonnet generation timed out on both allowed attempts,
-the helper reported that `/v1/models` remained responsive while the generation
-path was unhealthy, and no JSON result artifact was produced. No further live
-retry, restart, credential/provider mutation, push, merge, or release was done.
+Offline closure is verified, but the bounded live command did not reach panel
+lane execution. The exact command was:
+
+```text
+.venv/bin/python codex_antigravity_auth/skills/anti/scripts/anti.py panel --mode review --scope files --file README.md --model sonnet --model opus --judge opus --fallback-policy never --max-parallel 2 --retry 1 --max-output-tokens 128 --judge-output-tokens 128 --chunked auto --max-review-chunks 4 --timeout 45 --save-output never --json --no-progress
+```
+
+It used the default `http://127.0.0.1:51122/v1`, exited `1`, had no run ID,
+wrote zero bytes to `/tmp/anti-live-sonnet-opus.json`, and
+redirected stdout JSON file, and emitted the timeout diagnostic on stderr. The
+gateway catalog probe returned HTTP 200 and advertised both requested Claude
+models. The dry-run execution plan was two Sonnet `review_chunk` calls, one
+Sonnet `review_synthesis`, Sonnet and Opus panel lanes, and an Opus judge; the
+actual run timed out on the first Sonnet review chunk (`prompt_chars=29152`) on
+both allowed attempts, before the second chunk, synthesis, either panel lane,
+or judge ran. No further live retry, restart, credential/provider mutation,
+push, merge, or release was done.
+
+The missing live `result.json` was intentional because `--save-output never`
+causes `ensure_run_id()` and `write_run_record()` to skip persistence. A copied
+CLI mock-HTTP timeout reproduction with `--save-output summary --run-id
+timeout-repro` exited `1` and persisted both the run record and sanitized
+`result.json`, including `resultPath`, the failed Sonnet lane, timeout evidence,
+and the execution plan. This confirms no persistence defect was found.
 
 ## Exact offline gate evidence
 
@@ -118,6 +134,7 @@ suite run used `GIT_CONFIG_GLOBAL=/dev/null` and did not change repository or
 global configuration.
 
 The bounded live attempt is evidence of a generation-path timeout, not provider
-health or production readiness. A representative multi-chunk live run was not
+health or production readiness; catalog responsiveness and generation latency
+are separate observations. A representative multi-chunk live run was not
 attempted after that terminal failure. Therefore this report does not claim
 live provider health, full-repository review coverage, or release acceptance.
