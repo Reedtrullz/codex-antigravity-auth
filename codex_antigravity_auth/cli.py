@@ -3,6 +3,7 @@ import os
 import argparse
 import getpass
 import http.server
+import hashlib
 import math
 import re
 import shlex
@@ -301,6 +302,15 @@ def codex_skill_matches_bundled(skill_path: Path) -> bool:
     return _path_tree_manifest(skill_path) == _resource_tree_manifest(bundled_skill_root())
 
 
+def _skill_manifest_hash(manifest: dict[str, bytes]) -> str:
+    digest = hashlib.sha256()
+    for path, content in sorted(manifest.items()):
+        digest.update(path.encode("utf-8", "surrogateescape"))
+        digest.update(b"\0")
+        digest.update(content)
+    return digest.hexdigest()
+
+
 def verify_codex_skill(skill_path: Path) -> bool:
     required = [
         skill_path / "SKILL.md",
@@ -313,6 +323,15 @@ def verify_codex_skill(skill_path: Path) -> bool:
         for path in missing:
             print(f"[FAIL] Missing skill file: {path}")
         return False
+    installed_hash = _skill_manifest_hash(_path_tree_manifest(skill_path))
+    bundled_hash = _skill_manifest_hash(_resource_tree_manifest(bundled_skill_root()))
+    if installed_hash != bundled_hash:
+        print(
+            f"[FAIL] Installed Anti skill differs from the bundled skill: {skill_path} "
+            f"(installed={installed_hash}, bundled={bundled_hash})"
+        )
+        return False
+    print(f"[PASS] Installed Anti skill matches bundled tree ({installed_hash})")
     proc = subprocess.run(
         [sys.executable, "-m", "unittest", "discover", "-s", str(skill_path / "tests")],
         text=True,

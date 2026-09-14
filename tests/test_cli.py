@@ -50,6 +50,7 @@ from codex_antigravity_auth.cli import (
     start_gateway_background,
     stop_gateway,
     upsert_google_account,
+    verify_codex_skill,
     validate_codex_model_id,
     validate_codex_provider_name,
     version_check_result,
@@ -1126,6 +1127,13 @@ class TestInstallSkill(unittest.TestCase):
 
             verify.assert_called_once()
             self.assertTrue((Path(tmp) / "anti" / "SKILL.md").is_file())
+
+    def test_verify_codex_skill_rejects_bundle_mismatch(self):
+        with TemporaryDirectory() as tmp:
+            _action, destination, _backup = install_codex_skill(Path(tmp))
+            (destination / "SKILL.md").write_text("local drift\n", encoding="utf-8")
+
+            self.assertFalse(verify_codex_skill(destination))
 
     def test_main_install_skill_command_uses_temp_skill_dir(self):
         with TemporaryDirectory() as tmp:

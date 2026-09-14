@@ -20,6 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
@@ -247,14 +248,21 @@ DEFAULT_PANEL_MODELS = ["claude-sonnet-4-6", "claude-opus-4-6-thinking"]
 DEFAULT_PANEL_JUDGE_MODEL = "claude-opus-4-6-thinking"
 COLLAB_PROFILES = {"none"}
 MAX_FILE_BYTES = 180_000
+RESULT_SCHEMA_VERSION = 1
+VERIFICATION_REQUIRED_CHECKS = [
+    "inspect exact source at sourceCommit",
+    "run targeted tests",
+    "run relevant build or trust gate",
+    "perform a runtime check where claimed",
+]
 DEFAULT_MAX_PROMPT_CHARS = 120_000
 DEFAULT_MAX_SYNTHESIS_CHARS = DEFAULT_MAX_PROMPT_CHARS
 GIT_DIFF_TRUNCATION_CAVEAT = "Git diff truncated to fit max prompt budget"
 CLAUDE_SAFE_PROMPT_CHARS = 30_000
 MAX_PROMPT_CHARS_HELP = (
-    "Maximum prompt chars before truncation/chunking; use 0 for unlimited. "
+    "Maximum prompt chars before chunking; use 0 for unlimited. "
     "Claude-family review/plan/panel calls still use the conservative safety budget with --chunked auto; "
-    "add --chunked off when you intentionally want one large Claude request."
+    "--chunked off refuses any review scope that cannot fit exactly."
 )
 PID_FILE = Path.home() / ".codex" / "anti-gateway.pid"
 LOG_FILE = Path.home() / ".codex" / "anti-gateway.log"
@@ -447,6 +455,7 @@ EXCLUDED_PATTERNS = [
     "*api-key*",
 ]
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+CHUNK_PART_SUFFIX_RE = re.compile(r" part \d+/\d+$")
 
 
 class AntiError(Exception):
@@ -514,6 +523,58 @@ def save_output_mode(args: argparse.Namespace) -> str:
     return value
 
 
+def helper_identity() -> dict[str, Any]:
+    """Identify the exact skill tree that produced a saved result."""
+    skill_root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    try:
+        for path in sorted(skill_root.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts or path.name == ".DS_Store":
+                continue
+            digest.update(path.relative_to(skill_root).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+        tree_hash: str | None = digest.hexdigest()
+    except OSError:
+        tree_hash = None
+    try:
+        version: str | None = importlib_metadata.version("codex-antigravity-auth")
+    except importlib_metadata.PackageNotFoundError:
+        version = None
+    return {
+        "version": version,
+        "path": str(Path(__file__).resolve()),
+        "treeHash": tree_hash,
+    }
+
+
+def write_preflight_record(
+    args: argparse.Namespace,
+    *,
+    mode: str,
+    models: list[str],
+    base_url: str | None,
+    metadata: dict[str, Any],
+) -> None:
+    """Persist a redacted scope manifest before the first provider call."""
+    if save_output_mode(args) == "never" or not getattr(args, "run_id", None):
+        return
+    safe_metadata = {
+        key: value
+        for key, value in metadata.items()
+        if key not in {"_review_context", "_execution_ledger", "findings", "panel_results"}
+    }
+    safe_metadata["preflightStatus"] = "ready"
+    write_run_record(
+        args,
+        mode=mode,
+        status="running",
+        models=models,
+        base_url=base_url,
+        metadata=safe_metadata,
+    )
+
+
 def write_run_record(
     args: argparse.Namespace,
     *,
@@ -562,17 +623,22 @@ def write_run_record(
         "caveats": caveats or [],
         "metadata": metadata or {},
         "save_output": output_mode,
+        "helper": helper_identity(),
     }
     # B7: split run lifecycle from scope coverage so consumers never confuse
     # "the command ran" with "the requested scope was fully reviewed".
-    record["runStatus"] = status
+    record["runStatus"] = "failed" if status == "error" else status
     scope_status: str | None = None
     if isinstance(metadata, dict):
         # Panel ``status`` is an integrity result (for example
         # ``degraded_single_model``), while review/plan ``scope_status`` keeps
         # the older complete/incomplete coverage contract for run records.
-        metadata_status = metadata.get("scope_status") or metadata.get("status")
-        if metadata_status == "incomplete":
+        metadata_status = (
+            metadata.get("scope_status")
+            or metadata.get("scopeStatus")
+            or metadata.get("status")
+        )
+        if metadata_status in {"incomplete", "partial"}:
             scope_status = "partial"
         elif metadata_status == "complete":
             scope_status = "complete"
@@ -582,8 +648,7 @@ def write_run_record(
             manifest_file_count if manifest_file_count is not None else len(omitted_items)
         )
         record["omittedChunkCount"] = int(metadata.get("omitted_chunk_count") or 0)
-    if scope_status:
-        record["scopeStatus"] = scope_status
+    record["scopeStatus"] = scope_status or ("complete" if status == "success" else "partial")
     if error:
         record["error"] = error
     if output_mode == "summary" and output_text:
@@ -604,7 +669,80 @@ def write_run_record(
     record["id"] = str(record_id)
     if record.get("metadata", {}).get("request_log_correlation_id") is not None:
         record["metadata"]["request_log_correlation_id"] = str(record_id)
-    path = RUNS_DIR / f"{record['id']}.json"
+    run_record_path = RUNS_DIR / f"{record['id']}.json"
+    artifact_dir = RUNS_DIR / str(record_id)
+    if artifact_dir.exists() and artifact_dir.is_symlink():
+        raise AntiError(f"refusing to write result artifact through symlink: {artifact_dir}")
+    artifact_dir.mkdir(mode=0o700, exist_ok=True)
+    try:
+        os.chmod(artifact_dir, 0o700)
+    except OSError:
+        pass
+    artifact_path = artifact_dir / "result.json"
+    if artifact_path.exists() and artifact_path.is_symlink():
+        raise AntiError(f"refusing to overwrite symlinked result artifact: {artifact_path}")
+    artifact_scope_status = record.get("scopeStatus") or ("complete" if status == "success" else "partial")
+    artifact_metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    artifact_run_status = "failed" if status == "error" else status
+    finding_contract = artifact_metadata.get("findings")
+    if not isinstance(finding_contract, dict):
+        finding_contract = {}
+    artifact = sanitize_json(
+        {
+            "schemaVersion": RESULT_SCHEMA_VERSION,
+            "runId": str(record_id),
+            "createdAt": record["created_at"],
+            "sourceCommit": artifact_metadata.get("sourceCommit") or artifact_metadata.get("source_commit"),
+            "helper": record.get("helper"),
+            "mode": mode,
+            "runStatus": artifact_run_status,
+            "scopeStatus": artifact_scope_status,
+            "panelStatus": artifact_metadata.get("panel_status") or artifact_metadata.get("panelStatus"),
+            "coverage": coverage_summary(artifact_metadata),
+            "requestedModels": artifact_metadata.get("requested_models") or record.get("models", []),
+            "actualModels": artifact_metadata.get("actual_models", []),
+            "actualProviders": artifact_metadata.get("actual_providers", []),
+            "lanes": artifact_metadata.get("panel_results", []),
+            "findings": finding_contract.get("findings", []),
+            "disagreements": finding_contract.get("disagreements", []),
+            "unverifiable": finding_contract.get("unverifiable", []),
+            "recommendedNextActions": finding_contract.get("recommended_next_actions", []),
+            "summary": finding_contract.get("summary"),
+            "verification": artifact_metadata.get(
+                "verification",
+                {
+                    "status": "not_run",
+                    "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
+                    "performedBy": None,
+                    "evidence": [],
+                },
+            ),
+            "caveats": record.get("caveats", []),
+            "error": record.get("error"),
+            "artifacts": {
+                "runRecordPath": str(run_record_path),
+                "resultPath": str(artifact_path),
+                "rawLanePaths": [],
+            },
+            "resultPath": str(artifact_path),
+        }
+    )
+    artifact_tmp = artifact_path.with_suffix(artifact_path.suffix + ".tmp")
+    artifact_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        artifact_flags |= os.O_NOFOLLOW
+    try:
+        artifact_fd = os.open(artifact_tmp, artifact_flags, 0o600)
+    except FileExistsError:
+        if artifact_tmp.is_symlink():
+            raise
+        artifact_tmp.unlink()
+        artifact_fd = os.open(artifact_tmp, artifact_flags, 0o600)
+    with os.fdopen(artifact_fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
+    os.replace(artifact_tmp, artifact_path)
+    record["resultPath"] = str(artifact_path)
+    path = run_record_path
     if path.exists() and path.is_symlink():
         raise AntiError(f"refusing to overwrite symlinked run record: {path}")
     tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -1651,10 +1789,13 @@ def filter_paths(paths: list[str], *, root: Path) -> tuple[list[str], list[str]]
 
 
 def read_paths_file(spec: str) -> list[str]:
-    if spec == "-":
-        raw = sys.stdin.buffer.read()
-    else:
-        raw = Path(spec).expanduser().read_bytes()
+    try:
+        if spec == "-":
+            raw = sys.stdin.buffer.read()
+        else:
+            raw = Path(spec).expanduser().read_bytes()
+    except OSError as exc:
+        raise AntiError(f"could not read path list {spec!r}: {exc}") from exc
     try:
         decoded = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -1747,7 +1888,12 @@ def file_is_tracked(root: Path, rel_path: str) -> bool:
     return proc.returncode == 0
 
 
-def read_text_file(root: Path, rel_path: str) -> tuple[str, str | None]:
+def read_text_file(
+    root: Path,
+    rel_path: str,
+    *,
+    truncate: bool = True,
+) -> tuple[str, str | None]:
     path = root / rel_path
     if not path.is_file():
         return "", f"{rel_path}: not a regular file"
@@ -1755,7 +1901,7 @@ def read_text_file(root: Path, rel_path: str) -> tuple[str, str | None]:
     if b"\0" in raw:
         return "", f"{rel_path}: binary file skipped"
     note = None
-    if len(raw) > MAX_FILE_BYTES:
+    if truncate and len(raw) > MAX_FILE_BYTES:
         original_len = len(raw)
         raw = raw[:MAX_FILE_BYTES]
         note = f"{rel_path}: truncated to {MAX_FILE_BYTES} bytes ({original_len} original bytes)"
@@ -1769,6 +1915,197 @@ def read_text_file(root: Path, rel_path: str) -> tuple[str, str | None]:
         else:
             return "", f"{rel_path}: non-UTF-8 file skipped"
     return text, note
+
+
+def source_commit(root: Path) -> str | None:
+    value = run_git(root, ["rev-parse", "HEAD"], check=False).strip()
+    return value or None
+
+
+def file_coverage_record(
+    root: Path,
+    rel_path: str,
+    text: str,
+    note: str | None,
+    *,
+    source_kind: str = "file",
+) -> dict[str, Any]:
+    """Describe the exact source bytes available to the review planner."""
+    path = root / rel_path
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return {
+            "path": rel_path,
+            "sha256": None,
+            "bytesDeclared": 0,
+            "bytesSent": 0,
+            "chunksExpected": 0,
+            "chunksSent": 0,
+            "contentStatus": "omitted",
+            "reason": str(exc),
+            "sourceKind": source_kind,
+        }
+    status = "complete"
+    if note:
+        status = "omitted" if any(word in note.lower() for word in ("binary", "non-utf", "not a regular")) else "truncated"
+    return {
+        "path": rel_path,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "bytesDeclared": len(raw),
+        "bytesSent": len(text.encode("utf-8")),
+        "chunksExpected": 0,
+        "chunksSent": 0,
+        "contentStatus": status,
+        "reason": note,
+        "sourceKind": source_kind,
+    }
+
+
+def coverage_is_incomplete(records: list[dict[str, Any]] | None) -> bool:
+    return any(
+        record.get("contentStatus") in {"truncated", "omitted", "partial", "failed", "error"}
+        or int(record.get("bytesSent") or 0) < int(record.get("bytesDeclared") or 0)
+        for record in (records or [])
+    )
+
+
+def coverage_summary(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return one stable coverage shape for stdout and saved result artifacts."""
+    metadata = metadata or {}
+    records = [
+        dict(record)
+        for record in (metadata.get("coverage") or [])
+        if isinstance(record, dict) and record.get("path")
+    ]
+
+    def unique(values: list[Any]) -> list[str]:
+        result: list[str] = []
+        for value in values:
+            text = str(value)
+            if text and text not in result:
+                result.append(text)
+        return result
+
+    def source_path(value: Any) -> str:
+        text = str(value)
+        text = CHUNK_PART_SUFFIX_RE.sub("", text)
+        if " (" in text:
+            text = text.split(" (", 1)[0]
+        return text
+
+    declared = unique(
+        list(metadata.get("declared_files") or [])
+        + [record.get("path") for record in records]
+    )
+    included = unique(
+        [source_path(path) for path in (metadata.get("included_files") or [])]
+        + [
+            record["path"]
+            for record in records
+            if record.get("contentStatus") == "complete"
+            and (
+                int(record.get("chunksSent") or 0) > 0
+                or int(record.get("bytesDeclared") or 0) == 0
+            )
+        ]
+    )
+    omitted: list[str] = []
+    truncated: list[str] = []
+    partial: list[str] = []
+    failed: list[str] = []
+    for record in records:
+        path = str(record["path"])
+        status = str(record.get("contentStatus") or "")
+        try:
+            byte_incomplete = int(record.get("bytesSent") or 0) < int(record.get("bytesDeclared") or 0)
+        except (TypeError, ValueError):
+            byte_incomplete = True
+        try:
+            chunks_completed = int(
+                record.get("chunksCompleted", record.get("chunksSent")) or 0
+            )
+            chunk_incomplete = chunks_completed < int(record.get("chunksExpected") or 0)
+        except (TypeError, ValueError):
+            chunk_incomplete = True
+        if status == "truncated" or (byte_incomplete and status not in {"omitted", "failed", "error"}):
+            truncated.append(path)
+        if status in {"omitted", "error", "failed"}:
+            omitted.append(path)
+        if status == "partial" or chunk_incomplete:
+            partial.append(path)
+        if chunk_incomplete and status not in {"omitted", "failed", "error", "partial"}:
+            partial.append(path)
+        if status in {"error", "failed"}:
+            failed.append(path)
+    declared_set = set(declared)
+    for item in metadata.get("omitted_files") or metadata.get("chunk_omitted_items") or []:
+        path = source_path(item)
+        if path in declared_set:
+            record = next((item for item in records if item.get("path") == path), None)
+            if record and record.get("contentStatus") == "partial":
+                partial.append(path)
+            else:
+                omitted.append(path)
+
+    planned_chunks = metadata.get("planned_chunk_count")
+    sent_chunks = metadata.get("completed_chunk_count", metadata.get("chunk_count"))
+    if planned_chunks is None:
+        planned_chunks = sum(int(record.get("chunksExpected") or 0) for record in records)
+    if sent_chunks is None:
+        sent_chunks = sum(int(record.get("chunksSent") or 0) for record in records)
+    try:
+        planned_chunks = max(0, int(planned_chunks or 0))
+    except (TypeError, ValueError):
+        planned_chunks = 0
+    try:
+        sent_chunks = max(0, int(sent_chunks or 0))
+    except (TypeError, ValueError):
+        sent_chunks = 0
+    try:
+        omitted_chunks = max(0, int(metadata.get("omitted_chunk_count") or planned_chunks - sent_chunks))
+    except (TypeError, ValueError):
+        omitted_chunks = max(0, planned_chunks - sent_chunks)
+    metadata_status = str(
+        metadata.get("scope_status")
+        or metadata.get("scopeStatus")
+        or metadata.get("status")
+        or ""
+    )
+    incomplete = bool(
+        omitted
+        or truncated
+        or partial
+        or failed
+        or omitted_chunks
+        or metadata_status in {"incomplete", "partial"}
+        or metadata.get("diff_truncated")
+        or metadata.get("assembly_over_budget")
+    )
+    result = {
+        "status": "partial" if incomplete else "complete",
+        "declaredFiles": declared,
+        "includedFiles": unique(included),
+        "omittedFiles": unique(omitted),
+        "truncatedFiles": unique(truncated),
+        "partialFiles": unique(partial),
+        "failedFiles": unique(failed),
+        "chunksExpected": planned_chunks,
+        "chunksCompleted": min(sent_chunks, planned_chunks) if planned_chunks else sent_chunks,
+        "chunksFailed": max(int(metadata.get("failed_chunk_count") or 0), len(failed)),
+        "chunksOmitted": omitted_chunks,
+        "chunks": [
+            {
+                key: item.get(key)
+                for key in ("id", "index", "kind", "label", "prompt_chars", "status", "model_used")
+                if item.get(key) is not None
+            }
+            for item in (metadata.get("chunk_prompts") or [])
+            if isinstance(item, dict)
+        ],
+        "files": records,
+    }
+    return result
 
 
 def apply_prompt_limit(prompt: str, max_prompt_chars: int, caveats: list[str]) -> str:
@@ -1948,11 +2285,24 @@ def build_review_prompt(
     excluded: list[str],
     initial_caveats: list[str],
     max_prompt_chars: int,
+    file_records: list[dict[str, Any]] | None = None,
 ) -> tuple[str, list[str], dict[str, Any]]:
     caveats = list(initial_caveats)
     diff_for_prompt = diff
-    omitted_files = [rel for rel, text in file_texts if not text]
-    candidates = [(rel, text) for rel, text in file_texts if text]
+    records_by_path = {
+        str(record.get("path")): record
+        for record in (file_records or [])
+        if record.get("path")
+    }
+
+    def is_includable(rel: str, text: str) -> bool:
+        # An empty regular file is still covered; without its manifest entry,
+        # the historical truthiness check misreported it as omitted.
+        record = records_by_path.get(rel)
+        return bool(text) or bool(record and record.get("contentStatus") == "complete")
+
+    omitted_files = [rel for rel, text in file_texts if not is_includable(rel, text)]
+    candidates = [(rel, text) for rel, text in file_texts if is_includable(rel, text)]
     included: list[tuple[str, str]] = []
 
     if max_prompt_chars > 0 and diff_for_prompt:
@@ -2012,7 +2362,11 @@ def build_review_prompt(
         )
     )
     metadata = {
-        "status": "incomplete" if omitted_files or any("truncated" in item.lower() for item in caveats) else "complete",
+        "status": "incomplete"
+        if omitted_files
+        or any("truncated" in item.lower() for item in caveats)
+        or coverage_is_incomplete(file_records)
+        else "complete",
         "prompt_chars": len(prompt),
         "diff_chars": len(diff_for_prompt),
         "diff_original_chars": len(diff),
@@ -2021,7 +2375,12 @@ def build_review_prompt(
         "omitted_files": omitted_files,
         "excluded_paths": excluded,
         "helper_warnings": caveats,
+        "coverage": [dict(record) for record in (file_records or [])],
     }
+    for record in metadata["coverage"]:
+        if record.get("path") in metadata["included_files"]:
+            record["chunksExpected"] = 1
+            record["chunksSent"] = 1
     return prompt, caveats, metadata
 
 
@@ -2038,17 +2397,18 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
     diff = diff_for_paths(root, args.scope, paths, rev_range=rev_range)
     notes: list[str] = []
     file_texts: list[tuple[str, str]] = []
+    file_records: list[dict[str, Any]] = []
 
     include_file_text = args.scope == "files"
     for rel in paths:
         if include_file_text or not file_is_tracked(root, rel):
-            text, note = read_text_file(root, rel)
+            # Review planning must chunk the complete source from disk. The
+            # smaller read limit remains for consult/plan pre-reads.
+            text, note = read_text_file(root, rel, truncate=False)
             if note:
                 notes.append(note)
-            if text:
-                file_texts.append((rel, text))
-            else:
-                file_texts.append((rel, ""))
+            file_texts.append((rel, text))
+            file_records.append(file_coverage_record(root, rel, text, note))
 
     scope_line = args.scope
     if rev_range:
@@ -2069,6 +2429,9 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
         "excluded": excluded,
         "diff": diff,
         "file_texts": file_texts,
+        "file_records": file_records,
+        "source_commit": source_commit(root),
+        "workspace_root": str(root),
         "scope_line": scope_line,
         "caveats": caveats,
     }
@@ -2098,7 +2461,15 @@ def assemble_review_prompt_from_context(
         excluded=context["excluded"],
         initial_caveats=context["caveats"],
         max_prompt_chars=max_prompt_chars,
+        file_records=context.get("file_records"),
     )
+    metadata["sourceCommit"] = context.get("source_commit")
+    metadata["workspace_root"] = context.get("workspace_root")
+    metadata["declared_files"] = list(context.get("paths") or [])
+    if not metadata.get("status") == "incomplete" and context.get("diff"):
+        metadata["included_files"] = list(
+            dict.fromkeys([*(metadata.get("included_files") or []), *(context.get("paths") or [])])
+        )
     return prompt, context["paths"], caveats, metadata
 
 
@@ -2120,7 +2491,10 @@ def split_text_by_budget(text: str, max_chars: int) -> list[str]:
         if not piece:
             piece = rest[:max_chars]
         chunks.append(piece)
-        rest = rest[len(piece) :].lstrip("\n")
+        # Preserve every source character.  Dropping boundary newlines makes
+        # a chunked review look complete while the sent bytes no longer match
+        # the declared file hash.
+        rest = rest[len(piece) :]
     return chunks
 
 
@@ -2167,6 +2541,7 @@ def build_review_chunk_prompts(
     max_prompt_chars: int,
     max_chunks: int,
     priority_paths: list[str] | None = None,
+    required_paths: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Build the full chunk plan first, then apply the chunk cap.
 
@@ -2178,10 +2553,27 @@ def build_review_chunk_prompts(
     file_chunk_budget = max(1200, max_prompt_chars - 1800) if max_prompt_chars > 0 else 0
     all_chunks: list[dict[str, Any]] = []
     omitted_items: list[str] = []
+    file_records = [dict(record) for record in context.get("file_records", [])]
+    records_by_path = {
+        str(record.get("path")): record for record in file_records if record.get("path")
+    }
+    priority = normalized_priority_paths(context, priority_paths)
+    required = normalized_priority_paths(context, required_paths)
+
+    def source_bytes(items: list[tuple[str, str]]) -> dict[str, int]:
+        totals: dict[str, int] = {}
+        for label, text in items:
+            path = CHUNK_PART_SUFFIX_RE.sub("", label)
+            totals[path] = totals.get(path, 0) + len(text.encode("utf-8"))
+        return totals
 
     def append_chunk(kind: str, label: str, prompt: str, metadata: dict[str, Any]) -> None:
+        chunk_id = f"{kind}-{hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:16]}"
+        metadata["chunkId"] = chunk_id
+        metadata["chunk_id"] = chunk_id
         all_chunks.append(
             {
+                "id": chunk_id,
                 "kind": kind,
                 "label": label,
                 "prompt": prompt,
@@ -2219,11 +2611,13 @@ def build_review_chunk_prompts(
                 metadata["diff_truncated"] = True
                 omitted_items.append(f"{label} (diff part exceeds {max_prompt_chars} chars)")
                 continue
+            metadata["included_files"] = list(context.get("paths") or [])
             append_chunk("diff", label, prompt, metadata)
 
     file_items: list[tuple[str, str]] = []
     for rel, text in context["file_texts"]:
-        if not text:
+        record = records_by_path.get(rel)
+        if not text and not (record and record.get("contentStatus") == "complete"):
             omitted_items.append(rel)
             continue
         whole_prompt, _whole_caveats, whole_metadata = build_review_prompt(
@@ -2233,6 +2627,7 @@ def build_review_chunk_prompts(
             excluded=context["excluded"],
             initial_caveats=context["caveats"],
             max_prompt_chars=max_prompt_chars,
+            file_records=[record] if record else None,
         )
         if prompt_fits(whole_prompt, max_prompt_chars) and whole_metadata.get("included_files") == [rel]:
             file_items.append((rel, text))
@@ -2242,10 +2637,10 @@ def build_review_chunk_prompts(
             label = f"{rel} part {index}/{len(text_parts)}"
             file_items.append((label, text_part))
 
-    priority = [str(path) for path in (priority_paths or [])]
+    priority = list(dict.fromkeys([*required, *priority]))
     if priority:
         def _item_matches_priority(item_label: str) -> bool:
-            return any(item_label == rel or item_label.startswith(rel + " part ") for rel in priority)
+            return any(CHUNK_PART_SUFFIX_RE.sub("", item_label) == rel for rel in priority)
 
         ordered_items = [item for item in file_items if _item_matches_priority(item[0])]
         ordered_items.extend(item for item in file_items if not _item_matches_priority(item[0]))
@@ -2283,6 +2678,7 @@ def build_review_chunk_prompts(
             label = ", ".join(path for path, _item_text in current)
             current_metadata["chunk_kind"] = "files"
             current_metadata["chunk_label"] = label
+            current_metadata["source_bytes"] = source_bytes(current)
             if prompt_fits(current_prompt, max_prompt_chars):
                 append_chunk("files", label, current_prompt, current_metadata)
             else:
@@ -2304,6 +2700,7 @@ def build_review_chunk_prompts(
         label = ", ".join(path for path, _item_text in current)
         current_metadata["chunk_kind"] = "files"
         current_metadata["chunk_label"] = label
+        current_metadata["source_bytes"] = source_bytes(current)
         if prompt_fits(current_prompt, max_prompt_chars):
             append_chunk("files", label, current_prompt, current_metadata)
         else:
@@ -2315,12 +2712,43 @@ def build_review_chunk_prompts(
         omitted_items.extend(chunk["label"] for chunk in all_chunks[max_chunks:])
     else:
         chunks = all_chunks
+    required_missing: list[str] = []
+    for path in required:
+        expected = sum(
+            1
+            for chunk in all_chunks
+            if any(
+                CHUNK_PART_SUFFIX_RE.sub("", str(included)) == path
+                for included in chunk.get("metadata", {}).get("included_files", [])
+            )
+        )
+        sent = sum(
+            1
+            for chunk in chunks
+            if any(
+                CHUNK_PART_SUFFIX_RE.sub("", str(included)) == path
+                for included in chunk.get("metadata", {}).get("included_files", [])
+            )
+        )
+        if expected == 0 or sent != expected:
+            required_missing.append(path)
+    if required_missing:
+        raise AntiError(
+            "required file(s) cannot be covered by the current chunk plan: "
+            + ", ".join(required_missing)
+            + "; raise --max-review-chunks, raise the prompt budget, or narrow the scope"
+        )
     metadata = chunk_manifest(
         chunks,
         omitted_items,
         max_chunks=max_chunks,
         planned_chunk_count=planned_chunk_count,
+        planned_chunks=all_chunks,
+        file_records=file_records,
     )
+    metadata["sourceCommit"] = context.get("source_commit")
+    metadata["declared_files"] = list(context.get("paths") or [])
+    metadata["required_files"] = required
     return chunks, metadata
 
 
@@ -2376,43 +2804,10 @@ def build_chunk_synthesis_prompt(
     if max_chars <= 0 or len(prompt) <= max_chars or not outputs:
         metadata["synthesis_prompt_chars"] = len(prompt)
         return prompt, caveats, metadata
-
-    marker = "\n[Chunk output truncated by helper to keep synthesis prompt bounded.]"
-    empty_prompt_len = len(render([""] * len(outputs)))
-    available_for_outputs = max_chars - empty_prompt_len - (len(marker) * len(outputs))
-    truncated_labels: list[str] = []
-
-    if available_for_outputs <= 0:
-        limited_outputs = [marker.strip() for _output in outputs]
-        truncated_labels = [chunk["label"] for chunk in chunks]
-    else:
-        per_output_budget = max(1, available_for_outputs // len(outputs))
-        limited_outputs = []
-        for chunk, output in zip(chunks, outputs):
-            if len(output) <= per_output_budget:
-                limited_outputs.append(output)
-                continue
-            cut = truncate_at_line_boundary(output, per_output_budget)
-            if len(cut) > per_output_budget:
-                cut = cut[:per_output_budget]
-            limited_outputs.append((cut + marker).strip() if cut else marker.strip())
-            truncated_labels.append(chunk["label"])
-
-    prompt = render(limited_outputs)
-    if len(prompt) > max_chars:
-        prompt = truncate_at_line_boundary(prompt, max_chars)
-        if len(prompt) > max_chars:
-            prompt = prompt[:max_chars]
-        if not truncated_labels:
-            truncated_labels = [chunk["label"] for chunk in chunks]
-
-    caveats.append(
-        f"Synthesis chunk outputs truncated to keep prompt under {max_chars} characters "
-        f"({original_len} original chars)"
+    raise AntiError(
+        f"chunk synthesis input requires {original_len} characters but the exact budget is {max_chars}; "
+        "narrow the scope, raise --max-synthesis-chars, or use a smaller chunk output budget"
     )
-    metadata["synthesis_prompt_chars"] = len(prompt)
-    metadata["synthesis_truncated_outputs"] = truncated_labels
-    return prompt, caveats, metadata
 
 
 def should_run_chunked_review(args: argparse.Namespace, metadata: dict[str, Any]) -> bool:
@@ -2421,9 +2816,73 @@ def should_run_chunked_review(args: argparse.Namespace, metadata: dict[str, Any]
         return False
     if mode == "always":
         return True
-    return metadata.get("status") == "incomplete" or bool(metadata.get("omitted_files")) or bool(
-        metadata.get("diff_truncated")
+    return (
+        metadata.get("status") == "incomplete"
+        or bool(metadata.get("omitted_files"))
+        or bool(metadata.get("diff_truncated"))
+        or bool(metadata.get("assembly_over_budget"))
     )
+
+
+def review_scope_is_incomplete(metadata: dict[str, Any]) -> bool:
+    return bool(
+        metadata.get("status") == "incomplete"
+        or metadata.get("diff_truncated")
+        or coverage_is_incomplete(metadata.get("coverage"))
+        or metadata.get("omitted_files")
+        or metadata.get("assembly_over_budget")
+    )
+
+
+def enforce_exact_review(args: argparse.Namespace, metadata: dict[str, Any]) -> None:
+    """Fail before generation when --chunked off cannot cover the scope."""
+    if getattr(args, "chunked", "auto") != "off" or not review_scope_is_incomplete(metadata):
+        return
+    omitted = metadata.get("omitted_files") or []
+    details = f"; omitted items: {', '.join(str(item) for item in omitted[:8])}" if omitted else ""
+    raise AntiError(
+        "review scope is incomplete and --chunked off refuses lossy input"
+        + details
+        + "; use --chunked auto/always, raise the prompt budget, or narrow the file set"
+    )
+
+
+def apply_panel_prompt_limit(
+    prompt: str,
+    max_chars: int,
+    caveats: list[str],
+    *,
+    strict: bool = False,
+    preserve_overflow: bool = False,
+) -> str:
+    if strict and max_chars > 0 and len(prompt) > max_chars:
+        raise AntiError(
+            f"review source prompt requires {len(prompt)} characters but the exact budget is {max_chars}; "
+            "use --chunked auto/always, raise the prompt budget, or narrow the file set"
+        )
+    if preserve_overflow and max_chars > 0 and len(prompt) > max_chars:
+        caveats.append(
+            f"Review source prompt is {len(prompt)} characters; it will be chunked before generation"
+        )
+        return prompt
+    return apply_prompt_limit(prompt, max_chars, caveats)
+
+
+def normalized_priority_paths(
+    context: dict[str, Any], priority_paths: list[str] | None
+) -> list[str]:
+    paths = [str(path) for path in (priority_paths or [])]
+    if context.get("root"):
+        paths = [relative_safe_path(Path(context["root"]), path) for path in paths]
+    if "paths" in context:
+        allowed = set(context.get("paths") or [])
+        unknown = [path for path in paths if path not in allowed]
+        if unknown:
+            raise AntiError(
+                "priority file(s) are not in the requested review scope: "
+                + ", ".join(unknown)
+            )
+    return paths
 
 
 def run_chunked_review(
@@ -2442,6 +2901,7 @@ def run_chunked_review(
             max_prompt_chars=max_prompt_chars,
             max_chunks=args.max_review_chunks,
             priority_paths=getattr(args, "priority_file", None),
+            required_paths=getattr(args, "required_file", None),
         )
     if not chunks:
         omitted_count = len(chunk_metadata.get("omitted_items", []))
@@ -2452,7 +2912,7 @@ def run_chunked_review(
         )
     planned_chunk_count = int(chunk_metadata.get("planned_chunk_count") or len(chunks))
     omitted_items = chunk_metadata.get("omitted_items", [])
-    if omitted_items and not getattr(args, "allow_partial", False):
+    if chunk_metadata.get("status") == "incomplete" and not getattr(args, "allow_partial", False):
         raise AntiError(
             "review scope needs "
             f"{planned_chunk_count} chunk(s) but --max-review-chunks={args.max_review_chunks}; "
@@ -2472,16 +2932,42 @@ def run_chunked_review(
     chunk_outputs: list[str] = []
     chunk_generation: list[dict[str, Any]] = []
     execution_ledger: list[dict[str, Any]] = []
+    incomplete_chunks: list[str] = []
     for index, chunk in enumerate(chunks, start=1):
-        chunk_text, chunk_model, generation_metadata = generate_with_fallback(
-            args,
-            model=model,
-            prompt=chunk["prompt"],
-            max_output_tokens=args.chunk_output_tokens,
-            purpose=f"review chunk {index}/{len(chunks)}",
+        try:
+            chunk_text, chunk_model, generation_metadata = generate_with_fallback(
+                args,
+                model=model,
+                prompt=chunk["prompt"],
+                max_output_tokens=args.chunk_output_tokens,
+                purpose=f"review chunk {index}/{len(chunks)}",
+            )
+        except AntiError as exc:
+            exc.run_metadata = {
+                **base_metadata,
+                **chunk_metadata,
+                "status": "incomplete",
+                "scope_status": "partial",
+                "failed_chunk": chunk["label"],
+            }  # type: ignore[attr-defined]
+            raise
+        chunk_status = lane_output_status(
+            chunk_text,
+            generation_metadata.get("usage"),
+            args.chunk_output_tokens,
         )
+        if chunk_status != "success":
+            incomplete_chunks.append(chunk["label"])
         chunk_outputs.append(chunk_text)
-        chunk_generation.append({"index": index, "model_used": chunk_model, **generation_metadata})
+        chunk_generation.append(
+            {
+                "index": index,
+                "id": chunk.get("id"),
+                "model_used": chunk_model,
+                "status": chunk_status,
+                **generation_metadata,
+            }
+        )
         execution_ledger.append(
             execution_entry(
                 stage=f"review_chunk_{index}",
@@ -2492,13 +2978,71 @@ def run_chunked_review(
             )
         )
 
-    synthesis_prompt, synthesis_caveats, synthesis_metadata = build_chunk_synthesis_prompt(
-        context=context,
-        chunks=chunks,
-        chunk_outputs=chunk_outputs,
-        chunk_metadata=chunk_metadata,
-        max_chars=args.max_synthesis_chars,
+    completed_chunk_count = sum(
+        1 for item in chunk_generation if item.get("status") == "success"
     )
+    for record in chunk_metadata.get("coverage", []):
+        path = str(record.get("path") or "")
+        if not path:
+            continue
+        completed = sum(
+            1
+            for item, chunk in zip(chunk_generation, chunks)
+            if item.get("status") == "success"
+            and any(
+                CHUNK_PART_SUFFIX_RE.sub("", str(included)) == path
+                for included in chunk.get("metadata", {}).get("included_files", [])
+            )
+        )
+        record["chunksCompleted"] = completed
+        record["bytesSent"] = sum(
+            int(chunk.get("metadata", {}).get("source_bytes", {}).get(path, 0) or 0)
+            for item, chunk in zip(chunk_generation, chunks)
+            if item.get("status") == "success"
+        )
+        if completed < int(record.get("chunksExpected") or 0):
+            if record.get("contentStatus") == "complete":
+                record["contentStatus"] = "partial"
+            record["reason"] = record.get("reason") or "one or more expected chunks did not complete"
+
+    if incomplete_chunks:
+        chunk_metadata = {**chunk_metadata, "status": "incomplete"}
+        chunk_metadata["failed_chunk_count"] = len(incomplete_chunks)
+        chunk_metadata["incomplete_chunks"] = incomplete_chunks
+    chunk_metadata["completed_chunk_count"] = completed_chunk_count
+    chunk_metadata["failed_chunk_count"] = len(incomplete_chunks)
+    chunk_metadata["incomplete_chunks"] = incomplete_chunks
+    if incomplete_chunks and not getattr(args, "allow_partial", False):
+        exc = AntiError(
+            "review chunk output was incomplete ("
+            + ", ".join(incomplete_chunks[:8])
+            + "); pass --allow-partial to continue with an explicitly partial result"
+        )
+        exc.run_metadata = {
+            **base_metadata,
+            **chunk_metadata,
+            "scope_status": "partial",
+        }  # type: ignore[attr-defined]
+        raise exc
+
+    try:
+        synthesis_prompt, synthesis_caveats, synthesis_metadata = build_chunk_synthesis_prompt(
+            context=context,
+            chunks=chunks,
+            chunk_outputs=chunk_outputs,
+            chunk_metadata=chunk_metadata,
+            max_chars=args.max_synthesis_chars,
+        )
+    except AntiError as exc:
+        exc.run_metadata = {
+            **base_metadata,
+            **chunk_metadata,
+            "status": "incomplete" if chunk_metadata.get("status") == "incomplete" else "complete",
+            "scope_status": "partial" if chunk_metadata.get("status") == "incomplete" else "complete",
+            "chunk_count": len(chunks),
+            "planned_chunk_count": planned_chunk_count,
+        }  # type: ignore[attr-defined]
+        raise
     # The single-prompt assembly truncates the diff to fit one prompt; chunked
     # mode re-budgets the FULL diff across chunks, so that caveat is stale here.
     caveats = [
@@ -2507,13 +3051,24 @@ def run_chunked_review(
         if not caveat.startswith(GIT_DIFF_TRUNCATION_CAVEAT)
     ]
     caveats.extend(synthesis_caveats)
-    synthesis, synthesis_model, synthesis_generation = generate_with_fallback(
-        args,
-        model=model,
-        prompt=synthesis_prompt,
-        max_output_tokens=args.max_output_tokens,
-        purpose="review synthesis",
-    )
+    try:
+        synthesis, synthesis_model, synthesis_generation = generate_with_fallback(
+            args,
+            model=model,
+            prompt=synthesis_prompt,
+            max_output_tokens=args.max_output_tokens,
+            purpose="review synthesis",
+        )
+    except AntiError as exc:
+        exc.run_metadata = {
+            **base_metadata,
+            **chunk_metadata,
+            "status": "incomplete" if chunk_metadata.get("status") == "incomplete" else "complete",
+            "scope_status": "partial" if chunk_metadata.get("status") == "incomplete" else "complete",
+            "chunk_count": len(chunks),
+            "planned_chunk_count": planned_chunk_count,
+        }  # type: ignore[attr-defined]
+        raise
     execution_ledger.append(
         execution_entry(
             stage="review_synthesis",
@@ -2523,11 +3078,36 @@ def run_chunked_review(
             generation=synthesis_generation,
         )
     )
+    synthesis_status = lane_output_status(
+        synthesis,
+        synthesis_generation.get("usage"),
+        args.max_output_tokens,
+    )
+    if synthesis_status != "success":
+        chunk_metadata = {**chunk_metadata, "status": "incomplete"}
+        chunk_metadata["synthesis_status"] = synthesis_status
+        caveats.append(
+            "Review synthesis output was "
+            + synthesis_status
+            + " at the output-token cap; the result is incomplete"
+        )
+        if not getattr(args, "allow_partial", False):
+            exc = AntiError(
+                "review synthesis output was "
+                + synthesis_status
+                + "; pass --allow-partial to continue with an explicitly partial result"
+            )
+            exc.run_metadata = {
+                **base_metadata,
+                **chunk_metadata,
+                "scope_status": "partial",
+            }  # type: ignore[attr-defined]
+            raise exc
     if chunk_metadata["omitted_items"]:
         caveats.append("Chunked review omitted items: " + ", ".join(chunk_metadata["omitted_items"][:20]))
     metadata = {
         **base_metadata,
-        "status": "incomplete" if chunk_metadata["omitted_items"] else "complete",
+        "status": chunk_metadata.get("status", "incomplete" if omitted_items else "complete"),
         "chunked": True,
         "single_prompt_status": base_metadata.get("status"),
         "single_prompt_omitted_files": base_metadata.get("omitted_files", []),
@@ -2542,17 +3122,24 @@ def run_chunked_review(
                 "index": index,
                 "kind": chunk["kind"],
                 "label": chunk["label"],
+                "id": chunk.get("id"),
                 "prompt_chars": chunk["prompt_chars"],
                 "model_used": chunk_generation[index - 1]["model_used"],
+                "status": chunk_generation[index - 1]["status"],
             }
             for index, chunk in enumerate(chunks, start=1)
         ],
         "chunk_generation": chunk_generation,
         "synthesis_model_used": synthesis_model,
         "synthesis_generation": synthesis_generation,
+        "synthesis_status": synthesis_status,
+        "failed_chunk_count": len(incomplete_chunks),
+        "incomplete_chunks": incomplete_chunks,
         "chunk_omitted_items": chunk_metadata["omitted_items"],
         "included_files": chunk_metadata["included_files"],
         "included_items": chunk_metadata["included_items"],
+        "coverage": chunk_metadata.get("coverage", []),
+        "sourceCommit": chunk_metadata.get("sourceCommit"),
         "prompt_budget_chars": max_prompt_chars,
         **synthesis_metadata,
         "_execution_ledger": execution_ledger,
@@ -2868,10 +3455,11 @@ def print_result(
         sanitizer=sanitize_json,
     )
     if output_json:
-        scope_status = None
-        if metadata.get("status") == "incomplete":
+        scope_status = metadata.get("scopeStatus") or metadata.get("scope_status")
+        coverage = coverage_summary(metadata)
+        if coverage["status"] == "partial":
             scope_status = "partial"
-        elif metadata.get("status") == "complete":
+        elif scope_status is None and coverage["status"] == "complete":
             scope_status = "complete"
         omitted_items = metadata.get("omitted_files") or metadata.get("chunk_omitted_items") or []
         derived_metadata = dict(metadata)
@@ -2885,10 +3473,27 @@ def print_result(
         print(
             json.dumps(
                 {
+                    "schemaVersion": RESULT_SCHEMA_VERSION,
+                    "runStatus": (
+                        "partial"
+                        if scope_status == "partial"
+                        else metadata.get("runStatus") or "success"
+                    ),
+                    "scopeStatus": scope_status,
+                    "coverage": coverage,
                     "mode": mode,
                     "model": model,
                     "gateway": safe_gateway,
                     "caveats": caveats,
+                    "verification": metadata.get(
+                        "verification",
+                        {
+                            "status": "not_run",
+                            "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
+                            "performedBy": None,
+                            "evidence": [],
+                        },
+                    ),
                     "metadata": derived_metadata,
                     "output_text": text.strip(),
                 },
@@ -3199,6 +3804,12 @@ def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
     else:
         line = None
     evidence = clean_string(value.get("evidence"), max_chars=2000) or "unverified"
+    # Model-supplied verification labels are untrusted; only the local
+    # verifier may upgrade this field after attaching tool evidence.
+    verification_status = "unverified"
+    excerpt_sha256 = clean_string(value.get("excerptSha256"), max_chars=64).lower() or None
+    if excerpt_sha256 and not re.fullmatch(r"[0-9a-f]{64}", excerpt_sha256):
+        excerpt_sha256 = None
     # Build fingerprint for cross-lane dedup
     fp_key = f"{file_path or ''}:{line or ''}:{claim.lower().strip()}"
     fingerprint = "sha256:" + hashlib.sha256(fp_key.encode("utf-8")).hexdigest()[:16]
@@ -3213,6 +3824,12 @@ def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
         "line": line,
         "evidence": evidence,
         "fingerprint": fingerprint,
+        "sourceCommit": clean_string(value.get("sourceCommit"), max_chars=128) or None,
+        "chunkId": clean_string(value.get("chunkId"), max_chars=160) or None,
+        "laneId": clean_string(value.get("laneId"), max_chars=160) or None,
+        "excerptSha256": excerpt_sha256,
+        "scopeStatus": clean_string(value.get("scopeStatus"), max_chars=40).lower() or "unknown",
+        "verificationStatus": verification_status,
     }
 
 
@@ -3301,6 +3918,53 @@ def parse_panel_findings(text: str) -> tuple[dict[str, Any] | None, str | None, 
         "findings_dropped": dropped,
     }
     return sanitize_json(contract), None, diagnostics
+
+
+def enrich_finding_provenance(
+    findings: dict[str, Any] | None,
+    metadata: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Attach source/run provenance; model text cannot manufacture it."""
+    if not isinstance(findings, dict) or not isinstance(findings.get("findings"), list):
+        return findings
+    scope = metadata.get("scope_status") or metadata.get("scopeStatus")
+    if scope == "incomplete":
+        scope = "partial"
+    elif scope == "complete":
+        scope = "complete"
+    else:
+        scope = "unknown"
+    source_commit = metadata.get("sourceCommit") or metadata.get("source_commit")
+    coverage = {
+        str(record.get("path")): record
+        for record in metadata.get("coverage", [])
+        if isinstance(record, dict) and record.get("path")
+    }
+    root = Path(metadata.get("workspace_root") or Path.cwd())
+    for finding in findings["findings"]:
+        if not isinstance(finding, dict):
+            continue
+        finding["sourceCommit"] = source_commit
+        finding["scopeStatus"] = scope
+        lanes = finding.get("lanes") if isinstance(finding.get("lanes"), list) else []
+        finding["laneId"] = lanes[0] if len(lanes) == 1 else None
+        finding.setdefault("chunkId", None)
+        record = coverage.get(str(finding.get("file")))
+        if record and record.get("contentStatus") != "complete":
+            finding["verificationStatus"] = "needs-runtime-check"
+        else:
+            finding["verificationStatus"] = "unverified"
+        line = finding.get("line")
+        rel_path = finding.get("file")
+        if isinstance(line, int) and line > 0 and isinstance(rel_path, str) and record:
+            try:
+                text, _note = read_text_file(root, rel_path, truncate=False)
+                source_line = text.splitlines()[line - 1]
+            except (IndexError, OSError, UnicodeError):
+                source_line = ""
+            if source_line:
+                finding["excerptSha256"] = hashlib.sha256(source_line.encode("utf-8")).hexdigest()
+    return findings
 
 
 def fallback_findings_contract(
@@ -3400,16 +4064,25 @@ def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[st
             claude_guardrail_would_apply(args, model, prompt_budget) for model in resolved_panel_models
         )
         context = collect_review_context(args)
+        normalized_priority_paths(context, getattr(args, "priority_file", None))
+        normalized_priority_paths(context, getattr(args, "required_file", None))
         if not context["diff"].strip() and not context["file_texts"]:
             raise empty_review_scope_error(args.scope)
         prompt, _paths, caveats, review_metadata = assemble_review_prompt_from_context(
             context,
             max_prompt_chars=prompt_budget,
         )
+        enforce_exact_review(args, review_metadata)
         extra_prompt = read_optional_prompt(args)
         if extra_prompt:
             prompt = "\n\n".join(["Additional review instructions:\n" + extra_prompt, prompt])
-            prompt = apply_prompt_limit(prompt, prompt_budget, caveats)
+            prompt = apply_panel_prompt_limit(
+                prompt,
+                prompt_budget,
+                caveats,
+                strict=False,
+                preserve_overflow=True,
+            )
             review_metadata["additional_prompt_chars"] = len(extra_prompt)
         claude_guardrail_used = claude_guardrail_available and should_run_chunked_review(args, review_metadata)
         if claude_guardrail_used:
@@ -3438,14 +4111,31 @@ def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[st
     role_instruction = panel_role_instruction(args.role)
     if role_instruction:
         prompt = "\n\n".join([role_instruction, prompt])
-        prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+        prompt = apply_panel_prompt_limit(
+            prompt,
+            prompt_budget if args.mode == "review" else args.max_prompt_chars,
+            caveats,
+            strict=False,
+            preserve_overflow=args.mode == "review",
+        )
         metadata["prompt_chars"] = len(prompt)
     # Collaboration instructions removed (no active profiles); kept for future extensibility
     # if collab_instruction:
     #     prompt = "\n\n".join([collab_instruction, prompt])
     prompt = "\n\n".join([PANEL_LANE_INSTRUCTION, gpt_complement_instruction(), prompt])
-    prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+    prompt = apply_panel_prompt_limit(
+        prompt,
+        prompt_budget if args.mode == "review" else args.max_prompt_chars,
+        caveats,
+        strict=False,
+        preserve_overflow=args.mode == "review",
+    )
     metadata["prompt_chars"] = len(prompt)
+    if args.mode == "review":
+        metadata["assembly_over_budget"] = bool(
+            prompt_budget > 0 and len(prompt) > prompt_budget
+        )
+        enforce_exact_review(args, metadata)
 
     return prompt, caveats, metadata
 
@@ -3512,19 +4202,86 @@ def build_panel_synthesis_prompt(
         "requested_output": output_mode,
     }
 
-    def render(source: str, outputs: list[str]) -> str:
+    def lane_material(result: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        raw = str(result.get("output_text", "")).strip()
+        if result.get("status") not in {"success", "truncated"}:
+            return {
+                "status": result.get("status"),
+                "error": clean_string(result.get("error"), max_chars=1200),
+            }, False
+        parsed, warning, _diagnostics = parse_panel_findings(raw)
+        if isinstance(parsed, dict):
+            severity_order = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+            findings = sorted(
+                [item for item in parsed.get("findings", []) if isinstance(item, dict)],
+                key=lambda item: severity_order.get(str(item.get("severity")), 0),
+                reverse=True,
+            )
+            material = {
+                "status": result.get("status"),
+                "materialStatus": "structured",
+                "summary": parsed.get("summary", ""),
+                "findings": findings,
+                "disagreements": parsed.get("disagreements", []),
+                "unverifiable": parsed.get("unverifiable", []),
+                "recommended_next_actions": parsed.get("recommended_next_actions", []),
+                "caveats": parsed.get("caveats", []),
+            }
+            if warning:
+                material["caveats"] = [*material["caveats"], warning]
+        else:
+            material = {
+                "status": result.get("status"),
+                "materialStatus": "prose",
+                "summary": raw,
+                "findings": [],
+                "caveats": [warning] if warning else [],
+            }
+        if result.get("status") == "truncated":
+            material["caveats"] = [
+                "lane output truncated at the token cap; partial content below is incomplete",
+                *list(material.get("caveats") or []),
+            ]
+        encoded_len = len(json.dumps(material, ensure_ascii=False, sort_keys=True))
+        if encoded_len <= 8000:
+            return material, False
+        # A lane's raw response is never silently cut into the judge prompt.
+        # Keep a bounded excerpt only with an explicit partial marker.
+        material["materialStatus"] = "compacted"
+        material["materialOriginalChars"] = encoded_len
+        material["summary"] = truncate_at_line_boundary(str(material.get("summary") or ""), 2400)
+        material["findings"] = list(material.get("findings") or [])[:12]
+        material["caveats"] = [
+            *list(material.get("caveats") or []),
+            "Lane material was compacted before judge synthesis; this lane is partial.",
+        ]
+        return material, True
+
+    lane_materials: list[dict[str, Any]] = []
+    lossy_lanes: list[str] = []
+    for result in panel_results:
+        material, lossy = lane_material(result)
+        lane_materials.append(material)
+        if lossy:
+            lossy_lanes.append(str(result.get("model")))
+    metadata["judge_input_status"] = "partial" if lossy_lanes else "complete"
+    metadata["judge_input_lossy_lanes"] = lossy_lanes
+    manifest["judge_input_status"] = metadata["judge_input_status"]
+    manifest["judge_input_lossy_lanes"] = lossy_lanes
+
+    def render(source: str, materials: list[dict[str, Any]]) -> str:
         # Phase 3: anonymize lane labels and shuffle before judging
         render_results = list(panel_results)
-        render_outputs = list(outputs)
+        render_materials = list(materials)
         # H-3 fix: reuse existing mapping on retry to avoid inconsistent shuffle
         anonymize_mapping = dict(metadata.get("anonymize_mapping", {}))
         if anonymize and len(render_results) > 1:
             if not anonymize_mapping:
-                paired = list(zip(render_results, render_outputs))
+                paired = list(zip(render_results, render_materials))
                 random.shuffle(paired)
-                render_results, render_outputs = zip(*paired) if paired else ([], [])
+                render_results, render_materials = zip(*paired) if paired else ([], [])
                 render_results = list(render_results)
-                render_outputs = list(render_outputs)
+                render_materials = list(render_materials)
                 for i, result in enumerate(render_results):
                     lane_label = chr(ord("A") + i)
                     anonymize_mapping[f"Lane {lane_label}"] = result["model"]
@@ -3534,13 +4291,13 @@ def build_panel_synthesis_prompt(
                 # Reorder results to match existing mapping
                 reverse_map = {v: k for k, v in anonymize_mapping.items()}
                 reorder_key = lambda r: reverse_map.get(r["model"], "")
-                paired = sorted(zip(render_results, render_outputs), key=lambda p: reorder_key(p[0]))
+                paired = sorted(zip(render_results, render_materials), key=lambda p: reorder_key(p[0]))
                 if paired:
-                    render_results, render_outputs = zip(*paired)
+                    render_results, render_materials = zip(*paired)
                     render_results = list(render_results)
-                    render_outputs = list(render_outputs)
+                    render_materials = list(render_materials)
         result_sections = []
-        for result, output in zip(render_results, render_outputs):
+        for result, material in zip(render_results, render_materials):
             # Use anonymized label if anonymizing
             display_model = result["model"]
             if anonymize and len(render_results) > 1:
@@ -3571,13 +4328,7 @@ def build_panel_synthesis_prompt(
             if result.get("model_identity"):
                 lines.append(f"- model_identity: {json.dumps(result['model_identity'], sort_keys=True)}")
             lines.append(f"- independent_of_other_lanes: {bool(result.get('independent'))}")
-            if result["status"] == "success":
-                lines.append(output.strip() or "(empty output)")
-            elif result["status"] == "truncated":
-                lines.append("(lane output truncated at the token cap; partial content below is incomplete)")
-                lines.append(output.strip() or "(no content)")
-            else:
-                lines.append("error: " + str(result.get("error", "unknown error")))
+            lines.append("```json\n" + json.dumps(material, ensure_ascii=False, indent=2, sort_keys=True) + "\n```")
             result_sections.append("\n".join(lines))
         return "\n\n".join(
             [
@@ -3600,8 +4351,7 @@ def build_panel_synthesis_prompt(
             ]
         )
 
-    outputs = [str(result.get("output_text", "")).strip() for result in panel_results]
-    prompt = render(source_prompt, outputs)
+    prompt = render(source_prompt, lane_materials)
     original_len = len(prompt)
     synthesis_caveats: list[str] = []
     synthesis_metadata: dict[str, Any] = {
@@ -3612,59 +4362,10 @@ def build_panel_synthesis_prompt(
     if max_chars <= 0 or len(prompt) <= max_chars:
         synthesis_metadata["synthesis_prompt_chars"] = len(prompt)
         return prompt, synthesis_caveats, synthesis_metadata
-
-    marker = "\n[Panel content truncated by helper to keep synthesis prompt bounded.]"
-    empty_len = len(render("", ["" for _ in outputs]))
-    available = max_chars - empty_len - len(marker) * (len(outputs) + 1)
-    truncated_source = False
-    truncated_models: list[str] = []
-
-    if available <= 0:
-        limited_source = marker.strip()
-        limited_outputs = [marker.strip() for _ in outputs]
-        truncated_source = bool(source_prompt.strip())
-        truncated_models = [result["model"] for result in panel_results if result["status"] == "success"]
-    else:
-        source_budget = max(1, available // 3)
-        outputs_budget = max(1, available - source_budget)
-        per_output_budget = max(1, outputs_budget // max(1, len(outputs)))
-        if len(source_prompt) > source_budget:
-            cut = truncate_at_line_boundary(source_prompt, source_budget)
-            if len(cut) > source_budget:
-                cut = cut[:source_budget]
-            limited_source = (cut + marker).strip() if cut else marker.strip()
-            truncated_source = True
-        else:
-            limited_source = source_prompt
-
-        limited_outputs = []
-        for result, output in zip(panel_results, outputs):
-            if result["status"] != "success" or len(output) <= per_output_budget:
-                limited_outputs.append(output)
-                continue
-            cut = truncate_at_line_boundary(output, per_output_budget)
-            if len(cut) > per_output_budget:
-                cut = cut[:per_output_budget]
-            limited_outputs.append((cut + marker).strip() if cut else marker.strip())
-            truncated_models.append(result["model"])
-
-    prompt = render(limited_source, limited_outputs)
-    if len(prompt) > max_chars:
-        prompt = truncate_at_line_boundary(prompt, max_chars)
-        if len(prompt) > max_chars:
-            prompt = prompt[:max_chars]
-        truncated_source = True
-        if not truncated_models:
-            truncated_models = [result["model"] for result in panel_results if result["status"] == "success"]
-
-    synthesis_caveats.append(
-        f"Panel synthesis prompt truncated to keep it under {max_chars} characters "
-        f"({original_len} original chars)"
+    raise AntiError(
+        f"panel synthesis input requires {original_len} characters but the exact budget is {max_chars}; "
+        "narrow the scope, raise --max-synthesis-chars, or reduce lane output budgets"
     )
-    synthesis_metadata["synthesis_prompt_chars"] = len(prompt)
-    synthesis_metadata["synthesis_truncated_source"] = truncated_source
-    synthesis_metadata["synthesis_truncated_models"] = truncated_models
-    return prompt, synthesis_caveats, synthesis_metadata
 
 
 def lane_retry_instruction() -> str:
@@ -4041,6 +4742,8 @@ def annotate_panel_results(panel_results: list[dict[str, Any]]) -> tuple[list[st
         status = "degraded_single_model"
     elif len(usable) < len(panel_results) or fallback_lanes or len(identity_counts) < len(usable):
         status = "partial_multi_model"
+    elif len(distinct_actual_providers) == 1:
+        status = "same_provider_multi_model"
     else:
         status = "complete_multi_model"
     return distinct_actual_models, distinct_actual_providers, status
@@ -4081,6 +4784,12 @@ def panel_integrity_notice(
             "Panel integrity notice: partial_multi_model. "
             f"Requested models: {requested}. Distinct successful actual models/providers: {actual}. "
             "Some requested lanes failed, were truncated, or used fallback; do not treat this as complete consensus."
+        )
+    if status == "same_provider_multi_model":
+        return (
+            "Panel integrity notice: same_provider_multi_model. "
+            f"Requested models: {requested}. Distinct successful actual models/providers: {actual}. "
+            "Multiple model identities ran, but all were served by one provider; provider independence was not established."
         )
     return (
         "Panel integrity notice: failed. "
@@ -4196,18 +4905,41 @@ def print_panel_result(
     safe_gateway = redact_sensitive_text(base_url)
     judge_model = redact_sensitive_text(judge_model)
     panel_models = [redact_sensitive_text(model) for model in panel_models]
-    panel_results = sanitize_json(sanitize_panel_results_for_display(panel_results))
+    panel_results = sanitize_json(
+        sanitize_panel_results_for_display(panel_results_for_record(panel_results))
+    )
     findings = sanitize_json(findings) if findings is not None else None
+    display_metadata = dict(metadata)
+    display_metadata.pop("_review_context", None)
+    display_metadata.pop("panel_results", None)
     text, caveats, metadata = presentable_result(
         text=text,
         caveats=caveats,
-        metadata=metadata,
+        metadata=display_metadata,
         sanitizer=sanitize_json,
     )
+    panel_status = metadata.get("panelStatus") or metadata.get("panel_status") or metadata.get("status")
+    scope_status = metadata.get("scopeStatus") or metadata.get("scope_status")
+    coverage = coverage_summary(metadata)
+    if coverage["status"] == "partial":
+        scope_status = "partial"
+    elif scope_status is None:
+        scope_status = "complete"
+    run_status = metadata.get("runStatus") or metadata.get("run_status")
+    if run_status is None:
+        run_status = "success" if panel_status in {None, "complete_multi_model", "same_provider_multi_model"} else "partial"
+    if scope_status == "partial" and run_status == "success":
+        run_status = "partial"
     if output_json:
         print(
             json.dumps(
                 {
+                    "schemaVersion": RESULT_SCHEMA_VERSION,
+                    "runId": metadata.get("run_id"),
+                    "runStatus": run_status,
+                    "scopeStatus": scope_status,
+                    "panelStatus": panel_status,
+                    "coverage": coverage,
                     "mode": "panel",
                     "panel_mode": panel_mode,
                     "gateway": safe_gateway,
@@ -4215,6 +4947,15 @@ def print_panel_result(
                     "panel_models": panel_models,
                     "panel_results": panel_results,
                     "caveats": caveats,
+                    "verification": metadata.get(
+                        "verification",
+                        {
+                            "status": "not_run",
+                            "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
+                            "performedBy": None,
+                            "evidence": [],
+                        },
+                    ),
                     "findings": findings,
                     "metadata": metadata,
                     "output_text": text.strip(),
@@ -4225,7 +4966,26 @@ def print_panel_result(
         )
         return
     if output_mode == "findings":
-        print(json.dumps(findings or fallback_findings_contract(text, caveats), indent=2, sort_keys=True))
+        findings_output = dict(findings or fallback_findings_contract(text, caveats))
+        findings_output.update(
+            {
+                "schemaVersion": RESULT_SCHEMA_VERSION,
+                "runStatus": run_status,
+                "scopeStatus": scope_status,
+                "panelStatus": panel_status,
+                "coverage": coverage,
+                "verification": metadata.get(
+                    "verification",
+                    {
+                        "status": "not_run",
+                        "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
+                        "performedBy": None,
+                        "evidence": [],
+                    },
+                ),
+            }
+        )
+        print(json.dumps(findings_output, indent=2, sort_keys=True))
         return
 
     print(f"## Antigravity panel ({panel_mode})")
@@ -4310,6 +5070,7 @@ def maybe_summarize_panel_review(
         max_prompt_chars=prompt_budget_for_model(args, panel_review_summary_model(panel_models)),
         max_chunks=args.max_review_chunks,
         priority_paths=getattr(args, "priority_file", None),
+        required_paths=getattr(args, "required_file", None),
     )
     planned_count = int(pre_chunk_metadata.get("planned_chunk_count") or len(pre_chunks))
     omitted = pre_chunk_metadata.get("omitted_items", [])
@@ -4321,6 +5082,18 @@ def maybe_summarize_panel_review(
             "Pass --allow-partial to continue with a partial review, "
             "raise --max-review-chunks, or narrow the file set."
         )
+
+    write_preflight_record(
+        args,
+        mode="panel",
+        models=list(panel_models),
+        base_url=args.base_url,
+        metadata={
+            **metadata,
+            **pre_chunk_metadata,
+            "scope_status": "partial" if pre_chunk_metadata.get("status") == "incomplete" else "complete",
+        },
+    )
 
     raw_prompt_chars = len(prompt)
     summary_model = panel_review_summary_model(panel_models)
@@ -4343,7 +5116,23 @@ def maybe_summarize_panel_review(
         ]
     )
     fanout_prompt_budget = prompt_budget_for_panel_source(args, panel_models)
-    prompt = apply_prompt_limit(prompt, fanout_prompt_budget, summary_caveats)
+    if fanout_prompt_budget > 0 and len(prompt) > fanout_prompt_budget:
+        original_summary_prompt_chars = len(prompt)
+        summary_header = (
+            "This panel review context was summarized by Anti before multi-model fan-out to avoid silently "
+            "truncating a large review scope.\n"
+            "Panel lanes must treat the summary as bounded context, not as proof of the omitted raw source.\n"
+            "## Bounded Review Summary\n"
+        )
+        marker = "\n[Bounded review summary compacted; panel status is partial.]"
+        summary_budget = max(1, fanout_prompt_budget - len(summary_header) - len(marker))
+        summary_excerpt = truncate_at_line_boundary(summary_text, summary_budget)
+        prompt = summary_header + summary_excerpt + marker
+        summary_caveats.append(
+            f"Bounded review summary compacted from {original_summary_prompt_chars} to "
+            f"{len(prompt)} characters before panel fan-out"
+        )
+        metadata["summary_input_lossy"] = True
     metadata = {
         **metadata,
         "panel_review_context": "chunked-summary",
@@ -4354,6 +5143,10 @@ def maybe_summarize_panel_review(
         "review_summary_chars": len(summary_text),
         "review_summary_metadata": summary_metadata,
     }
+    # Chunk prompts and model outputs belong in full audit artifacts, not in
+    # the next judge prompt's manifest.
+    metadata.pop("_execution_ledger", None)
+    summary_metadata.pop("_execution_ledger", None)
     merged_caveats = list(caveats)
     for caveat in summary_caveats:
         if caveat not in merged_caveats:
@@ -4392,6 +5185,9 @@ def command_panel(args: argparse.Namespace) -> int:
         min_successes = 2 if len(panel_models) >= 2 else 1
     if min_successes > len(panel_models):
         raise AntiError("--min-successes cannot exceed the number of panel models")
+    min_providers = getattr(args, "min_providers", None)
+    if min_providers is not None and min_providers > len(panel_models):
+        raise AntiError("--min-providers cannot exceed the number of panel models")
 
     prompt, caveats, metadata = assemble_panel_source_prompt(args)
     disclosure = byok_repo_context_disclosure(
@@ -4411,6 +5207,7 @@ def command_panel(args: argparse.Namespace) -> int:
             "panel_models": panel_models,
             "judge_model": judge_model,
             "min_successes": min_successes,
+            "min_providers": min_providers,
             "max_parallel": args.max_parallel,
             "prompt_chars": len(prompt),
             "budget_limit": args.budget,
@@ -4478,14 +5275,29 @@ def command_panel(args: argparse.Namespace) -> int:
             + f"below --min-successes {min_successes}. Available sample: {sample}"
         )
 
-    prompt, caveats, metadata = maybe_summarize_panel_review(
-        args=args,
-        prompt=prompt,
-        caveats=caveats,
-        metadata=metadata,
-        panel_models=available_panel_models or panel_models,
-    )
+    review_context = metadata.get("_review_context") if isinstance(metadata.get("_review_context"), dict) else None
+    try:
+        prompt, caveats, metadata = maybe_summarize_panel_review(
+            args=args,
+            prompt=prompt,
+            caveats=caveats,
+            metadata=metadata,
+            panel_models=available_panel_models or panel_models,
+        )
+    except AntiError as exc:
+        exc.run_metadata = {
+            **metadata,
+            "scope_status": "partial" if review_scope_is_incomplete(metadata) else "complete",
+        }  # type: ignore[attr-defined]
+        raise
     metadata["prompt_chars"] = len(prompt)
+    write_preflight_record(
+        args,
+        mode="panel",
+        models=list(panel_models),
+        base_url=args.base_url,
+        metadata=metadata,
+    )
 
     panel_results: list[dict[str, Any]] = [
         {"model": model, "status": "error", "error": "model not advertised by /v1/models"}
@@ -4544,6 +5356,8 @@ def command_panel(args: argparse.Namespace) -> int:
     usable = [*successes, *truncated]
     distinct_actual_models, distinct_actual_providers, panel_status = annotate_panel_results(panel_results)
     distinct_actual_identity_count = panel_actual_identity_count(panel_results)
+    if metadata.get("summary_input_lossy") and panel_status not in {"failed", "degraded_single_model"}:
+        panel_status = "partial_multi_model"
     if failures:
         caveats.extend(
             f"Panel model {result['model']} failed: {redact_sensitive_text(result.get('error', 'unknown error'))}"
@@ -4598,8 +5412,13 @@ def command_panel(args: argparse.Namespace) -> int:
     ]
     metadata["success_count"] = len(successes)
     metadata["usable_count"] = len(usable)
-    if metadata.get("status") in {"complete", "incomplete"}:
-        metadata["scope_status"] = metadata["status"]
+    scope_status = "partial" if review_scope_is_incomplete(metadata) else "complete"
+    if scope_status == "partial" and panel_status in {
+        "complete_multi_model",
+        "same_provider_multi_model",
+    }:
+        panel_status = "partial_multi_model"
+    metadata["scope_status"] = scope_status
     metadata["logical_success_count"] = len(successes)
     metadata["logical_usable_count"] = len(usable)
     metadata["successful_actual_models"] = [
@@ -4641,18 +5460,27 @@ def command_panel(args: argparse.Namespace) -> int:
     metadata["distinctActualProviders"] = list(distinct_actual_providers)
     metadata["distinctActualProviderCount"] = len(distinct_actual_providers)
     metadata["panelStatus"] = panel_status
+    metadata["min_providers_met"] = (
+        min_providers is None or len(distinct_actual_providers) >= min_providers
+    )
 
     # ``--min-successes`` is a minimum amount of independent evidence.  A
     # fallback may make multiple logical lanes usable, but it cannot satisfy a
     # diversity requirement when all outputs came from one actual model.
-    if distinct_actual_identity_count < min_successes:
+    if distinct_actual_identity_count < min_successes or not metadata["min_providers_met"]:
         metadata["panel_results"] = panel_results_for_record(panel_results)
-        error = (
-            f"panel had {len(successes)} successful and {len(truncated)} truncated model(s) "
-            f"from {distinct_actual_identity_count} distinct actual model/provider(s), "
-            f"below --min-successes {min_successes} (truncated lanes still count as usable; "
-            "fallback lanes sharing an actual model are not independent)"
-        )
+        if not metadata["min_providers_met"]:
+            error = (
+                f"panel had {len(distinct_actual_providers)} distinct actual provider(s), "
+                f"below --min-providers {min_providers}; provider diversity requirement failed"
+            )
+        else:
+            error = (
+                f"panel had {len(successes)} successful and {len(truncated)} truncated model(s) "
+                f"from {distinct_actual_identity_count} distinct actual model/provider(s), "
+                f"below --min-successes {min_successes} (truncated lanes still count as usable; "
+                "fallback lanes sharing an actual model are not independent)"
+            )
         try:
             write_run_record(
                 args,
@@ -4689,19 +5517,39 @@ def command_panel(args: argparse.Namespace) -> int:
             )
         raise AntiError(error)
 
-    synthesis_prompt, synthesis_caveats, synthesis_metadata = build_panel_synthesis_prompt(
-        panel_mode=args.mode,
-        source_prompt=prompt,
-        panel_results=panel_results,
-        metadata=metadata,
-        caveats=caveats,
-        roles=args.role or [],
-        max_chars=args.max_synthesis_chars,
-        output_mode=args.output,
-        anonymize=not getattr(args, "no_anonymize", False),
-    )
+    try:
+        synthesis_prompt, synthesis_caveats, synthesis_metadata = build_panel_synthesis_prompt(
+            panel_mode=args.mode,
+            source_prompt=prompt,
+            panel_results=panel_results,
+            metadata=metadata,
+            caveats=caveats,
+            roles=args.role or [],
+            max_chars=args.max_synthesis_chars,
+            output_mode=args.output,
+            anonymize=not getattr(args, "no_anonymize", False),
+        )
+    except AntiError as exc:
+        exc.run_metadata = {
+            **metadata,
+            "scope_status": scope_status,
+            "panel_status": panel_status,
+            "panel_results": panel_results_for_record(panel_results),
+        }  # type: ignore[attr-defined]
+        raise
     caveats.extend(synthesis_caveats)
     metadata.update(synthesis_metadata)
+    if metadata.get("judge_input_status") == "partial" and panel_status not in {"failed", "degraded_single_model"}:
+        panel_status = "partial_multi_model"
+        metadata["panel_status"] = panel_status
+        metadata["status"] = panel_status
+        integrity_notice = panel_integrity_notice(
+            status=panel_status,
+            requested_models=panel_models,
+            distinct_actual_models=distinct_actual_models,
+        )
+        if integrity_notice and integrity_notice not in caveats:
+            caveats.append(integrity_notice)
 
     def run_judge(prompt: str, max_output_tokens: int) -> tuple[str, str, dict[str, Any]]:
         return generate_with_fallback(
@@ -4860,6 +5708,21 @@ def command_panel(args: argparse.Namespace) -> int:
                 )
         display_text = render_panel_findings(findings or {}, caveats)
 
+    if judge_truncated or parse_diagnostics.get("repaired") or findings_caveat:
+        if panel_status != "failed":
+            panel_status = "partial_multi_model" if len(distinct_actual_models) > 1 else "degraded_single_model"
+    integrity_notice = panel_integrity_notice(
+        status=panel_status,
+        requested_models=panel_models,
+        distinct_actual_models=distinct_actual_models,
+    )
+    if integrity_notice and integrity_notice not in caveats:
+        caveats.append(integrity_notice)
+    metadata["panel_status"] = panel_status
+    metadata["panelStatus"] = panel_status
+    metadata["status"] = panel_status
+    metadata["scopeStatus"] = scope_status
+
     # Make the panel-integrity disclosure part of the structured findings
     # contract as well as the top-level caveats.  Consumers using
     # ``--output findings`` must not be able to miss a collapsed or partial
@@ -4873,19 +5736,31 @@ def command_panel(args: argparse.Namespace) -> int:
         integrity_notice=integrity_notice,
         caveats=caveats,
     )
+    findings = enrich_finding_provenance(findings, metadata)
+    metadata["verification"] = {
+        "status": "not_run",
+        "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
+        "performedBy": None,
+        "evidence": [],
+    }
     # Phase 6: evidence-linked verification of findings
     if (
         not getattr(args, "no_verify", False)
         and isinstance(findings, dict)
         and findings.get("findings")
     ):
-        review_ctx = metadata.get("_review_context") or {}
-        workspace = Path(review_ctx.get("workspace_root") or Path.cwd())
+        workspace = Path((review_context or {}).get("workspace_root") or Path.cwd())
         raw_findings = findings.get("findings", [])
         if isinstance(raw_findings, list):
             verified = verify_findings(raw_findings, workspace)
             findings["findings"] = verified
             verified_count = sum(1 for f in verified if f.get("evidence", "unverified") != "unverified")
+            metadata["verification"] = {
+                "status": "completed_no_evidence" if not verified_count else "tool_checks",
+                "performedBy": "anti",
+                "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
+                "evidenceCount": verified_count,
+            }
             if verified_count:
                 caveats.append(f"Verification: {verified_count}/{len(verified)} findings received tool-backed evidence")
     if metadata.get("findings_status") == "parsed" and isinstance(findings, dict):
@@ -4906,11 +5781,25 @@ def command_panel(args: argparse.Namespace) -> int:
             if isinstance(findings_caveats, list) and output_integrity_notice not in findings_caveats:
                 findings_caveats.insert(0, output_integrity_notice)
         display_text = "\n\n".join(part for part in [output_integrity_notice, display_text] if part).strip()
+    run_status = (
+        "failed"
+        if panel_status == "failed" or not usable
+        else "partial"
+        if scope_status == "partial"
+        or panel_status in {"partial_multi_model", "degraded_single_model"}
+        or judge_truncated
+        or parse_diagnostics.get("repaired")
+        or findings_caveat
+        else "success"
+    )
+    metadata["runStatus"] = run_status
     metadata["findings"] = findings
+    metadata["panel_results"] = panel_results_for_record(panel_results)
+    metadata.pop("_review_context", None)
     write_run_record(
         args,
         mode="panel",
-        status="success",
+        status=run_status,
         models=list(dict.fromkeys([*panel_models, str(judge_model), str(judge_model_used)])),
         base_url=args.base_url,
         prompt_text=prompt,
@@ -4920,8 +5809,7 @@ def command_panel(args: argparse.Namespace) -> int:
     )
     # Phase 8: passively record reflection data
     try:
-        review_ctx = metadata.get("_review_context") or {}
-        workspace = Path(review_ctx.get("workspace_root") or Path.cwd())
+        workspace = Path((review_context or {}).get("workspace_root") or Path.cwd())
         record_review(
             repo_path=workspace,
             findings=findings.get("findings", []) if isinstance(findings, dict) else [],
@@ -5032,6 +5920,12 @@ def command_consult(args: argparse.Namespace) -> int:
         **attempts_metadata[-1],
         "consult_attempts": attempts_metadata,
     }
+    metadata["verification"] = {
+        "status": "not_run",
+        "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
+        "performedBy": None,
+        "evidence": [],
+    }
     if auto_route_model:
         metadata["auto_route_decision"] = auto_route_model
         metadata["auto_route_reason"] = auto_route_reason
@@ -5088,12 +5982,15 @@ def command_review(args: argparse.Namespace) -> int:
     prompt_budget = prompt_budget_for_model(args, model)
     claude_guardrail_available = claude_guardrail_would_apply(args, model, prompt_budget)
     context = context or collect_review_context(args)
+    normalized_priority_paths(context, getattr(args, "priority_file", None))
+    normalized_priority_paths(context, getattr(args, "required_file", None))
     if not context["diff"].strip() and not context["file_texts"]:
         raise empty_review_scope_error(args.scope)
     prompt, _paths, caveats, metadata = assemble_review_prompt_from_context(
         context,
         max_prompt_chars=prompt_budget,
     )
+    enforce_exact_review(args, metadata)
     if auto_route_model:
         metadata["auto_route_decision"] = auto_route_model
         metadata["auto_route_reason"] = auto_route_reason
@@ -5117,6 +6014,7 @@ def command_review(args: argparse.Namespace) -> int:
                 max_prompt_chars=prompt_budget,
                 max_chunks=args.max_review_chunks,
                 priority_paths=getattr(args, "priority_file", None),
+                required_paths=getattr(args, "required_file", None),
             )
             eprint(
                 f"[anti] dry-run chunk plan: {len(plan_chunks)}/"
@@ -5151,6 +6049,23 @@ def command_review(args: argparse.Namespace) -> int:
     claude_guardrail_used = claude_guardrail_available and chunked_review
     if claude_guardrail_used:
         add_claude_guardrail_caveat(caveats, prompt_budget=prompt_budget)
+    preflight_metadata = metadata
+    if chunked_review:
+        _planned_chunks, planned_metadata = build_review_chunk_prompts(
+            context,
+            max_prompt_chars=prompt_budget,
+            max_chunks=args.max_review_chunks,
+            priority_paths=getattr(args, "priority_file", None),
+            required_paths=getattr(args, "required_file", None),
+        )
+        preflight_metadata = {**metadata, **planned_metadata}
+    write_preflight_record(
+        args,
+        mode="review",
+        models=[model],
+        base_url=args.base_url,
+        metadata=preflight_metadata,
+    )
     # The single-prompt assembly may have truncated the diff to fit one prompt;
     # chunked mode re-budgets the full diff, so that stale caveat must not leak
     # into every chunk prompt's manifest (B2).
@@ -5175,9 +6090,45 @@ def command_review(args: argparse.Namespace) -> int:
             purpose="review",
         )
         metadata = {**metadata, "chunked": False, "prompt_budget_chars": prompt_budget, **generation_metadata}
+        output_status = lane_output_status(
+            text,
+            generation_metadata.get("usage"),
+            args.max_output_tokens,
+        )
+        metadata["output_status"] = output_status
+        if output_status != "success":
+            metadata["status"] = "incomplete"
+            caveat = (
+                f"Review output was {output_status} at the output-token cap; "
+                "the result is incomplete"
+            )
+            caveats.append(caveat)
+            if not getattr(args, "allow_partial", False):
+                exc = AntiError(
+                    f"review output was {output_status}; pass --allow-partial to continue with an explicitly partial result"
+                )
+                exc.run_metadata = {
+                    **metadata,
+                    "scope_status": "partial",
+                }  # type: ignore[attr-defined]
+                raise exc
     metadata["claude_prompt_guardrail"] = claude_guardrail_used
+    scope_status = "partial" if review_scope_is_incomplete(metadata) else "complete"
+    run_status = "partial" if scope_status == "partial" else "success"
+    metadata["scope_status"] = scope_status
+    metadata["scopeStatus"] = scope_status
+    metadata["runStatus"] = run_status
+    metadata.setdefault(
+        "verification",
+        {
+            "status": "not_run",
+            "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
+            "performedBy": None,
+            "evidence": [],
+        },
+    )
     omitted_items = metadata.get("omitted_files") or []
-    if metadata.get("status") == "incomplete" and omitted_items:
+    if run_status == "partial":
         omitted_file_count = int(metadata.get("omitted_file_count") or 0)
         if omitted_file_count:
             banner = (
@@ -5187,7 +6138,7 @@ def command_review(args: argparse.Namespace) -> int:
             )
         else:
             banner = (
-                f"⚠ INCOMPLETE — {len(omitted_items)} item(s) NOT reviewed; "
+                f"⚠ INCOMPLETE — {len(omitted_items)} item(s) or file content NOT covered; "
                 "this synthesis covers only the reviewed chunks, not the full requested scope "
                 "(see metadata.omitted_items for the manifest)."
             )
@@ -5201,7 +6152,7 @@ def command_review(args: argparse.Namespace) -> int:
     write_run_record(
         args,
         mode="review",
-        status="success",
+        status=run_status,
         models=[str(model_used)],
         base_url=args.base_url,
         prompt_text=recorded_prompt,
@@ -5299,6 +6250,15 @@ def command_plan(args: argparse.Namespace) -> int:
         )
         metadata = {"prompt_chars": len(limited_prompt), "chunked": False, "prompt_budget_chars": prompt_budget, **generation_metadata}
     metadata["claude_prompt_guardrail"] = claude_guardrail_used
+    metadata.setdefault(
+        "verification",
+        {
+            "status": "not_run",
+            "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
+            "performedBy": None,
+            "evidence": [],
+        },
+    )
     if disclosure:
         metadata.setdefault("privacy_disclosures", []).append(disclosure)
     if getattr(args, "run_id", None):
@@ -5743,6 +6703,8 @@ def _panel_argv(
         argv.extend(extra)
     if args.min_successes is not None:
         argv.extend(["--min-successes", str(args.min_successes)])
+    if args.min_providers is not None:
+        argv.extend(["--min-providers", str(args.min_providers)])
     for role in args.role or roles:
         argv.extend(["--role", role])
     for model in args.model or models:
@@ -5810,6 +6772,8 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             raise AntiError("workflow plan-deep does not support --changed-files")
         if args.files_from:
             raise AntiError("workflow plan-deep does not support --files-from")
+        if args.required_file:
+            raise AntiError("workflow plan-deep does not support --required-file")
         argv = [
             "plan",
             "--model",
@@ -5850,6 +6814,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             or args.changed_files_range
             or args.file
             or args.files_from
+            or args.required_file
             or workflow_scope(args, default="none") != "none"
         ):
             raise AntiError(
@@ -5895,6 +6860,10 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         ]
         if args.min_successes is not None:
             argv.extend(["--min-successes", str(args.min_successes)])
+        if args.min_providers is not None:
+            argv.extend(["--min-providers", str(args.min_providers)])
+        if args.required_file:
+            raise AntiError("workflow debug-consensus is prompt-only; omit --required-file")
         for role in args.role or ["root-cause", "regression-risk", "discriminating-tests"]:
             argv.extend(["--role", role])
         for model in args.model or ["sonnet", "opus"]:
@@ -5912,6 +6881,8 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
                       "--output", args.output])
         if args.allow_partial:
             argv.append("--allow-partial")
+        if args.min_providers is not None:
+            argv.extend(["--min-providers", str(args.min_providers)])
         for role in ["correctness", "security"]:
             argv.extend(["--role", role])
         for model in args.model or ["flash-3.8", "poolside"]:
@@ -5943,6 +6914,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         append_each(argv, "--file", args.file)
         append_each(argv, "--files-from", args.files_from)
         append_each(argv, "--priority-file", args.priority_file)
+        append_each(argv, "--required-file", args.required_file)
     elif args.name == "plan-deep":
         append_each(argv, "--file", args.file)
     if args.name != "debug-consensus":
@@ -6124,6 +7096,9 @@ def command_runs(args: argparse.Namespace) -> int:
                     print(f"[*] Would remove {path.name}")
                 else:
                     path.unlink()
+                    artifact_dir = RUNS_DIR / path.stem
+                    if artifact_dir.is_dir() and not artifact_dir.is_symlink():
+                        shutil.rmtree(artifact_dir)
                 removed += 1
         if RUNS_DIR.exists():
             for path in RUNS_DIR.glob("*.json.tmp"):
@@ -6268,11 +7243,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Continue with a partial chunked summary when the scope exceeds --max-review-chunks",
     )
     panel.add_argument("--priority-file", action="append", help="Review these paths first when chunking; repeatable")
+    panel.add_argument("--required-file", action="append", help="Require complete coverage for this path; repeatable")
     panel.add_argument("--chunk-output-tokens", type=positive_int, default=4096, help="Max output tokens per review chunk")
     panel.add_argument(
         "--min-successes",
         type=positive_int,
         help="Minimum distinct actual provider/model identities before judging",
+    )
+    panel.add_argument(
+        "--min-providers",
+        type=positive_int,
+        help="Require this many distinct actual providers before judging",
     )
     panel.add_argument("--max-parallel", type=positive_int, default=3, help="Maximum concurrent panel model calls")
     panel.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
@@ -6359,6 +7340,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="Review these paths first when chunking; repeatable",
     )
+    review.add_argument("--required-file", action="append", help="Require complete coverage for this path; repeatable")
     review.add_argument("--chunk-output-tokens", type=positive_int, default=4096, help="Max output tokens per chunk review")
     review.add_argument(
         "--max-synthesis-chars",
@@ -6399,6 +7381,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--file", action="append")
     workflow.add_argument("--files-from", action="append")
     workflow.add_argument("--priority-file", action="append")
+    workflow.add_argument("--required-file", action="append")
     workflow.add_argument("--allow-partial", action="store_true")
     workflow.add_argument("--prompt")
     workflow.add_argument("--prompt-file")
@@ -6412,6 +7395,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help=MAX_PROMPT_CHARS_HELP)
     workflow.add_argument("--max-synthesis-chars", type=non_negative_int, default=DEFAULT_MAX_SYNTHESIS_CHARS)
     workflow.add_argument("--min-successes", type=positive_int)
+    workflow.add_argument("--min-providers", type=positive_int)
     workflow.add_argument("--max-parallel", type=positive_int, default=3)
     workflow.add_argument("--retry", type=non_negative_int, default=1)
     workflow.add_argument("--chunked", choices=["auto", "always", "off"], default="auto")
@@ -6569,6 +7553,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_id = getattr(args, "run_id", None)
                 correlation = {"request_log_correlation_id": run_id} if run_id else {}
                 gen_meta = getattr(exc, "generation_metadata", None) or {}
+                run_metadata = getattr(exc, "run_metadata", None) or {}
                 diagnostics = _extract_error_diagnostics(exc, args)
                 requested = diagnostics["requested_models"]
                 prompt_chars = diagnostics["prompt_chars"]
@@ -6581,6 +7566,11 @@ def main(argv: list[str] | None = None) -> int:
                     base_url=getattr(args, "base_url", None),
                     caveats=[],
                     metadata={
+                        **(
+                            {key: value for key, value in run_metadata.items() if key != "_review_context"}
+                            if isinstance(run_metadata, dict)
+                            else {}
+                        ),
                         **correlation,
                         "failed_lanes": diagnostics["failed_lanes"],
                         "requested_model": gen_meta.get("requestedModel") or gen_meta.get("primary_model"),
@@ -6588,6 +7578,7 @@ def main(argv: list[str] | None = None) -> int:
                         "fallback_used": bool(gen_meta.get("fallbackUsed")),
                         "prompt_chars": prompt_chars,
                         "output_chars": output_chars,
+                        "runStatus": "failed",
                     },
                     error=str(exc),
                 )

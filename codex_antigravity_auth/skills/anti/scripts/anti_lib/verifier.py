@@ -121,7 +121,10 @@ def verify_finding(finding: dict[str, Any], workspace_root: Path) -> dict[str, A
             finding["evidence"] = new_evidence
         else:
             finding["evidence"] = f"{existing_evidence}; {new_evidence}"
-    
+        # These checks provide evidence about the referenced file, not proof
+        # that the model's claim is correct. Keep the finding unverified until
+        # the native agent confirms or rejects the claim.
+
     return finding
 
 

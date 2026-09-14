@@ -230,10 +230,12 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - `--budget <cost>` — Maximum estimated cost for a run. Skips remaining panel lanes when the cap is exceeded. Cost is in arbitrary units (not real USD), tracked per lane with estimated vs actual.
 - `--no-verify` — Skip evidence-linked verification of findings (syntax, secrets, eslint checks on referenced files).
 - `--no-anonymize` — Preserve original model names and lane order in judge synthesis (default: anonymize and shuffle).
+- `--required-file <path>` — Require every chunk for these paths to be sent; repeatable and fail-closed when the cap cannot cover them.
+- `--min-providers <N>` — Require successful lanes from at least N distinct actual providers before panel judging.
 
 ## Agent Execution Pattern
 
-**anti.py runs synchronously.** Every command (`consult`, `review`, `plan`, `panel`, `workflow`) blocks until the API response arrives and prints the result directly to stdout. There is no background mode and no separate output file to poll.
+**anti.py runs synchronously.** Every command (`consult`, `review`, `plan`, `panel`, `workflow`) blocks until the API response arrives and prints the result directly to stdout. With `--save-output summary` or `--save-output full`, it also writes a stable result artifact at `resultPath` (`~/.codex/anti-runs/<runId>/result.json`) for reliable retrieval after a long run.
 
 ### Correct pattern for Codex agents
 
@@ -244,14 +246,15 @@ exec_command(
   yield_time_ms=120000  # 2 minutes for consults; 300s for panels/reviews
 )
 # Read the result from stdout — no file polling needed
+# For saved runs, read the returned resultPath/result.json as the complete artifact.
 ```
 
 ### What NOT to do
 
-1. **Do NOT background the process** and poll for output files in `~/.codex/anti-runs/`. The `--save-output` flag writes a run record for auditing, not for primary result retrieval.
+1. **Do NOT background the process** and poll for a completion signal. Run it in the foreground; if a saved result is needed after completion, use the returned `resultPath` and `result.json` artifact.
 2. **Do NOT use `sleep N && cat ...` polling loops.** If `exec_command` times out, the process is still running — use `write_stdin` with the session_id or check `ps aux | grep anti.py` to verify, then decide whether to wait longer or abort.
 3. **Do NOT escalate sleep durations** (60s → 90s → 120s → ...) as a recovery strategy. After 2-3 failed waits, report the situation to the user.
-4. **Do NOT assume output lands in a specific file path.** The run record path includes a timestamp that may not match a naive glob. stdout is the primary output channel.
+4. **Do NOT assume stdout preview is complete.** Use `resultPath` and its `result.json` artifact for the full saved result, including coverage, statuses, findings, and verification state.
 
 ### Timeout recovery
 
@@ -271,6 +274,8 @@ Panel findings use an enriched schema with provenance and dedup:
 - `verify` — a concrete local check Codex should run before acting
 - `lanes` — array of model identities that support this finding
 - `fingerprint` — sha256 hash for cross-lane dedup (same file+line+claim)
+- `sourceCommit` / `chunkId` / `laneId` — source and execution provenance when available
+- `verificationStatus` — `unverified` until the native agent confirms or rejects the claim; helper evidence does not promote it automatically
 
 Cross-lane dedup is automatic: when multiple lanes produce findings with the same fingerprint, they are merged (lanes combined, highest severity kept, confidence averaged).
 
@@ -310,6 +315,7 @@ Use `--role` multiple times for different lenses: `--role security --role correc
 
 - Do not include secrets, OAuth material, provider keys, key files, `.env` files, encrypted account/provider stores, or credential JSON in review prompts.
 - The helper excludes common secret/cached/binary paths by default. If it reports exclusions, mention that scope caveat.
+- Review sources are never silently truncated. `--chunked auto` records per-file/per-chunk coverage; `--chunked off` is exact-or-refuse when the requested scope exceeds the budget. Use `--allow-partial` only when an explicitly partial result is acceptable.
 - Do not run `setup`, `setup-google`, or `configure-codex` unless the user explicitly asks for setup/configuration.
 - Prefer `--api-key-env` workflows in the underlying `codex-antigravity` CLI; do not put provider keys into chat, shell history, notes, or prompt files.
 - If a panel includes BYOK `provider:model` lanes and repo/diff/file context, the helper prints a BYOK disclosure and records it in the run caveats. Treat that as an explicit reminder that code context is leaving the Google Antigravity lane for the named provider.
