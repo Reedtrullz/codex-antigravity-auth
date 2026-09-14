@@ -208,3 +208,9 @@ Fresh focused evidence:
 
 No live install, restart, canonical account-store write, push, PR, or merge has
 been performed for this remediation yet.
+
+Retained build artifacts for the candidate are in
+`/Users/reidar/.codex/antigravity-builds/anti-gateway-remediation-bea624e/`:
+
+- wheel SHA256 `c7199ab919437c6b049b1b925d1601014fdc7d87e13cd6f1aff92d8a0bdb5b60`;
+- source distribution SHA256 `551c50fb1aebf47819cc9c7ffc7d5ea21ea6709854141056eaf4ca3bedcd9ddf`.
