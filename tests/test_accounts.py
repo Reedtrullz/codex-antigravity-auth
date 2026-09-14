@@ -155,7 +155,7 @@ class TestAccounts(unittest.TestCase):
     def test_selection_does_not_wait_on_background_same_account_refresh(self, mock_read_only, mock_refresh, mock_load, mock_update):
         data = {
             "accounts": [
-                {"email": "primary@gmail.com", "refreshToken": "ref", "accessToken": "old", "expiresAt": time.time() + 120},
+                {"email": "primary@gmail.com", "refreshToken": "ref", "accessToken": "old", "expiresAt": time.time() + 120, "projectId": "fixture-project"},
                 {"email": "secondary@gmail.com", "refreshToken": "ref2", "accessToken": "ok", "expiresAt": time.time() + 3600},
             ],
             "activeIndex": 0,
@@ -197,7 +197,7 @@ class TestAccounts(unittest.TestCase):
     def test_busy_sole_account_is_transient_and_selectable_after_refresh(self, mock_read_only, mock_refresh, mock_load, mock_update):
         data = {
             "accounts": [
-                {"email": "primary@gmail.com", "refreshToken": "ref", "accessToken": "old", "expiresAt": time.time() + 120},
+                {"email": "primary@gmail.com", "refreshToken": "ref", "accessToken": "old", "expiresAt": time.time() + 120, "projectId": "fixture-project"},
             ],
             "activeIndex": 0,
             "activeIndexByFamily": {"claude": 0, "gemini": 0},
