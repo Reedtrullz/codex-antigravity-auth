@@ -5069,20 +5069,7 @@ def build_panel_synthesis_prompt(
                 "lane output truncated at the token cap; partial content below is incomplete",
                 *list(material.get("caveats") or []),
             ]
-        encoded_len = len(json.dumps(material, ensure_ascii=False, sort_keys=True))
-        if encoded_len <= 8000:
-            return material, normalized_lossy
-        # A lane's raw response is never silently cut into the judge prompt.
-        # Keep a bounded excerpt only with an explicit partial marker.
-        material["materialStatus"] = "compacted"
-        material["materialOriginalChars"] = encoded_len
-        material["summary"] = truncate_at_line_boundary(str(material.get("summary") or ""), 2400)
-        material["findings"] = list(material.get("findings") or [])[:12]
-        material["caveats"] = [
-            *list(material.get("caveats") or []),
-            "Lane material was compacted before judge synthesis; this lane is partial.",
-        ]
-        return material, True
+        return material, normalized_lossy
 
     lane_materials: list[dict[str, Any]] = []
     lossy_lanes: list[str] = []
@@ -5957,22 +5944,28 @@ def maybe_summarize_panel_review(
     )
     fanout_prompt_budget = prompt_budget_for_panel_source(args, panel_models)
     if fanout_prompt_budget > 0 and len(prompt) > fanout_prompt_budget:
-        original_summary_prompt_chars = len(prompt)
-        summary_header = (
-            "This panel review context was summarized by Anti before multi-model fan-out to avoid silently "
-            "truncating a large review scope.\n"
-            "Panel lanes must treat the summary as bounded context, not as proof of the omitted raw source.\n"
-            "## Bounded Review Summary\n"
+        failure_metadata = {
+            **metadata,
+            **summary_metadata,
+            "panel_review_context": "chunked-summary",
+            "panel_review_summary_model": summary_model,
+            "raw_review_prompt_chars": raw_prompt_chars,
+            "prompt_chars": len(prompt),
+            "prompt_budget_chars": fanout_prompt_budget,
+            "review_summary_chars": len(summary_text),
+            "summary_input_lossy": False,
+            "summary_input_status": "not_sent",
+            "panel_status": "failed",
+            "panelStatus": "failed",
+            "scopeStatus": "partial" if summary_metadata.get("status") == "incomplete" else "complete",
+            "scope_status": "partial" if summary_metadata.get("status") == "incomplete" else "complete",
+        }
+        failure = AntiError(
+            f"panel review summary requires {len(prompt)} characters but the exact fan-out budget is "
+            f"{fanout_prompt_budget}; raise --max-prompt-chars or narrow the scope"
         )
-        marker = "\n[Bounded review summary compacted; panel status is partial.]"
-        summary_budget = max(1, fanout_prompt_budget - len(summary_header) - len(marker))
-        summary_excerpt = truncate_at_line_boundary(summary_text, summary_budget)
-        prompt = summary_header + summary_excerpt + marker
-        summary_caveats.append(
-            f"Bounded review summary compacted from {original_summary_prompt_chars} to "
-            f"{len(prompt)} characters before panel fan-out"
-        )
-        metadata["summary_input_lossy"] = True
+        failure.run_metadata = failure_metadata  # type: ignore[attr-defined]
+        raise failure
     prompt_summary_metadata = dict(summary_metadata)
     prompt_summary_metadata.pop("_execution_ledger", None)
     metadata = {

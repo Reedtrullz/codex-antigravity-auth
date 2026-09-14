@@ -524,9 +524,10 @@ class AntiHelperTests(unittest.TestCase):
 
             old_cwd = Path.cwd()
             output = io.StringIO()
+            error_output = io.StringIO()
             try:
                 os.chdir(root)
-                with contextlib.redirect_stdout(output):
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error_output):
                     rc = anti.main(
                         [
                             "review",
@@ -2103,7 +2104,9 @@ class AntiHelperTests(unittest.TestCase):
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
-            rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json"])
+            rc = anti.main(
+                ["panel", "--mode", "ask", "--prompt", "What next?", "--retry", "0", "--json"]
+            )
 
         self.assertEqual(rc, 0, output.getvalue())
         parsed = json.loads(output.getvalue())
@@ -2111,6 +2114,184 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(parsed["metadata"]["retried_models"], ["claude-opus-4-6-thinking"])
         self.assertEqual(parsed["metadata"]["failed_models"], [])
         self.assertIn("output-claude-opus-4-6-thinking", judge_prompts[0])
+        lane_plan = next(
+            stage for stage in parsed["metadata"]["execution_plan"]
+            if stage["name"] == "panel_lane_2"
+        )
+        self.assertEqual(lane_plan["retry_count"], 0)
+        self.assertEqual(lane_plan["logical_attempts"], 2)
+
+    def test_panel_synthesis_preserves_large_successful_lane_material_when_budget_fits(self) -> None:
+        anti = load_anti()
+        tail = "FULL_LANE_TAIL"
+        results = [
+            {
+                "model": "claude-sonnet-4-6",
+                "status": "success",
+                "output_text": "sonnet output",
+                "actual_model": "claude-sonnet-4-6",
+                "provider": "google-antigravity",
+            },
+            {
+                "model": "claude-opus-4-6-thinking",
+                "status": "success",
+                "output_text": "opus output\n" + ("x" * 9000) + "\n" + tail,
+                "actual_model": "claude-opus-4-6-thinking",
+                "provider": "google-antigravity",
+            },
+        ]
+
+        prompt, _caveats, metadata = anti.build_panel_synthesis_prompt(
+            panel_mode="review",
+            source_prompt="source",
+            panel_results=results,
+            metadata={"status": "complete_multi_model"},
+            caveats=[],
+            roles=[],
+            max_chars=64000,
+            anonymize=False,
+        )
+
+        self.assertLess(len(prompt), 64000)
+        self.assertIn(tail, prompt)
+        self.assertEqual(metadata["synthesis_truncated_source"], False)
+        self.assertEqual(metadata["synthesis_truncated_models"], [])
+
+    def test_panel_review_preserves_large_summary_through_actual_panel_path(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+        }
+        summary_tail = "FULL_SUMMARY_TAIL"
+        summary = "bounded summary\n" + ("s" * 9000) + "\n" + summary_tail
+        summary_metadata = {
+            "status": "complete",
+            "scope_status": "complete",
+            "coverage": [],
+            "declared_files": ["fixture.py"],
+            "included_files": ["fixture.py"],
+            "included_items": ["fixture.py part 1/1"],
+            "omitted_files": [],
+            "omitted_chunk_count": 0,
+            "planned_chunk_count": 1,
+            "completed_chunk_count": 1,
+            "failed_chunk_count": 0,
+            "chunk_count": 1,
+            "chunk_prompts": [],
+            "chunk_generation": [],
+            "sourceCommit": "test-source",
+            "_execution_ledger": [],
+        }
+        lane_prompts: list[str] = []
+
+        def fake_chunked_review(**_kwargs):
+            return summary, [], summary_metadata
+
+        def fake_post_response(**kwargs):
+            prompt = kwargs["prompt"]
+            if "You are synthesizing an Antigravity multi-model advisory panel" in prompt:
+                return json.dumps(
+                    {
+                        "summary": "ok",
+                        "disagreements": [],
+                        "findings": [],
+                        "unverifiable": [],
+                        "recommended_next_actions": [],
+                        "caveats": [],
+                    }
+                )
+            if "This panel review context was summarized" in prompt:
+                lane_prompts.append(prompt)
+            return "lane output"
+
+        anti.run_chunked_review = fake_chunked_review
+        anti.post_response = fake_post_response
+        with tempfile.TemporaryDirectory(prefix="anti-summary-path-") as tmp:
+            root = Path(tmp)
+            (root / "fixture.py").write_text("VALUE = 1\n", encoding="utf-8")
+            anti.RUNS_DIR = root / "runs"
+            old_cwd = Path.cwd()
+            output = io.StringIO()
+            try:
+                os.chdir(root)
+                with contextlib.redirect_stdout(output):
+                    rc = anti.main(
+                        [
+                            "panel", "--mode", "review", "--scope", "files", "--file", "fixture.py",
+                            "--model", "sonnet", "--model", "opus", "--judge", "opus",
+                            "--max-prompt-chars", "12000", "--max-synthesis-chars", "64000",
+                            "--max-review-chunks", "3", "--chunked", "always", "--save-output", "never",
+                            "--json", "--no-progress",
+                        ]
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(len(lane_prompts), 2)
+        self.assertTrue(all(summary_tail in prompt for prompt in lane_prompts))
+        self.assertFalse(parsed["metadata"].get("summary_input_lossy", False))
+        self.assertEqual(parsed["metadata"]["prompt_chars"], len("This panel review context was summarized by Anti before multi-model fan-out to avoid silently truncating a large review scope.\n\nPanel lanes must treat the summary as bounded context, not as proof of the omitted raw source.\n\n## Bounded Review Summary\n" + summary.strip()))
+
+    def test_panel_review_rejects_lossy_summary_before_lane_generation(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+        }
+        summary_metadata = {
+            "status": "complete",
+            "scope_status": "complete",
+            "coverage": [],
+            "declared_files": ["fixture.py"],
+            "included_files": ["fixture.py"],
+            "included_items": ["fixture.py part 1/1"],
+            "omitted_files": [],
+            "omitted_chunk_count": 0,
+            "planned_chunk_count": 1,
+            "completed_chunk_count": 1,
+            "failed_chunk_count": 0,
+            "chunk_count": 1,
+            "chunk_prompts": [],
+            "chunk_generation": [],
+            "sourceCommit": "test-source",
+            "_execution_ledger": [],
+        }
+        provider_calls: list[dict] = []
+
+        anti.run_chunked_review = lambda **_kwargs: (
+            "bounded summary\n" + ("s" * 9000) + "\nFULL_SUMMARY_TAIL",
+            [],
+            summary_metadata,
+        )
+        anti.post_response = lambda **kwargs: provider_calls.append(kwargs) or "unexpected provider call"
+        with tempfile.TemporaryDirectory(prefix="anti-summary-reject-") as tmp:
+            root = Path(tmp)
+            (root / "fixture.py").write_text("VALUE = 1\n", encoding="utf-8")
+            anti.RUNS_DIR = root / "runs"
+            old_cwd = Path.cwd()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            try:
+                os.chdir(root)
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    rc = anti.main(
+                        [
+                            "panel", "--mode", "review", "--scope", "files", "--file", "fixture.py",
+                            "--model", "sonnet", "--model", "opus", "--judge", "opus",
+                            "--max-prompt-chars", "3000", "--max-synthesis-chars", "64000",
+                            "--max-review-chunks", "3", "--chunked", "always", "--save-output", "never",
+                            "--json", "--no-progress",
+                        ]
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(provider_calls, [])
+        self.assertIn("panel review summary", stderr.getvalue())
 
     def test_panel_non_answer_lane_counts_as_failure_below_min_successes(self) -> None:
         anti = load_anti()
@@ -3008,9 +3189,10 @@ class AntiHelperTests(unittest.TestCase):
             (root / "large.py").write_text("LARGE = '" + ("x" * 6000) + "'\n", encoding="utf-8")
             old_cwd = Path.cwd()
             output = io.StringIO()
+            error_output = io.StringIO()
             try:
                 os.chdir(root)
-                with contextlib.redirect_stdout(output):
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error_output):
                     rc = anti.main(
                         [
                             "panel",
@@ -3029,10 +3211,8 @@ class AntiHelperTests(unittest.TestCase):
                 os.chdir(old_cwd)
 
         self.assertEqual(rc, 1, output.getvalue())
-        self.assertTrue(panel_prompts)
-        parsed = json.loads(output.getvalue())
-        self.assertEqual(parsed["metadata"]["panel_review_context"], "chunked-summary")
-        self.assertTrue(any("bounded chunked summary" in caveat for caveat in parsed["caveats"]))
+        self.assertEqual(panel_prompts, [])
+        self.assertIn("panel review summary requires", error_output.getvalue())
 
     def test_default_claude_panel_review_summarizes_before_large_fanout(self) -> None:
         anti = load_anti()
