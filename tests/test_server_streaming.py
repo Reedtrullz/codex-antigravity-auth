@@ -477,6 +477,14 @@ class TestServerStreaming(unittest.TestCase):
     def test_google_rotation_records_and_releases_every_attempted_account(self):
         first = {"email": "first@gmail.com", "accessToken": "first-token"}
         second = {"email": "second@gmail.com", "accessToken": "second-token"}
+        disconnect_polls = 0
+
+        original_is_disconnected = Request.is_disconnected
+
+        async def tracked_is_disconnected(request):
+            nonlocal disconnect_polls
+            disconnect_polls += 1
+            return await original_is_disconnected(request)
 
         class MockClient:
             responses = [
@@ -503,17 +511,22 @@ class TestServerStreaming(unittest.TestCase):
             async def post(self, *args, **kwargs):
                 return self.responses.pop(0)
 
-        with patch("codex_antigravity_auth.server.account_manager.acquire_account", side_effect=[first, second]):
+        with patch.object(Request, "is_disconnected", tracked_is_disconnected), \
+             patch("codex_antigravity_auth.server.account_manager.acquire_account", side_effect=[first, second]):
             with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
                     with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
                         with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
-                            response = TestClient(app).post(
-                                "/v1/responses",
-                                json={"model": "gemini-3.5-flash-high", "input": "hello"},
-                            )
+                            with TestClient(app) as client:
+                                response = client.post(
+                                    "/v1/responses",
+                                    json={"model": "gemini-3.5-flash-high", "input": "hello"},
+                                )
+                                polls_after_response = disconnect_polls
+                                time.sleep(0.35)
 
         self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(polls_after_response, disconnect_polls)
         self.assertEqual([call.args[0] for call in release.call_args_list], ["first@gmail.com", "second@gmail.com"])
         self.assertEqual([call.args[0] for call in record.call_args_list], ["first@gmail.com", "second@gmail.com"])
         self.assertEqual([call.args[2].category for call in record.call_args_list], ["auth", "success"])
@@ -736,7 +749,7 @@ class TestServerStreaming(unittest.TestCase):
         release_mock = AsyncMock()
         record_mock = AsyncMock()
         with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
-             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.05), \
+             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.5), \
              patch.object(server_module, "acquire_active_account_for_request", get_account), \
              patch.object(server_module, "release_account_for_request", release_mock), \
              patch.object(server_module, "record_attempt_outcome", record_mock), \
@@ -897,7 +910,7 @@ class TestServerStreaming(unittest.TestCase):
             acquire_count += 1
             if acquire_count == 1:
                 return first
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(1.0)
             return second
 
         class FakeTransport:
@@ -915,11 +928,11 @@ class TestServerStreaming(unittest.TestCase):
         async def scenario():
             with self.assertRaises(HTTPException) as caught:
                 await create_response(request)
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(1.1)
             return caught.exception
 
         with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
-             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.05), \
+             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.5), \
              patch.object(server_module, "acquire_active_account_for_request", get_account), \
              patch.object(server_module, "release_account_for_request", release), \
              patch.object(server_module, "record_attempt_outcome", AsyncMock()), \
@@ -1032,7 +1045,7 @@ class TestServerStreaming(unittest.TestCase):
         release_mock = AsyncMock()
 
         with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
-             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.05), \
+             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.5), \
              patch.object(server_module, "acquire_active_account_for_request", get_account), \
              patch.object(server_module, "release_account_for_request", release_mock), \
              patch.object(server_module, "write_request_record", side_effect=RuntimeError("audit failed")), \
@@ -1111,9 +1124,12 @@ class TestServerStreaming(unittest.TestCase):
         backend_release = asyncio.Event()
         backend_done = asyncio.Event()
         post_count = 0
+        disconnect_poll_count = 0
 
         class ConnectedRequest(Request):
             async def is_disconnected(self):
+                nonlocal disconnect_poll_count
+                disconnect_poll_count += 1
                 return False
 
         async def receive():
@@ -1161,19 +1177,22 @@ class TestServerStreaming(unittest.TestCase):
             elapsed = time.monotonic() - started
             backend_release.set()
             await asyncio.sleep(0.05)
-            return caught.exception, elapsed
+            polls_after_response = disconnect_poll_count
+            await asyncio.sleep(0.35)
+            return caught.exception, elapsed, polls_after_response, disconnect_poll_count
 
         release_mock = AsyncMock()
         with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
-             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.05), \
+             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.5), \
              patch.object(server_module, "acquire_active_account_for_request", get_account), \
              patch.object(server_module, "release_account_for_request", release_mock), \
              patch.object(server_module, "write_request_record", lambda record: None), \
              patch.object(server_module, "GoogleTransport", FakeTransport):
-            exception, elapsed = asyncio.run(scenario())
+            exception, elapsed, polls_after_response, polls_later = asyncio.run(scenario())
 
         self.assertEqual(exception.status_code, 504)
-        self.assertLess(elapsed, 0.6)
+        self.assertLess(elapsed, 1.1)
+        self.assertEqual(polls_after_response, polls_later)
         self.assertEqual(post_count, 1)
         self.assertTrue(backend_done.is_set())
         release_mock.assert_awaited_once_with("cancel-resistant@example.invalid")

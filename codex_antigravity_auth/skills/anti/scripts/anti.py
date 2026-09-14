@@ -1983,6 +1983,8 @@ def run_git(root: Path, args: list[str], *, check: bool = True) -> str:
             ["git", *args],
             cwd=root,
             timeout=60,
+            encoding="utf-8",
+            errors="replace",
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

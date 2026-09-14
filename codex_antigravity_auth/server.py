@@ -1547,11 +1547,18 @@ async def create_response(request: Request):
     operation_deadline = time.monotonic() + google_request_timeout_from_metadata(request_metadata)
     diagnostic_deadline = operation_deadline if not stream else None
 
-    async def wait_for_disconnect() -> bool:
-        while True:
+    async def wait_for_disconnect(stop_event: asyncio.Event) -> bool:
+        while not stop_event.is_set():
             if await request_disconnected_now():
                 return True
-            await asyncio.sleep(CLIENT_DISCONNECT_POLL_SECONDS)
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(),
+                    timeout=CLIENT_DISCONNECT_POLL_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                pass
+        return False
 
     def release_late_account(task: asyncio.Task) -> None:
         async def cleanup() -> None:
@@ -1571,13 +1578,17 @@ async def create_response(request: Request):
         asyncio.create_task(cleanup())
 
     async def request_disconnected_now() -> bool:
-        try:
-            return await asyncio.wait_for(
-                request.is_disconnected(),
-                timeout=CLIENT_DISCONNECT_POLL_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            return False
+        return await request.is_disconnected()
+
+    async def drain_task(task: asyncio.Task, timeout: float, *, cancel: bool = False) -> bool:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+        if not done and cancel:
+            task.cancel()
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+        if task.done():
+            with suppress(asyncio.CancelledError, Exception):
+                task.result()
+        return task.done()
 
     async def run_bounded_operation(operation_factory, *, release_late_result: bool = False):
         if await request_disconnected_now():
@@ -1585,7 +1596,8 @@ async def create_response(request: Request):
         if time.monotonic() >= operation_deadline:
             raise RequestDeadlineExceeded()
         operation_task = asyncio.create_task(operation_factory())
-        disconnect_task = asyncio.create_task(wait_for_disconnect())
+        disconnect_stop = asyncio.Event()
+        disconnect_task = asyncio.create_task(wait_for_disconnect(disconnect_stop))
         deadline_task = asyncio.create_task(
             asyncio.sleep(max(0.0, operation_deadline - time.monotonic()))
         )
@@ -1598,13 +1610,10 @@ async def create_response(request: Request):
                 operation_task.add_done_callback(release_late_account)
                 return
             operation_task.cancel()
-            try:
-                await asyncio.wait_for(asyncio.shield(operation_task), timeout=0.2)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                if not operation_task.done():
-                    operation_task.add_done_callback(
-                        lambda task: task.exception() if not task.cancelled() else None
-                    )
+            if not await drain_task(operation_task, 0.2):
+                operation_task.add_done_callback(
+                    lambda task: task.exception() if not task.cancelled() else None
+                )
 
         try:
             done, _ = await asyncio.wait(
@@ -1622,11 +1631,9 @@ async def create_response(request: Request):
             await abandon_operation()
             raise
         finally:
-            for task in (disconnect_task, deadline_task):
-                if not task.done():
-                    task.cancel()
-                with suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                    await asyncio.wait_for(asyncio.shield(task), timeout=0.2)
+            disconnect_stop.set()
+            await drain_task(disconnect_task, 0.2, cancel=True)
+            await drain_task(deadline_task, 0.2, cancel=True)
             if not operation_task.done() and not abandoned:
                 await abandon_operation()
 
