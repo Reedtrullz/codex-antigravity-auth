@@ -515,6 +515,15 @@ class TestServerStreaming(unittest.TestCase):
         self.assertTrue(request_log.call_args.args[0]["cancelled"])
         self.assertEqual(request_log.call_args.args[0]["outcome_category"], "cancelled")
 
+        # A diagnostic failure during cancellation must not skip lease release.
+        with patch("codex_antigravity_auth.google_transport.GoogleTransport.stream", side_effect=mock_stream):
+            with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account):
+                with patch("codex_antigravity_auth.server.account_manager.release_account") as release_after_error:
+                    with patch("codex_antigravity_auth.server.account_manager.record_attempt", side_effect=RuntimeError("log failed")):
+                        with patch("codex_antigravity_auth.server.write_request_record", side_effect=RuntimeError("audit failed")):
+                            asyncio.run(scenario())
+        release_after_error.assert_called_once_with("cancelled@gmail.com")
+
     def test_google_request_log_records_terminal_attempt_rotation_and_usage(self):
         first = {"email": "first@gmail.com", "accessToken": "first-token"}
         second = {"email": "second@gmail.com", "accessToken": "second-token"}

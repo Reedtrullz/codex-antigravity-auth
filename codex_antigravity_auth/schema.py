@@ -9,7 +9,7 @@ UNSUPPORTED_KEYWORDS = [
 ]
 
 def _resolve_local_ref(ref: str, root: dict) -> dict | None:
-    if not ref.startswith("#/"):
+    if not isinstance(ref, str) or not ref.startswith("#/"):
         return None
     current = root
     for raw_part in ref[2:].split("/"):
@@ -29,7 +29,7 @@ def clean_json_schema(
     Removes unsupported keys, strips const, and handles unions (anyOf/oneOf).
     """
     if not isinstance(schema, dict):
-        return schema
+        return {}
 
     root = _root if _root is not None else schema
     seen_refs = _seen_refs or set()
@@ -57,10 +57,12 @@ def clean_json_schema(
                 if required:
                     cleaned[k] = required
             continue
-        if k == "properties" and isinstance(v, dict):
-            cleaned[k] = {pk: clean_json_schema(pv, root, False, seen_refs) for pk, pv in v.items()}
-        elif k == "items" and isinstance(v, dict):
-            cleaned[k] = clean_json_schema(v, root, False, seen_refs)
+        if k == "properties":
+            if isinstance(v, dict):
+                cleaned[k] = {pk: clean_json_schema(pv, root, False, seen_refs) for pk, pv in v.items()}
+        elif k == "items":
+            if isinstance(v, dict):
+                cleaned[k] = clean_json_schema(v, root, False, seen_refs)
         elif k in ("anyOf", "oneOf", "allOf") and isinstance(v, list):
             # Try to flatten or pick the best option
             cleaned[k] = [clean_json_schema(opt, root, False, seen_refs) for opt in v if isinstance(opt, dict)]

@@ -387,11 +387,13 @@ class TestAccounts(unittest.TestCase):
         self.assertEqual(counter["total_tokens"], 9)
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.load_accounts")
     @patch("codex_antigravity_auth.accounts.refresh_access_token")
-    def test_refresh_expiring_accounts_refreshes_ahead(self, mock_refresh, mock_update):
+    def test_refresh_expiring_accounts_refreshes_ahead(self, mock_refresh, mock_load, mock_update):
         self.accounts_data["accounts"][0]["expiresAt"] = time.time() + 120
         self.accounts_data["accounts"][1]["expiresAt"] = time.time() + 1000
         mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+        mock_load.return_value = self.accounts_data
         mock_refresh.return_value = {"access_token": "fresh_access", "expires_in": 3600}
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -414,6 +416,45 @@ class TestAccounts(unittest.TestCase):
         self.assertEqual(summary["failed"], 0)
         self.assertEqual(self.accounts_data["accounts"][0]["accessToken"], "fresh_access")
         mock_refresh.assert_called_once_with("ref_1")
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.load_accounts")
+    @patch("codex_antigravity_auth.accounts.refresh_access_token", side_effect=RuntimeError("expired"))
+    def test_refresh_failure_persists_cooldown(self, _mock_refresh, mock_load, mock_update):
+        self.accounts_data["accounts"][0]["expiresAt"] = time.time() + 1
+        mock_load.return_value = self.accounts_data
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "accounts.json"
+            path.write_text("{}", encoding="utf-8")
+            with patch("codex_antigravity_auth.accounts.accounts_json_path_read_only", return_value=path):
+                summary = AccountManager().refresh_expiring_accounts(window_seconds=300)
+
+        self.assertEqual(summary["failed"], 1)
+        self.assertIn("primary@gmail.com", self.accounts_data["accountState"]["cooldowns"])
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.load_accounts")
+    @patch("codex_antigravity_auth.accounts.refresh_access_token")
+    def test_refresh_does_not_overwrite_rotated_token(self, mock_refresh, mock_load, mock_update):
+        self.accounts_data["accounts"][0]["expiresAt"] = time.time() + 1
+        mock_load.return_value = self.accounts_data
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+
+        def rotate_before_merge(_refresh_token):
+            self.accounts_data["accounts"][0]["refreshToken"] = "rotated_elsewhere"
+            return {"access_token": "stale_access", "expires_in": 3600}
+
+        mock_refresh.side_effect = rotate_before_merge
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "accounts.json"
+            path.write_text("{}", encoding="utf-8")
+            with patch("codex_antigravity_auth.accounts.accounts_json_path_read_only", return_value=path):
+                summary = AccountManager().refresh_expiring_accounts(window_seconds=300)
+
+        self.assertEqual(summary["refreshed"], 0)
+        self.assertEqual(self.accounts_data["accounts"][0]["accessToken"], "acc_1")
 
 
 

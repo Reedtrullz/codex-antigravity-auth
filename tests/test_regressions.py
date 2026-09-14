@@ -1082,6 +1082,7 @@ class TestRegressionFixes(unittest.TestCase):
         client = TestClient(app)
         invalid_requests = [
             ({"temperature": "hot"}, "temperature must be a finite number"),
+            ({"temperature": 10**400}, "temperature must be a finite number"),
             ({"temperature": 3}, "temperature must be between 0 and 2"),
             ({"top_p": 2}, "top_p must be between 0 and 1"),
             ({"max_output_tokens": True}, "max_output_tokens must be a positive integer"),

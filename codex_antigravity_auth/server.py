@@ -6,6 +6,7 @@ import secrets
 import sys
 import time
 import httpx
+import anyio
 import email.utils
 import re
 from contextlib import asynccontextmanager
@@ -52,6 +53,7 @@ from .google_transport import (
     outcome_for_http_status,
 )
 from .openai_transport import (
+    NativeResponsesStreamAdapter,
     OpenAICompatibleTransport,
     PreparedOpenAIRequest,
     TransportConfigError,
@@ -827,9 +829,14 @@ def google_backend_timeout_from_metadata(metadata: object) -> float:
 
 
 def validate_finite_number_option(value: object, field_name: str, *, minimum: float, maximum: float | None = None) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise HTTPException(status_code=400, detail=f"{field_name} must be a finite number")
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a finite number") from exc
+    if not math.isfinite(number):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a finite number")
     if number < minimum or (maximum is not None and number > maximum):
         if maximum is None:
             raise HTTPException(status_code=400, detail=f"{field_name} must be greater than or equal to {minimum:g}")
@@ -2019,36 +2026,51 @@ async def create_response(request: Request):
             async for chunk in sse_generator():
                 yield chunk
         finally:
-            cancelled = any(
-                used_account.get("email", "") not in recorded_stream_attempts
-                for used_account in stream_attempts
-            )
-            if cancelled:
-                await log_request(
-                    "cancelled",
-                    model=model,
-                    route="google",
-                    family=family,
-                    stream=True,
-                    terminal_kind="failed",
-                    terminal_reason="cancelled",
-                    attempt_count=len(stream_attempts),
-                    rotation_count=max(0, len(stream_attempts) - 1),
-                    outcome_category="cancelled",
-                    cancelled=True,
-                    error_class="cancelled",
+            async def cleanup_stream_accounts() -> None:
+                cancelled = any(
+                    used_account.get("email", "") not in recorded_stream_attempts
+                    for used_account in stream_attempts
                 )
-            released_emails = set()
-            for used_account in stream_attempts:
-                await record_stream_attempt(
-                    used_account,
-                    AttemptOutcome(scope="none", category="cancelled"),
-                    error_class="cancelled",
-                )
-                email = used_account.get("email")
-                if email and email not in released_emails:
-                    released_emails.add(email)
-                    await release_account_for_request(email)
+                if cancelled:
+                    try:
+                        await log_request(
+                            "cancelled",
+                            model=model,
+                            route="google",
+                            family=family,
+                            stream=True,
+                            terminal_kind="failed",
+                            terminal_reason="cancelled",
+                            attempt_count=len(stream_attempts),
+                            rotation_count=max(0, len(stream_attempts) - 1),
+                            outcome_category="cancelled",
+                            cancelled=True,
+                            error_class="cancelled",
+                        )
+                    except Exception:
+                        pass
+                released_emails = set()
+                for used_account in stream_attempts:
+                    try:
+                        await record_stream_attempt(
+                            used_account,
+                            AttemptOutcome(scope="none", category="cancelled"),
+                            error_class="cancelled",
+                        )
+                    except Exception:
+                        pass
+                    email = used_account.get("email")
+                    if email and email not in released_emails:
+                        released_emails.add(email)
+                        try:
+                            await release_account_for_request(email)
+                        except Exception:
+                            pass
+
+            # Essential lease cleanup must finish even when ASGI cancellation
+            # arrives while diagnostics are being recorded.
+            with anyio.CancelScope(shield=True):
+                await cleanup_stream_accounts()
 
     return StreamingResponse(managed_sse_generator(), media_type="text/event-stream")
 
@@ -2287,10 +2309,14 @@ async def openai_upstream_sse_generator(
             return
 
     client, stream_context, response = stream_state
+    adapter = NativeResponsesStreamAdapter(display_model=display_model)
     try:
         async for chunk in response.aiter_text():
-            # Upstream already speaks Responses SSE, so proxy its frames as-is.
-            yield chunk
+            for event in adapter.consume_bytes(chunk.encode("utf-8", errors="replace")):
+                yield f"data: {json.dumps(event)}\n\n"
+        for event in adapter.finish():
+            yield f"data: {json.dumps(event)}\n\n"
+        yield "data: [DONE]\n\n"
     finally:
         await _close_openai_upstream_stream(client, stream_context)
 

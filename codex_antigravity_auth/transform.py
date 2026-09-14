@@ -652,6 +652,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
     system_texts = []
     function_names_by_call_id = {}
     pending_reasoning_content = None
+    pending_tool_call_message = None
 
     instructions = codex_req.get("instructions")
     if isinstance(instructions, str) and instructions:
@@ -699,6 +700,12 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
             return "".join(p.get("text", "") for p in parts if isinstance(p.get("text"), str))
         return parts
 
+    def flush_tool_calls() -> None:
+        nonlocal pending_tool_call_message
+        if pending_tool_call_message is not None:
+            messages.append(pending_tool_call_message)
+            pending_tool_call_message = None
+
     def text_format_to_chat_response_format() -> dict | None:
         text_config = codex_req.get("text")
         if not isinstance(text_config, dict):
@@ -731,6 +738,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 continue
             item_type = item.get("type")
             if item_type == "reasoning":
+                flush_tool_calls()
                 pending_reasoning_content = _first_stream_text(
                     item.get("reasoning_content"),
                     item.get("step_by_step_summary"),
@@ -752,24 +760,28 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                         arguments = json.dumps(arguments)
                     except TypeError:
                         arguments = "{}"
-                assistant_message = {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
+                tool_call = {
                         "id": call_id,
                         "type": "function",
                         "function": {
                             "name": name,
                             "arguments": arguments,
                         },
-                    }],
-                }
+                    }
+                if pending_tool_call_message is None:
+                    pending_tool_call_message = {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [],
+                    }
+                    if pending_reasoning_content:
+                        pending_tool_call_message["reasoning_content"] = pending_reasoning_content
+                pending_tool_call_message["tool_calls"].append(tool_call)
                 if pending_reasoning_content:
-                    assistant_message["reasoning_content"] = pending_reasoning_content
                     pending_reasoning_content = None
-                messages.append(assistant_message)
                 continue
             if item_type == "function_call_output":
+                flush_tool_calls()
                 call_id = item.get("call_id")
                 if not _valid_tool_call_id(call_id):
                     continue
@@ -785,6 +797,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                 continue
 
             role = item.get("role", "user")
+            flush_tool_calls()
             raw_content = item.get("content", "")
             parts = []
             tool_messages = []
@@ -811,6 +824,7 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
                     messages.append(chat_message)
                 messages.extend(tool_messages)
 
+    flush_tool_calls()
     system_prompt = "\n\n".join(t for t in system_texts if t)
     if system_prompt:
         messages.insert(0, {"role": "system", "content": system_prompt})

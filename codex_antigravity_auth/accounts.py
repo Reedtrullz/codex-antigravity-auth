@@ -353,58 +353,97 @@ class AccountManager:
         )
 
     def refresh_expiring_accounts(self, window_seconds: int = 300) -> dict[str, int]:
+        summary = {"checked": 0, "refreshed": 0, "failed": 0}
+        if not accounts_json_path_read_only().exists():
+            return summary
+        now = time.time()
         with self._lock:
-            summary = {"checked": 0, "refreshed": 0, "failed": 0}
-            if not accounts_json_path_read_only().exists():
-                return summary
-            current_time = time.time()
+            current = load_accounts()
+            all_candidates = [
+                (
+                    str(account.get("email")),
+                    str(account.get("refreshToken")),
+                    self._normalize_expires_at(account.get("expiresAt", 0)),
+                )
+                for account in current.get("accounts", [])
+                if isinstance(account, dict)
+                and account.get("email")
+                and account.get("refreshToken")
+            ]
+        summary["checked"] = len(all_candidates)
+        candidates = [
+            candidate for candidate in all_candidates
+            if candidate[2] <= now + max(0, int(window_seconds))
+        ]
 
-            def mutate(data: dict[str, Any]) -> bool:
-                self._sync_state_from_storage(data)
-                accounts = data.get("accounts", [])
-                if not isinstance(accounts, list):
-                    return True
-                for account in accounts:
-                    if not isinstance(account, dict):
-                        continue
-                    email = str(account.get("email", ""))
-                    refresh_token = account.get("refreshToken")
-                    if not email or not refresh_token:
-                        continue
-                    summary["checked"] += 1
-                    expires_at = self._normalize_expires_at(account.get("expiresAt", 0))
-                    if expires_at > current_time + max(0, int(window_seconds)):
-                        continue
+        # Network refresh/discovery is deliberately outside both manager and
+        # storage locks; merge only against the refresh-token identity we read.
+        for email, refresh_token, _expires_at in candidates:
+            try:
+                refreshed = refresh_access_token(refresh_token)
+                new_access_token = refreshed["access_token"]
+                new_expires_at = now + token_expires_in_seconds(refreshed)
+                discovered_project = None
+                if not any(
+                    str(account.get("email")) == email and account.get("projectId")
+                    for account in current.get("accounts", [])
+                    if isinstance(account, dict)
+                ):
                     try:
-                        refreshed = refresh_access_token(refresh_token)
-                        account["accessToken"] = refreshed["access_token"]
-                        account["expiresAt"] = current_time + token_expires_in_seconds(refreshed)
+                        from .oauth import discover_project_id
+                        discovered_project = discover_project_id(new_access_token)
+                    except Exception:
+                        _log.warning("Project discovery failed for %s during refresh", email)
+
+                merged = False
+                with self._lock:
+                    def merge(data: dict[str, Any]) -> bool:
+                        nonlocal merged
+                        self._sync_state_from_storage(data)
+                        account = next(
+                            (
+                                item for item in data.get("accounts", [])
+                                if isinstance(item, dict) and str(item.get("email")) == email
+                            ),
+                            None,
+                        )
+                        if not account or str(account.get("refreshToken")) != refresh_token:
+                            return False
+                        account["accessToken"] = new_access_token
+                        account["expiresAt"] = new_expires_at
                         if refreshed.get("refresh_token"):
                             account["refreshToken"] = refreshed["refresh_token"]
-                        # Discover project ID if missing
-                        if not account.get("projectId"):
-                            try:
-                                from .oauth import discover_project_id
-                                pid = discover_project_id(refreshed["access_token"])
-                                if pid:
-                                    account["projectId"] = pid
-                                    _log.info("Discovered project ID %s for %s", pid, email)
-                                else:
-                                    _log.warning("Project discovery returned empty for %s", email)
-                            except Exception:
-                                _log.warning("Project discovery failed for %s during refresh", email)
-                        summary["refreshed"] += 1
-                    except Exception:
+                        if discovered_project and not account.get("projectId"):
+                            account["projectId"] = discovered_project
+                        merged = True
+                        return True
+
+                    update_accounts(merge)
+                if merged:
+                    summary["refreshed"] += 1
+            except Exception:
+                with self._lock:
+                    def mark_failed(data: dict[str, Any]) -> bool:
+                        self._sync_state_from_storage(data)
+                        account = next(
+                            (
+                                item for item in data.get("accounts", [])
+                                if isinstance(item, dict) and str(item.get("email")) == email
+                            ),
+                            None,
+                        )
+                        if not account or str(account.get("refreshToken")) != refresh_token:
+                            return False
                         self._state_owner.apply_cooldown(
                             email,
                             "gemini",
                             AttemptOutcome(scope="account", category="auth"),
                         )
-                        summary["failed"] += 1
-                return True
+                        return True
 
-            update_accounts(mutate)
-            return summary
+                    if update_accounts(mark_failed):
+                        summary["failed"] += 1
+        return summary
 
     def clear_failures(self, email: str, family: str | None = None) -> None:
         with self._lock:
