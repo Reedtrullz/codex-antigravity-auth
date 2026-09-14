@@ -7,6 +7,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -1370,10 +1371,10 @@ class AntiHelperTests(unittest.TestCase):
                     ]
                 )
 
-            self.assertEqual(rc, 0, output.getvalue())
+            self.assertEqual(rc, 1, output.getvalue())
             record = json.loads(next(Path(tmp).glob("*.json")).read_text(encoding="utf-8"))
-            self.assertEqual(len(record["prompt_text"]), 1200)
-            self.assertEqual(record["metadata"]["prompt_chars"], 1200)
+            self.assertNotIn("prompt_text", record)
+            self.assertIn("exact budget", record["error"])
 
     def test_large_plan_prompt_is_split_before_generation(self) -> None:
         anti = load_anti()
@@ -3610,6 +3611,7 @@ class BugfixRegressionTests(unittest.TestCase):
                 )
             parsed = json.loads(output.getvalue())
             record = json.loads(next(Path(tmp).glob("*.json")).read_text(encoding="utf-8"))
+            artifact = json.loads(Path(record["resultPath"]).read_text(encoding="utf-8"))
 
         self.assertEqual(rc, 1, output.getvalue())
         self.assertEqual(caps, [40, 80])
@@ -3617,8 +3619,8 @@ class BugfixRegressionTests(unittest.TestCase):
         self.assertTrue(any("truncated at the token cap" in caveat for caveat in parsed["caveats"]))
         self.assertEqual(record["status"], "partial")
         self.assertEqual(record["runStatus"], "partial")
-        self.assertIn("output_text", record)
-        self.assertIn("answer that ends mid-sentence", record["output_text"])
+        self.assertNotIn("output_text", record)
+        self.assertIn("answer that ends mid-sentence", artifact["output_text"])
         self.assertIn("consult_attempts", record["metadata"])
         self.assertEqual(len(record["metadata"]["consult_attempts"]), 2)
 
@@ -4321,6 +4323,8 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertLess(record["bytesSent"], record["bytesDeclared"])
         self.assertEqual(record["firstChunkId"], chunks[0]["id"])
         self.assertIsNotNone(record["lastChunkId"])
+        self.assertEqual(chunks[0]["metadata"]["source_ranges"]["large.py"]["lineStart"], 1)
+        self.assertGreater(chunks[0]["metadata"]["source_ranges"]["large.py"]["lineEnd"], 1)
         coverage = anti.coverage_summary(metadata)
         self.assertEqual(coverage["status"], "partial")
         self.assertEqual(coverage["partialFiles"], ["large.py"])
@@ -4629,3 +4633,94 @@ class ScopeIntegrityContractTests(unittest.TestCase):
             finding["excerptSha256"],
             hashlib.sha256(b"VALUE = 1").hexdigest(),
         )
+
+    def test_enrich_finding_provenance_clears_unresolved_hashes_and_ranges(self) -> None:
+        anti = load_anti()
+        findings = {"findings": [
+            {"file": "a.py", "line": 99, "chunkId": "forged", "excerptSha256": "f" * 64},
+            {"file": "a.py", "line": 1, "chunkId": "forged", "excerptSha256": "f" * 64},
+        ]}
+        result = anti.enrich_finding_provenance(findings, {
+            "sourceCommit": "commit-1",
+            "scopeStatus": "complete",
+            "coverage": [{"path": "a.py", "contentStatus": "complete"}],
+            "_review_context": {"file_texts": [("a.py", "one\n")]},
+        })
+        assert result is not None
+        self.assertIsNone(result["findings"][0]["line"])
+        self.assertIsNone(result["findings"][0]["excerptSha256"])
+        self.assertEqual(result["findings"][1]["excerptSha256"], hashlib.sha256(b"one").hexdigest())
+
+    def test_plan_chunked_off_refuses_before_provider_call(self) -> None:
+        anti = load_anti()
+        calls: list[str] = []
+        anti.post_response = lambda **kwargs: calls.append(kwargs["prompt"]) or "must not run"
+        output = io.StringIO()
+        error = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+            rc = anti.main([
+                "plan", "--prompt", "task " * 3000, "--chunked", "off",
+                "--max-prompt-chars", "2000", "--save-output", "never", "--json", "--no-progress",
+            ])
+        self.assertEqual(rc, 1)
+        self.assertFalse(calls)
+        self.assertIn("exact budget", error.getvalue())
+
+    def test_plan_chunked_off_refuses_in_real_cli_subprocess(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "plan",
+                "--prompt",
+                "task " * 3000,
+                "--chunked",
+                "off",
+                "--max-prompt-chars",
+                "2000",
+                "--save-output",
+                "never",
+                "--json",
+                "--no-progress",
+            ],
+            cwd=Path.cwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("exact budget", completed.stderr)
+
+    def test_full_result_writes_atomic_raw_lane_paths_and_summary_keeps_index_compact(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            full_args = anti.build_parser().parse_args(
+                ["consult", "--prompt", "x", "--run-id", "full-run", "--save-output", "full"]
+            )
+            full_record_path = anti.write_run_record(
+                full_args,
+                mode="consult",
+                status="success",
+                output_text="answer",
+                execution_ledger=[{"stage": "consult", "output": "answer"}],
+            )
+            full_artifact = json.loads(Path(json.loads(full_record_path.read_text())["resultPath"]).read_text())
+            lane_paths = full_artifact["artifacts"]["rawLanePaths"]
+            self.assertEqual(len(lane_paths), 1)
+            self.assertEqual(json.loads(Path(lane_paths[0]).read_text())["output"], "answer")
+
+            summary_args = anti.build_parser().parse_args(
+                ["consult", "--prompt", "x", "--run-id", "summary-run", "--save-output", "summary"]
+            )
+            summary_record_path = anti.write_run_record(
+                summary_args,
+                mode="consult",
+                status="success",
+                output_text="answer-" + "x" * 2000,
+            )
+            summary_record = json.loads(summary_record_path.read_text())
+            summary_artifact = json.loads(Path(summary_record["resultPath"]).read_text())
+        self.assertNotIn("output_text", summary_record)
+        self.assertEqual(summary_artifact["output_text"], "answer-" + "x" * 2000)
+        self.assertEqual(summary_artifact["artifacts"]["rawLanePaths"], [])

@@ -15,6 +15,14 @@ Offline remediation evidence through T5:
 - T5: consult summary artifacts retain the complete answer; finding provenance clears model-forged chunk/excerpt fields and derives excerpt hashes only from the captured snapshot.
 - Focused Anti suite: `189 passed, 9 subtests passed`.
 
+T5 follow-up reopened the checkpoint after review found gaps in the first
+checkpoint: `plan --chunked off` now refuses before generation; unresolved
+provenance clears both line and excerpt hash; chunk records carry structured
+line ranges and distinguish bytes submitted from bytes successfully reviewed;
+plan chunks and synthesis classify terminal output; full-mode result artifacts
+write atomic per-call lane files while summary indexes retain only previews and
+the complete answer remains in `result.json`.
+
 Baseline evidence (2026-09-14):
 
 - `.venv/bin/python` is `/Users/reidar/.codex/worktrees/dfb9/codex-antigravity-auth/.venv/bin/python`.
@@ -28,13 +36,13 @@ Baseline evidence (2026-09-14):
 
 | Finding | Outcome | Commit | Evidence |
 |---|---|---|---|
-| A1 | fixed offline | pending commit | Capped plan/review exits nonzero; exact-off refusal test; `189 passed, 9 subtests passed` |
-| A2 | fixed offline | pending commit | 11-chunk execution manifest and failure test: 1 completed, 1 failed, 9 never sent; original error retained |
+| A1 | fixed offline | pending follow-up commit | Capped plan/review exits nonzero; exact-off plan refusal is also exercised through the real CLI subprocess |
+| A2 | fixed offline | pending follow-up commit | 11-chunk execution manifest and failure test: 1 completed, 1 failed, 9 never sent; original error retained; submitted/reviewed bytes are separate |
 | A3 | fixed offline | pending commit | Upstream `incomplete` and completed-empty responses classify as incomplete/empty |
 | A4 | partial offline | pending commit | Zero budget makes zero provider calls; whole-call reservation/race coverage remains T6 |
-| A5 | fixed offline | pending commit | Complete consult answer retained in summary artifact |
+| A5 | fixed offline | pending follow-up commit | Complete consult answer retained in summary artifact; full mode emits atomic raw lane paths and summary index stays compact |
 | A6 | fixed offline | pending commit | Parse/truncation/loss facts force partial status and nonzero exit |
-| A7 | fixed offline | pending commit | Provenance fields are authoritative from captured scope, not model text |
+| A7 | fixed offline | pending follow-up commit | Provenance fields are authoritative from captured scope/chunk ranges; unresolved line/hash/chunk values are null |
 | A8 | fixed offline | pending commit | Partial coverage is explicit in nested/top-level artifacts |
 | A9 | fixed offline | pending commit | Plan cap cannot silently become complete |
 | A10 | pending | — | — |
