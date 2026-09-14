@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import email.utils
 import fnmatch
 import json
 import math
@@ -1267,14 +1268,23 @@ def token_from_env(env_name: str) -> str | None:
     return token if token else None
 
 
-def _bounded_retry_after_seconds(value: object) -> float | None:
+MAX_RETRY_AFTER_SECONDS = 60.0
+
+
+def _retry_after_seconds(value: object) -> float | None:
     try:
         delay = float(value)
     except (TypeError, ValueError):
-        return None
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = email.utils.parsedate_to_datetime(value)
+            delay = parsed.timestamp() - time.time()
+        except (TypeError, ValueError, OverflowError):
+            return None
     if not math.isfinite(delay) or delay < 0:
         return None
-    return min(60.0, delay)
+    return delay
 
 
 def request_json(
@@ -1319,9 +1329,11 @@ def request_json(
     if not isinstance(decoded, dict):
         raise AntiError(f"request to {url} returned JSON {type(decoded).__name__}, expected object")
     if status in {408, 409, 425, 500, 502, 503, 504} or status == 429:
-        retry_after = _bounded_retry_after_seconds(retry_after_header)
+        retry_after = _retry_after_seconds(retry_after_header)
         if retry_after is not None:
             decoded["_retry_after_seconds"] = retry_after
+        elif retry_after_header is not None:
+            decoded["_retry_after_unsupported"] = True
     return status, decoded
 
 
@@ -1714,7 +1726,8 @@ def post_response(
                 response_metadata=response_metadata,
             )
 
-        retry_after_hint = _bounded_retry_after_seconds(decoded.pop("_retry_after_seconds", None))
+        retry_after_hint = _retry_after_seconds(decoded.pop("_retry_after_seconds", None))
+        retry_after_unsupported = bool(decoded.pop("_retry_after_unsupported", False))
         detail = decoded.get("detail") or decoded.get("error") or decoded
         settle_budget_call(
             retry_reservation,
@@ -1725,6 +1738,11 @@ def post_response(
         )
         last_error = f"HTTP {status}: {detail}"
         if status in retryable_statuses and attempt < attempts:
+            if retry_after_unsupported or retry_after_hint is not None and retry_after_hint > MAX_RETRY_AFTER_SECONDS:
+                raise AntiError(
+                    f"retry deferred after HTTP {status}; Retry-After exceeds the local "
+                    f"{MAX_RETRY_AFTER_SECONDS:.0f}s retry cap or is unsupported"
+                )
             time.sleep(retry_after_hint if retry_after_hint is not None else min(4.0, 0.75 * attempt))
             continue
         raise AntiError(
@@ -3895,6 +3913,11 @@ def build_panel_execution_plan(
 ) -> list[dict[str, Any]]:
     """Return the provider stages shared by panel dry-run and execution metadata."""
     stages: list[dict[str, Any]] = []
+    fallback_raw = getattr(args, "fallback_model", None)
+    fallback_model = resolve_model(fallback_raw, default=fallback_raw) if fallback_raw else None
+    fallback_policy = getattr(args, "fallback_policy", "never")
+    fallback_possible = bool(fallback_model and fallback_policy != "never")
+    retry_count = max(0, int(getattr(args, "retry", 0)))
     context = metadata.get("_review_context")
     chunked = (
         args.mode == "review"
@@ -3920,6 +3943,11 @@ def build_panel_execution_plan(
                 "prompt_chars_by_call": [len(chunk["prompt"]) for chunk in chunks],
                 "max_output_tokens": args.chunk_output_tokens,
                 "possible_retries": len(chunks) * max(0, int(getattr(args, "retry", 0))),
+                "retry_count": retry_count,
+                "logical_attempts": 1,
+                "fallback_model": fallback_model,
+                "fallback_policy": fallback_policy,
+                "fallback_possible": fallback_possible,
                 "omitted_calls": max(0, int(chunk_metadata.get("planned_chunk_count") or len(chunks)) - len(chunks)),
             }
         )
@@ -3931,22 +3959,33 @@ def build_panel_execution_plan(
                 "prompt_chars": int(getattr(args, "max_synthesis_chars", 0) or max(1, sum(len(chunk["prompt"]) for chunk in chunks))),
                 "max_output_tokens": args.max_output_tokens,
                 "possible_retries": max(0, int(getattr(args, "retry", 0))),
+                "retry_count": retry_count,
+                "logical_attempts": 1,
+                "fallback_model": fallback_model,
+                "fallback_policy": fallback_policy,
+                "fallback_possible": fallback_possible,
             }
         )
         fanout_prompt_chars = prompt_budget_for_panel_source(args, panel_models)
     else:
         fanout_prompt_chars = len(prompt)
 
-    stages.append(
-        {
-            "name": "panel_lane",
-            "model": panel_models[0],
-            "calls": len(panel_models),
-            "prompt_chars": fanout_prompt_chars,
-            "max_output_tokens": args.max_output_tokens,
-            "possible_retries": len(panel_models) * (1 + 2 * max(0, int(getattr(args, "retry", 0)))),
-        }
-    )
+    for index, lane_model in enumerate(panel_models, start=1):
+        stages.append(
+            {
+                "name": "panel_lane" if len(panel_models) == 1 else f"panel_lane_{index}",
+                "model": lane_model,
+                "calls": 1,
+                "prompt_chars": fanout_prompt_chars,
+                "max_output_tokens": args.max_output_tokens,
+                "possible_retries": 1 + 2 * retry_count,
+                "retry_count": retry_count,
+                "logical_attempts": 2,
+                "fallback_model": fallback_model,
+                "fallback_policy": fallback_policy,
+                "fallback_possible": fallback_possible,
+            }
+        )
     stages.append(
         {
             "name": "judge",
@@ -3954,7 +3993,12 @@ def build_panel_execution_plan(
             "calls": 1,
             "prompt_chars": int(getattr(args, "max_synthesis_chars", 0) or max(1, fanout_prompt_chars + len(panel_models) * args.max_output_tokens * 4)),
             "max_output_tokens": args.judge_output_tokens,
-            "possible_retries": 1 + 2 * max(0, int(getattr(args, "retry", 0))),
+            "possible_retries": 1 + 2 * retry_count,
+            "retry_count": retry_count,
+            "logical_attempts": 2,
+            "fallback_model": fallback_model,
+            "fallback_policy": fallback_policy,
+            "fallback_possible": fallback_possible,
         }
     )
     return stages
@@ -3982,25 +4026,48 @@ def format_dry_run(
     for stage in stages:
         calls = int(stage.get("calls", 1) or 0)
         retries = int(stage.get("possible_retries", 0) or 0)
+        logical_attempts = int(stage.get("logical_attempts", 0) or 0)
+        if logical_attempts:
+            retry_count = int(stage.get("retry_count", 0) or 0)
+            primary_attempts = calls * logical_attempts * (1 + retry_count)
+            fallback_calls = calls * logical_attempts if stage.get("fallback_possible") else 0
+            fallback_attempts = fallback_calls * (1 + retry_count)
+            retries = max(0, primary_attempts + fallback_attempts - calls)
+        else:
+            fallback_calls = 0
+            fallback_attempts = 0
         prompt_sizes = stage.get("prompt_chars_by_call")
         if not isinstance(prompt_sizes, list):
             prompt_sizes = [int(stage.get("prompt_chars", prompt_chars)) for _ in range(calls)]
         prompt_sizes = [max(0, int(size)) for size in prompt_sizes]
         prompt_sizes.extend([prompt_sizes[-1] if prompt_sizes else prompt_chars] * max(0, calls - len(prompt_sizes)))
         price = model_pricing_metadata(str(stage.get("model", model)))
-        attempt_sizes = prompt_sizes + [prompt_sizes[-1] if prompt_sizes else prompt_chars] * retries
+        fallback_price = model_pricing_metadata(str(stage.get("fallback_model"))) if stage.get("fallback_model") else None
+        repeat_count = max(1, logical_attempts) * (1 + int(stage.get("retry_count", 0) or 0))
+        primary_sizes = [size for size in prompt_sizes for _ in range(repeat_count)]
+        fallback_sizes = [size for size in prompt_sizes for _ in range(repeat_count)] if stage.get("fallback_possible") else []
+        attempt_sizes = primary_sizes + fallback_sizes
+        if not attempt_sizes:
+            attempt_sizes = prompt_sizes + [prompt_sizes[-1] if prompt_sizes else prompt_chars] * retries
+        attempt_models = [str(stage.get("model", model))] * len(primary_sizes)
+        attempt_models.extend([str(stage.get("fallback_model"))] * len(fallback_sizes))
+        if not attempt_models:
+            attempt_models = [str(stage.get("model", model))] * len(attempt_sizes)
         stage_copy = {
             **stage,
             "calls": calls,
             "planned_calls": int(stage.get("planned_calls", calls) or 0),
             "max_attempts": calls + retries,
+            "fallback_calls": fallback_calls,
+            "fallback_attempts": fallback_attempts,
             "prompt_chars_by_call": prompt_sizes,
             "estimated_cost": sum(
-                estimate_call_cost(stage.get("model", model), size, int(stage.get("max_output_tokens", max_output_tokens) or 0))
-                for size in attempt_sizes
+                estimate_call_cost(attempt_model, size, int(stage.get("max_output_tokens", max_output_tokens) or 0))
+                for attempt_model, size in zip(attempt_models, attempt_sizes)
             ),
             "price_known": price["provider_price_known"],
             "pricing": price,
+            "fallback_pricing": fallback_price,
         }
         planned_stages.append(stage_copy)
     stages = planned_stages

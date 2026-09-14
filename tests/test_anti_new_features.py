@@ -1,10 +1,12 @@
 import argparse
+import email.utils
 import json
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from pathlib import Path
 
@@ -48,7 +50,7 @@ class NormalizeAndFindingsTests(unittest.TestCase):
             "--chunked", "auto", "--max-prompt-chars", "1200", "--max-review-chunks", "10",
             "--allow-partial", "--no-verify", "--no-progress",
         ])
-        args.resolved_panel_models = ["claude-sonnet-4-6", "claude-opus-4-6-thinking"]
+        args.resolved_panel_models = ["claude-sonnet-4-6", "openrouter:nvidia/nemotron-3-super-120b-a12b:free"]
         context = {
             "scope_line": "files",
             "diff": "",
@@ -66,8 +68,22 @@ class NormalizeAndFindingsTests(unittest.TestCase):
             panel_models=args.resolved_panel_models,
             judge_model="claude-opus-4-6-thinking",
         )
-        self.assertEqual([stage["name"] for stage in plan], ["review_chunk", "review_synthesis", "panel_lane", "judge"])
+        self.assertEqual(
+            [stage["name"] for stage in plan],
+            ["review_chunk", "review_synthesis", "panel_lane_1", "panel_lane_2", "judge"],
+        )
         self.assertGreater(plan[0]["calls"], 1)
+        dry_run = json.loads(anti.format_dry_run(
+            mode="panel review",
+            model=args.resolved_panel_models[0],
+            prompt_chars=100,
+            max_output_tokens=args.max_output_tokens,
+            extra_models=[args.resolved_panel_models[1], "claude-opus-4-6-thinking"],
+            stage_plan=plan,
+            output_json=True,
+        ))
+        lane_pricing = [stage["pricing"]["tier"] for stage in dry_run["stages"] if stage["name"].startswith("panel_lane")]
+        self.assertEqual(lane_pricing, ["quota", "free"])
 
         calls = []
 
@@ -183,6 +199,32 @@ class NormalizeAndFindingsTests(unittest.TestCase):
         self.assertEqual(len(provider_calls), sum(stage["calls"] for stage in pre_panel))
         self.assertFalse(any("panel model" in purpose or purpose == "panel judge" for purpose in provider_calls))
 
+    def test_panel_dry_run_includes_bounded_fallback_topology(self):
+        args = anti.build_parser().parse_args([
+            "panel", "--mode", "ask", "--prompt", "compare", "--model", "sonnet", "--judge", "opus",
+            "--fallback-model", "deepseek-v4-pro", "--fallback-policy", "on-retryable", "--retry", "1",
+        ])
+        args.resolved_panel_models = ["claude-sonnet-4-6", "openrouter:nvidia/nemotron-3-super-120b-a12b:free"]
+        plan = anti.build_panel_execution_plan(
+            args=args,
+            prompt="compare",
+            metadata={},
+            panel_models=args.resolved_panel_models,
+            judge_model="claude-opus-4-6-thinking",
+        )
+        dry_run = json.loads(anti.format_dry_run(
+            mode="panel ask",
+            model=args.resolved_panel_models[0],
+            prompt_chars=100,
+            max_output_tokens=args.max_output_tokens,
+            stage_plan=plan,
+            output_json=True,
+        ))
+        for stage in dry_run["stages"]:
+            self.assertTrue(stage["fallback_possible"])
+            self.assertGreater(stage["fallback_attempts"], 0)
+            self.assertGreater(stage["max_attempts"], stage["calls"])
+
     def test_panel_identity_preserves_requested_actual_and_fallback_defaults(self):
         identity = anti.panel_model_identity(requested_model="sonnet", actual_model="deepseek:deepseek-v4-pro", fallback_used=True)
         self.assertEqual(identity["requestedModel"], "sonnet")
@@ -247,6 +289,31 @@ class RoutingAndCostTests(unittest.TestCase):
 
         self.assertEqual(str(result), "ok")
         sleep.assert_called_once_with(2.0)
+
+    def test_retry_after_over_cap_is_deferred_and_http_date_is_supported(self):
+        responses = iter([(429, {"_retry_after_seconds": 61})])
+        with patch.object(anti, "request_json", side_effect=lambda *args, **kwargs: next(responses)):
+            with patch.object(anti.time, "sleep") as sleep:
+                with self.assertRaisesRegex(anti.AntiError, "retry deferred"):
+                    anti.post_response(
+                        base_url="http://127.0.0.1:51122/v1",
+                        model="claude-sonnet-4-6",
+                        prompt="retry",
+                        max_output_tokens=10,
+                        timeout=5,
+                        token_env=anti.DEFAULT_TOKEN_ENV,
+                        retries=1,
+                        model_ids={"claude-sonnet-4-6"},
+                    )
+        sleep.assert_not_called()
+
+        retry_at = email.utils.format_datetime(
+            datetime.now(timezone.utc) + timedelta(seconds=2), usegmt=True
+        )
+        parsed = anti._retry_after_seconds(retry_at)
+        self.assertIsNotNone(parsed)
+        self.assertGreaterEqual(parsed, 0)
+        self.assertLessEqual(parsed, 3)
 
     def test_budget_refuses_unknown_model_price_before_state_or_provider(self):
         args = argparse.Namespace(budget=1.0)
