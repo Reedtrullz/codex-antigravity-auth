@@ -4457,7 +4457,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         source = "".join(f"LINE_{index:03d} = '{index:03d}-" + ("x" * 44) + "'\n" for index in range(100))
         with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:
             root = Path(tmp)
-            (root / "fixture.py").write_text(source, encoding="utf-8")
+            (root / "fixture.py").write_bytes(source.encode("utf-8"))
             old_cwd = Path.cwd()
             try:
                 os.chdir(root)
@@ -4485,7 +4485,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="anti-artifact-") as tmp:
             root = Path(tmp) / "workspace"
             root.mkdir()
-            (root / "fixture.py").write_text(source, encoding="utf-8")
+            (root / "fixture.py").write_bytes(source.encode("utf-8"))
             anti.RUNS_DIR = Path(tmp) / "runs"
             old_cwd = Path.cwd()
             try:
