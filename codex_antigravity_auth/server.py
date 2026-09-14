@@ -913,6 +913,8 @@ def validate_response_tool_schemas(codex_req: dict) -> None:
         if not isinstance(tool, dict) or tool.get("type") != "function":
             continue
         function = tool.get("function")
+        if not isinstance(function, dict):
+            function = tool
         if isinstance(function, dict) and "parameters" in function:
             visit(function["parameters"], f"tools[{index}].function.parameters")
 

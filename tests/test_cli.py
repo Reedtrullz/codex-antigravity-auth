@@ -1990,6 +1990,22 @@ class TestV3NativeSetup(unittest.TestCase):
 
         self.assertTrue(info["reachable"])
         status_info.assert_called_once_with(51122, wait=True, timeout=5.0)
+        self.assertTrue(info["service"]["reachable"])
+        self.assertEqual(info["service"]["state"], "ready")
+
+    def test_run_gateway_status_marks_registered_but_unreachable_service_degraded(self):
+        with patch(
+            "codex_antigravity_auth.cli.reachable_gateway_status_info",
+            return_value={"port": 51122, "status": "stopped", "reachable": False, "reachability_error": "connection refused"},
+        ):
+            with patch("codex_antigravity_auth.cli.service_status", return_value={"installed": True, "active": True}):
+                with patch("codex_antigravity_auth.cli.request_log_info", return_value={"path": "requests.jsonl"}):
+                    with patch("builtins.print"):
+                        info = run_gateway_status(Namespace(port=51122, json=True))
+
+        self.assertFalse(info["reachable"])
+        self.assertFalse(info["service"]["reachable"])
+        self.assertEqual(info["service"]["state"], "active_unreachable")
 
     def test_codex_ready_treats_unmanaged_reachable_gateway_as_process_ready(self):
         with TemporaryDirectory() as tmp:

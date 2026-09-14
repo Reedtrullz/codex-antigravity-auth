@@ -50,15 +50,21 @@ def _get_refresh_lock(email: str) -> threading.Lock:
         return _refresh_locks[email]
 
 
-def _apply_token_refresh(account: dict, refresh_token: str) -> None:
+def _apply_token_refresh(account: dict, refresh_token: str, *, wait: bool = True) -> bool:
     email = account.get("email", "")
     lock = _get_refresh_lock(email)
     # Block with a timeout rather than skipping: another thread may be
     # refreshing the same account, and skipping leaves the caller with
     # a stale token.  Wait for the in-progress refresh to finish.
-    if not lock.acquire(blocking=True, timeout=30):
-        _log.warning("Refresh lock timeout for %s; proceeding anyway", email)
-        return
+    if wait:
+        acquired = lock.acquire(blocking=True, timeout=30)
+    else:
+        # Selection already owns the account/store mutation lock. Never wait
+        # on a background refresh here: fail closed and let selection rotate.
+        acquired = lock.acquire(blocking=False)
+    if not acquired:
+        _log.warning("Refresh lock busy for %s; refusing stale-token selection", email)
+        return False
     try:
         refreshed = refresh_access_token(refresh_token)
         account["accessToken"] = refreshed["access_token"]
@@ -78,6 +84,7 @@ def _apply_token_refresh(account: dict, refresh_token: str) -> None:
                     _log.warning("Project discovery returned empty for %s", email)
             except Exception as exc:
                 _log.warning("Project discovery failed for %s: %s", email, exc)
+        return True
     finally:
         lock.release()
 
@@ -204,7 +211,8 @@ class AccountManager:
                     if account.get("accessToken") and expires_at > time.time() + 10:
                         try:
                             if refresh_token:
-                                _apply_token_refresh(account, refresh_token)
+                                if not _apply_token_refresh(account, refresh_token, wait=False):
+                                    raise RuntimeError("refresh already in progress")
                                 dirty = True
                         except Exception as exc:
                             # The remaining token lifetime (<=10s) cannot
@@ -231,7 +239,8 @@ class AccountManager:
                     try:
                         if not refresh_token:
                             raise RuntimeError("Token expired and no refresh token is available")
-                        _apply_token_refresh(account, refresh_token)
+                        if not _apply_token_refresh(account, refresh_token, wait=False):
+                            raise RuntimeError("refresh already in progress")
                         selected = account
                         return True
                     except Exception as exc:
@@ -242,6 +251,7 @@ class AccountManager:
                             family,
                             AttemptOutcome(scope="account", category="auth"),
                         )
+                        dirty = True
                         print(
                             f"[*] Account {email} flagged as cooling down. Reason: "
                             f"{redact_secret_text(str(exc))}"

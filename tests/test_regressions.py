@@ -4,7 +4,7 @@ import time
 import unittest
 import warnings
 from importlib import metadata as importlib_metadata
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import urllib.error
 
 import httpx
@@ -228,6 +228,20 @@ class TestRegressionFixes(unittest.TestCase):
                     )
                 self.assertEqual(response.status_code, 400)
                 select.assert_not_called()
+
+    def test_responses_endpoint_accepts_flat_and_nested_tool_schema_shapes(self):
+        forms = [
+            {"type": "function", "name": "lookup", "parameters": {"$ref": "#/defs/input"}},
+            {"type": "function", "function": {"name": "lookup", "parameters": {"$ref": "#/defs/input"}}},
+        ]
+        for tool in forms:
+            with self.subTest(tool=tool):
+                with patch("codex_antigravity_auth.server.select_active_account_for_request", new_callable=AsyncMock, return_value=None):
+                    response = TestClient(app).post(
+                        "/v1/responses",
+                        json={"model": "custom:anything", "input": "hello", "tools": [tool]},
+                    )
+                self.assertEqual(response.status_code, 404)
 
     def test_byok_stream_writes_terminal_request_log_record(self):
         provider = {

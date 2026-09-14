@@ -14,7 +14,7 @@ Offline remediation evidence through T15:
 - T3/T4: upstream incomplete/empty output is not a completed answer; partial panel/review/plan results retain artifacts and exit nonzero, while successful retries remain zero; capped plans refuse exact execution unless `--allow-partial` is explicit.
 - T5: consult summary artifacts retain the complete answer; finding provenance clears model-forged chunk/excerpt fields and derives excerpt hashes only from the captured snapshot.
 - Focused Anti/gateway regression suite after the reopened checkpoint: `374 passed, 80 subtests, 2 warnings`.
-- Full suite with the repository's 1Password signing configuration isolated for temporary Git fixtures: `791 passed, 214 subtests, 2 warnings`.
+- Full suite with the repository's 1Password signing configuration isolated for temporary Git fixtures: `795 passed, 220 subtests, 2 warnings`.
 - `uv pip check --python .venv/bin/python`: 31 packages compatible.
 - `git diff --check`: pass.
 
@@ -46,17 +46,17 @@ Baseline evidence (2026-09-14):
 | A5 | fixed offline | `90c719f` | Complete consult answer remains retrievable in the result artifact; prompt retention uses hashes/counts and sanitized outputs. |
 | A6 | fixed offline | `90c719f` | Parse/truncation/loss facts force partial status and nonzero exit. |
 | A7 | fixed offline | `90c719f` | Provenance is derived from captured scope/chunk ranges; forged unresolved fields clear to null. |
-| A8 | fixed offline | `90c719f` | Partial coverage is explicit in nested and top-level artifacts. |
+| A8 | fixed offline | `90c719f` | NUL-safe staged scope preserves deletions/renames and the exact scope snapshot; partial coverage remains explicit in artifacts. |
 | A9 | fixed offline | `90c719f` | Plan caps cannot silently become complete. |
 | A10 | fixed offline | `a3b97ff`, `90c719f` | Helper/bundle parity is checked before generation; clean local and bundled hashes matched in the worktree. |
 | G1 | fixed offline | `90c719f` | Real ASGI disconnect regression covers bounded diagnostics and exactly-once lease release; cleanup is shielded and release is independent. |
-| G2 | fixed offline | `90c719f` | Selection refresh failures mark the mutation dirty and persist cooldown state. |
+| G2 | fixed offline | current remediation patch | Hard-expiry failures mark the mutation dirty and persist cooldown state; a same-account background refresh cannot make selection wait and then use an expired token. |
 | G3 | fixed offline | `90c719f` | Refresh merge checks refresh token, access token and expiry snapshot; stale same-token results are discarded. |
 | G4 | fixed offline | `340ec96` | Adjacent Responses function calls group into one ordered assistant tool-call turn without crossing intervening messages. |
 | G5 | fixed offline | `90c719f` | Native Responses SSE adapter is exercised for valid terminal, premature EOF, duplicate terminal, model rewrite and closure. |
-| G6 | fixed offline | `90c719f` | Malformed `$ref`/`properties` schemas return 400 before account/provider selection; numeric boundaries remain fail-closed. |
+| G6 | fixed offline | current remediation patch | Malformed `$ref`/`properties` schemas return 400 before account/provider selection; both flat and nested valid tool shapes pass schema validation; numeric boundaries remain fail-closed. |
 | G7 | fixed offline | `90c719f` | BYOK telemetry reads normalized Responses terminal status and nested usage, with compatibility coverage for the transport seam. |
-| G8 | fixed offline | existing service/CLI state tests plus `90c719f` | Service state composes installed/active/reachable observations; managed/unmanaged reachability cases are covered. |
+| G8 | fixed offline | current remediation patch | Service state composes installed/active/reachable observations; registered-but-unreachable is `active_unreachable`, while a reachable managed service is `ready`. |
 | R1 | fixed offline | `340ec96` | OAuth login uses transactional per-account merge and preserves concurrent account state. |
 | R2 | fixed offline | `90c719f` | Reflection read-modify-write is cross-process locked and atomic; concurrent writers, pruning and symlink sentinels are tested. |
 | D1 | fixed offline | `13e8df9`, `a3b97ff`, `90c719f` | README/SKILL describe partial exits, retention, estimates, parity and non-claims; no new broad abstraction was introduced. |
@@ -65,8 +65,15 @@ Baseline evidence (2026-09-14):
 
 ## Acceptance boundary
 
-Offline acceptance is complete on `90c719f` plus the preceding remediation
-commits. The temporary Git-fixture failures under the normal environment were
+The reopened offline blocker suite is green in the current worktree: `795
+passed, 220 subtests, 2 warnings`. Exact closure evidence includes
+`test_hard_refresh_failure_persists_for_select_and_acquire`,
+`test_selection_does_not_wait_on_background_same_account_refresh`,
+`test_responses_endpoint_rejects_malformed_tool_schema_before_provider`,
+`test_responses_endpoint_accepts_flat_and_nested_tool_schema_shapes`,
+`test_run_gateway_status_uses_waiting_reachability_probe`, and
+`test_run_gateway_status_marks_registered_but_unreachable_service_degraded`.
+Coordinator acceptance remains pending review of this closure. The temporary Git-fixture failures under the normal environment were
 caused by the user's global 1Password SSH signing hook; the authoritative full
 suite run used `GIT_CONFIG_GLOBAL=/dev/null` and did not change repository or
 global configuration.

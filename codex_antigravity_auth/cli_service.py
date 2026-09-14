@@ -243,7 +243,19 @@ def gateway_status_info(port: int) -> dict:
 
 def run_gateway_status(args) -> dict:
     info = _cli.reachable_gateway_status_info(args.port, wait=True, timeout=5.0)
-    info["service"] = _cli.service_status(args.port)
+    raw_service = _cli.service_status(args.port)
+    info["service"] = {
+        **raw_service,
+        **_cli.observed_service_result(
+            action="status",
+            installed=bool(raw_service.get("installed")),
+            active=bool(raw_service.get("active")),
+            reachable=bool(info.get("reachable")),
+            changed=False,
+            commands=tuple(raw_service.get("commands", ())) if isinstance(raw_service.get("commands", ()), (list, tuple)) else (),
+            error=raw_service.get("error"),
+        ).to_dict(),
+    }
     info["request_log"] = _cli.request_log_info()
     if getattr(args, "json", False):
         print(json.dumps(info, indent=2))
@@ -604,4 +616,3 @@ def stop_gateway(args) -> dict:
     pid_path.unlink(missing_ok=True)
     print(f"[+] Gateway stopped on port {args.port} (pid {pid})")
     return _cli.gateway_status_info(args.port)
-
