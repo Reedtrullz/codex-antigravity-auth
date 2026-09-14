@@ -21,6 +21,108 @@ from anti_lib.verifier import verify_finding  # noqa: E402
 
 
 class NormalizeAndFindingsTests(unittest.TestCase):
+    def test_review_prompts_require_bounded_non_generating_findings(self):
+        context = {
+            "scope_line": "files",
+            "diff": "",
+            "file_texts": [("fixture.py", "x = 1\n")],
+            "file_records": [{"path": "fixture.py"}],
+            "paths": ["fixture.py"],
+            "excluded": [],
+            "caveats": [],
+        }
+        chunks, metadata = anti.build_review_chunk_prompts(
+            context,
+            max_prompt_chars=1200,
+            max_chunks=2,
+        )
+        prompt, _, _ = anti.build_chunk_synthesis_prompt(
+            context=context,
+            chunks=chunks,
+            chunk_outputs=["## Confirmed Findings\n- None"],
+            chunk_metadata=metadata,
+            max_chars=12000,
+        )
+        self.assertIn("## Recommended Next Actions", prompt)
+        self.assertIn("Do not generate code, patches, plans", prompt)
+        self.assertIn("stop incomplete rather than omit them", prompt)
+        self.assertIn("no code or patches", chunks[0]["prompt"])
+
+    def test_chunked_failure_retains_bounded_redacted_diagnostics(self):
+        args = anti.build_parser().parse_args([
+            "panel", "--mode", "review", "--scope", "files", "--model", "sonnet",
+            "--judge", "opus", "--max-prompt-chars", "1200", "--max-review-chunks", "2",
+            "--no-verify", "--no-progress",
+        ])
+        args.chunk_output_tokens = 3
+        args.max_output_tokens = 3
+        args.max_synthesis_chars = 12000
+        context = {
+            "scope_line": "files",
+            "diff": "",
+            "file_texts": [("fixture.py", "x = 1\n")],
+            "file_records": [{"path": "fixture.py"}],
+            "paths": ["fixture.py"],
+            "excluded": [],
+            "caveats": [],
+        }
+
+        def fake_generate(_args, *, purpose, model, **_kwargs):
+            if purpose == "review synthesis":
+                return "partial synthesis", model, {
+                    "usage": {"input_tokens": 10, "output_tokens": 3, "total_tokens": 13},
+                    "terminal_kind": "incomplete",
+                    "terminal_reason": "max_tokens",
+                }
+            return "## Confirmed Findings\n- None", model, {
+                "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+            }
+
+        with patch.object(anti, "generate_with_fallback", side_effect=fake_generate):
+            with self.assertRaises(anti.AntiError) as raised:
+                anti.run_chunked_review(
+                    args=args,
+                    context=context,
+                    model="claude-sonnet-4-6",
+                    base_metadata={},
+                    max_prompt_chars=1200,
+                )
+
+        diagnostics = raised.exception.run_metadata["failure_diagnostics"]
+        self.assertEqual([item["stage"] for item in diagnostics], ["review_chunk_1", "review_synthesis"])
+        self.assertEqual(diagnostics[-1]["terminal_reason"], "max_tokens")
+        self.assertEqual(diagnostics[-1]["outputPreview"], "partial synthesis")
+        self.assertNotIn("output", diagnostics[-1])
+        self.assertEqual(len(diagnostics[-1]["outputSha256"]), 64)
+
+    def test_failure_diagnostics_are_exposed_in_sanitized_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                save_output="full",
+                run_id="diagnostic-test",
+                command="review",
+                workflow_name=None,
+                run_label=None,
+                progress=False,
+            )
+            diagnostics = [{
+                "stage": "review_synthesis",
+                "outputPreview": "partial synthesis",
+                "outputChars": 17,
+            }]
+            with patch.object(anti, "RUNS_DIR", Path(tmp)):
+                result_path = anti.write_run_record(
+                    args,
+                    mode="review",
+                    status="error",
+                    models=["sonnet"],
+                    metadata={"failure_diagnostics": diagnostics, "scope_status": "partial"},
+                    error="review synthesis output was truncated",
+                )
+            result = json.loads((Path(tmp) / "diagnostic-test" / "result.json").read_text())
+            self.assertEqual(result["failureDiagnostics"], diagnostics)
+            self.assertEqual(result_path, Path(tmp) / "diagnostic-test.json")
+
     def test_budget_admission_allows_only_one_concurrent_last_allowance(self):
         args = argparse.Namespace(budget=anti.estimate_call_cost("claude-sonnet-4-6", 4000, 1000))
         barrier = __import__("threading").Barrier(4)

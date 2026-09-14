@@ -553,6 +553,7 @@ EXCLUDED_PATTERNS = [
 ]
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 CHUNK_PART_SUFFIX_RE = re.compile(r" part \d+/\d+$")
+FAILURE_OUTPUT_PREVIEW_CHARS = 1600
 
 
 class AntiError(Exception):
@@ -856,6 +857,7 @@ def write_run_record(
             "recommendedNextActions": finding_contract.get("recommended_next_actions", []),
             "summary": finding_contract.get("summary"),
             "output_text": output_text,
+            "failureDiagnostics": artifact_metadata.get("failure_diagnostics", []),
             "verification": artifact_metadata.get(
                 "verification",
                 {
@@ -2472,8 +2474,8 @@ def review_prompt_parts(
 
     parts = [
         "You are an Antigravity sidecar reviewer for a Codex coding session.",
-        "Review independently. Lead with concrete defects, regressions, security risks, install/usability problems, or missing tests. Avoid speculative style comments.",
-        "Use file paths and precise behavior references when possible. If you find no issues, say so and list residual verification caveats.",
+        "Review independently. Lead with concrete defects, regressions, security risks, install/usability problems, or missing tests. Be concise; no code or patches.",
+        "Use file paths and precise behavior references. If no issues, say so and list caveats; group duplicates; do not restate source.",
         "Treat the Review Manifest as authoritative. Helper warnings, omitted files, and partial diffs are scope caveats, not source-code defects.",
         "\n".join(manifest_lines),
     ]
@@ -3200,6 +3202,8 @@ def build_chunk_synthesis_prompt(
                 "You are synthesizing an Antigravity sidecar code review that was split into multiple bounded chunks.",
                 "Use only the chunk findings below. Separate confirmed defects from risks and scope caveats. Do not invent findings for omitted items.",
                 "If chunks disagree or a finding depends on omitted context, mark it as needing local verification.",
+                "Use exactly these concise headings: ## Confirmed Findings, ## Risks and Caveats, ## Needs Local Verification, and ## Recommended Next Actions. Group duplicates; write None when empty.",
+                "Do not generate code, patches, plans, or extra prose; do not restate chunks. If findings cannot fit, stop incomplete rather than omit them.",
                 "## Chunked Review Manifest\n```json\n" + json.dumps(manifest, indent=2, sort_keys=True) + "\n```",
                 *chunk_sections,
             ]
@@ -3234,6 +3238,38 @@ def should_run_chunked_review(args: argparse.Namespace, metadata: dict[str, Any]
         or bool(metadata.get("diff_truncated"))
         or bool(metadata.get("assembly_over_budget"))
     )
+
+
+def bounded_failure_diagnostics(execution_ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Retain redacted, bounded output evidence when a staged run fails."""
+    diagnostics: list[dict[str, Any]] = []
+    for entry in execution_ledger:
+        if not isinstance(entry, dict):
+            continue
+        output = str(entry.get("output") or "")
+        generation = entry.get("generation") if isinstance(entry.get("generation"), dict) else {}
+        item: dict[str, Any] = {
+            "stage": str(entry.get("stage") or "unknown"),
+            "model": redact_sensitive_text(str(entry.get("model") or "unknown")),
+            "promptSha256": entry.get("promptSha256"),
+            "promptChars": int(entry.get("promptChars") or 0),
+            "outputChars": len(output),
+            "outputSha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
+            "outputPreview": redact_sensitive_text(output[:FAILURE_OUTPUT_PREVIEW_CHARS]),
+            "outputPreviewTruncated": len(output) > FAILURE_OUTPUT_PREVIEW_CHARS,
+        }
+        usage = generation.get("usage")
+        if isinstance(usage, dict):
+            item["usage"] = {
+                key: usage[key]
+                for key in ("input_tokens", "output_tokens", "total_tokens")
+                if usage.get(key) is not None
+            }
+        for key in ("terminal_kind", "terminal_reason", "upstream_status", "fallback_used"):
+            if generation.get(key) is not None:
+                item[key] = generation[key]
+        diagnostics.append(item)
+    return diagnostics
 
 
 def review_scope_is_incomplete(metadata: dict[str, Any]) -> bool:
@@ -3525,6 +3561,7 @@ def run_chunked_review(
             "included_files": list(chunk_metadata.get("included_files") or []),
             "included_items": list(chunk_metadata.get("included_items") or []),
             "coverage": [dict(record) for record in chunk_metadata.get("coverage", [])],
+            "failure_diagnostics": bounded_failure_diagnostics(execution_ledger),
             **overrides,
         }
 
