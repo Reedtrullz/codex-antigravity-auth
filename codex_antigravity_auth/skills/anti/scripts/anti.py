@@ -3513,17 +3513,28 @@ def run_chunked_review(
     chunk_metadata["completed_chunk_count"] = completed_chunk_count
     chunk_metadata["failed_chunk_count"] = len(incomplete_chunks)
     chunk_metadata["incomplete_chunks"] = incomplete_chunks
+
+    def failure_metadata(**overrides: Any) -> dict[str, Any]:
+        # The initial single-prompt assembly may omit a whole file because the
+        # chunked path is required. Once chunks have covered it, that stale
+        # omission must not survive a later synthesis failure.
+        return {
+            **base_metadata,
+            **chunk_metadata,
+            "omitted_files": list(chunk_metadata.get("omitted_items") or []),
+            "included_files": list(chunk_metadata.get("included_files") or []),
+            "included_items": list(chunk_metadata.get("included_items") or []),
+            "coverage": [dict(record) for record in chunk_metadata.get("coverage", [])],
+            **overrides,
+        }
+
     if incomplete_chunks and not getattr(args, "allow_partial", False):
         exc = AntiError(
             "review chunk output was incomplete ("
             + ", ".join(incomplete_chunks[:8])
             + "); pass --allow-partial to continue with an explicitly partial result"
         )
-        exc.run_metadata = {
-            **base_metadata,
-            **chunk_metadata,
-            "scope_status": "partial",
-        }  # type: ignore[attr-defined]
+        exc.run_metadata = failure_metadata(scope_status="partial")  # type: ignore[attr-defined]
         raise exc
 
     try:
@@ -3535,14 +3546,13 @@ def run_chunked_review(
             max_chars=args.max_synthesis_chars,
         )
     except AntiError as exc:
-        exc.run_metadata = {
-            **base_metadata,
-            **chunk_metadata,
-            "status": "incomplete" if chunk_metadata.get("status") == "incomplete" else "complete",
-            "scope_status": "partial" if chunk_metadata.get("status") == "incomplete" else "complete",
-            "chunk_count": len(chunks),
-            "planned_chunk_count": planned_chunk_count,
-        }  # type: ignore[attr-defined]
+        exc.run_metadata = failure_metadata(
+            status="incomplete" if chunk_metadata.get("status") == "incomplete" else "complete",
+            chunk_count=len(chunks),
+            planned_chunk_count=planned_chunk_count,
+            scope_status="partial",
+            synthesis_status="not_sent",
+        )  # type: ignore[attr-defined]
         raise
     # The single-prompt assembly truncates the diff to fit one prompt; chunked
     # mode re-budgets the FULL diff across chunks, so that caveat is stale here.
@@ -3561,14 +3571,13 @@ def run_chunked_review(
             purpose="review synthesis",
         )
     except AntiError as exc:
-        exc.run_metadata = {
-            **base_metadata,
-            **chunk_metadata,
-            "status": "incomplete" if chunk_metadata.get("status") == "incomplete" else "complete",
-            "scope_status": "partial" if chunk_metadata.get("status") == "incomplete" else "complete",
-            "chunk_count": len(chunks),
-            "planned_chunk_count": planned_chunk_count,
-        }  # type: ignore[attr-defined]
+        exc.run_metadata = failure_metadata(
+            status="incomplete" if chunk_metadata.get("status") == "incomplete" else "complete",
+            chunk_count=len(chunks),
+            planned_chunk_count=planned_chunk_count,
+            scope_status="partial",
+            synthesis_status="failed",
+        )  # type: ignore[attr-defined]
         raise
     execution_ledger.append(
         execution_entry(
