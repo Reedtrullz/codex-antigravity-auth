@@ -177,18 +177,20 @@ class TestAccounts(unittest.TestCase):
         manager = AccountManager()
         worker = threading.Thread(target=manager.refresh_expiring_accounts, daemon=True)
         worker.start()
-        self.assertTrue(started.wait(1))
+        try:
+            self.assertTrue(started.wait(1))
 
-        started_at = time.monotonic()
-        selected = manager.select_active_account("gemini-3.8-flash")
-        elapsed = time.monotonic() - started_at
+            started_at = time.monotonic()
+            selected = manager.select_active_account("gemini-3.8-flash")
+            elapsed = time.monotonic() - started_at
 
-        self.assertEqual(selected["email"], "secondary@gmail.com")
-        self.assertLess(elapsed, 0.5)
-        self.assertNotIn("primary@gmail.com", data["accountState"]["cooldowns"])
-        release.set()
-        worker.join(timeout=1)
-        self.assertFalse(worker.is_alive())
+            self.assertEqual(selected["email"], "secondary@gmail.com")
+            self.assertLess(elapsed, 0.5)
+            self.assertNotIn("primary@gmail.com", data["accountState"]["cooldowns"])
+        finally:
+            release.set()
+            worker.join(timeout=1)
+            self.assertFalse(worker.is_alive())
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
     @patch("codex_antigravity_auth.accounts.load_accounts")
@@ -218,16 +220,18 @@ class TestAccounts(unittest.TestCase):
         manager = AccountManager()
         worker = threading.Thread(target=manager.refresh_expiring_accounts, daemon=True)
         worker.start()
-        self.assertTrue(started.wait(1))
+        try:
+            self.assertTrue(started.wait(1))
 
-        started_at = time.monotonic()
-        self.assertIsNone(manager.select_active_account("gemini-3.8-flash"))
-        self.assertLess(time.monotonic() - started_at, 0.5)
-        self.assertNotIn("primary@gmail.com", data["accountState"]["cooldowns"])
+            started_at = time.monotonic()
+            self.assertIsNone(manager.select_active_account("gemini-3.8-flash"))
+            self.assertLess(time.monotonic() - started_at, 0.5)
+            self.assertNotIn("primary@gmail.com", data["accountState"]["cooldowns"])
+        finally:
+            release.set()
+            worker.join(timeout=1)
+            self.assertFalse(worker.is_alive())
 
-        release.set()
-        worker.join(timeout=1)
-        self.assertFalse(worker.is_alive())
         self.assertEqual(data["accounts"][0]["accessToken"], "fresh")
         self.assertEqual(manager.select_active_account("gemini-3.8-flash")["email"], "primary@gmail.com")
 
