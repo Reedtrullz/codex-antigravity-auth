@@ -1102,6 +1102,7 @@ async def create_response(request: Request):
         cooldown_category: str | None = None,
         outcome_category: str | None = None,
         cancelled: bool = False,
+        terminal_cleanup: bool = False,
     ) -> None:
         record = {
             "request_id": request_id,
@@ -1128,10 +1129,10 @@ async def create_response(request: Request):
             "outcome_category": outcome_category,
             "cancelled": cancelled,
         }
-        if diagnostic_deadline is None:
+        if diagnostic_deadline is None and not terminal_cleanup:
             await run_in_threadpool(write_request_record, record)
             return
-        remaining = diagnostic_deadline - time.monotonic()
+        remaining = 2.0 if terminal_cleanup else diagnostic_deadline - time.monotonic()
         if remaining <= 0:
             raise RequestDeadlineExceeded()
         try:
@@ -1648,6 +1649,7 @@ async def create_response(request: Request):
                 outcome_category="cancelled",
                 cancelled=True,
                 error="Client disconnected before account acquisition completed",
+                terminal_cleanup=True,
             ))
             raise
         except RequestDeadlineExceeded:
@@ -1660,6 +1662,7 @@ async def create_response(request: Request):
                 http_status=504,
                 error_class="request_deadline_exceeded",
                 error="Native non-stream request deadline expired during account acquisition",
+                terminal_cleanup=True,
             ))
             raise HTTPException(status_code=504, detail="Antigravity request deadline exceeded")
     if not account:
@@ -2066,6 +2069,7 @@ async def create_response(request: Request):
                 error="Native non-stream request deadline expired before completion",
                 attempt_count=len(response_attempts),
                 rotation_count=max(0, len(response_attempts) - 1),
+                terminal_cleanup=True,
             ))
             raise HTTPException(status_code=504, detail="Antigravity request deadline exceeded")
         except ClientDisconnect:
@@ -2089,6 +2093,7 @@ async def create_response(request: Request):
                 outcome_category="cancelled",
                 cancelled=True,
                 error="Client disconnected before the Antigravity response completed",
+                terminal_cleanup=True,
             ))
             raise
         finally:

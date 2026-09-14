@@ -4293,7 +4293,10 @@ class ScopeIntegrityContractTests(unittest.TestCase):
             git("init", "-q")
             git("config", "user.name", "Anti fixture")
             git("config", "user.email", "anti-fixture@example.invalid")
-            names = ["keep.py", "deleted.py", "føø.py", "space name.py", "line\nname.py", "rename-old.py"]
+            newline_name = "line\nname.py"
+            names = ["keep.py", "deleted.py", "føø.py", "space name.py", "rename-old.py"]
+            if os.name != "nt":
+                names.append(newline_name)
             for name in names:
                 (root / name).write_text("VALUE = 1\n", encoding="utf-8")
             git("add", "-A")
@@ -4302,7 +4305,8 @@ class ScopeIntegrityContractTests(unittest.TestCase):
             (root / "deleted.py").unlink()
             (root / "føø.py").write_text("VALUE = 2\n", encoding="utf-8")
             (root / "space name.py").write_text("VALUE = 2\n", encoding="utf-8")
-            (root / "line\nname.py").write_text("VALUE = 2\n", encoding="utf-8")
+            if os.name != "nt":
+                (root / newline_name).write_bytes(b"VALUE = 2\n")
             git("mv", "rename-old.py", "rename-new.py")
             git("add", "-A")
 
@@ -4315,7 +4319,10 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 os.chdir(old_cwd)
 
         paths = set(context["paths"])
-        self.assertTrue({"keep.py", "deleted.py", "føø.py", "space name.py", "line\nname.py"} <= paths)
+        expected_paths = {"keep.py", "deleted.py", "føø.py", "space name.py"}
+        if os.name != "nt":
+            expected_paths.add("line\nname.py")
+        self.assertTrue(expected_paths <= paths)
         self.assertTrue({"rename-old.py", "rename-new.py"} <= paths)
         self.assertIn("deleted.py", context["diff"])
         self.assertIn("føø.py", context["diff"])
@@ -4326,13 +4333,13 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="anti-snapshot-") as tmp:
             root = Path(tmp)
             path = root / "fixture.py"
-            path.write_text("BEFORE\n", encoding="utf-8")
+            path.write_bytes(b"BEFORE\n")
             old_cwd = Path.cwd()
             try:
                 os.chdir(root)
                 args = anti.build_parser().parse_args(["review", "--scope", "files", "--file", "fixture.py"])
                 context = anti.collect_review_context(args)
-                path.write_text("AFTER\n", encoding="utf-8")
+                path.write_bytes(b"AFTER\n")
             finally:
                 os.chdir(old_cwd)
 
@@ -4462,11 +4469,13 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertEqual(str(raised.exception), "provider broke")
         self.assertEqual(run_metadata["completed_chunk_count"], 1)
         self.assertEqual(run_metadata["failed_chunk_count"], 1)
-        self.assertEqual(run_metadata["not_sent_chunk_count"], 9)
+        self.assertGreater(len(chunks), 2)
+        expected_not_sent = len(chunks) - 2
+        self.assertEqual(run_metadata["not_sent_chunk_count"], expected_not_sent)
         self.assertEqual(coverage["chunksCompleted"], 1)
         self.assertEqual(coverage["chunksFailed"], 1)
-        self.assertEqual(coverage["chunksOmitted"], 9)
-        self.assertEqual(coverage["chunksNotSent"], 9)
+        self.assertEqual(coverage["chunksOmitted"], expected_not_sent)
+        self.assertEqual(coverage["chunksNotSent"], expected_not_sent)
 
     def test_required_file_cannot_be_dropped_by_chunk_cap(self) -> None:
         anti = load_anti()
