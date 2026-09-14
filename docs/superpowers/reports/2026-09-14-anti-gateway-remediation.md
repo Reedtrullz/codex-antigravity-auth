@@ -167,3 +167,44 @@ gate due to generation timeouts; larger multi-chunk live acceptance remains
 pending. Integration requires no code change from this check: retain the
 failure artifact for diagnosis, and only rerun after an independently
 authorized gateway/provider remediation.
+
+## Non-stream liveness remediation
+
+The bounded reproductions separated two issues without assigning the
+35-minute live latency to a specific provider cause:
+
+- `GoogleTransport(timeout=0.1)` completed a local response after `1.721s`
+  while the server trickled one byte every `50ms`; HTTPX's scalar timeout is a
+  phase/inactivity limit, not a total request deadline.
+- A non-stream `create_response` run with a backend sleeping `0.5s` and a
+  request whose `is_disconnected()` returned true completed after `0.515s` and
+  called `is_disconnected()` zero times.
+- The correlated T15 gateway records completed with HTTP 200 after
+  `2,119,998ms` (Sonnet) and `2,132,306ms` (Opus), while the helper had already
+  stopped waiting at 90 seconds. This proves the client/gateway lifetime
+  boundary was broken, not that the upstream provider was globally unhealthy.
+
+The remediation keeps HTTPX inactivity timeouts separate and adds a clamped
+monotonic total deadline for native non-stream operations. That single budget
+covers initial account acquisition, backend attempts, rotation acquisition,
+and the next backend attempt; it is never reset for rotation. The helper now
+sends `antigravity_request_timeout_seconds` at client timeout minus a 10-second
+cleanup margin, so a 90-second helper call gives the gateway an 80-second
+server budget. Disconnect cancellation, deadline expiry, and provider failure
+remain separate outcomes. Late threadpool account acquisition releases its
+lease, and cleanup/diagnostic paths are bounded and shielded.
+
+Fresh focused evidence:
+
+- ASGI non-stream disconnect cancels the delayed backend and releases exactly
+  once; no rotation occurs.
+- A total deadline cancels a trickling backend; rotation uses remaining time
+  and does not issue a second POST after expiry.
+- A blocked account acquisition that returns after disconnect releases the late
+  account and never issues a POST.
+- Diagnostic failure does not prevent lease release; normal success and the
+  existing provider-failure/rotation tests remain green.
+- Full authoritative suite: `812 passed, 220 subtests, 2 warnings`.
+
+No live install, restart, canonical account-store write, push, PR, or merge has
+been performed for this remediation yet.
