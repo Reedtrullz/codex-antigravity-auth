@@ -491,9 +491,11 @@ post-trial canonical accounts SHA256 is
 `682e44464728514821253bceda38e3b207307f206152a98c6aeeadc3c2ca54e7`; this
 current refreshed state was preserved rather than rolled back.
 
-PR #27 remains draft/open at `ea23c7c`; PR #26 remains open and unchanged. No
-candidate installation, local skill update, merge, close, credential/provider
-change, or production-readiness claim was made.
+The tested PR #27 source head was `ea23c7c`; the report is carried by later
+forward-only documentation commits, and PR #27 remains draft/open. PR #26
+remains open and unchanged. No candidate installation, local skill update,
+merge, close, credential/provider change, or production-readiness claim was
+made.
 
 No-force-push record: the previously disclosed historical rewrite was
 `164988f29bac2a917bd2ba9f3de3891eeadd4f11 ->
