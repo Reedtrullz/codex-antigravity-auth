@@ -375,6 +375,11 @@ PANEL_LANE_INSTRUCTION = (
     "produce your independent review or answer directly from the supplied context. "
     "Do not ask for direction, restate the task, or ask clarifying questions."
 )
+PANEL_REVIEW_LANE_CONTRACT = (
+    "Independent review lane contract: use only the supplied source context. "
+    "Do not claim local verification, tool execution, file reads, or actions not present. "
+    "Do not generate code, patches, or implementation steps. Return concise findings and caveats only."
+)
 
 # Phase 2: role-specific rubrics injected into panel lane prompts
 ROLE_RUBRICS: dict[str, str] = {
@@ -5240,11 +5245,14 @@ def build_panel_synthesis_prompt(
     )
 
 
-def lane_retry_instruction() -> str:
-    return (
+def lane_retry_instruction(*, panel_review: bool = False) -> str:
+    instructions = [
         "This is a complete, self-contained review task. Produce the requested output directly now. "
         "Do not ask for direction, restate the task, or ask clarifying questions."
-    )
+    ]
+    if panel_review:
+        instructions.append(PANEL_REVIEW_LANE_CONTRACT)
+    return " ".join(instructions)
 
 
 def lane_output_status(
@@ -5366,7 +5374,7 @@ def run_panel_call(
         cap = max_output_tokens if attempt == 1 else retry_cap
         call_prompt = prompt
         if attempt > 1:
-            call_prompt = prompt + "\n\n" + lane_retry_instruction()
+            call_prompt = prompt + "\n\n" + lane_retry_instruction(panel_review=True)
         purpose = f"panel model {model}" + ("" if attempt == 1 else f" (retry {attempt - 1})")
         try:
             text, model_used, generation_metadata = generate_with_fallback(
@@ -5993,8 +6001,15 @@ def maybe_summarize_panel_review(
         chunks=pre_chunks,
         chunk_metadata=pre_chunk_metadata,
     )
+    instruction_prefix = prompt.split("\n## Review Manifest", 1)[0].rstrip()
+    if not instruction_prefix:
+        instruction_prefix = "\n\n".join(
+            [PANEL_LANE_INSTRUCTION, gpt_complement_instruction(), PANEL_REVIEW_LANE_CONTRACT]
+        )
     prompt = "\n\n".join(
         [
+            instruction_prefix,
+            PANEL_REVIEW_LANE_CONTRACT,
             "This panel review context was summarized by Anti before multi-model fan-out to avoid silently truncating a large review scope.",
             "Panel lanes must treat the summary as bounded context, not as proof of the omitted raw source.",
             "## Bounded Review Summary\n" + summary_text.strip(),

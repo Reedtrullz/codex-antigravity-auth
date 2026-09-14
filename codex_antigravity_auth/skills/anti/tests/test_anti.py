@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
 import hashlib
 import importlib.util
@@ -2292,8 +2293,36 @@ class AntiHelperTests(unittest.TestCase):
         parsed = json.loads(output.getvalue())
         self.assertEqual(len(lane_prompts), 2)
         self.assertTrue(all(summary_tail in prompt for prompt in lane_prompts))
+        self.assertTrue(all(anti.PANEL_REVIEW_LANE_CONTRACT in prompt for prompt in lane_prompts))
+        self.assertTrue(all("## Review Manifest" not in prompt for prompt in lane_prompts))
         self.assertFalse(parsed["metadata"].get("summary_input_lossy", False))
-        self.assertEqual(parsed["metadata"]["prompt_chars"], len("This panel review context was summarized by Anti before multi-model fan-out to avoid silently truncating a large review scope.\n\nPanel lanes must treat the summary as bounded context, not as proof of the omitted raw source.\n\n## Bounded Review Summary\n" + summary.strip()))
+        self.assertEqual(parsed["metadata"]["prompt_chars"], len(lane_prompts[0]))
+
+    def test_panel_retry_preserves_review_lane_contract(self) -> None:
+        anti = load_anti()
+        prompts: list[str] = []
+        responses = [
+            ("partial", "claude-sonnet-4-6", {"usage": {"output_tokens": 2}}),
+            ("complete", "claude-sonnet-4-6", {"usage": {"output_tokens": 1}}),
+        ]
+
+        def fake_generate(_args, **kwargs):
+            prompts.append(kwargs["prompt"])
+            return responses.pop(0)
+
+        anti.generate_with_fallback = fake_generate
+        result = anti.run_panel_call(
+            args=argparse.Namespace(),
+            model="claude-sonnet-4-6",
+            prompt=anti.PANEL_REVIEW_LANE_CONTRACT,
+            max_output_tokens=2,
+            model_ids={"claude-sonnet-4-6"},
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(prompts), 2)
+        self.assertIn(anti.PANEL_REVIEW_LANE_CONTRACT, prompts[1])
+        self.assertIn("Do not generate code, patches, or implementation steps.", prompts[1])
 
     def test_panel_review_rejects_lossy_summary_before_lane_generation(self) -> None:
         anti = load_anti()
