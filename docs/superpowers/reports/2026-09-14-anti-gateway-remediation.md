@@ -246,3 +246,59 @@ Offline gate status: clear. The authorized next gate is a reversible single-writ
 live candidate trial with preserved canonical refreshed state, Sonnet + Opus +
 judge, and representative multi-chunk acceptance. Merge remains blocked until
 that live gate passes.
+
+## 2026-09-14 — Multi-chunk provenance hold and offline closure
+
+The authorized small live panel on the e01 candidate succeeded, but the
+representative multi-chunk live gate did not pass and was stopped. The
+cap-256 run failed closed with all five chunk generations incomplete. The
+cap-512 run generated all five chunks, then produced a partial result whose
+machine manifest was inconsistent with the executed scope: the top-level file
+record declared `bytesDeclared=5186`, `bytesSent=5186`, and
+`bytesReviewed=5186`, but reported `chunksExpected=0`, `chunksSent=0`, null
+chunk IDs, and `includedFiles=[]`. The five actual prompts were only 4,785
+characters in total against 5,138 Unicode source characters before wrapper
+overhead. The cap-3000 run failed closed on chunks 2/5, 4/5, and 5/5; its
+saved failure artifact had `chunksExpected=4`, `completed2`, `failed2`, and an
+empty saved chunk list. These are preserved artifacts, not acceptance evidence:
+
+- `/Users/reidar/.codex/anti-runs/t15-remediation-e01e118-multichunk-512/result.json`
+- `/Users/reidar/.codex/anti-runs/t15-remediation-e01e118-multichunk-3000/result.json`
+
+The source-level root cause was then fixed in `9b44c73` and strengthened in
+`08d5735`/`7b24b27`: chunk budgeting now probes the complete prompt scaffolding,
+future source parts are not mislabeled as omitted during fit checks, empty
+chunks cannot enter the execution plan, per-file source ranges are merged, and
+failure artifacts persist every planned chunk as `success`, `failed`, or
+`not_sent`. The attempted sent-ID boundary is updated at runtime. Regression
+coverage extracts the actual fenced payload from every generated prompt and
+asserts exact ordered equality with the source at 1,000- and 3,000-character
+caps; a mocked CLI run also compares dry-run planned calls with execution and
+checks artifact bytes, counters, IDs, included files, failed labels, and
+never-sent chunk statuses.
+
+Offline evidence for `7b24b27`: full local suite `819 passed, 220 subtests, 2
+warnings`; exact Python 3.10 deadline/rotation/cancellation gate `4 passed, 32
+deselected`; Anti plus new-feature suite `237 passed, 9 subtests`; `git
+diff --check` passed. Fresh PR CI `34877596123` and push CI `34877607713` both
+passed all 12 jobs (Ubuntu Python 3.10/3.11/3.12/3.14, Windows Python 3.12,
+package). The one Windows failure on the prior commit was test-fixture newline
+translation and was corrected with byte-exact fixture writes; the final CI is
+green.
+
+Runtime posture after rollback: candidate PID 12227 is stopped; launchd
+`com.codex-antigravity.gateway.51122` is the sole listener on
+`127.0.0.1:51122`, PID 35501, state `running`, using
+`/Library/Frameworks/Python.framework/Versions/3.10/bin/python3.10`, with
+process cwd `/`. The launchd editable finder maps imports to the primary
+checkout `/Users/reidar/Projectos/codex-antigravity-auth` at
+`117b496db568a7c222dd1698912224c36f8264da`; the worktree helper was not the
+live process. `/v1/models` returned HTTP 200. Current canonical encrypted-state
+hashes are accounts
+`6d0b77ca989dae8a44cbf22b6ba9bde649b9c3b2be007b9616fdc9e3cdad2bb3` and
+providers
+`1959f85e8a68235ab04bb885ccb904f1eaa41c116cf81d2b193214873e416b94`.
+
+Decision: hold further live multi-chunk retries, candidate install/restart, and
+merge. The e01 retained wheel remains historical live-trial evidence only; no
+new wheel was installed or claimed equivalent to `7b24b27`.
