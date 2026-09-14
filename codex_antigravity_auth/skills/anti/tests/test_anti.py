@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -1431,6 +1432,7 @@ class AntiHelperTests(unittest.TestCase):
                         "1800",
                         "--max-plan-chunks",
                         "2",
+                        "--allow-partial",
                         "--save-output",
                         "full",
                         "--run-id",
@@ -1439,7 +1441,7 @@ class AntiHelperTests(unittest.TestCase):
                     ]
                 )
 
-            self.assertEqual(rc, 0, output.getvalue())
+            self.assertEqual(rc, 1, output.getvalue())
             record = json.loads(next(Path(tmp).glob("*.json")).read_text(encoding="utf-8"))
             ledger = record["execution_ledger"]
             self.assertEqual([entry["prompt"] for entry in ledger], calls)
@@ -1802,7 +1804,7 @@ class AntiHelperTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertTrue(parsed["metadata"]["chunked"])
         self.assertEqual(parsed["metadata"]["status"], "incomplete")
@@ -1981,7 +1983,7 @@ class AntiHelperTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             rc = anti.main(["panel", "--mode", "ask", "--prompt", "x", "--json"])
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["findings_status"], "fallback")
         self.assertEqual(parsed["output_text"], "judge-output")
@@ -2150,7 +2152,7 @@ class AntiHelperTests(unittest.TestCase):
                 ["panel", "--mode", "ask", "--prompt", "What next?", "--min-successes", "1", "--json"]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         opus = parsed["panel_results"][1]
         self.assertEqual(opus["status"], "non_answer")
@@ -2224,7 +2226,7 @@ class AntiHelperTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json"])
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         self.assertEqual(len(calls), 3, "two lanes plus one judge call; repair avoided the retry")
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["findings_status"], "parsed")
@@ -2293,7 +2295,7 @@ class AntiHelperTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json"])
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["findings_status"], "fallback")
         self.assertEqual(parsed["findings"]["findings"], [])
@@ -2380,7 +2382,7 @@ class AntiHelperTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--min-successes", "1", "--json"])
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         rendered = json.dumps(parsed)
         self.assertNotIn("CLIENTSECRET1234567890", rendered)
@@ -2422,7 +2424,7 @@ class AntiHelperTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         self.assertEqual(calls[:2], ["claude-opus-4-6-thinking", "claude-sonnet-4-6"])
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["panel_results"][0]["model_used"], "claude-sonnet-4-6")
@@ -2483,7 +2485,7 @@ class AntiHelperTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         results = {item["model"]: item for item in parsed["panel_results"]}
         for model in requested:
@@ -2631,7 +2633,7 @@ class AntiHelperTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         failed = parsed["panel_results"][0]
         self.assertEqual(failed["requestedModel"], "claude-opus-4-6-thinking")
@@ -2693,7 +2695,7 @@ class AntiHelperTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["judge_model"], "claude-opus-4-6-thinking")
         metadata = parsed["metadata"]
@@ -2720,7 +2722,7 @@ class AntiHelperTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--min-successes", "1", "--json"])
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["panel_results"][0]["status"], "error")
         self.assertEqual(parsed["panel_results"][1]["status"], "success")
@@ -2789,7 +2791,7 @@ class AntiHelperTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["panel_results"][0]["status"], "success")
         self.assertEqual(parsed["panel_results"][1]["status"], "error")
@@ -2830,7 +2832,7 @@ class AntiHelperTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         statuses = {item["model"]: item for item in parsed["panel_results"]}
         self.assertEqual(statuses["claude-sonnet-4-6"]["status"], "success")
@@ -2990,7 +2992,7 @@ class AntiHelperTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         self.assertTrue(panel_prompts)
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["panel_review_context"], "chunked-summary")
@@ -3233,6 +3235,35 @@ class PostResponseGuardTests(unittest.TestCase):
         )
         self.assertIn("Good review", str(result))
 
+    def test_upstream_incomplete_and_empty_completed_are_not_success(self) -> None:
+        anti = load_anti()
+        model_ids = {"gemini-3.5-flash-high"}
+        anti.request_json = lambda *a, **kw: (200, {
+            "model": "gemini-3.5-flash-high",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "partial"}]}],
+        })
+        incomplete = anti.post_response(
+            base_url="http://x", model="gemini-3.5-flash-high", prompt="x",
+            max_output_tokens=100, timeout=5, token_env="", retries=0, model_ids=model_ids,
+        )
+        self.assertEqual(incomplete.response_metadata["upstream_status"], "incomplete")
+        self.assertNotEqual(
+            anti.lane_output_status(str(incomplete), incomplete.usage, 100, incomplete.response_metadata),
+            "success",
+        )
+
+        anti.request_json = lambda *a, **kw: (200, {
+            "model": "gemini-3.5-flash-high", "status": "completed", "output": [],
+        })
+        empty = anti.post_response(
+            base_url="http://x", model="gemini-3.5-flash-high", prompt="x",
+            max_output_tokens=100, timeout=5, token_env="", retries=0, model_ids=model_ids,
+        )
+        self.assertTrue(empty.response_metadata["upstream_output_empty"])
+        self.assertEqual(anti.lane_output_status(str(empty), empty.usage, 100, empty.response_metadata), "empty")
+
 
 class ErrorRetryableTests(unittest.TestCase):
     """Tests for error_is_retryable covering status 'failed' pattern."""
@@ -3372,7 +3403,7 @@ class BugfixRegressionTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         self.assertTrue(calls)
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["status"], "incomplete")
@@ -3580,12 +3611,12 @@ class BugfixRegressionTests(unittest.TestCase):
             parsed = json.loads(output.getvalue())
             record = json.loads(next(Path(tmp).glob("*.json")).read_text(encoding="utf-8"))
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         self.assertEqual(caps, [40, 80])
         self.assertEqual(parsed["metadata"]["status"], "truncated")
         self.assertTrue(any("truncated at the token cap" in caveat for caveat in parsed["caveats"]))
-        self.assertEqual(record["status"], "success")
-        self.assertEqual(record["runStatus"], "success")
+        self.assertEqual(record["status"], "partial")
+        self.assertEqual(record["runStatus"], "partial")
         self.assertIn("output_text", record)
         self.assertIn("answer that ends mid-sentence", record["output_text"])
         self.assertIn("consult_attempts", record["metadata"])
@@ -3905,7 +3936,7 @@ class BugfixRegressionTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertTrue(parsed["caveats"])
         self.assertTrue(any("bounded chunked summary" in caveat for caveat in parsed["caveats"]))
@@ -4142,7 +4173,7 @@ class BugfixRegressionTests(unittest.TestCase):
                  "--judge", "opus", "--max-output-tokens", "10", "--json"]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+            self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual([item["status"] for item in parsed["panel_results"]], ["success", "success"])
         self.assertEqual(
@@ -4294,6 +4325,56 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertEqual(coverage["status"], "partial")
         self.assertEqual(coverage["partialFiles"], ["large.py"])
 
+    def test_chunk_failure_separates_failed_from_never_sent_chunks(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:
+            root = Path(tmp)
+            (root / "large.py").write_text("VALUE = 1\n" * 1200, encoding="utf-8")
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                args = anti.build_parser().parse_args(
+                    ["review", "--scope", "files", "--file", "large.py", "--max-review-chunks", "0"]
+                )
+                context = anti.collect_review_context(args)
+                chunks, metadata = anti.build_review_chunk_prompts(
+                    context, max_prompt_chars=1000, max_chunks=0
+                )
+                calls = {"count": 0}
+
+                def generate(*args, **kwargs):
+                    calls["count"] += 1
+                    if calls["count"] == 2:
+                        raise anti.AntiError("provider broke")
+                    return "chunk result", "claude-sonnet-4-6", {
+                        "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+                    }
+
+                anti.generate_with_fallback = generate
+                with self.assertRaises(anti.AntiError) as raised:
+                    anti.run_chunked_review(
+                        args=args,
+                        context=context,
+                        model="claude-sonnet-4-6",
+                        base_metadata={},
+                        max_prompt_chars=1000,
+                        chunks=chunks,
+                        chunk_metadata=metadata,
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        run_metadata = raised.exception.run_metadata
+        coverage = anti.coverage_summary(run_metadata)
+        self.assertEqual(str(raised.exception), "provider broke")
+        self.assertEqual(run_metadata["completed_chunk_count"], 1)
+        self.assertEqual(run_metadata["failed_chunk_count"], 1)
+        self.assertEqual(run_metadata["not_sent_chunk_count"], 9)
+        self.assertEqual(coverage["chunksCompleted"], 1)
+        self.assertEqual(coverage["chunksFailed"], 1)
+        self.assertEqual(coverage["chunksOmitted"], 9)
+        self.assertEqual(coverage["chunksNotSent"], 9)
+
     def test_required_file_cannot_be_dropped_by_chunk_cap(self) -> None:
         anti = load_anti()
         with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:
@@ -4369,6 +4450,29 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 roles=[],
                 max_chars=1000,
             )
+
+    def test_capped_plan_is_partial_and_nonzero(self) -> None:
+        anti = load_anti()
+        calls: list[str] = []
+
+        def fake_post_response(**kwargs):
+            calls.append(kwargs["prompt"])
+            return "bounded plan"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            rc = anti.main([
+                "plan", "--prompt", "task " * 3000, "--max-prompt-chars", "2000",
+                "--max-plan-chunks", "1", "--allow-partial", "--json", "--no-progress",
+            ])
+
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertEqual(parsed["runStatus"], "partial")
+        self.assertEqual(parsed["scopeStatus"], "partial")
+        self.assertGreater(parsed["coverage"]["chunksExpected"], parsed["coverage"]["chunksCompleted"])
+        self.assertTrue(calls)
 
     def test_same_provider_multi_model_is_explicitly_limited(self) -> None:
         anti = load_anti()
@@ -4449,13 +4553,13 @@ class ScopeIntegrityContractTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["runStatus"], "partial")
         self.assertEqual(parsed["scopeStatus"], "partial")
         self.assertNotEqual(parsed["panelStatus"], "complete_multi_model")
         self.assertEqual(parsed["coverage"]["status"], "partial")
-        self.assertTrue(parsed["coverage"]["omittedFiles"])
+        self.assertTrue(parsed["coverage"]["partialFiles"] or parsed["coverage"]["truncatedFiles"])
 
     def test_run_record_has_stable_result_artifact(self) -> None:
         anti = load_anti()
@@ -4504,3 +4608,24 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertIn("laneId", finding)
         self.assertIn("excerptSha256", finding)
         self.assertIn("scopeStatus", finding)
+
+    def test_enrich_finding_provenance_rejects_forged_chunk_and_uses_snapshot(self) -> None:
+        anti = load_anti()
+        findings = {"findings": [{
+            "file": "a.py", "line": 1, "chunkId": "forged", "excerptSha256": "f" * 64,
+        }]}
+        result = anti.enrich_finding_provenance(findings, {
+            "sourceCommit": "commit-1",
+            "scopeStatus": "complete",
+            "workspace_root": "/does/not/exist",
+            "coverage": [{"path": "a.py", "contentStatus": "complete"}],
+            "_review_context": {"file_texts": [("a.py", "VALUE = 1\n")]},
+        })
+        assert result is not None
+        finding = result["findings"][0]
+        self.assertIsNone(finding["chunkId"])
+        self.assertEqual(finding["sourceCommit"], "commit-1")
+        self.assertEqual(
+            finding["excerptSha256"],
+            hashlib.sha256(b"VALUE = 1").hexdigest(),
+        )
