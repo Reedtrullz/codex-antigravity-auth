@@ -2655,8 +2655,10 @@ def build_review_prompt(
 
     for index, (rel, text) in enumerate(candidates):
         trial_included = [*included, (rel, text)]
-        trial_omitted = [item_rel for item_rel, _item_text in candidates[index + 1 :]]
-        trial_omitted.extend(omitted_files)
+        # Remaining source parts are future chunks, not omitted scope. Listing
+        # them in every trial manifest can consume the entire prompt budget
+        # before any source content is admitted.
+        trial_omitted = list(omitted_files)
         trial_prompt = "\n\n".join(
             review_prompt_parts(
                 scope_line=scope_line,
@@ -2899,7 +2901,6 @@ def build_review_chunk_prompts(
     cap, never for silent truncation, so the manifest's ``status`` is honest.
     """
     unlimited = max_chunks <= 0
-    file_chunk_budget = max(1200, max_prompt_chars - 1800) if max_prompt_chars > 0 else 0
     all_chunks: list[dict[str, Any]] = []
     omitted_items: list[str] = []
     file_records = [dict(record) for record in context.get("file_records", [])]
@@ -2930,9 +2931,12 @@ def build_review_chunk_prompts(
             if start < 0:
                 continue
             end = start + len(text)
+            line_start = full.count("\n", 0, start) + 1
+            line_end = full.count("\n", 0, max(start, end - 1)) + 1
+            previous = ranges.get(path)
             ranges[path] = {
-                "lineStart": full.count("\n", 0, start) + 1,
-                "lineEnd": full.count("\n", 0, max(start, end - 1)) + 1,
+                "lineStart": min(line_start, previous["lineStart"]) if previous else line_start,
+                "lineEnd": max(line_end, previous["lineEnd"]) if previous else line_end,
             }
             source_offsets[path] = end
         return ranges
@@ -2951,6 +2955,38 @@ def build_review_chunk_prompts(
                 "prompt_chars": len(prompt),
             }
         )
+
+    def file_chunk_budget(rel: str, text: str) -> int:
+        if max_prompt_chars <= 0 or not text:
+            return len(text)
+        probe_rel = f"{rel} part 999/999"
+        chunk_scope = f"{context['scope_line']} (file chunk)"
+        chunk_caveats = [
+            *context["caveats"],
+            "Chunked review: file chunk; synthesize with other chunks before final judgment.",
+        ]
+
+        def fits(size: int) -> bool:
+            prompt, _caveats, metadata = build_review_prompt(
+                scope_line=chunk_scope,
+                diff="",
+                file_texts=[(probe_rel, text[:size])],
+                excluded=context["excluded"],
+                initial_caveats=chunk_caveats,
+                max_prompt_chars=max_prompt_chars,
+            )
+            return prompt_fits(prompt, max_prompt_chars) and metadata.get("included_files") == [probe_rel]
+
+        if not fits(1):
+            return 0
+        low, high = 1, len(text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if fits(middle):
+                low = middle
+            else:
+                high = middle - 1
+        return low
 
     diff = str(context["diff"])
     if diff.strip():
@@ -3002,7 +3038,11 @@ def build_review_chunk_prompts(
         if prompt_fits(whole_prompt, max_prompt_chars) and whole_metadata.get("included_files") == [rel]:
             file_items.append((rel, text))
             continue
-        text_parts = split_text_by_budget(text, file_chunk_budget)
+        chunk_budget = file_chunk_budget(rel, text)
+        if chunk_budget <= 0:
+            omitted_items.append(f"{rel} (file content does not fit under {max_prompt_chars} chars)")
+            continue
+        text_parts = split_text_by_budget(text, chunk_budget)
         for index, text_part in enumerate(text_parts, start=1):
             label = f"{rel} part {index}/{len(text_parts)}"
             file_items.append((label, text_part))
@@ -3050,10 +3090,10 @@ def build_review_chunk_prompts(
             current_metadata["chunk_label"] = label
             current_metadata["source_bytes"] = source_bytes(current)
             current_metadata["source_ranges"] = source_ranges(current)
-            if prompt_fits(current_prompt, max_prompt_chars):
+            if prompt_fits(current_prompt, max_prompt_chars) and current_metadata.get("included_files"):
                 append_chunk("files", label, current_prompt, current_metadata)
             else:
-                omitted_items.append(f"{label} (prompt still exceeds {max_prompt_chars} chars)")
+                omitted_items.append(f"{label} (file content does not fit under {max_prompt_chars} chars)")
         current = [(rel, text)]
 
     if current:
@@ -3073,10 +3113,10 @@ def build_review_chunk_prompts(
         current_metadata["chunk_label"] = label
         current_metadata["source_bytes"] = source_bytes(current)
         current_metadata["source_ranges"] = source_ranges(current)
-        if prompt_fits(current_prompt, max_prompt_chars):
+        if prompt_fits(current_prompt, max_prompt_chars) and current_metadata.get("included_files"):
             append_chunk("files", label, current_prompt, current_metadata)
         else:
-            omitted_items.append(f"{label} (prompt still exceeds {max_prompt_chars} chars)")
+            omitted_items.append(f"{label} (file content does not fit under {max_prompt_chars} chars)")
 
     planned_chunk_count = len(all_chunks)
     if not unlimited and len(all_chunks) > max_chunks:
@@ -3367,6 +3407,27 @@ def run_chunked_review(
         chunk_metadata["failed_chunk_count"] = failed
         chunk_metadata["not_sent_chunk_count"] = max(0, planned_chunk_count - attempted)
         chunk_metadata["incomplete_chunks"] = list(incomplete_chunks)
+        chunk_metadata["chunk_prompts"] = [
+            {
+                "index": index,
+                "kind": chunk["kind"],
+                "label": chunk["label"],
+                "id": chunk.get("id"),
+                "prompt_chars": chunk["prompt_chars"],
+                "model_used": (
+                    chunk_generation[index - 1].get("model_used", model)
+                    if index <= len(chunk_generation)
+                    else model
+                ),
+                "status": (
+                    chunk_generation[index - 1].get("status", "not_sent")
+                    if index <= len(chunk_generation)
+                    else "not_sent"
+                ),
+                "source_ranges": chunk.get("metadata", {}).get("source_ranges", {}),
+            }
+            for index, chunk in enumerate(chunks, start=1)
+        ]
 
     for index, chunk in enumerate(chunks, start=1):
         try:

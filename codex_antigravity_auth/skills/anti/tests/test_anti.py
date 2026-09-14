@@ -4218,6 +4218,24 @@ class BugfixRegressionTests(unittest.TestCase):
         self.assertTrue(metadata["omitted_items"])
         self.assertEqual(chunks, [])
 
+    def test_tiny_prompt_budget_file_scope_fails_closed(self) -> None:
+        anti = load_anti()
+        context = {
+            "scope_line": "files",
+            "diff": "",
+            "file_texts": [("fixture.py", "VALUE = 1\n" * 80)],
+            "file_records": [{"path": "fixture.py", "contentStatus": "complete"}],
+            "paths": ["fixture.py"],
+            "excluded": [],
+            "caveats": [],
+        }
+        chunks, metadata = anti.build_review_chunk_prompts(
+            context, max_prompt_chars=800, max_chunks=0
+        )
+        self.assertEqual(chunks, [])
+        self.assertEqual(metadata["status"], "incomplete")
+        self.assertTrue(metadata["omitted_items"])
+
     def test_run_id_validated_even_without_save_output(self) -> None:
         anti = load_anti()
         stderr = io.StringIO()
@@ -4421,6 +4439,15 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertIsNotNone(record["lastChunkId"])
         self.assertEqual(chunks[0]["metadata"]["source_ranges"]["large.py"]["lineStart"], 1)
         self.assertGreater(chunks[0]["metadata"]["source_ranges"]["large.py"]["lineEnd"], 1)
+        all_chunks, _all_metadata = anti.build_review_chunk_prompts(
+            context, max_prompt_chars=3000, max_chunks=0
+        )
+        self.assertEqual(all_chunks[0]["metadata"]["source_ranges"]["large.py"]["lineStart"], 1)
+        self.assertEqual(all_chunks[-1]["metadata"]["source_ranges"]["large.py"]["lineEnd"], 4000)
+        self.assertEqual(
+            [chunk["metadata"]["source_ranges"]["large.py"]["lineStart"] for chunk in all_chunks],
+            sorted(chunk["metadata"]["source_ranges"]["large.py"]["lineStart"] for chunk in all_chunks),
+        )
         coverage = anti.coverage_summary(metadata)
         self.assertEqual(coverage["status"], "partial")
         self.assertEqual(coverage["partialFiles"], ["large.py"])
@@ -4438,7 +4465,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 )
                 context = anti.collect_review_context(args)
                 chunks, metadata = anti.build_review_chunk_prompts(
-                    context, max_prompt_chars=1000, max_chunks=0
+                    context, max_prompt_chars=3000, max_chunks=0
                 )
                 calls = {"count": 0}
 
@@ -4457,7 +4484,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                         context=context,
                         model="claude-sonnet-4-6",
                         base_metadata={},
-                        max_prompt_chars=1000,
+                        max_prompt_chars=3000,
                         chunks=chunks,
                         chunk_metadata=metadata,
                     )
@@ -4476,6 +4503,8 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertEqual(coverage["chunksFailed"], 1)
         self.assertEqual(coverage["chunksOmitted"], expected_not_sent)
         self.assertEqual(coverage["chunksNotSent"], expected_not_sent)
+        self.assertEqual(len(coverage["chunks"]), len(chunks))
+        self.assertEqual(coverage["chunks"][1]["status"], "failed")
 
     def test_required_file_cannot_be_dropped_by_chunk_cap(self) -> None:
         anti = load_anti()
