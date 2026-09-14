@@ -8,12 +8,15 @@
 - Primary checkout was not edited.
 - Initial finding outcomes are pending until regression evidence is collected.
 
-Offline remediation evidence through T5:
+Offline remediation evidence through T15:
 
 - T1/T2: staged/working-tree scope is NUL-safe, preserves deletions/renames/Unicode, captures one source snapshot, and records planned/attempted/completed/failed/not-sent chunk buckets.
 - T3/T4: upstream incomplete/empty output is not a completed answer; partial panel/review/plan results retain artifacts and exit nonzero, while successful retries remain zero; capped plans refuse exact execution unless `--allow-partial` is explicit.
 - T5: consult summary artifacts retain the complete answer; finding provenance clears model-forged chunk/excerpt fields and derives excerpt hashes only from the captured snapshot.
-- Focused Anti suite: `189 passed, 9 subtests passed`.
+- Focused Anti/gateway regression suite after the reopened checkpoint: `374 passed, 80 subtests, 2 warnings`.
+- Full suite with the repository's 1Password signing configuration isolated for temporary Git fixtures: `791 passed, 214 subtests, 2 warnings`.
+- `uv pip check --python .venv/bin/python`: 31 packages compatible.
+- `git diff --check`: pass.
 
 T5 follow-up reopened the checkpoint after review found gaps in the first
 checkpoint: `plan --chunked off` now refuses before generation; unresolved
@@ -36,30 +39,40 @@ Baseline evidence (2026-09-14):
 
 | Finding | Outcome | Commit | Evidence |
 |---|---|---|---|
-| A1 | fixed offline | pending follow-up commit | Capped plan/review exits nonzero; exact-off plan refusal is also exercised through the real CLI subprocess |
-| A2 | fixed offline | pending follow-up commit | 11-chunk execution manifest and failure test: 1 completed, 1 failed, 9 never sent; original error retained; submitted/reviewed bytes are separate |
-| A3 | fixed offline | pending commit | Upstream `incomplete` and completed-empty responses classify as incomplete/empty |
-| A4 | partial offline | pending commit | Zero budget makes zero provider calls; whole-call reservation/race coverage remains T6 |
-| A5 | fixed offline | pending follow-up commit | Complete consult answer retained in summary artifact; full mode emits atomic raw lane paths and summary index stays compact |
-| A6 | fixed offline | pending commit | Parse/truncation/loss facts force partial status and nonzero exit |
-| A7 | fixed offline | pending follow-up commit | Provenance fields are authoritative from captured scope/chunk ranges; unresolved line/hash/chunk values are null |
-| A8 | fixed offline | pending commit | Partial coverage is explicit in nested/top-level artifacts |
-| A9 | fixed offline | pending commit | Plan cap cannot silently become complete |
-| A10 | pending | — | — |
-| G1 | pending | — | — |
-| G2 | pending | — | — |
-| G3 | pending | — | — |
-| G4 | pending | — | — |
-| G5 | pending | — | — |
-| G6 | pending | — | — |
-| G7 | pending | — | — |
-| G8 | pending | — | — |
-| R1 | pending | — | — |
-| R2 | pending | — | — |
-| D1 | pending | — | — |
+| A1 | fixed offline | `90c719f` plus Anti commits | Exact-off planning refuses before generation; capped execution remains partial/nonzero. |
+| A2 | fixed offline | `90c719f` | Chunk ledger preserves completed/failed/not-sent buckets and submitted vs reviewed bytes. |
+| A3 | fixed offline | `90c719f` | Upstream incomplete and completed-empty responses retain distinct non-success classifications. |
+| A4 | fixed offline | `90c719f` | Shared locked admission covers every provider attempt; zero-budget and concurrent last-allowance tests make no provider call when refused. |
+| A5 | fixed offline | `90c719f` | Complete consult answer remains retrievable in the result artifact; prompt retention uses hashes/counts and sanitized outputs. |
+| A6 | fixed offline | `90c719f` | Parse/truncation/loss facts force partial status and nonzero exit. |
+| A7 | fixed offline | `90c719f` | Provenance is derived from captured scope/chunk ranges; forged unresolved fields clear to null. |
+| A8 | fixed offline | `90c719f` | Partial coverage is explicit in nested and top-level artifacts. |
+| A9 | fixed offline | `90c719f` | Plan caps cannot silently become complete. |
+| A10 | fixed offline | `a3b97ff`, `90c719f` | Helper/bundle parity is checked before generation; clean local and bundled hashes matched in the worktree. |
+| G1 | fixed offline | `90c719f` | Real ASGI disconnect regression covers bounded diagnostics and exactly-once lease release; cleanup is shielded and release is independent. |
+| G2 | fixed offline | `90c719f` | Selection refresh failures mark the mutation dirty and persist cooldown state. |
+| G3 | fixed offline | `90c719f` | Refresh merge checks refresh token, access token and expiry snapshot; stale same-token results are discarded. |
+| G4 | fixed offline | `340ec96` | Adjacent Responses function calls group into one ordered assistant tool-call turn without crossing intervening messages. |
+| G5 | fixed offline | `90c719f` | Native Responses SSE adapter is exercised for valid terminal, premature EOF, duplicate terminal, model rewrite and closure. |
+| G6 | fixed offline | `90c719f` | Malformed `$ref`/`properties` schemas return 400 before account/provider selection; numeric boundaries remain fail-closed. |
+| G7 | fixed offline | `90c719f` | BYOK telemetry reads normalized Responses terminal status and nested usage, with compatibility coverage for the transport seam. |
+| G8 | fixed offline | existing service/CLI state tests plus `90c719f` | Service state composes installed/active/reachable observations; managed/unmanaged reachability cases are covered. |
+| R1 | fixed offline | `340ec96` | OAuth login uses transactional per-account merge and preserves concurrent account state. |
+| R2 | fixed offline | `90c719f` | Reflection read-modify-write is cross-process locked and atomic; concurrent writers, pruning and symlink sentinels are tested. |
+| D1 | fixed offline | `13e8df9`, `a3b97ff`, `90c719f` | README/SKILL describe partial exits, retention, estimates, parity and non-claims; no new broad abstraction was introduced. |
 
 ## Verification boundary
 
-This report will record exact commands, commits, artifacts, residual risks, and
-live/offline boundaries. Green tests alone will not be treated as release,
-provider, or complete-review approval.
+## Acceptance boundary
+
+Offline acceptance is complete on `90c719f` plus the preceding remediation
+commits. The temporary Git-fixture failures under the normal environment were
+caused by the user's global 1Password SSH signing hook; the authoritative full
+suite run used `GIT_CONFIG_GLOBAL=/dev/null` and did not change repository or
+global configuration.
+
+No live Sonnet/Opus panel, representative multi-chunk live run, gateway restart,
+credential mutation, provider mutation, push, merge, or release was performed.
+The coordinator explicitly paused further live calls while reviewing the
+offline blockers. Therefore this report does not claim live provider health,
+production readiness, full-repository review coverage, or release acceptance.
