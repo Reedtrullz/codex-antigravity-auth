@@ -3830,6 +3830,46 @@ class BugfixRegressionTests(unittest.TestCase):
         self.assertIn("[dry-run] plan", stdout.getvalue())
         self.assertIn("[dry-run] panel ask", stdout.getvalue())
 
+    def test_dry_run_reports_stages_prices_retries_and_unknowns(self) -> None:
+        anti = load_anti()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(["plan", "--prompt", "Plan this", "--dry-run", "--json", "--budget", "1"])
+        self.assertEqual(rc, 0)
+        payload = json.loads(output.getvalue())
+        self.assertIn("stages", payload)
+        self.assertIn("known_prices", payload)
+        self.assertIn("possible_retries", payload)
+        self.assertIn("unknowns", payload)
+        self.assertEqual(payload["budget_limit"], 1.0)
+
+    def test_chunked_plan_budget_refusal_keeps_completed_progress_and_makes_no_extra_call(self) -> None:
+        anti = load_anti()
+        args = anti.build_parser().parse_args([
+            "plan", "--prompt", "x" * 5000, "--max-prompt-chars", "1800",
+            "--max-plan-chunks", "5", "--budget", "0.006",
+        ])
+        calls: list[str] = []
+
+        def fake_generate(_args, *, model, prompt, **_kwargs):
+            calls.append(prompt)
+            return "chunk-note", model, {}
+
+        anti.generate_with_fallback = fake_generate
+        with self.assertRaises(anti.AntiError) as raised:
+            anti.run_chunked_plan(
+                args=args,
+                model="claude-sonnet-4-6",
+                prompt="x" * 5000,
+                caveats=[],
+                max_prompt_chars=1800,
+            )
+        metadata = raised.exception.run_metadata
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(metadata["completed_chunk_count"], 1)
+        self.assertEqual(metadata["failed_chunk_count"], 1)
+        self.assertGreater(metadata["not_sent_chunk_count"], 0)
+
     def test_chunk_prompts_do_not_carry_stale_single_prompt_diff_caveat(self) -> None:
         anti = load_anti()
         anti.generate_with_fallback = lambda args, **kwargs: (

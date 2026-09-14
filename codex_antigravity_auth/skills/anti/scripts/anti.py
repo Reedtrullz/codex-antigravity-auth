@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import hashlib
 import random
@@ -21,6 +22,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from importlib import metadata as importlib_metadata
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
@@ -184,6 +186,77 @@ def actual_call_cost(model: str, generation: dict[str, Any] | None, *, prompt_ch
         tier = MODEL_COST_TIER.get(base_model_id(model), "quota")
         return (int(usage["total_tokens"]) / 1000) * COST_PER_1K_TOKENS.get(tier, 0.002)
     return estimate_call_cost(model, prompt_chars, max_output_tokens)
+
+
+def reserve_budget_call(
+    args: argparse.Namespace,
+    *,
+    model: str,
+    prompt_chars: int,
+    max_output_tokens: int,
+    purpose: str,
+) -> dict[str, Any] | None:
+    """Admit one bounded logical call before touching the provider."""
+    if getattr(args, "budget", None) is None:
+        return None
+    estimate = estimate_call_cost(model, prompt_chars, max_output_tokens)
+    state = getattr(args, "_anti_budget_state", None)
+    if state is None:
+        state = {"lock": threading.Lock(), "reserved": 0.0, "committed": 0.0, "unknown": False, "attempts": []}
+        setattr(args, "_anti_budget_state", state)
+    with state["lock"]:
+        used = state["reserved"] + state["committed"]
+        if used + estimate > float(args.budget):
+            state["attempts"].append({"purpose": purpose, "status": "not_sent", "estimated_cost": estimate})
+            error = AntiError(
+                f"budget exhausted before {purpose}; estimated {used + estimate:.4f} > {float(args.budget):.4f}; no provider call was made"
+            )
+            error.submitted = False  # type: ignore[attr-defined]
+            raise error
+        state["reserved"] += estimate
+        entry = {"purpose": purpose, "status": "admitted", "estimated_cost": estimate}
+        state["attempts"].append(entry)
+        return {"estimate": estimate, "entry": entry, "state": state}
+
+
+def settle_budget_call(
+    reservation: dict[str, Any] | None,
+    *,
+    model: str,
+    generation: dict[str, Any] | None,
+    prompt_chars: int,
+    max_output_tokens: int,
+) -> None:
+    if not reservation:
+        return
+    state = reservation["state"]
+    estimate = float(reservation["estimate"])
+    usage = normalize_usage((generation or {}).get("usage"))
+    observed = usage is not None and usage.get("total_tokens") is not None
+    actual = actual_call_cost(model, generation, prompt_chars=prompt_chars, max_output_tokens=max_output_tokens)
+    with state["lock"]:
+        state["reserved"] = max(0.0, state["reserved"] - estimate)
+        state["committed"] += actual
+        if not observed:
+            state["unknown"] = True
+        entry = reservation["entry"]
+        entry.update({"status": "settled", "observed_cost": actual, "usage_known": observed})
+
+
+def budget_metadata(args: argparse.Namespace) -> dict[str, Any]:
+    state = getattr(args, "_anti_budget_state", None)
+    if state is None or getattr(args, "budget", None) is None:
+        return {"budget_limit": getattr(args, "budget", None)}
+    with state["lock"]:
+        used = state["reserved"] + state["committed"]
+        return {
+            "budget_limit": float(args.budget),
+            "budget_reserved": state["reserved"],
+            "budget_committed": state["committed"],
+            "budget_remaining": max(0.0, float(args.budget) - used),
+            "budget_usage_unknown": bool(state["unknown"]),
+            "budget_attempts": list(state["attempts"]),
+        }
 
 # Relative quality ranking for cost-aware selection (higher = better for code tasks)
 MODEL_QUALITY_RANK: dict[str, int] = {
@@ -541,11 +614,41 @@ def helper_identity() -> dict[str, Any]:
         version: str | None = importlib_metadata.version("codex-antigravity-auth")
     except importlib_metadata.PackageNotFoundError:
         version = None
+    bundle_hash: str | None = None
+    parity_status = "unverifiable"
+    try:
+        bundled = files("codex_antigravity_auth").joinpath("skills", "anti")
+        with as_file(bundled) as bundled_path:
+            bundled_digest = hashlib.sha256()
+            for path in sorted(bundled_path.rglob("*")):
+                if not path.is_file() or "__pycache__" in path.parts or path.name == ".DS_Store":
+                    continue
+                bundled_digest.update(path.relative_to(bundled_path).as_posix().encode("utf-8"))
+                bundled_digest.update(b"\0")
+                bundled_digest.update(path.read_bytes())
+            bundle_hash = bundled_digest.hexdigest()
+        parity_status = "match" if tree_hash and tree_hash == bundle_hash else "mismatch"
+    except (ImportError, OSError, FileNotFoundError):
+        pass
     return {
         "version": version,
         "path": str(Path(__file__).resolve()),
         "treeHash": tree_hash,
+        "bundleTreeHash": bundle_hash,
+        "parityStatus": parity_status,
     }
+
+
+def ensure_helper_parity(args: argparse.Namespace) -> None:
+    if getattr(args, "_anti_parity_checked", False):
+        return
+    identity = helper_identity()
+    setattr(args, "_anti_parity_checked", True)
+    if identity.get("parityStatus") == "mismatch":
+        raise AntiError(
+            "Anti helper differs from its discoverable bundled skill; refusing provider generation "
+            f"(helper={identity.get('treeHash')}, bundle={identity.get('bundleTreeHash')})"
+        )
 
 
 def write_preflight_record(
@@ -1600,6 +1703,7 @@ def generate_with_fallback(
     purpose: str,
     model_ids: set[str] | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
+    ensure_helper_parity(args)
     fallback_raw = getattr(args, "fallback_model", None)
     budget = getattr(args, "budget", None)
     if budget is not None and float(budget) <= 0:
@@ -3155,7 +3259,15 @@ def run_chunked_review(
         chunk_metadata["incomplete_chunks"] = list(incomplete_chunks)
 
     for index, chunk in enumerate(chunks, start=1):
+        reservation = None
         try:
+            reservation = reserve_budget_call(
+                args,
+                model=model,
+                prompt_chars=len(chunk["prompt"]),
+                max_output_tokens=args.chunk_output_tokens,
+                purpose=f"review chunk {index}/{len(chunks)}",
+            )
             chunk_text, chunk_model, generation_metadata = generate_with_fallback(
                 args,
                 model=model,
@@ -3164,6 +3276,13 @@ def run_chunked_review(
                 purpose=f"review chunk {index}/{len(chunks)}",
             )
         except AntiError as exc:
+            settle_budget_call(
+                reservation,
+                model=model,
+                generation=getattr(exc, "generation_metadata", None),
+                prompt_chars=len(chunk["prompt"]),
+                max_output_tokens=args.chunk_output_tokens,
+            )
             incomplete_chunks.append(chunk["label"])
             chunk_generation.append(
                 {
@@ -3187,6 +3306,13 @@ def run_chunked_review(
                 "_execution_ledger": execution_ledger,
             }  # type: ignore[attr-defined]
             raise
+        settle_budget_call(
+            reservation,
+            model=chunk_model,
+            generation=generation_metadata,
+            prompt_chars=len(chunk["prompt"]),
+            max_output_tokens=args.chunk_output_tokens,
+        )
         chunk_status = lane_output_status(
             chunk_text,
             generation_metadata.get("usage"),
@@ -3267,6 +3393,13 @@ def run_chunked_review(
     ]
     caveats.extend(synthesis_caveats)
     try:
+        synthesis_reservation = reserve_budget_call(
+            args,
+            model=model,
+            prompt_chars=len(synthesis_prompt),
+            max_output_tokens=args.max_output_tokens,
+            purpose="review synthesis",
+        )
         synthesis, synthesis_model, synthesis_generation = generate_with_fallback(
             args,
             model=model,
@@ -3275,6 +3408,13 @@ def run_chunked_review(
             purpose="review synthesis",
         )
     except AntiError as exc:
+        settle_budget_call(
+            locals().get("synthesis_reservation"),
+            model=model,
+            generation=getattr(exc, "generation_metadata", None),
+            prompt_chars=len(synthesis_prompt),
+            max_output_tokens=args.max_output_tokens,
+        )
         exc.run_metadata = {
             **base_metadata,
             **chunk_metadata,
@@ -3284,6 +3424,13 @@ def run_chunked_review(
             "planned_chunk_count": planned_chunk_count,
         }  # type: ignore[attr-defined]
         raise
+    settle_budget_call(
+        synthesis_reservation,
+        model=synthesis_model,
+        generation=synthesis_generation,
+        prompt_chars=len(synthesis_prompt),
+        max_output_tokens=args.max_output_tokens,
+    )
     execution_ledger.append(
         execution_entry(
             stage="review_synthesis",
@@ -3351,6 +3498,7 @@ def run_chunked_review(
         "synthesis_generation": synthesis_generation,
         "synthesis_status": synthesis_status,
         "usage_totals": sum_usage(chunk_generation, synthesis_generation),
+        **budget_metadata(args),
         "failed_chunk_count": len(incomplete_chunks),
         "not_sent_chunk_count": chunk_metadata.get("not_sent_chunk_count", 0),
         "incomplete_chunks": incomplete_chunks,
@@ -3544,6 +3692,7 @@ def run_chunked_plan(
             "status": "partial",
             "scope_status": "partial",
             "error": error,
+            **budget_metadata(args),
         }
 
     for index, chunk in enumerate(prompt_chunks, start=1):
@@ -3560,7 +3709,15 @@ def run_chunked_plan(
         if chunk_caveats:
             caveats.extend(f"Plan chunk {index}: {caveat}" for caveat in chunk_caveats)
         sent_chunk_prompt_chars.append(len(chunk_prompt))
+        reservation = None
         try:
+            reservation = reserve_budget_call(
+                args,
+                model=model,
+                prompt_chars=len(chunk_prompt),
+                max_output_tokens=args.chunk_output_tokens,
+                purpose=f"plan chunk {index}/{len(prompt_chunks)}",
+            )
             text, model_used, generation_metadata = generate_with_fallback(
                 args,
                 model=model,
@@ -3570,8 +3727,22 @@ def run_chunked_plan(
             )
         except AntiError as exc:
             incomplete_chunks.append(index)
+            settle_budget_call(
+                reservation,
+                model=model,
+                generation=getattr(exc, "generation_metadata", None),
+                prompt_chars=len(chunk_prompt),
+                max_output_tokens=args.chunk_output_tokens,
+            )
             exc.run_metadata = plan_failure_metadata(str(exc), failed_chunk=index)  # type: ignore[attr-defined]
             raise
+        settle_budget_call(
+            reservation,
+            model=model_used,
+            generation=generation_metadata,
+            prompt_chars=len(chunk_prompt),
+            max_output_tokens=args.chunk_output_tokens,
+        )
         chunk_status = lane_output_status(
             text,
             generation_metadata.get("usage"),
@@ -3613,7 +3784,15 @@ def run_chunked_plan(
         failure.run_metadata = plan_failure_metadata(error, synthesis_status="not_sent")  # type: ignore[attr-defined]
         raise failure
     caveats = [*caveats, *synthesis_caveats]
+    synthesis_reservation = None
     try:
+        synthesis_reservation = reserve_budget_call(
+            args,
+            model=model,
+            prompt_chars=len(synthesis_prompt),
+            max_output_tokens=args.max_output_tokens,
+            purpose="plan synthesis",
+        )
         text, synthesis_model, synthesis_generation = generate_with_fallback(
             args,
             model=model,
@@ -3622,8 +3801,25 @@ def run_chunked_plan(
             purpose="plan synthesis",
         )
     except AntiError as exc:
-        exc.run_metadata = plan_failure_metadata(str(exc), synthesis_status="failed")  # type: ignore[attr-defined]
+        settle_budget_call(
+            synthesis_reservation,
+            model=model,
+            generation=getattr(exc, "generation_metadata", None),
+            prompt_chars=len(synthesis_prompt),
+            max_output_tokens=args.max_output_tokens,
+        )
+        exc.run_metadata = plan_failure_metadata(
+            str(exc),
+            synthesis_status="not_sent" if not getattr(exc, "submitted", True) else "failed",
+        )  # type: ignore[attr-defined]
         raise
+    settle_budget_call(
+        synthesis_reservation,
+        model=synthesis_model,
+        generation=synthesis_generation,
+        prompt_chars=len(synthesis_prompt),
+        max_output_tokens=args.max_output_tokens,
+    )
     synthesis_status = lane_output_status(
         text,
         synthesis_generation.get("usage"),
@@ -3667,6 +3863,7 @@ def run_chunked_plan(
         "omitted_chunk_count": max(0, planned_chunk_count - len(prompt_chunks)),
         "synthesis_status": synthesis_status,
         "usage_totals": sum_usage(chunk_generation, synthesis_generation),
+        **budget_metadata(args),
         "omitted_files": [],
         "_execution_ledger": execution_ledger,
     }
@@ -3709,6 +3906,8 @@ def format_dry_run(
     max_output_tokens: int,
     extra_models: list[str] | None = None,
     output_json: bool = False,
+    stage_plan: list[dict[str, Any]] | None = None,
+    budget_limit: float | None = None,
 ) -> str:
     """Format a dry-run summary with token and cost estimates."""
     estimates = [estimate_cost(model=model, prompt_chars=prompt_chars,
@@ -3716,8 +3915,20 @@ def format_dry_run(
     for m in (extra_models or []):
         estimates.append(estimate_cost(model=m, prompt_chars=prompt_chars,
                                        estimated_output_tokens=max_output_tokens))
+    stages = stage_plan or [{"name": "primary", "calls": 1, "max_output_tokens": max_output_tokens}]
+    known_prices = {tier: COST_PER_1K_TOKENS[tier] for tier in ("free", "quota", "paid")}
+    payload = {
+        "mode": mode,
+        "estimates": estimates,
+        "stages": stages,
+        "token_ceilings": {stage["name"]: stage.get("max_output_tokens") for stage in stages},
+        "known_prices": known_prices,
+        "unknowns": ["provider billing and missing runtime usage are not known at dry-run time"],
+        "possible_retries": sum(int(stage.get("possible_retries", 0) or 0) for stage in stages),
+        "budget_limit": budget_limit,
+    }
     if output_json:
-        return json.dumps({"mode": mode, "estimates": estimates}, indent=2, sort_keys=True)
+        return json.dumps(payload, indent=2, sort_keys=True)
     lines = [
         f"[dry-run] {mode} with model(s): {', '.join(e['model'] for e in estimates)}",
         f"  prompt: {prompt_chars} chars (~{estimates[0]['estimated_input_tokens']} tokens)",
@@ -3727,6 +3938,11 @@ def format_dry_run(
             f"  {e['model']}: ~{e['estimated_total_tokens']} total tokens "
             f"({e['cost_tier']} tier, quality {e['quality_rank']})"
         )
+    lines.append(f"  stages: {json.dumps(stages, sort_keys=True)}")
+    lines.append(f"  possible retries: {payload['possible_retries']}; prices: {json.dumps(known_prices, sort_keys=True)}")
+    lines.append("  unknowns: provider billing and missing runtime usage")
+    if budget_limit is not None:
+        lines.append(f"  budget: {float(budget_limit):.4f}")
     return "\n".join(lines)
 
 
@@ -5599,7 +5815,11 @@ def command_panel(args: argparse.Namespace) -> int:
     if args.dry_run:
         print(format_dry_run(mode=f"panel {args.mode}", model=panel_models[0],
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
-            extra_models=panel_models[1:] + [judge_model], output_json=args.json))
+            extra_models=panel_models[1:] + [judge_model], output_json=args.json,
+            stage_plan=[
+                {"name": "panel_lane", "calls": len(panel_models), "max_output_tokens": args.max_output_tokens, "possible_retries": len(panel_models)},
+                {"name": "judge", "calls": 1, "max_output_tokens": args.judge_output_tokens, "possible_retries": 1},
+            ], budget_limit=args.budget))
         return 0
     if args.print_prompt:
         payload = {"prompt": prompt, "metadata": metadata, "caveats": caveats}
@@ -6288,22 +6508,44 @@ def command_consult(args: argparse.Namespace) -> int:
     if args.dry_run:
         print(format_dry_run(mode="consult", model=model,
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
-            output_json=args.json))
+            output_json=args.json, stage_plan=[
+                {"name": "consult", "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 1},
+            ], budget_limit=args.budget))
         if not read_files:
             print()
             print(prompt)
         return 0
-    if args.budget is not None and estimated_cost > args.budget:
-        raise AntiError(
-            f"budget cap reached (estimated {estimated_cost:.4f} > {args.budget:.4f}); consult skipped"
-        )
-    ensure_run_id(args)
-    text, model_used, generation_metadata = generate_with_fallback(
+    reservation = reserve_budget_call(
         args,
         model=model,
-        prompt=prompt,
+        prompt_chars=len(prompt),
         max_output_tokens=args.max_output_tokens,
         purpose="consult",
+    )
+    ensure_run_id(args)
+    try:
+        text, model_used, generation_metadata = generate_with_fallback(
+            args,
+            model=model,
+            prompt=prompt,
+            max_output_tokens=args.max_output_tokens,
+            purpose="consult",
+        )
+    except AntiError as exc:
+        settle_budget_call(
+            reservation,
+            model=model,
+            generation=getattr(exc, "generation_metadata", None),
+            prompt_chars=len(prompt),
+            max_output_tokens=args.max_output_tokens,
+        )
+        raise
+    settle_budget_call(
+        reservation,
+        model=model_used,
+        generation=generation_metadata,
+        prompt_chars=len(prompt),
+        max_output_tokens=args.max_output_tokens,
     )
     attempts_metadata: list[dict[str, Any]] = [generation_metadata]
     usage = generation_metadata.get("usage")
@@ -6317,12 +6559,36 @@ def command_consult(args: argparse.Namespace) -> int:
         )
         retry_prompt = prompt + "\n\n" + lane_retry_instruction()
         last_prompt_chars = len(retry_prompt)
-        text, model_used, retry_metadata = generate_with_fallback(
+        retry_reservation = reserve_budget_call(
             args,
             model=model,
-            prompt=retry_prompt,
+            prompt_chars=len(retry_prompt),
             max_output_tokens=retry_cap,
             purpose="consult (retry)",
+        )
+        try:
+            text, model_used, retry_metadata = generate_with_fallback(
+                args,
+                model=model,
+                prompt=retry_prompt,
+                max_output_tokens=retry_cap,
+                purpose="consult (retry)",
+            )
+        except AntiError as exc:
+            settle_budget_call(
+                retry_reservation,
+                model=model,
+                generation=getattr(exc, "generation_metadata", None),
+                prompt_chars=len(retry_prompt),
+                max_output_tokens=retry_cap,
+            )
+            raise
+        settle_budget_call(
+            retry_reservation,
+            model=model_used,
+            generation=retry_metadata,
+            prompt_chars=len(retry_prompt),
+            max_output_tokens=retry_cap,
         )
         attempts_metadata.append(retry_metadata)
         usage = retry_metadata.get("usage")
@@ -6337,6 +6603,7 @@ def command_consult(args: argparse.Namespace) -> int:
         "budget_limit": args.budget,
         "estimated_total": actual_call_cost(model_used, attempts_metadata[-1], prompt_chars=last_prompt_chars, max_output_tokens=args.max_output_tokens),
         "budget_exceeded": False,
+        **budget_metadata(args),
         **attempts_metadata[-1],
         "consult_attempts": attempts_metadata,
         "usage_totals": sum_usage(attempts_metadata),
@@ -6428,9 +6695,22 @@ def command_review(args: argparse.Namespace) -> int:
         if not args.print_prompt:
             eprint(f"[anti] {redact_sensitive_text(disclosure)}")
     if args.dry_run:
+        stage_plan = [{"name": "review", "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 1}]
+        if chunked_review:
+            plan_chunks, _plan_metadata = build_review_chunk_prompts(
+                context,
+                max_prompt_chars=prompt_budget,
+                max_chunks=args.max_review_chunks,
+                priority_paths=getattr(args, "priority_file", None),
+                required_paths=getattr(args, "required_file", None),
+            )
+            stage_plan = [
+                {"name": "review_chunk", "calls": len(plan_chunks), "max_output_tokens": args.chunk_output_tokens, "possible_retries": len(plan_chunks)},
+                {"name": "review_synthesis", "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 1},
+            ]
         print(format_dry_run(mode="review", model=model,
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
-            output_json=args.json))
+            output_json=args.json, stage_plan=stage_plan, budget_limit=args.budget))
         if chunked_review:
             plan_chunks, plan_metadata = build_review_chunk_prompts(
                 context,
@@ -6632,9 +6912,22 @@ def command_plan(args: argparse.Namespace) -> int:
             eprint(f"[anti] {redact_sensitive_text(disclosure)}")
     recorded_prompt = prompt
     if args.dry_run:
+        stage_plan = [{"name": "plan", "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 1}]
+        if should_chunk_plan(args, prompt, max_prompt_chars=prompt_budget):
+            wrapper_overhead = len("\n\n".join([
+                "You are reviewing one bounded chunk of a larger Codex work-planning prompt.",
+                "Extract concrete implementation tasks, risks, dependencies, validation ideas, and caveats from this chunk only.",
+                f"Chunk {args.max_plan_chunks}/{args.max_plan_chunks}:", "",
+            ]))
+            chunk_count = len(split_text_by_budget(prompt, max(1, prompt_budget - wrapper_overhead))) if prompt_budget > 0 else 1
+            chunk_count = min(chunk_count, args.max_plan_chunks) if args.max_plan_chunks > 0 else chunk_count
+            stage_plan = [
+                {"name": "plan_chunk", "calls": chunk_count, "max_output_tokens": args.chunk_output_tokens, "possible_retries": chunk_count},
+                {"name": "plan_synthesis", "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 1},
+            ]
         print(format_dry_run(mode="plan", model=model,
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
-            output_json=args.json))
+            output_json=args.json, stage_plan=stage_plan, budget_limit=args.budget))
         return 0
     if args.print_prompt:
         printable_caveats = list(caveats)

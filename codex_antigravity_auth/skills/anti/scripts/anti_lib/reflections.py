@@ -9,9 +9,24 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+try:
+    from codex_antigravity_auth.secure_store import file_lock
+except ImportError:  # standalone copied skill
+    _locks: dict[str, threading.RLock] = {}
+    _locks_guard = threading.Lock()
+
+    @contextmanager
+    def file_lock(path: Path):
+        key = str(path.resolve())
+        with _locks_guard:
+            lock = _locks.setdefault(key, threading.RLock())
+        with lock:
+            yield
 
 REFLECTIONS_DIR = Path.home() / ".codex" / "anti-runs" / "reflections"
 MAX_ENTRIES_PER_REPO = 500
@@ -54,17 +69,22 @@ def _load_records(path: Path) -> list[dict[str, Any]]:
 def _save_records(path: Path, records: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(path.parent, 0o700)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        # Existing files keep their old mode through O_TRUNC, so enforce 600 here.
-        if hasattr(os, "fchmod"):
-            os.fchmod(handle.fileno(), 0o600)
-        else:
-            # Windows: fchmod is unavailable; os.open's mode arg already set
-            # 600 for new files and chmod is a no-op on read-only attribute,
-            # so this is best-effort only.
-            pass
-        handle.write(json.dumps(records, indent=2, sort_keys=True))
+    if path.is_symlink():
+        raise RuntimeError(f"Refusing to write symlinked reflection file: {path}")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    if temporary.exists() or temporary.is_symlink():
+        temporary.unlink()
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(records, indent=2, sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _prune_old(records: list[dict[str, Any]], ttl_days: int = TTL_DAYS) -> list[dict[str, Any]]:
@@ -112,13 +132,14 @@ def record_review(
     
     path = _reflection_path(repo_path)
     _ensure_permissions()
-    records = _load_records(path)
-    records.append(record)
-    records = _prune_old(records)
-    # Keep bounded
-    if len(records) > MAX_ENTRIES_PER_REPO:
-        records = records[-MAX_ENTRIES_PER_REPO:]
-    _save_records(path, records)
+    with file_lock(path):
+        records = _load_records(path)
+        records.append(record)
+        records = _prune_old(records)
+        # Keep bounded
+        if len(records) > MAX_ENTRIES_PER_REPO:
+            records = records[-MAX_ENTRIES_PER_REPO:]
+        _save_records(path, records)
     return record
 
 

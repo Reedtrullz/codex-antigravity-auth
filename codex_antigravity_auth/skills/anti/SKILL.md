@@ -221,13 +221,14 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - V2 workflow presets default to sanitized run summaries under `~/.codex/anti-runs`; use `runs list`, `runs show <id>`, and `runs clean --older-than N` (add `--dry-run` to preview deletions) to inspect or prune them. Primitive commands default to `--save-output never`; pass `--save-output summary` or `--save-output full` only when useful.
 - Repo-level reflection memory passively records review findings per repo under `~/.codex/anti-runs/reflections/` for pattern analysis. Use `runs reflections --repo <path>` to show summary (recurring fingerprints, severity distribution, most-reviewed files) and recent history. Pass `--clear` to reset. Reflections never suppress findings; they only surface patterns. Files are stored at 0600 permissions.
 - The helper emits a cost-awareness hint to stderr when a quota/paid-tier model is selected and free alternatives of similar quality are available. Use `--model <free-alias>` to switch.
-- `--dry-run` prints token estimates and cost tiers without contacting the gateway. Available on `consult`, `review`, `plan`, `panel`, and `workflow` commands.
+- `--dry-run` prints token estimates, stage/call counts, token ceilings, known cost tiers, bounded retry allowance, and runtime-unknown billing/usage caveats without contacting the gateway. Available on `consult`, `review`, `plan`, `panel`, and `workflow` commands.
+- The helper records its executed tree hash and, when a bundled package tree is discoverable, reports parity as `match`, `mismatch`, or `unverifiable`; a detectable mismatch refuses provider generation before the first POST.
 - Treat sidecar and panel findings as leads. Consensus is not proof. Before editing, verify actionable claims with local source inspection, official docs when relevant, typecheck/tests, or a small reproducer; record dubious or unverified claims as caveats instead of patching them blindly.
 
 ## New Flags
 
 - `--auto-route` — Automatically pick the cheapest adequate model based on diff size and file risk. Small diffs use flash-3.8, medium use sonnet, large or high-risk files use opus. Only activates when `--model` is not explicitly passed.
-- `--budget <cost>` — Maximum estimated cost for a run. Skips remaining panel lanes when the cap is exceeded. Cost is in arbitrary units (not real USD), tracked per lane with estimated vs actual.
+- `--budget <cost>` — Maximum estimated cost for a run. Admission happens before each chunk/synthesis/lane/judge call; refused work is marked not-sent. Cost is in arbitrary units (not real USD), with estimated ceilings, observed usage, and unknown-usage markers kept separate.
 - `--no-verify` — Skip evidence-linked verification of findings (syntax, secrets, eslint checks on referenced files).
 - `--no-anonymize` — Preserve original model names and lane order in judge synthesis (default: anonymize and shuffle).
 - `--required-file <path>` — Require every chunk for these paths to be sent; repeatable and fail-closed when the cap cannot cover them.
@@ -321,7 +322,7 @@ Use `--role` multiple times for different lenses: `--role security --role correc
 - If a panel includes BYOK `provider:model` lanes and repo/diff/file context, the helper prints a BYOK disclosure and records it in the run caveats. Treat that as an explicit reminder that code context is leaving the Google Antigravity lane for the named provider.
 - If the gateway is remote, use `--gateway-token-env` rather than passing bearer tokens in argv.
 - Do not use panel mode as an always-on background swarm. Keep model counts, roles, tokens, retries, and scope bounded.
-- Run ledgers are sanitized, but avoid `--save-output full` for prompts that may contain credentials, OAuth material, `.env` content, or private account/provider stores.
+- Run ledgers never retain raw prompts. Full mode stores sanitized per-call outputs and prompt hashes/counts; still avoid saving outputs that may contain credentials, OAuth material, `.env` content, or private account/provider stores.
 - Helper workflows remain advisory. They do not create true Codex subagents, gateway virtual `panel:*`, `moa:*`, or `fusion:*` picker models, automatic code edits, recursive swarms, or background always-on model calls.
 
 ## Output Shape
