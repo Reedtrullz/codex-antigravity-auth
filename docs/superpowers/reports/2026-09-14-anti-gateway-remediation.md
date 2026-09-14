@@ -825,3 +825,50 @@ The refreshed accounts state was preserved at post-trial SHA256
 not rolled back to the pre-trial hash. No second live trial, retry, install,
 merge, force-push, tag, PyPI action, or credential/provider/cooldown edit was
 made.
+
+## 2026-09-15 — Summary handoff contract fix and authorized v6 live validation
+
+Commit `2d30025` fixes the chunked panel handoff that replaced the original
+review lane instructions with a summary-only wrapper. The fan-out prompt now
+retains the original instruction prefix and explicitly preserves the bounded,
+independent, no-tool/no-code review contract; the panel retry prompt carries
+the same contract. Regressions cover the actual chunked panel path, summary-tail
+preservation, the exact fan-out budget, and a truncated-lane retry.
+
+The first full-suite run exposed that adding the longer contract to every chunk
+prompt consumed tight chunk budgets and could remove file payloads. That was
+corrected before the live run by keeping chunk prompts at their existing compact
+`no code or patches` wording and placing the longer contract only at summary
+fan-out/retry boundaries. Final local evidence after the correction was
+`831 passed, 220 subtests, 2 warnings`.
+
+One authorized live run used candidate `2d30025` and run ID
+`t15-remediation-2d30025-3chunk-bounded-contract-v6`. It completed all 3/3
+chunks with exact per-file byte/hash parity, completed synthesis, both requested
+model lanes, and the Opus judge. The run made 7 primary helper requests, with
+zero retries/fallbacks/rotations; the hard topology remains 7 primary calls plus
+3 possible logical retries, capped at 10. Both lanes returned concise review
+prose without fabricated `<tool_call>`/`<tool_result>` transcripts or code
+fences. Actual identities were Sonnet and Opus, both served by
+`google-antigravity`, so the result is `same_provider_multi_model`, not
+independent-provider consensus. The result is `runStatus=success` and
+`scopeStatus=complete`; artifacts are retained under
+`/Users/reidar/.codex/anti-runs/t15-remediation-2d30025-3chunk-bounded-contract-v6/`.
+
+The delegation follow-up found a sibling regression in the retry helper:
+commit `1025f69` scopes the no-code review contract to `args.mode == "review"`
+and adds plan/ask retry regressions. Final local evidence is `832 passed, 220
+subtests, 2 warnings`; current PR #27 CI run `34905693479` and push run
+`34905688723` passed package plus Ubuntu Python 3.10/3.11/3.12/3.14 and
+Windows Python 3.12. The final retained candidate is
+`/Users/reidar/.codex/antigravity-builds/anti-gateway-remediation-1025f69/`;
+source and wheel Anti trees match at
+`973ceb041c9f6d59e948f383d938a8cf1e93ddd1b6d1a79a77225d018bb063f4`, and the
+corrected dry-run plans 3 chunks, 1 synthesis, 2 lanes, and 1 judge.
+
+Rollback is complete: launchd is again the sole listener on 127.0.0.1:51122,
+`/v1/models` returns HTTP 200, and the plist/provider hashes remain unchanged
+at `391297d7...9b7db09` and `1959f85e...416b94`. The accounts state was
+preserved after live refresh at `33853cf8...d8732a82`; it was not rolled back.
+No install, merge, force-push, tag, PyPI action, credential/provider edit, or
+additional live trial was made.
