@@ -42,6 +42,10 @@ _refresh_locks: dict[str, threading.Lock] = {}
 _refresh_locks_lock = threading.Lock()
 
 
+class _RefreshBusy(RuntimeError):
+    """A refresh is already running; exclude this account for this selection."""
+
+
 def _get_refresh_lock(email: str) -> threading.Lock:
     """Return a per-account lock for serializing token refresh attempts."""
     with _refresh_locks_lock:
@@ -173,6 +177,7 @@ class AccountManager:
         with self._lock:
             selected: dict[str, Any] | None = None
             family = self._model_family(model)
+            temporarily_excluded: set[str] = set()
 
             def mutate(data: dict[str, Any]) -> bool:
                 nonlocal selected
@@ -182,9 +187,9 @@ class AccountManager:
                     family_index_before = data.get("activeIndexByFamily", {}).get(family)
                     cooldowns_before = copy.deepcopy(self._state_owner.state["cooldowns"])
                     lease = (
-                        self._state_owner.acquire(family)
+                        self._state_owner.acquire(family, exclude_emails=temporarily_excluded)
                         if acquire
-                        else self._state_owner.select(family)
+                        else self._state_owner.select(family, exclude_emails=temporarily_excluded)
                     )
                     dirty = dirty or (
                         data.get("activeIndex") != active_index_before
@@ -212,8 +217,13 @@ class AccountManager:
                         try:
                             if refresh_token:
                                 if not _apply_token_refresh(account, refresh_token, wait=False):
-                                    raise RuntimeError("refresh already in progress")
+                                    raise _RefreshBusy("refresh already in progress")
                                 dirty = True
+                        except _RefreshBusy:
+                            if acquire:
+                                self._state_owner.release(lease)
+                            temporarily_excluded.add(email)
+                            continue
                         except Exception as exc:
                             # The remaining token lifetime (<=10s) cannot
                             # outlast a generation call, so selecting it would
@@ -240,9 +250,14 @@ class AccountManager:
                         if not refresh_token:
                             raise RuntimeError("Token expired and no refresh token is available")
                         if not _apply_token_refresh(account, refresh_token, wait=False):
-                            raise RuntimeError("refresh already in progress")
+                            raise _RefreshBusy("refresh already in progress")
                         selected = account
                         return True
+                    except _RefreshBusy:
+                        if acquire:
+                            self._state_owner.release(lease)
+                        temporarily_excluded.add(email)
+                        continue
                     except Exception as exc:
                         if acquire:
                             self._state_owner.release(lease)

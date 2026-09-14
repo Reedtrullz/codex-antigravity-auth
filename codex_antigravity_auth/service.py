@@ -61,6 +61,26 @@ def _command_evidence(result: subprocess.CompletedProcess) -> dict[str, Any]:
     return {"command": command[:500], "returncode": int(result.returncode)}
 
 
+def _launchd_running(result: subprocess.CompletedProcess) -> bool:
+    if result.returncode != 0:
+        return False
+    for line in str(result.stdout or "").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip().lower() == "state":
+            return value.strip().lower() in {"running", "active"}
+    return False
+
+
+def _scheduled_task_running(result: subprocess.CompletedProcess) -> bool:
+    if result.returncode != 0:
+        return False
+    for line in str(result.stdout or "").splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip().lower() == "status":
+            return value.strip().lower() == "running"
+    return False
+
+
 def service_platform() -> str:
     if sys.platform == "darwin":
         return "macos"
@@ -320,9 +340,11 @@ def service_status(port: int, *, platform_name: str | None = None) -> dict[str, 
     platform_name = platform_name or service_platform()
     if platform_name == "macos":
         path = macos_launch_agent_path(port)
-        loaded = _run(["launchctl", "print", f"gui/{_launchd_uid()}/{service_label(port)}"]).returncode == 0
+        probe = _run(["launchctl", "print", f"gui/{_launchd_uid()}/{service_label(port)}"])
+        loaded = probe.returncode == 0
+        active = _launchd_running(probe)
         return _service_result(
-            {"platform": platform_name, "installed": path.is_file(), "active": loaded, "reachable": False, "path": str(path)},
+            {"platform": platform_name, "installed": path.is_file(), "loaded": loaded, "active": active, "reachable": False, "path": str(path)},
             action="status",
             changed=False,
         )
@@ -336,10 +358,10 @@ def service_status(port: int, *, platform_name: str | None = None) -> dict[str, 
             changed=False,
         )
     if platform_name == "windows":
-        query = _run(["schtasks", "/Query", "/TN", service_task_name(port)])
+        query = _run(["schtasks", "/Query", "/TN", service_task_name(port), "/FO", "LIST"])
         installed = query.returncode == 0
         return _service_result(
-            {"platform": platform_name, "installed": installed, "active": installed, "reachable": False, "task_name": service_task_name(port)},
+            {"platform": platform_name, "installed": installed, "active": _scheduled_task_running(query), "reachable": False, "task_name": service_task_name(port)},
             action="status",
             changed=False,
         )
