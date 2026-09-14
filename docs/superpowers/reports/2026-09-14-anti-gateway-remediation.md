@@ -465,10 +465,11 @@ Coverage was complete: 3/3 chunks, 5,186/5,186 bytes, matching source SHA256
 omitted or failed chunks. Review synthesis succeeded with
 `synthesis_prompt_chars=10637` and HTTP 200 in 48.413s. Sonnet succeeded in
 31.890s. Opus returned a non-answer first, then succeeded on its built-in
-second logical attempt; its final lane output was 10,602 characters and was
-marked truncated. The judge itself then succeeded with HTTP 200 in 54.244s,
-`findings_status=parsed`, and no judge retry, but its input status was
-`partial` because the Opus lane was lossy.
+second logical attempt; the retained artifact records its final lane as
+`status=success`, `output_chars=10602`, with `truncated_models=[]`. The judge
+itself then succeeded with HTTP 200 in 54.244s, `findings_status=parsed`,
+`judge_truncated=false`, and no judge retry. Its input status was nevertheless
+`partial` because Anti compacted the successful Opus lane material locally.
 
 The artifact is therefore not a full gate: `runStatus=partial`,
 `scopeStatus=complete`, `panelStatus=partial_multi_model`,
@@ -502,3 +503,56 @@ No-force-push record: the previously disclosed historical rewrite was
 c484a7f05d6cf5ce46efb280474405e15cbcf358`, and read-only diff inspection shows
 only this report changed. Subsequent `9050ec3` and `ea23c7c` commits were normal
 forward commits. This trial made no amend or force push.
+
+## 2026-09-14 — Offline diagnosis correction for 64k trial
+
+The prior section's phrase “truncated lane” was too strong and is corrected
+here. The authoritative retained artifact says both result lanes were
+`status=success`, `truncated_models=[]`, and `judge_truncated=false`; the Opus
+provider response was not token-truncated upstream, and the judge response was
+parsed successfully.
+
+The lossy judge-input flag came from the helper's local
+`build_panel_synthesis_prompt.lane_material` branch: any serialized lane
+material with `encoded_len > 8000` is changed to `materialStatus=compacted`, a
+2,400-character line-boundary summary, at most 12 findings, and an explicit
+partial caveat. The retained Opus response was 10,602 characters, so this
+fixed threshold necessarily applied. The exact compacted final judge prompt is
+retained as `metadata.synthesis_prompt_chars=47125`. The raw lane body is not
+retained, so its byte-exact uncompact prompt cannot be reconstructed; a
+length-preserving offline reconstruction from the retained 1,600-character
+preview and 10,602-character total yields approximately 55,208 characters for
+ordinary prose and a conservative quote/backslash-escaping upper bound of
+63,410 characters. Both fit below 64,000. This establishes that the hardcoded
+8,000-character lane compaction, not upstream token truncation, caused
+`judge_input_lossy_lanes` for Opus.
+
+There was a second independent loss boundary: the raw chunk review summary was
+9,178 characters and was compacted to 2,808 before fan-out because the lane
+source budget was 3,000. That set `summary_input_lossy=true`, which the helper
+promotes to `panel_status=partial_multi_model` even when both final lane
+statuses are success. Removing only lane-material compaction would therefore
+not make this exact run a full acceptance; the fan-out summary boundary also
+remains a declared non-loss gate.
+
+`--retry 0` controls provider retry count in `generate_with_fallback`; it does
+not disable the panel's fixed two-logical-attempt loop. `run_panel_call` always
+tries attempts 1 and 2, adding a retry instruction after a non-answer, so the
+Opus non-answer caused the second logical attempt despite `retry_count=0`.
+The judge had no second attempt because its first output parsed successfully;
+`judge_retried=false` is authoritative.
+
+Smallest proposed root fix, not implemented: remove the fixed `encoded_len >
+8000` lane compaction and let the already-existing final assembled-prompt
+`max_chars` guard fail closed when the complete judge prompt exceeds the
+configured budget. If budget-aware compaction is later retained, it must use
+remaining whole-prompt budget and mark the result partial explicitly.
+
+Deterministic regression proposal: build two successful mock lanes with one
+10,602-character prose response, call
+`build_panel_synthesis_prompt(..., max_chars=64000)`, assert the full tail is
+present, `judge_input_status=complete`, no lossy lanes, and prompt length below
+64,000; then repeat with a cap below the complete prompt and assert a fail-closed
+`AntiError` rather than silent lane compaction. A separate small test should
+document that `retry=0` still permits the existing non-answer logical second
+attempt, while a judge parse-success path has exactly one judge call.
