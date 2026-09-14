@@ -138,3 +138,32 @@ health or production readiness; catalog responsiveness and generation latency
 are separate observations. A representative multi-chunk live run was not
 attempted after that terminal failure. Therefore this report does not claim
 live provider health, full-repository review coverage, or release acceptance.
+
+## Final T15 small-fixture gate
+
+One final authorized live check used the synthetic, non-sensitive
+`scratch/t15-small-fixture.md` fixture (24 lines) and the corrected worktree
+helper at
+`/Users/reidar/.codex/worktrees/dfb9/codex-antigravity-auth/codex_antigravity_auth/skills/anti/scripts/anti.py`.
+The dry-run passed exact-source fit with `--chunked off`: no review-chunk or
+synthesis stages were planned; Sonnet and Opus lanes were each 2,013 prompt
+characters, followed by the Opus judge. Fallback was disabled, parallelism was
+2, retry was `0`, lane output was `2048`, and judge output was `4096` tokens.
+
+The single live command used `--save-output summary --run-id
+t15-small-fixture-20260914 --json`, exited `1`, and stopped after both requested
+lanes timed out once at 90 seconds. The persisted record reports
+`runStatus=failed`, `scopeStatus=complete`, `panelStatus=failed`, no actual
+models/providers, and no judge execution. Sanitized evidence is retained at
+[`result.json`](/Users/reidar/.codex/anti-runs/t15-small-fixture-20260914/result.json);
+the run record's `resultPath` points to that file. Its helper identity is the
+worktree path above with matching bundled/worktree tree hashes; the gateway was
+the already-running localhost service, and no installed skill, provider,
+credential, runtime, or configuration state was changed.
+
+Gate status: offline remediation remains green (`804 passed`, 220 subtests);
+exact-fit dry-run is green; the final small live fixture is a recorded failed
+gate due to generation timeouts; larger multi-chunk live acceptance remains
+pending. Integration requires no code change from this check: retain the
+failure artifact for diagnosis, and only rerun after an independently
+authorized gateway/provider remediation.
