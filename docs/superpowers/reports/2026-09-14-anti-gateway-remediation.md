@@ -63,6 +63,15 @@ Baseline evidence (2026-09-14):
 
 ## Verification boundary
 
+Offline closure is verified, but live generation is not healthy in the currently
+reachable gateway. A bounded live panel attempt on `README.md` used Sonnet and
+Opus lanes with `--fallback-policy never`, `--max-parallel 2`, `--retry 1`, and
+`--timeout 45`. The gateway catalog probe returned HTTP 200 and advertised both
+requested Claude models; Sonnet generation timed out on both allowed attempts,
+the helper reported that `/v1/models` remained responsive while the generation
+path was unhealthy, and no JSON result artifact was produced. No further live
+retry, restart, credential/provider mutation, push, merge, or release was done.
+
 ## Exact offline gate evidence
 
 - A1/A9/T4: `test_review_partial_scope_fails_preflight_without_allow_partial`, `test_chunked_off_refuses_incomplete_content_before_model_call`, and `test_capped_plan_is_partial_and_nonzero`.
@@ -108,8 +117,7 @@ caused by the user's global 1Password SSH signing hook; the authoritative full
 suite run used `GIT_CONFIG_GLOBAL=/dev/null` and did not change repository or
 global configuration.
 
-No live Sonnet/Opus panel, representative multi-chunk live run, gateway restart,
-credential mutation, provider mutation, push, merge, or release was performed.
-The coordinator explicitly paused further live calls while reviewing the
-offline blockers. Therefore this report does not claim live provider health,
-production readiness, full-repository review coverage, or release acceptance.
+The bounded live attempt is evidence of a generation-path timeout, not provider
+health or production readiness. A representative multi-chunk live run was not
+attempted after that terminal failure. Therefore this report does not claim
+live provider health, full-repository review coverage, or release acceptance.
