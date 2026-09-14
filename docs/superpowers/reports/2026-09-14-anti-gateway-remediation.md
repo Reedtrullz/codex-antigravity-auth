@@ -515,6 +515,31 @@ Ubuntu Python 3.10/3.11/3.12/3.14 and Windows Python 3.12. The live gateway
 trial remains terminally failed at synthesis and was not repeated; merge,
 install, and release acceptance remain owner-gated.
 
+## 2026-09-14 — Authorized larger-budget retest aborted in offline preflight
+
+Parent authorized exactly one bounded retest from current head `0b6768b` with
+review-synthesis/lane output `4096`, judge output `8192`, source/fanout budget
+`30000`, synthesis/judge-input budget `128000`, chunk output `2048`, helper
+timeout `180` (`170` gateway), retry `0`, fallback `never`, max parallel `2`,
+three required fixture files, and a 20-minute external watchdog. The candidate
+was built and retained at
+`/Users/reidar/.codex/antigravity-builds/anti-gateway-remediation-0b6768b/`:
+wheel SHA256 `275fa865ae9a3a119b2614fad5398a96341d9dc3be45ddcb9728fa2731589098`,
+sdist SHA256 `e205a0495e9dac88071f60ade6c1ea6c84dc14f6eca8d76ba296081660b73a43`,
+Anti helper source/extracted SHA256
+`cc50efa30ae2666fab2fddceb1093e0b2a2ff507a50f2bfdb5e6557c0efb2bae`, and
+server SHA256 `c3567ba9806ebece827274c71f74006cb9ae06b946af40abd6d81592447c4fcc`.
+Candidate imports and timeout helpers verified `180 -> 170` under Python 3.10.
+
+The exact dry-run was deterministic but did not meet the required shape:
+`review_chunk` planned one content chunk (`prompt_chars=18659`) rather than
+three. The larger `30000` source/fanout budget fits all 17,358 fixture bytes in
+one chunk; `--max-review-chunks 3` is only a ceiling, not a request for exactly
+three chunks. Per authorization, this mismatch aborts offline rather than
+guessing a compensating setting. No full prompt probe, service switch, model
+request, account/provider mutation, or live trial was made. Existing service
+and refreshed state remain untouched.
+
 No-force-push record: the previously disclosed historical rewrite was
 `164988f29bac2a917bd2ba9f3de3891eeadd4f11 ->
 c484a7f05d6cf5ce46efb280474405e15cbcf358`, and read-only diff inspection shows
