@@ -5374,7 +5374,9 @@ def run_panel_call(
         cap = max_output_tokens if attempt == 1 else retry_cap
         call_prompt = prompt
         if attempt > 1:
-            call_prompt = prompt + "\n\n" + lane_retry_instruction(panel_review=True)
+            call_prompt = prompt + "\n\n" + lane_retry_instruction(
+                panel_review=getattr(args, "mode", "review") == "review"
+            )
         purpose = f"panel model {model}" + ("" if attempt == 1 else f" (retry {attempt - 1})")
         try:
             text, model_used, generation_metadata = generate_with_fallback(

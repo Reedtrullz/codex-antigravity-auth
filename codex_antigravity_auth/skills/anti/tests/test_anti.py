@@ -2312,7 +2312,7 @@ class AntiHelperTests(unittest.TestCase):
 
         anti.generate_with_fallback = fake_generate
         result = anti.run_panel_call(
-            args=argparse.Namespace(),
+            args=argparse.Namespace(mode="review"),
             model="claude-sonnet-4-6",
             prompt=anti.PANEL_REVIEW_LANE_CONTRACT,
             max_output_tokens=2,
@@ -2323,6 +2323,32 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(len(prompts), 2)
         self.assertIn(anti.PANEL_REVIEW_LANE_CONTRACT, prompts[1])
         self.assertIn("Do not generate code, patches, or implementation steps.", prompts[1])
+
+    def test_non_review_panel_retry_keeps_implementation_answers_allowed(self) -> None:
+        anti = load_anti()
+        for mode in ("plan", "ask"):
+            prompts: list[str] = []
+            responses = [
+                ("partial", "claude-sonnet-4-6", {"usage": {"output_tokens": 2}}),
+                ("complete", "claude-sonnet-4-6", {"usage": {"output_tokens": 1}}),
+            ]
+
+            def fake_generate(_args, **kwargs):
+                prompts.append(kwargs["prompt"])
+                return responses.pop(0)
+
+            anti.generate_with_fallback = fake_generate
+            result = anti.run_panel_call(
+                args=argparse.Namespace(mode=mode),
+                model="claude-sonnet-4-6",
+                prompt="Implement the requested plan.",
+                max_output_tokens=2,
+                model_ids={"claude-sonnet-4-6"},
+            )
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(len(prompts), 2)
+            self.assertNotIn(anti.PANEL_REVIEW_LANE_CONTRACT, prompts[1])
 
     def test_panel_review_rejects_lossy_summary_before_lane_generation(self) -> None:
         anti = load_anti()
