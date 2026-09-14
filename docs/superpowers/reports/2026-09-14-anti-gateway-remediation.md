@@ -591,3 +591,30 @@ This is an offline parent-review checkpoint only. No live gateway switch,
 credential/provider mutation, install, restart, merge, or release claim was
 made in this turn. The authorized live validation described above remains
 pending parent review of `dee9b8a` and current-head CI.
+
+## 2026-09-14 — Structured lane normalization correction
+
+Parent offline review of `dee9b8a` found a sibling loss boundary: valid
+structured lane JSON was normalized before judge assembly, including a 1,600
+character summary cap and bounded finding/list fields, while the lane metadata
+still reported `judge_input_status=complete`. Commit `b746b9b` corrects this
+without weakening display or provenance normalization. `parse_panel_findings`
+now retains a recursively redacted, uncapped structured copy for judge input;
+the existing normalized contract remains the artifact/display representation.
+The existing assembled-prompt budget guard still rejects the complete material
+before provider generation when it cannot fit.
+
+The new regression uses valid structured JSON with independent long summary,
+finding-claim, and list tails. It asserts all tails reach the judge prompt,
+mutated input metadata remains `judge_input_status=complete` with an empty
+`judge_input_lossy_lanes`, and a cap one character below the complete prompt
+fails closed. Offline evidence after this correction: Anti suite `206 passed,
+9 subtests`; authoritative repository suite `824 passed, 220 subtests, 2
+warnings`; Python 3.10 focused structured/content-loss set `5 passed, 201
+deselected`; packaged helper SHA parity
+`ba75a8a347c2f853338811f57ebd332ae06a44c726ff7152ee35d832dd2eb44a` and
+timeout helpers `180 -> 170`.
+
+The previous `ef0a2b8` CI is stale for this correction. The branch must be
+rebuilt and current-head CI must pass for `b746b9b` (plus its forward report
+commit) before any separately authorized live validation. Live remains held.
