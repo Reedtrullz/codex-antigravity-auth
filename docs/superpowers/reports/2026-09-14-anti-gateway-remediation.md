@@ -434,7 +434,7 @@ current refreshed state was preserved rather than restoring the pre-trial hash.
 
 PR #27 remains draft/open. The candidate code commit `af47e6c` has green PR
 and push CI runs `34880417584` and `34880421722` across all 12 jobs; the report
-commit `164988f` is now the PR head and its fresh CI runs `34882780406` and
-`34882787612` were pending at capture time. PR #26 remains open and unchanged.
+commit `c484a7f` is now the PR head and its fresh CI runs were pending at
+capture time. PR #26 remains open and unchanged.
 No candidate installation, skill update, merge, close, or production-readiness
 claim was made.
