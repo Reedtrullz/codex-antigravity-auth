@@ -302,3 +302,49 @@ providers
 Decision: hold further live multi-chunk retries, candidate install/restart, and
 merge. The e01 retained wheel remains historical live-trial evidence only; no
 new wheel was installed or claimed equivalent to `7b24b27`.
+
+## 2026-09-14 — Corrected-source live trial
+
+Parent offline closure independently confirmed the original panel path at caps
+1000 and 3000, including actual mocked calls, failed-chunk artifacts, byte
+counters, and IDs. A rebuilt current candidate was then created from the
+`7b24b27` source:
+
+- wheel SHA256 `9ac2116f5a8339c524d4fa3f9a6282a0a83b73d1f2398c5c6127c6027eab7db9`;
+- sdist SHA256 `a6288caecc6f73d3059581cf6df3c6c3c3b8c626e5720c3bd26e2b030764c2d9`;
+- extracted server SHA256 `c3567ba9806ebece827274c71f74006cb9ae06b946af40abd6d81592447c4fcc`;
+- extracted Anti helper SHA256 `ecea7dc9a2d428eff358ed47c85618bf9fc74134f600b2c5c07a18a3e7aa7ba4`.
+
+The candidate-only dry-run selected three real-content chunks with prompt
+sizes 2,948, 2,939, and 1,927 characters, then one synthesis, two panel lanes,
+and one judge. Fallback was `never`, retry `0`, chunk output `2048`, synthesis
+and lane output `4096`, judge output `4096`, synthesis cap `16000`, and no
+`--allow-partial`.
+
+The single-writer live trial used the extracted wheel and run ID
+`t15-remediation-7b24b27-multichunk`. All three chunks completed with HTTP 200.
+The saved artifact reports `bytesDeclared=bytesSent=bytesReviewed=5186`,
+`chunksExpected=chunksCompleted=3`, zero failed/not-sent chunks, the expected
+source SHA256 `480423e2c050ecab0a14f5935439c29774ad951eaf4841e20a1eac47d916fc06`,
+and matching first/last/sent chunk IDs. Synthesis then returned HTTP 504 after
+the gateway's 90-second total deadline (`prompt_chars=12099`), before panel
+lanes or judge execution. The result is therefore `runStatus=failed`,
+`scopeStatus=partial`, with no summary non-loss acceptance:
+
+- `/Users/reidar/.codex/anti-runs/t15-remediation-7b24b27-multichunk/result.json`
+
+The candidate process PID 26237 was stopped. The original launchd plist was
+bootstrapped again; final rollback posture is launchd PID 53238, Python 3.10,
+sole listener on `127.0.0.1:51122`, `/v1/models` HTTP 200. The launchd editable
+mapping remains the primary checkout at
+`/Users/reidar/Projectos/codex-antigravity-auth` (primary SHA
+`117b496db568a7c222dd1698912224c36f8264da`), not the candidate worktree.
+Providers remained unchanged at SHA256
+`1959f85e8a68235ab04bb885ccb904f1eaa41c116cf81d2b193214873e416b94`.
+The canonical accounts file was preserved through the trial and final launchd
+restart; its final SHA256 is
+`6c6e2129bf060d7fcbf26000964e0fba9e5f1c909ce4caaeaabe768cf20231ce`.
+
+Decision: the corrected-source live gate is failed on synthesis liveness, not
+source coverage or chunk-manifest integrity. Do not merge or install the
+candidate. No additional live retry was started.
