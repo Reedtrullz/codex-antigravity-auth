@@ -45,7 +45,7 @@ class NormalizeAndFindingsTests(unittest.TestCase):
         )
         self.assertIn("## Recommended Next Actions", prompt)
         self.assertIn("Do not generate code, patches, plans", prompt)
-        self.assertIn("stop incomplete rather than omit them", prompt)
+        self.assertIn("ANTI_SYNTHESIS_STATUS: OVERFLOW", prompt)
         self.assertIn("no code or patches", chunks[0]["prompt"])
 
     def test_chunked_failure_retains_bounded_redacted_diagnostics(self):
@@ -94,6 +94,62 @@ class NormalizeAndFindingsTests(unittest.TestCase):
         self.assertEqual(diagnostics[-1]["outputPreview"], "partial synthesis")
         self.assertNotIn("output", diagnostics[-1])
         self.assertEqual(len(diagnostics[-1]["outputSha256"]), 64)
+
+    def test_declared_synthesis_overflow_fails_closed_below_token_cap(self):
+        args = anti.build_parser().parse_args([
+            "panel", "--mode", "review", "--scope", "files", "--model", "sonnet",
+            "--judge", "opus", "--max-prompt-chars", "1200", "--max-review-chunks", "2",
+            "--no-verify", "--no-progress",
+        ])
+        args.chunk_output_tokens = 3
+        args.max_output_tokens = 10
+        args.max_synthesis_chars = 12000
+        context = {
+            "scope_line": "files",
+            "diff": "",
+            "file_texts": [("fixture.py", "x = 1\n")],
+            "file_records": [{"path": "fixture.py"}],
+            "paths": ["fixture.py"],
+            "excluded": [],
+            "caveats": [],
+        }
+
+        def fake_generate(_args, *, purpose, model, **_kwargs):
+            if purpose == "review synthesis":
+                return "additional findings omitted\nANTI_SYNTHESIS_STATUS: OVERFLOW", model, {
+                    "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+                    "upstream_status": "completed",
+                }
+            return "## Confirmed Findings\n- None", model, {
+                "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+            }
+
+        with patch.object(anti, "generate_with_fallback", side_effect=fake_generate):
+            with self.assertRaises(anti.AntiError) as raised:
+                anti.run_chunked_review(
+                    args=args,
+                    context=context,
+                    model="claude-sonnet-4-6",
+                    base_metadata={},
+                    max_prompt_chars=1200,
+                )
+
+        self.assertEqual(raised.exception.run_metadata["synthesis_status"], "incomplete")
+
+    def test_failure_preview_redacts_before_bounding_at_secret_boundary(self):
+        output = "x" * 1590 + "sk-" + ("Z" * 48) + " tail"
+        diagnostics = anti.bounded_failure_diagnostics([{
+            "stage": "review_synthesis",
+            "promptSha256": "a" * 64,
+            "promptChars": 10,
+            "output": output,
+            "model": "sonnet",
+            "generation": {},
+        }])
+        preview = diagnostics[0]["outputPreview"]
+        self.assertIn("<redacted>", preview)
+        self.assertNotIn("sk-Z", preview)
+        self.assertEqual(diagnostics[0]["outputSha256"], anti.hashlib.sha256(output.encode()).hexdigest())
 
     def test_failure_diagnostics_are_exposed_in_sanitized_result(self):
         with tempfile.TemporaryDirectory() as tmp:

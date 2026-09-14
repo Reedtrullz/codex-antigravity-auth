@@ -554,6 +554,7 @@ EXCLUDED_PATTERNS = [
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 CHUNK_PART_SUFFIX_RE = re.compile(r" part \d+/\d+$")
 FAILURE_OUTPUT_PREVIEW_CHARS = 1600
+REVIEW_SYNTHESIS_OVERFLOW_SENTINEL = "ANTI_SYNTHESIS_STATUS: OVERFLOW"
 
 
 class AntiError(Exception):
@@ -3203,7 +3204,7 @@ def build_chunk_synthesis_prompt(
                 "Use only the chunk findings below. Separate confirmed defects from risks and scope caveats. Do not invent findings for omitted items.",
                 "If chunks disagree or a finding depends on omitted context, mark it as needing local verification.",
                 "Use exactly these concise headings: ## Confirmed Findings, ## Risks and Caveats, ## Needs Local Verification, and ## Recommended Next Actions. Group duplicates; write None when empty.",
-                "Do not generate code, patches, plans, or extra prose; do not restate chunks. If findings cannot fit, stop incomplete rather than omit them.",
+                "Do not generate code, patches, plans, or extra prose; do not restate chunks. If findings cannot fit, end with exactly ANTI_SYNTHESIS_STATUS: OVERFLOW and stop; never omit findings silently.",
                 "## Chunked Review Manifest\n```json\n" + json.dumps(manifest, indent=2, sort_keys=True) + "\n```",
                 *chunk_sections,
             ]
@@ -3247,6 +3248,7 @@ def bounded_failure_diagnostics(execution_ledger: list[dict[str, Any]]) -> list[
         if not isinstance(entry, dict):
             continue
         output = str(entry.get("output") or "")
+        redacted_output = redact_sensitive_text(output)
         generation = entry.get("generation") if isinstance(entry.get("generation"), dict) else {}
         item: dict[str, Any] = {
             "stage": str(entry.get("stage") or "unknown"),
@@ -3255,8 +3257,8 @@ def bounded_failure_diagnostics(execution_ledger: list[dict[str, Any]]) -> list[
             "promptChars": int(entry.get("promptChars") or 0),
             "outputChars": len(output),
             "outputSha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "outputPreview": redact_sensitive_text(output[:FAILURE_OUTPUT_PREVIEW_CHARS]),
-            "outputPreviewTruncated": len(output) > FAILURE_OUTPUT_PREVIEW_CHARS,
+            "outputPreview": redacted_output[:FAILURE_OUTPUT_PREVIEW_CHARS],
+            "outputPreviewTruncated": len(redacted_output) > FAILURE_OUTPUT_PREVIEW_CHARS,
         }
         usage = generation.get("usage")
         if isinstance(usage, dict):
@@ -3270,6 +3272,22 @@ def bounded_failure_diagnostics(execution_ledger: list[dict[str, Any]]) -> list[
                 item[key] = generation[key]
         diagnostics.append(item)
     return diagnostics
+
+
+def review_synthesis_output_status(
+    output_text: str,
+    usage: dict[str, Any] | None,
+    max_output_tokens: int,
+    response_metadata: dict[str, Any] | None = None,
+) -> str:
+    """Fail closed when synthesis declares overflow below the token cap."""
+    status = lane_output_status(output_text, usage, max_output_tokens, response_metadata)
+    if status == "success" and re.search(
+        rf"(?m)^\s*{re.escape(REVIEW_SYNTHESIS_OVERFLOW_SENTINEL)}\s*$",
+        output_text or "",
+    ):
+        return "incomplete"
+    return status
 
 
 def review_scope_is_incomplete(metadata: dict[str, Any]) -> bool:
@@ -3625,7 +3643,7 @@ def run_chunked_review(
             generation=synthesis_generation,
         )
     )
-    synthesis_status = lane_output_status(
+    synthesis_status = review_synthesis_output_status(
         synthesis,
         synthesis_generation.get("usage"),
         args.max_output_tokens,
