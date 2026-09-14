@@ -438,3 +438,65 @@ documentation-only branch head has fresh CI still in progress at capture time.
 PR #26 remains open and unchanged.
 No candidate installation, skill update, merge, close, or production-readiness
 claim was made.
+
+## 2026-09-14 — Current-head 64k live trial
+
+The next and final authorized live attempt used verified PR #27 head
+`ea23c7cd0b966a29adb791dd08ea24f8b3593c52`. The code path was unchanged from
+`af47e6c`; only forward documentation commits followed it. Offline inspection
+confirmed the retained prior final judge payload was 46,741 characters, so the
+requested `--max-synthesis-chars 64000` left 17,259 characters of headroom.
+The dry-run plan selected 3 chunks at 2,948/2,939/1,927 characters, review
+synthesis at 64,000, two 3,000-character panel lanes, and the Opus judge at
+64,000; output caps were 2,048/4,096/4,096, retry was 0, fallback was never,
+and timeout mapping was 180 -> 170 for both request and backend hints.
+
+The exact-head wheel was rebuilt without installation:
+
+- wheel SHA256 `784f8e9c05a6871f2f6c35f58c06a8cc0f875eae7964d6903782f3c438279d8b`;
+- sdist SHA256 `1052fb4be0a2eb3123f2c6b187ffd7c4156f7ac72b05311fc03717bd2e2453a6`;
+- extracted server SHA256 `c3567ba9806ebece827274c71f74006cb9ae06b946af40abd6d81592447c4fcc`;
+- extracted Anti helper SHA256 `68bdaccfb1dc1be782b51abe6ea256e0cb21e8df1e28207f8838a90553bbd53d`;
+- helper/bundle tree hashes matched `276d36da1b8feb4cce0d9689d925089d27858ff7319025f0f88b73a6c38b9487`.
+
+Run ID `t15-remediation-ea23c7c-multichunk64000` reached every planned stage.
+Coverage was complete: 3/3 chunks, 5,186/5,186 bytes, matching source SHA256
+`480423e2c050ecab0a14f5935439c29774ad951eaf4841e20a1eac47d916fc06`, and no
+omitted or failed chunks. Review synthesis succeeded with
+`synthesis_prompt_chars=10637` and HTTP 200 in 48.413s. Sonnet succeeded in
+31.890s. Opus returned a non-answer first, then succeeded on its built-in
+second logical attempt; its final lane output was 10,602 characters and was
+marked truncated. The judge itself then succeeded with HTTP 200 in 54.244s,
+`findings_status=parsed`, and no judge retry, but its input status was
+`partial` because the Opus lane was lossy.
+
+The artifact is therefore not a full gate: `runStatus=partial`,
+`scopeStatus=complete`, `panelStatus=partial_multi_model`,
+`judge_input_status=partial`, and `judge_input_lossy_lanes` contains the Opus
+lane. The retained request log records eight successful HTTP 200 calls: three
+chunks, review synthesis, the initial Opus non-answer, Sonnet lane, Opus lane
+retry, and judge. No fallback was used. Per authorization, no further live
+attempt will be made.
+
+Evidence:
+
+- `/Users/reidar/.codex/anti-runs/t15-remediation-ea23c7c-multichunk64000/result.json`
+- `/Users/reidar/.codex/anti-runs/t15-remediation-ea23c7c-multichunk64000.json`
+
+The candidate was stopped and old launchd restored. Final state is PID 25153,
+Python 3.10, sole listener on `127.0.0.1:51122`, and `/v1/models` HTTP 200.
+Providers remain SHA256
+`1959f85e8a68235ab04bb885ccb904f1eaa41c116cf81d2b193214873e416b94`. The
+post-trial canonical accounts SHA256 is
+`682e44464728514821253bceda38e3b207307f206152a98c6aeeadc3c2ca54e7`; this
+current refreshed state was preserved rather than rolled back.
+
+PR #27 remains draft/open at `ea23c7c`; PR #26 remains open and unchanged. No
+candidate installation, local skill update, merge, close, credential/provider
+change, or production-readiness claim was made.
+
+No-force-push record: the previously disclosed historical rewrite was
+`164988f29bac2a917bd2ba9f3de3891eeadd4f11 ->
+c484a7f05d6cf5ce46efb280474405e15cbcf358`, and read-only diff inspection shows
+only this report changed. Subsequent `9050ec3` and `ea23c7c` commits were normal
+forward commits. This trial made no amend or force push.
