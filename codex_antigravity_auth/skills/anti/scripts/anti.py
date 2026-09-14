@@ -172,6 +172,17 @@ COST_PER_1K_TOKENS: dict[str, float] = {
     "paid": 0.01,
 }
 
+_BUDGET_STATE_INIT_LOCK = threading.Lock()
+
+
+def model_pricing_metadata(model: str) -> dict[str, Any]:
+    tier = MODEL_COST_TIER.get(base_model_id(model))
+    return {
+        "tier": tier or "unknown",
+        "basis": "heuristic_tier" if tier else "unknown",
+        "provider_price_known": False,
+    }
+
 def estimate_call_cost(model: str, prompt_chars: int, max_output_tokens: int) -> float:
     """Estimate the cost of a single model call in arbitrary cost units."""
     tier = MODEL_COST_TIER.get(base_model_id(model), "quota")
@@ -208,8 +219,11 @@ def reserve_budget_call(
         raise error
     state = getattr(args, "_anti_budget_state", None)
     if state is None:
-        state = {"lock": threading.Lock(), "reserved": 0.0, "committed": 0.0, "unknown": False, "attempts": []}
-        setattr(args, "_anti_budget_state", state)
+        with _BUDGET_STATE_INIT_LOCK:
+            state = getattr(args, "_anti_budget_state", None)
+            if state is None:
+                state = {"lock": threading.Lock(), "reserved": 0.0, "committed": 0.0, "unknown": False, "attempts": []}
+                setattr(args, "_anti_budget_state", state)
     with state["lock"]:
         used = state["reserved"] + state["committed"]
         if used + estimate > float(args.budget):
@@ -1253,6 +1267,16 @@ def token_from_env(env_name: str) -> str | None:
     return token if token else None
 
 
+def _bounded_retry_after_seconds(value: object) -> float | None:
+    try:
+        delay = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(delay) or delay < 0:
+        return None
+    return min(60.0, delay)
+
+
 def request_json(
     method: str,
     url: str,
@@ -1274,6 +1298,7 @@ def request_json(
     else:
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
 
+    retry_after_header: object = None
     try:
         with urllib.request.urlopen(req, timeout=timeout) as res:
             raw = res.read()
@@ -1281,6 +1306,7 @@ def request_json(
     except urllib.error.HTTPError as exc:
         raw = exc.read()
         status = int(exc.code)
+        retry_after_header = exc.headers.get("Retry-After")
     except Exception as exc:
         raise AntiError(f"request to {url} failed: {exc}") from exc
 
@@ -1292,6 +1318,10 @@ def request_json(
         raise AntiError(f"request to {url} returned HTTP {status} non-JSON response") from exc
     if not isinstance(decoded, dict):
         raise AntiError(f"request to {url} returned JSON {type(decoded).__name__}, expected object")
+    if status in {408, 409, 425, 500, 502, 503, 504} or status == 429:
+        retry_after = _bounded_retry_after_seconds(retry_after_header)
+        if retry_after is not None:
+            decoded["_retry_after_seconds"] = retry_after
     return status, decoded
 
 
@@ -1684,6 +1714,7 @@ def post_response(
                 response_metadata=response_metadata,
             )
 
+        retry_after_hint = _bounded_retry_after_seconds(decoded.pop("_retry_after_seconds", None))
         detail = decoded.get("detail") or decoded.get("error") or decoded
         settle_budget_call(
             retry_reservation,
@@ -1694,7 +1725,7 @@ def post_response(
         )
         last_error = f"HTTP {status}: {detail}"
         if status in retryable_statuses and attempt < attempts:
-            time.sleep(min(4.0, 0.75 * attempt))
+            time.sleep(retry_after_hint if retry_after_hint is not None else min(4.0, 0.75 * attempt))
             continue
         raise AntiError(
             f"/v1/responses returned {last_error} after {attempt} attempt(s). Diagnostics: "
@@ -3854,6 +3885,81 @@ def read_optional_prompt(args: argparse.Namespace) -> str:
     return ""
 
 
+def build_panel_execution_plan(
+    *,
+    args: argparse.Namespace,
+    prompt: str,
+    metadata: dict[str, Any],
+    panel_models: list[str],
+    judge_model: str,
+) -> list[dict[str, Any]]:
+    """Return the provider stages shared by panel dry-run and execution metadata."""
+    stages: list[dict[str, Any]] = []
+    context = metadata.get("_review_context")
+    chunked = (
+        args.mode == "review"
+        and isinstance(context, dict)
+        and should_run_chunked_review(args, metadata)
+    )
+    if chunked:
+        summary_model = panel_review_summary_model(panel_models)
+        summary_budget = prompt_budget_for_model(args, summary_model)
+        chunks, chunk_metadata = build_review_chunk_prompts(
+            context,
+            max_prompt_chars=summary_budget,
+            max_chunks=args.max_review_chunks,
+            priority_paths=getattr(args, "priority_file", None),
+            required_paths=getattr(args, "required_file", None),
+        )
+        stages.append(
+            {
+                "name": "review_chunk",
+                "model": summary_model,
+                "calls": len(chunks),
+                "planned_calls": int(chunk_metadata.get("planned_chunk_count") or len(chunks)),
+                "prompt_chars_by_call": [len(chunk["prompt"]) for chunk in chunks],
+                "max_output_tokens": args.chunk_output_tokens,
+                "possible_retries": len(chunks) * max(0, int(getattr(args, "retry", 0))),
+                "omitted_calls": max(0, int(chunk_metadata.get("planned_chunk_count") or len(chunks)) - len(chunks)),
+            }
+        )
+        stages.append(
+            {
+                "name": "review_synthesis",
+                "model": summary_model,
+                "calls": 1,
+                "prompt_chars": int(getattr(args, "max_synthesis_chars", 0) or max(1, sum(len(chunk["prompt"]) for chunk in chunks))),
+                "max_output_tokens": args.max_output_tokens,
+                "possible_retries": max(0, int(getattr(args, "retry", 0))),
+            }
+        )
+        fanout_prompt_chars = prompt_budget_for_panel_source(args, panel_models)
+    else:
+        fanout_prompt_chars = len(prompt)
+
+    stages.append(
+        {
+            "name": "panel_lane",
+            "model": panel_models[0],
+            "calls": len(panel_models),
+            "prompt_chars": fanout_prompt_chars,
+            "max_output_tokens": args.max_output_tokens,
+            "possible_retries": len(panel_models) * (1 + 2 * max(0, int(getattr(args, "retry", 0)))),
+        }
+    )
+    stages.append(
+        {
+            "name": "judge",
+            "model": judge_model,
+            "calls": 1,
+            "prompt_chars": int(getattr(args, "max_synthesis_chars", 0) or max(1, fanout_prompt_chars + len(panel_models) * args.max_output_tokens * 4)),
+            "max_output_tokens": args.judge_output_tokens,
+            "possible_retries": 1 + 2 * max(0, int(getattr(args, "retry", 0))),
+        }
+    )
+    return stages
+
+
 def format_dry_run(
     *,
     mode: str,
@@ -3872,28 +3978,46 @@ def format_dry_run(
         estimates.append(estimate_cost(model=m, prompt_chars=prompt_chars,
                                        estimated_output_tokens=max_output_tokens))
     stages = stage_plan or [{"name": "primary", "calls": 1, "max_output_tokens": max_output_tokens}]
-    stages = [
-        {
+    planned_stages: list[dict[str, Any]] = []
+    for stage in stages:
+        calls = int(stage.get("calls", 1) or 0)
+        retries = int(stage.get("possible_retries", 0) or 0)
+        prompt_sizes = stage.get("prompt_chars_by_call")
+        if not isinstance(prompt_sizes, list):
+            prompt_sizes = [int(stage.get("prompt_chars", prompt_chars)) for _ in range(calls)]
+        prompt_sizes = [max(0, int(size)) for size in prompt_sizes]
+        prompt_sizes.extend([prompt_sizes[-1] if prompt_sizes else prompt_chars] * max(0, calls - len(prompt_sizes)))
+        price = model_pricing_metadata(str(stage.get("model", model)))
+        attempt_sizes = prompt_sizes + [prompt_sizes[-1] if prompt_sizes else prompt_chars] * retries
+        stage_copy = {
             **stage,
-            "max_attempts": int(stage.get("calls", 1) or 0) + int(stage.get("possible_retries", 0) or 0),
-            "estimated_cost": estimate_call_cost(
-                stage.get("model", model),
-                prompt_chars,
-                int(stage.get("max_output_tokens", max_output_tokens) or 0),
-            ) * (int(stage.get("calls", 1) or 0) + int(stage.get("possible_retries", 0) or 0)),
-            "price_known": base_model_id(stage.get("model", model)) in MODEL_COST_TIER,
+            "calls": calls,
+            "planned_calls": int(stage.get("planned_calls", calls) or 0),
+            "max_attempts": calls + retries,
+            "prompt_chars_by_call": prompt_sizes,
+            "estimated_cost": sum(
+                estimate_call_cost(stage.get("model", model), size, int(stage.get("max_output_tokens", max_output_tokens) or 0))
+                for size in attempt_sizes
+            ),
+            "price_known": price["provider_price_known"],
+            "pricing": price,
         }
-        for stage in stages
-    ]
+        planned_stages.append(stage_copy)
+    stages = planned_stages
     known_prices = {tier: COST_PER_1K_TOKENS[tier] for tier in ("free", "quota", "paid")}
+    estimated_cost_total = sum(float(stage["estimated_cost"]) for stage in stages)
     payload = {
         "mode": mode,
         "estimates": estimates,
         "stages": stages,
         "token_ceilings": {stage["name"]: stage.get("max_output_tokens") for stage in stages},
         "known_prices": known_prices,
+        "known_provider_prices": {},
+        "pricing_basis": "heuristic_tier; provider prices are not known at dry-run time",
+        "estimated_cost_total": estimated_cost_total,
         "unknowns": [
             "provider billing and missing runtime usage are not known at dry-run time",
+            "tier rates are heuristic cost units, not authoritative provider prices",
             *[
                 f"price for {estimate['model']} is unknown"
                 for estimate in estimates
@@ -3915,7 +4039,7 @@ def format_dry_run(
             f"({e['cost_tier']} tier, quality {e['quality_rank']})"
         )
     lines.append(f"  stages: {json.dumps(stages, sort_keys=True)}")
-    lines.append(f"  possible retries: {payload['possible_retries']}; prices: {json.dumps(known_prices, sort_keys=True)}")
+    lines.append(f"  possible retries: {payload['possible_retries']}; pricing: heuristic tiers only (provider prices unknown)")
     lines.append("  unknowns: provider billing and missing runtime usage")
     if budget_limit is not None:
         lines.append(f"  budget: {float(budget_limit):.4f}")
@@ -5764,9 +5888,10 @@ def command_panel(args: argparse.Namespace) -> int:
         metadata.setdefault("privacy_disclosures", []).append(disclosure)
         if not args.print_prompt:
             eprint(f"[anti] {redact_sensitive_text(disclosure)}")
-    if getattr(args, "chunked", "auto") == "off" and prompt_budget > 0 and len(prompt) > prompt_budget:
+    source_prompt_budget = prompt_budget_for_panel_source(args, panel_models)
+    if getattr(args, "chunked", "auto") == "off" and source_prompt_budget > 0 and len(prompt) > source_prompt_budget:
         raise AntiError(
-            f"plan prompt requires {len(prompt)} characters but the exact budget is {prompt_budget}; "
+            f"panel prompt requires {len(prompt)} characters but the exact budget is {source_prompt_budget}; "
             "use --chunked auto/always, raise the prompt budget, or narrow the scope"
         )
     if args.print_prompt:
@@ -5788,14 +5913,18 @@ def command_panel(args: argparse.Namespace) -> int:
         metadata["auto_route_reason"] = auto_route_reason
     if collab_profile != "none":
         metadata["collaboration_profile"] = collab_profile
+    metadata["execution_plan"] = build_panel_execution_plan(
+        args=args,
+        prompt=prompt,
+        metadata=metadata,
+        panel_models=panel_models,
+        judge_model=judge_model,
+    )
     if args.dry_run:
         print(format_dry_run(mode=f"panel {args.mode}", model=panel_models[0],
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
             extra_models=panel_models[1:] + [judge_model], output_json=args.json,
-            stage_plan=[
-                {"name": "panel_lane", "calls": len(panel_models), "max_output_tokens": args.max_output_tokens, "possible_retries": len(panel_models)},
-                {"name": "judge", "calls": 1, "max_output_tokens": args.judge_output_tokens, "possible_retries": 1},
-            ], budget_limit=args.budget))
+            stage_plan=metadata["execution_plan"], budget_limit=args.budget))
         return 0
     if args.print_prompt:
         payload = {"prompt": prompt, "metadata": metadata, "caveats": caveats}
@@ -5866,6 +5995,13 @@ def command_panel(args: argparse.Namespace) -> int:
             "scope_status": "partial" if review_scope_is_incomplete(metadata) else "complete",
         }  # type: ignore[attr-defined]
         raise
+    metadata["execution_plan"] = build_panel_execution_plan(
+        args=args,
+        prompt=prompt,
+        metadata=metadata,
+        panel_models=panel_models,
+        judge_model=judge_model,
+    )
     metadata["prompt_chars"] = len(prompt)
     write_preflight_record(
         args,

@@ -5,6 +5,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -20,9 +21,11 @@ from anti_lib.verifier import verify_finding  # noqa: E402
 class NormalizeAndFindingsTests(unittest.TestCase):
     def test_budget_admission_allows_only_one_concurrent_last_allowance(self):
         args = argparse.Namespace(budget=anti.estimate_call_cost("claude-sonnet-4-6", 4000, 1000))
+        barrier = __import__("threading").Barrier(4)
 
         def attempt(_index):
             try:
+                barrier.wait(timeout=1)
                 return anti.reserve_budget_call(
                     args,
                     model="claude-sonnet-4-6",
@@ -38,6 +41,147 @@ class NormalizeAndFindingsTests(unittest.TestCase):
         self.assertEqual(sum(result is not None and not isinstance(result, Exception) for result in results), 1)
         self.assertEqual(sum(isinstance(result, anti.AntiError) for result in results), 3)
         self.assertTrue(all(getattr(result, "submitted", False) is False for result in results if isinstance(result, anti.AntiError)))
+
+    def test_panel_dry_run_plan_matches_mock_provider_stage_calls(self):
+        args = anti.build_parser().parse_args([
+            "panel", "--mode", "review", "--scope", "files", "--model", "sonnet", "--judge", "opus",
+            "--chunked", "auto", "--max-prompt-chars", "1200", "--max-review-chunks", "10",
+            "--allow-partial", "--no-verify", "--no-progress",
+        ])
+        args.resolved_panel_models = ["claude-sonnet-4-6", "claude-opus-4-6-thinking"]
+        context = {
+            "scope_line": "files",
+            "diff": "",
+            "file_texts": [("fixture.py", "x" * 6000)],
+            "file_records": [{"path": "fixture.py"}],
+            "paths": ["fixture.py"],
+            "excluded": [],
+            "caveats": [],
+        }
+        metadata = {"assembly_over_budget": True, "_review_context": context}
+        plan = anti.build_panel_execution_plan(
+            args=args,
+            prompt="initial prompt",
+            metadata=metadata,
+            panel_models=args.resolved_panel_models,
+            judge_model="claude-opus-4-6-thinking",
+        )
+        self.assertEqual([stage["name"] for stage in plan], ["review_chunk", "review_synthesis", "panel_lane", "judge"])
+        self.assertGreater(plan[0]["calls"], 1)
+
+        calls = []
+
+        def fake_generate(_args, *, model, prompt, purpose, **_kwargs):
+            calls.append(purpose)
+            return "answer " * 40, model, {"usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
+
+        with patch.object(anti, "generate_with_fallback", side_effect=fake_generate):
+            anti.run_chunked_review(
+                args=args,
+                context=context,
+                model="claude-sonnet-4-6",
+                base_metadata={},
+                max_prompt_chars=anti.prompt_budget_for_model(args, "claude-sonnet-4-6"),
+            )
+            for model in args.resolved_panel_models:
+                result = anti.run_panel_call(
+                    args=args,
+                    model=model,
+                    prompt="panel prompt",
+                    max_output_tokens=args.max_output_tokens,
+                    model_ids=set(args.resolved_panel_models + ["claude-opus-4-6-thinking"]),
+                )
+                self.assertEqual(result["status"], "success")
+            anti.generate_with_fallback(
+                args,
+                model="claude-opus-4-6-thinking",
+                prompt="judge prompt",
+                max_output_tokens=args.judge_output_tokens,
+                purpose="panel judge",
+            )
+
+        self.assertEqual(len(calls), sum(stage["calls"] for stage in plan))
+
+    def test_panel_budget_exhaustion_after_summary_blocks_panel_and_judge(self):
+        args = anti.build_parser().parse_args([
+            "panel", "--mode", "review", "--scope", "files", "--model", "sonnet", "--judge", "opus",
+            "--chunked", "auto", "--max-prompt-chars", "1200", "--max-review-chunks", "10",
+            "--allow-partial", "--no-verify", "--no-progress",
+        ])
+        args.resolved_panel_models = ["claude-sonnet-4-6", "claude-opus-4-6-thinking"]
+        context = {
+            "scope_line": "files",
+            "diff": "",
+            "file_texts": [("fixture.py", "x" * 6000)],
+            "file_records": [{"path": "fixture.py"}],
+            "paths": ["fixture.py"],
+            "excluded": [],
+            "caveats": [],
+        }
+        plan = anti.build_panel_execution_plan(
+            args=args,
+            prompt="initial prompt",
+            metadata={"assembly_over_budget": True, "_review_context": context},
+            panel_models=args.resolved_panel_models,
+            judge_model="claude-opus-4-6-thinking",
+        )
+        pre_panel = plan[:2]
+        chunks, chunk_metadata = anti.build_review_chunk_prompts(
+            context,
+            max_prompt_chars=anti.prompt_budget_for_model(args, "claude-sonnet-4-6"),
+            max_chunks=args.max_review_chunks,
+        )
+        synthesis_prompt, _, _ = anti.build_chunk_synthesis_prompt(
+            context=context,
+            chunks=chunks,
+            chunk_outputs=["answer " * 40] * len(chunks),
+            chunk_metadata=chunk_metadata,
+            max_chars=args.max_synthesis_chars,
+        )
+        args.budget = sum(
+            anti.estimate_call_cost("claude-sonnet-4-6", len(chunk["prompt"]), args.chunk_output_tokens)
+            for chunk in chunks
+        )
+        args.budget += anti.estimate_call_cost("claude-sonnet-4-6", len(synthesis_prompt), args.max_output_tokens)
+        provider_calls = []
+
+        def budgeted_generate(fake_args, *, model, prompt, max_output_tokens, purpose, **_kwargs):
+            reservation = anti.reserve_budget_call(
+                fake_args,
+                model=model,
+                prompt_chars=len(prompt),
+                max_output_tokens=max_output_tokens,
+                purpose=purpose,
+            )
+            provider_calls.append(purpose)
+            anti.settle_budget_call(
+                reservation,
+                model=model,
+                generation=None,
+                prompt_chars=len(prompt),
+                max_output_tokens=max_output_tokens,
+            )
+            return "answer " * 40, model, {}
+
+        with patch.object(anti, "generate_with_fallback", side_effect=budgeted_generate):
+            anti.run_chunked_review(
+                args=args,
+                context=context,
+                model="claude-sonnet-4-6",
+                base_metadata={},
+                max_prompt_chars=anti.prompt_budget_for_model(args, "claude-sonnet-4-6"),
+            )
+            with self.assertRaises(anti.AntiError):
+                anti.generate_with_fallback(
+                    args,
+                    model="claude-sonnet-4-6",
+                    prompt="panel prompt",
+                    max_output_tokens=args.max_output_tokens,
+                    purpose="panel model claude-sonnet-4-6",
+                )
+
+        self.assertEqual(len(provider_calls), sum(stage["calls"] for stage in pre_panel))
+        self.assertFalse(any("panel model" in purpose or purpose == "panel judge" for purpose in provider_calls))
 
     def test_panel_identity_preserves_requested_actual_and_fallback_defaults(self):
         identity = anti.panel_model_identity(requested_model="sonnet", actual_model="deepseek:deepseek-v4-pro", fallback_used=True)
@@ -83,6 +227,39 @@ class NormalizeAndFindingsTests(unittest.TestCase):
 
 
 class RoutingAndCostTests(unittest.TestCase):
+    def test_retry_after_hint_controls_bounded_provider_retry(self):
+        responses = iter([
+            (429, {"_retry_after_seconds": 2}),
+            (200, {"output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}], "usage": {"total_tokens": 2}}),
+        ])
+        with patch.object(anti, "request_json", side_effect=lambda *args, **kwargs: next(responses)):
+            with patch.object(anti.time, "sleep") as sleep:
+                result = anti.post_response(
+                    base_url="http://127.0.0.1:51122/v1",
+                    model="claude-sonnet-4-6",
+                    prompt="retry",
+                    max_output_tokens=10,
+                    timeout=5,
+                    token_env=anti.DEFAULT_TOKEN_ENV,
+                    retries=1,
+                    model_ids={"claude-sonnet-4-6"},
+                )
+
+        self.assertEqual(str(result), "ok")
+        sleep.assert_called_once_with(2.0)
+
+    def test_budget_refuses_unknown_model_price_before_state_or_provider(self):
+        args = argparse.Namespace(budget=1.0)
+        with self.assertRaisesRegex(anti.AntiError, "price.*unknown"):
+            anti.reserve_budget_call(
+                args,
+                model="mystery:unpriced",
+                prompt_chars=100,
+                max_output_tokens=10,
+                purpose="unknown-price",
+            )
+        self.assertFalse(hasattr(args, "_anti_budget_state"))
+
     def test_current_gemini_flash_aliases_target_38(self):
         self.assertEqual(anti.resolve_model("claude-opus", default="sonnet"), "claude-opus-4-6-thinking")
         self.assertEqual(anti.resolve_model("flash", default="sonnet"), "gemini-3.8-flash")

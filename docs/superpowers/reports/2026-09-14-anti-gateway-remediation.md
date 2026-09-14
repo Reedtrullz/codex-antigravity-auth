@@ -14,7 +14,7 @@ Offline remediation evidence through T15:
 - T3/T4: upstream incomplete/empty output is not a completed answer; partial panel/review/plan results retain artifacts and exit nonzero, while successful retries remain zero; capped plans refuse exact execution unless `--allow-partial` is explicit.
 - T5: consult summary artifacts retain the complete answer; finding provenance clears model-forged chunk/excerpt fields and derives excerpt hashes only from the captured snapshot.
 - Focused Anti/gateway regression suite after the reopened checkpoint: `374 passed, 80 subtests, 2 warnings`.
-- Full suite with the repository's 1Password signing configuration isolated for temporary Git fixtures: `798 passed, 220 subtests, 2 warnings`.
+- Full suite with the repository's 1Password signing configuration isolated for temporary Git fixtures: `802 passed, 220 subtests, 2 warnings`.
 - `uv pip check --python .venv/bin/python`: 31 packages compatible.
 - `git diff --check`: pass.
 
@@ -42,7 +42,7 @@ Baseline evidence (2026-09-14):
 | A1 | fixed offline | `90c719f` plus Anti commits | Exact-off planning refuses before generation; capped execution remains partial/nonzero. |
 | A2 | fixed offline | `90c719f` | Chunk ledger preserves completed/failed/not-sent buckets and submitted vs reviewed bytes. |
 | A3 | fixed offline | `90c719f` | Upstream incomplete and completed-empty responses retain distinct non-success classifications. |
-| A4 | fixed offline | `90c719f` | Shared locked admission covers every provider attempt; zero-budget and concurrent last-allowance tests make no provider call when refused. |
+| A4 | fixed offline | current remediation patch | Shared locked admission covers every provider attempt; panel dry-run and execution share chunk/synthesis/lane/judge stage planning; budget exhaustion after summary blocks panel/judge calls; first-state initialization is barrier-tested; Retry-After and unknown-price refusal are explicit. |
 | A5 | fixed offline | `90c719f` | Complete consult answer remains retrievable in the result artifact; prompt retention uses hashes/counts and sanitized outputs. |
 | A6 | fixed offline | `90c719f` | Parse/truncation/loss facts force partial status and nonzero exit. |
 | A7 | fixed offline | `90c719f` | Provenance is derived from captured scope/chunk ranges; forged unresolved fields clear to null. |
@@ -59,7 +59,7 @@ Baseline evidence (2026-09-14):
 | G8 | fixed offline | current remediation patch | Platform probes distinguish registered/loaded from running, then compose installed/active/reachable; registered-but-unreachable is `active_unreachable`, while a reachable managed service is `ready`. |
 | R1 | fixed offline | `340ec96` | OAuth login uses transactional per-account merge and preserves concurrent account state. |
 | R2 | fixed offline | `90c719f` | Reflection read-modify-write is cross-process locked and atomic; concurrent writers, pruning and symlink sentinels are tested. |
-| D1 | fixed offline | `13e8df9`, `a3b97ff`, `90c719f` | README/SKILL describe partial exits, retention, estimates, parity and non-claims; no new broad abstraction was introduced. |
+| D1 | fixed offline | `13e8df9`, `a3b97ff`, `90c719f`, current remediation patch | README/SKILL describe partial exits, retention, estimates, parity and non-claims; dry-run labels heuristic tiers versus unknown provider prices; no new broad abstraction was introduced. |
 
 ## Verification boundary
 
@@ -68,7 +68,7 @@ Baseline evidence (2026-09-14):
 - A1/A9/T4: `test_review_partial_scope_fails_preflight_without_allow_partial`, `test_chunked_off_refuses_incomplete_content_before_model_call`, and `test_capped_plan_is_partial_and_nonzero`.
 - A2/T1-T2: `test_staged_git_scope_is_nul_safe_and_includes_deletions_renames`, `test_partial_chunk_manifest_reports_bytes_and_boundaries`, and `test_chunk_failure_separates_failed_from_never_sent_chunks`.
 - A3/A6/T3-T4: `test_upstream_incomplete_and_empty_completed_are_not_success`, `test_diff_review_marks_incomplete_when_cap_cuts_diff_parts`, and `test_partial_panel_cannot_report_complete_panel_status`.
-- A4/T6: `test_budget_admission_allows_only_one_concurrent_last_allowance`, `test_chunked_plan_budget_refusal_keeps_completed_progress_and_makes_no_extra_call`, and `test_dry_run_reports_stages_prices_retries_and_unknowns`.
+- A4/T6: `test_budget_admission_allows_only_one_concurrent_last_allowance`, `test_panel_dry_run_plan_matches_mock_provider_stage_calls`, `test_panel_budget_exhaustion_after_summary_blocks_panel_and_judge`, `test_retry_after_hint_controls_bounded_provider_retry`, `test_budget_refuses_unknown_model_price_before_state_or_provider`, `test_chunked_plan_budget_refusal_keeps_completed_progress_and_makes_no_extra_call`, and `test_dry_run_reports_stages_prices_retries_and_unknowns`.
 - A5/A7/T5: `test_consult_truncated_output_retries_and_saves_full_output`, `test_run_record_has_stable_result_artifact`, `test_enrich_finding_provenance_rejects_forged_chunk_and_uses_snapshot`, and `test_enrich_finding_provenance_clears_unresolved_hashes_and_ranges`.
 - A8/T1: `ScopeIntegrityContractTests.test_staged_git_scope_is_nul_safe_and_includes_deletions_renames`.
 - A10/T7: `test_install_codex_skill_copies_bundled_anti_skill`, `test_install_codex_skill_does_not_follow_symlinked_existing_files`, and the parity checks in the Anti/CLI suite.
@@ -83,7 +83,7 @@ Baseline evidence (2026-09-14):
 
 ## Acceptance boundary
 
-The reopened offline blocker suite is green in the current worktree: `798
+The reopened offline blocker suite is green in the current worktree: `802
 passed, 220 subtests, 2 warnings`. Exact closure evidence includes
 `test_hard_refresh_failure_persists_for_select_and_acquire`,
 `test_selection_does_not_wait_on_background_same_account_refresh`,
@@ -93,7 +93,14 @@ passed, 220 subtests, 2 warnings`. Exact closure evidence includes
 `test_macos_loaded_but_stopped_is_not_active`,
 `test_macos_running_and_windows_registered_states_are_distinct`,
 `test_run_gateway_status_uses_waiting_reachability_probe`, and
-`test_run_gateway_status_marks_registered_but_unreachable_service_degraded`.
+`test_run_gateway_status_marks_registered_but_unreachable_service_degraded`,
+`test_panel_dry_run_plan_matches_mock_provider_stage_calls`,
+`test_panel_budget_exhaustion_after_summary_blocks_panel_and_judge`,
+`test_retry_after_hint_controls_bounded_provider_retry`, and
+`test_budget_refuses_unknown_model_price_before_state_or_provider`.
+An actual worktree CLI dry-run for a file review produced stages
+`review_chunk=2`, `review_synthesis=1`, `panel_lane=1`, `judge=1` and reported
+`pricing_basis=heuristic_tier; provider prices are not known at dry-run time`.
 Coordinator acceptance remains pending review of this closure. The temporary Git-fixture failures under the normal environment were
 caused by the user's global 1Password SSH signing hook; the authoritative full
 suite run used `GIT_CONFIG_GLOBAL=/dev/null` and did not change repository or
