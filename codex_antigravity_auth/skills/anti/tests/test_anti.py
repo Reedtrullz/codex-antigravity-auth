@@ -4899,6 +4899,49 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertEqual(coverage["files"][0]["contentStatus"], "complete")
         self.assertEqual(coverage["files"][0]["bytesReviewed"], len(source.encode("utf-8")))
 
+    def test_incomplete_synthesis_does_not_mark_reviewed_file_omitted(self) -> None:
+        anti = load_anti()
+        source = "".join(f"LINE_{index:03d} = '{index:03d}-" + ("x" * 44) + "'\n" for index in range(100))
+
+        def generate(_args, *, model, prompt, **_kwargs):
+            if "Chunked Review Manifest" in prompt:
+                return "synthesis" + ("x" * 9000), model, {
+                    "usage": {"input_tokens": 1, "output_tokens": 2048, "total_tokens": 2049}
+                }
+            return "chunk", model, {
+                "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+            }
+
+        anti.generate_with_fallback = generate
+        with tempfile.TemporaryDirectory(prefix="anti-incomplete-synthesis-") as tmp:
+            root = Path(tmp) / "workspace"
+            root.mkdir()
+            (root / "fixture.py").write_bytes(source.encode("utf-8"))
+            anti.RUNS_DIR = Path(tmp) / "runs"
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                rc = anti.main([
+                    "panel", "--mode", "review", "--scope", "files", "--file", "fixture.py",
+                    "--model", "sonnet", "--model", "opus", "--judge", "opus",
+                    "--max-prompt-chars", "3000", "--max-review-chunks", "0",
+                    "--chunked", "always", "--max-output-tokens", "2048",
+                    "--run-id", "incomplete-synthesis", "--save-output", "summary",
+                    "--json", "--no-progress",
+                ])
+            finally:
+                os.chdir(old_cwd)
+
+            artifact = json.loads(
+                (anti.RUNS_DIR / "incomplete-synthesis" / "result.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(artifact["coverage"]["includedFiles"], ["fixture.py"])
+        self.assertEqual(artifact["coverage"]["omittedFiles"], [])
+        self.assertEqual(artifact["coverage"]["chunksCompleted"], 3)
+        self.assertEqual(artifact["coverage"]["files"][0]["contentStatus"], "complete")
+
     def test_required_file_cannot_be_dropped_by_chunk_cap(self) -> None:
         anti = load_anti()
         with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:

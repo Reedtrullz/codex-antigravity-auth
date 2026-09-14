@@ -3608,11 +3608,7 @@ def run_chunked_review(
                 + synthesis_status
                 + "; pass --allow-partial to continue with an explicitly partial result"
             )
-            exc.run_metadata = {
-                **base_metadata,
-                **chunk_metadata,
-                "scope_status": "partial",
-            }  # type: ignore[attr-defined]
+            exc.run_metadata = failure_metadata(scope_status="partial")  # type: ignore[attr-defined]
             raise exc
     if chunk_metadata["omitted_items"]:
         caveats.append("Chunked review omitted items: " + ", ".join(chunk_metadata["omitted_items"][:20]))
