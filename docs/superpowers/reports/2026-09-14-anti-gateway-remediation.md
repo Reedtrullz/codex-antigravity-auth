@@ -498,6 +498,23 @@ remains open and unchanged. No candidate installation, local skill update,
 merge, close, credential/provider change, or production-readiness claim was
 made.
 
+## 2026-09-14 — Hermetic regression and CI closure
+
+The first forward-report push exposed a CI-only failure in the new incomplete-
+synthesis provenance regression: its generation stub was isolated, but its
+model-catalog lookup was not, so GitHub-hosted runners attempted
+`127.0.0.1:51122/v1/models` and observed connection refused. The sibling
+synthesis-failure regression already stubbed that boundary. Commit `4e8a242`
+adds the same two-model `fetch_model_ids` stub to the incomplete-synthesis test;
+production code is unchanged.
+
+Focused evidence: `1 passed, 206 deselected`. Authoritative local evidence:
+`825 passed, 220 subtests, 2 warnings`. Fresh CI for `4e8a242` is green in
+both PR run `34898375340` and push run `34898371468`, covering package plus
+Ubuntu Python 3.10/3.11/3.12/3.14 and Windows Python 3.12. The live gateway
+trial remains terminally failed at synthesis and was not repeated; merge,
+install, and release acceptance remain owner-gated.
+
 No-force-push record: the previously disclosed historical rewrite was
 `164988f29bac2a917bd2ba9f3de3891eeadd4f11 ->
 c484a7f05d6cf5ce46efb280474405e15cbcf358`, and read-only diff inspection shows
