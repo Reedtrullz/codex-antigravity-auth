@@ -50,6 +50,7 @@ from codex_antigravity_auth.cli import (
     start_gateway_background,
     stop_gateway,
     upsert_google_account,
+    verify_codex_skill,
     validate_codex_model_id,
     validate_codex_provider_name,
     version_check_result,
@@ -1127,6 +1128,13 @@ class TestInstallSkill(unittest.TestCase):
             verify.assert_called_once()
             self.assertTrue((Path(tmp) / "anti" / "SKILL.md").is_file())
 
+    def test_verify_codex_skill_rejects_bundle_mismatch(self):
+        with TemporaryDirectory() as tmp:
+            _action, destination, _backup = install_codex_skill(Path(tmp))
+            (destination / "SKILL.md").write_text("local drift\n", encoding="utf-8")
+
+            self.assertFalse(verify_codex_skill(destination))
+
     def test_main_install_skill_command_uses_temp_skill_dir(self):
         with TemporaryDirectory() as tmp:
             argv = ["codex-antigravity", "install-skill", "--skill-dir", tmp]
@@ -1982,6 +1990,22 @@ class TestV3NativeSetup(unittest.TestCase):
 
         self.assertTrue(info["reachable"])
         status_info.assert_called_once_with(51122, wait=True, timeout=5.0)
+        self.assertTrue(info["service"]["reachable"])
+        self.assertEqual(info["service"]["state"], "ready")
+
+    def test_run_gateway_status_marks_registered_but_unreachable_service_degraded(self):
+        with patch(
+            "codex_antigravity_auth.cli.reachable_gateway_status_info",
+            return_value={"port": 51122, "status": "stopped", "reachable": False, "reachability_error": "connection refused"},
+        ):
+            with patch("codex_antigravity_auth.cli.service_status", return_value={"installed": True, "active": True}):
+                with patch("codex_antigravity_auth.cli.request_log_info", return_value={"path": "requests.jsonl"}):
+                    with patch("builtins.print"):
+                        info = run_gateway_status(Namespace(port=51122, json=True))
+
+        self.assertFalse(info["reachable"])
+        self.assertFalse(info["service"]["reachable"])
+        self.assertEqual(info["service"]["state"], "active_unreachable")
 
     def test_codex_ready_treats_unmanaged_reachable_gateway_as_process_ready(self):
         with TemporaryDirectory() as tmp:

@@ -4,7 +4,7 @@ import time
 import unittest
 import warnings
 from importlib import metadata as importlib_metadata
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import urllib.error
 
 import httpx
@@ -33,9 +33,12 @@ from codex_antigravity_auth.schema import clean_json_schema
 from codex_antigravity_auth.server import (
     GOOGLE_BACKEND_TIMEOUT_MAX_SECONDS,
     GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS,
+    GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS,
+    GOOGLE_REQUEST_TIMEOUT_MIN_SECONDS,
     app,
     build_headers,
     google_backend_timeout_from_metadata,
+    google_request_timeout_from_metadata,
     retry_after_seconds_from_response,
     select_active_account_for_request,
 )
@@ -214,6 +217,35 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         mock_schedule.assert_not_called()
 
+    def test_responses_endpoint_rejects_malformed_tool_schema_before_provider(self):
+        malformed = [
+            {"type": "function", "function": {"name": "lookup", "parameters": {"$ref": 7}}},
+            {"type": "function", "function": {"name": "lookup", "parameters": {"properties": []}}},
+        ]
+        for tools in malformed:
+            with self.subTest(tools=tools):
+                with patch("codex_antigravity_auth.server.select_active_account_for_request") as select:
+                    response = TestClient(app).post(
+                        "/v1/responses",
+                        json={"model": "gemini-3.8-flash", "input": "hello", "tools": [tools]},
+                    )
+                self.assertEqual(response.status_code, 400)
+                select.assert_not_called()
+
+    def test_responses_endpoint_accepts_flat_and_nested_tool_schema_shapes(self):
+        forms = [
+            {"type": "function", "name": "lookup", "parameters": {"$ref": "#/defs/input"}},
+            {"type": "function", "function": {"name": "lookup", "parameters": {"$ref": "#/defs/input"}}},
+        ]
+        for tool in forms:
+            with self.subTest(tool=tool):
+                with patch("codex_antigravity_auth.server.select_active_account_for_request", new_callable=AsyncMock, return_value=None):
+                    response = TestClient(app).post(
+                        "/v1/responses",
+                        json={"model": "custom:anything", "input": "hello", "tools": [tool]},
+                    )
+                self.assertEqual(response.status_code, 404)
+
     def test_byok_stream_writes_terminal_request_log_record(self):
         provider = {
             "id": "mock",
@@ -227,8 +259,9 @@ class TestRegressionFixes(unittest.TestCase):
 
         async def fake_sse_generator(*args, **kwargs):
             yield (
-                'data: {"id":"chatcmpl-1","choices":[{"finish_reason":"stop","delta":{}}],'
-                '"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}\n\n'
+                'data: {"type":"response.completed","response":{"status":"completed",'
+                '"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3},'
+                '"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}\n\n'
             )
             yield "data: [DONE]\n\n"
 
@@ -241,7 +274,7 @@ class TestRegressionFixes(unittest.TestCase):
                     )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("finish_reason", response.text)
+        self.assertIn("response.completed", response.text)
         self.assertEqual([record["status"] for record in records], ["stream_started", "success"])
         self.assertEqual(records[-1]["usage"], {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3})
 
@@ -1082,6 +1115,7 @@ class TestRegressionFixes(unittest.TestCase):
         client = TestClient(app)
         invalid_requests = [
             ({"temperature": "hot"}, "temperature must be a finite number"),
+            ({"temperature": 10**400}, "temperature must be a finite number"),
             ({"temperature": 3}, "temperature must be between 0 and 2"),
             ({"top_p": 2}, "top_p must be between 0 and 1"),
             ({"max_output_tokens": True}, "max_output_tokens must be a positive integer"),
@@ -1220,6 +1254,22 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertIn("metadata.antigravity_backend_timeout_seconds", response.json()["detail"])
         mock_acquire.assert_not_called()
 
+    def test_responses_endpoint_rejects_invalid_google_request_timeout_metadata(self):
+        client = TestClient(app)
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_acquire:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "model": "claude-opus-4-6-thinking",
+                    "input": "hello",
+                    "metadata": {"antigravity_request_timeout_seconds": "slow"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("metadata.antigravity_request_timeout_seconds", response.json()["detail"])
+        mock_acquire.assert_not_called()
+
     def test_google_backend_timeout_reader_clamps_internal_metadata(self):
         self.assertEqual(
             google_backend_timeout_from_metadata({"antigravity_backend_timeout_seconds": 9999}),
@@ -1228,6 +1278,16 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(
             google_backend_timeout_from_metadata({"antigravity_backend_timeout_seconds": -5}),
             GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS,
+        )
+
+    def test_google_request_timeout_reader_clamps_internal_metadata(self):
+        self.assertEqual(
+            google_request_timeout_from_metadata({"antigravity_request_timeout_seconds": 9999}),
+            GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS,
+        )
+        self.assertEqual(
+            google_request_timeout_from_metadata({"antigravity_request_timeout_seconds": -5}),
+            GOOGLE_REQUEST_TIMEOUT_MIN_SECONDS,
         )
 
     def test_responses_endpoint_rejects_malformed_tool_choice_before_routing(self):

@@ -151,7 +151,13 @@ class AccountState:
     def state(self) -> dict[str, Any]:
         return self.data["accountState"]
 
-    def _select(self, family: str, *, acquire: bool) -> Lease | None:
+    def _select(
+        self,
+        family: str,
+        *,
+        acquire: bool,
+        exclude_emails: set[str] | None = None,
+    ) -> Lease | None:
         if family not in FAMILIES:
             raise ValueError(f"unsupported model family: {family}")
         with self._lock:
@@ -170,6 +176,8 @@ class AccountState:
                 if not isinstance(account, dict) or not account.get("email"):
                     continue
                 email = str(account["email"])
+                if exclude_emails and email in exclude_emails:
+                    continue
                 scoped = self.state["cooldowns"].get(email, {})
                 if scoped.get("account", 0) > now or scoped.get(family, 0) > now:
                     continue
@@ -187,11 +195,11 @@ class AccountState:
                 self._in_flight[email] = self._in_flight.get(email, 0) + 1
             return Lease(account=account, family=family)
 
-    def select(self, family: str) -> Lease | None:
-        return self._select(family, acquire=False)
+    def select(self, family: str, *, exclude_emails: set[str] | None = None) -> Lease | None:
+        return self._select(family, acquire=False, exclude_emails=exclude_emails)
 
-    def acquire(self, family: str) -> Lease | None:
-        return self._select(family, acquire=True)
+    def acquire(self, family: str, *, exclude_emails: set[str] | None = None) -> Lease | None:
+        return self._select(family, acquire=True, exclude_emails=exclude_emails)
 
     def release(self, lease: Lease | None) -> None:
         if lease is not None:

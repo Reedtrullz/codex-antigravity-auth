@@ -221,19 +221,22 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - V2 workflow presets default to sanitized run summaries under `~/.codex/anti-runs`; use `runs list`, `runs show <id>`, and `runs clean --older-than N` (add `--dry-run` to preview deletions) to inspect or prune them. Primitive commands default to `--save-output never`; pass `--save-output summary` or `--save-output full` only when useful.
 - Repo-level reflection memory passively records review findings per repo under `~/.codex/anti-runs/reflections/` for pattern analysis. Use `runs reflections --repo <path>` to show summary (recurring fingerprints, severity distribution, most-reviewed files) and recent history. Pass `--clear` to reset. Reflections never suppress findings; they only surface patterns. Files are stored at 0600 permissions.
 - The helper emits a cost-awareness hint to stderr when a quota/paid-tier model is selected and free alternatives of similar quality are available. Use `--model <free-alias>` to switch.
-- `--dry-run` prints token estimates and cost tiers without contacting the gateway. Available on `consult`, `review`, `plan`, `panel`, and `workflow` commands.
+- `--dry-run` prints token estimates, stage/call counts, token ceilings, known cost tiers, bounded retry allowance, and runtime-unknown billing/usage caveats without contacting the gateway. Available on `consult`, `review`, `plan`, `panel`, and `workflow` commands.
+- The helper records its executed tree hash and, when a bundled package tree is discoverable, reports parity as `match`, `mismatch`, or `unverifiable`; a detectable mismatch refuses provider generation before the first POST.
 - Treat sidecar and panel findings as leads. Consensus is not proof. Before editing, verify actionable claims with local source inspection, official docs when relevant, typecheck/tests, or a small reproducer; record dubious or unverified claims as caveats instead of patching them blindly.
 
 ## New Flags
 
 - `--auto-route` — Automatically pick the cheapest adequate model based on diff size and file risk. Small diffs use flash-3.8, medium use sonnet, large or high-risk files use opus. Only activates when `--model` is not explicitly passed.
-- `--budget <cost>` — Maximum estimated cost for a run. Skips remaining panel lanes when the cap is exceeded. Cost is in arbitrary units (not real USD), tracked per lane with estimated vs actual.
+- `--budget <cost>` — Maximum estimated cost for a run. Admission happens before each chunk/synthesis/lane/judge call; refused work is marked not-sent. Cost is in arbitrary units (not real USD), with estimated ceilings, observed usage, and unknown-usage markers kept separate.
 - `--no-verify` — Skip evidence-linked verification of findings (syntax, secrets, eslint checks on referenced files).
 - `--no-anonymize` — Preserve original model names and lane order in judge synthesis (default: anonymize and shuffle).
+- `--required-file <path>` — Require every chunk for these paths to be sent; repeatable and fail-closed when the cap cannot cover them.
+- `--min-providers <N>` — Require successful lanes from at least N distinct actual providers before panel judging.
 
 ## Agent Execution Pattern
 
-**anti.py runs synchronously.** Every command (`consult`, `review`, `plan`, `panel`, `workflow`) blocks until the API response arrives and prints the result directly to stdout. There is no background mode and no separate output file to poll.
+**anti.py runs synchronously.** Every command (`consult`, `review`, `plan`, `panel`, `workflow`) blocks until the API response arrives and prints the result directly to stdout. With `--save-output summary` or `--save-output full`, it also writes a stable result artifact at `resultPath` (`~/.codex/anti-runs/<runId>/result.json`) for reliable retrieval after a long run.
 
 ### Correct pattern for Codex agents
 
@@ -244,14 +247,15 @@ exec_command(
   yield_time_ms=120000  # 2 minutes for consults; 300s for panels/reviews
 )
 # Read the result from stdout — no file polling needed
+# For saved runs, read the returned resultPath/result.json as the complete artifact.
 ```
 
 ### What NOT to do
 
-1. **Do NOT background the process** and poll for output files in `~/.codex/anti-runs/`. The `--save-output` flag writes a run record for auditing, not for primary result retrieval.
+1. **Do NOT background the process** and poll for a completion signal. Run it in the foreground; if a saved result is needed after completion, use the returned `resultPath` and `result.json` artifact.
 2. **Do NOT use `sleep N && cat ...` polling loops.** If `exec_command` times out, the process is still running — use `write_stdin` with the session_id or check `ps aux | grep anti.py` to verify, then decide whether to wait longer or abort.
 3. **Do NOT escalate sleep durations** (60s → 90s → 120s → ...) as a recovery strategy. After 2-3 failed waits, report the situation to the user.
-4. **Do NOT assume output lands in a specific file path.** The run record path includes a timestamp that may not match a naive glob. stdout is the primary output channel.
+4. **Do NOT assume stdout preview is complete.** Use `resultPath` and its `result.json` artifact for the full saved result, including coverage, statuses, findings, and verification state.
 
 ### Timeout recovery
 
@@ -271,6 +275,8 @@ Panel findings use an enriched schema with provenance and dedup:
 - `verify` — a concrete local check Codex should run before acting
 - `lanes` — array of model identities that support this finding
 - `fingerprint` — sha256 hash for cross-lane dedup (same file+line+claim)
+- `sourceCommit` / `chunkId` / `laneId` — source and execution provenance when available
+- `verificationStatus` — `unverified` until the native agent confirms or rejects the claim; helper evidence does not promote it automatically
 
 Cross-lane dedup is automatic: when multiple lanes produce findings with the same fingerprint, they are merged (lanes combined, highest severity kept, confidence averaged).
 
@@ -310,12 +316,13 @@ Use `--role` multiple times for different lenses: `--role security --role correc
 
 - Do not include secrets, OAuth material, provider keys, key files, `.env` files, encrypted account/provider stores, or credential JSON in review prompts.
 - The helper excludes common secret/cached/binary paths by default. If it reports exclusions, mention that scope caveat.
+- Review sources are never silently truncated. `--chunked auto` records per-file/per-chunk coverage; `--chunked off` is exact-or-refuse when the requested scope exceeds the budget. Use `--allow-partial` only when an explicitly partial result is acceptable.
 - Do not run `setup`, `setup-google`, or `configure-codex` unless the user explicitly asks for setup/configuration.
 - Prefer `--api-key-env` workflows in the underlying `codex-antigravity` CLI; do not put provider keys into chat, shell history, notes, or prompt files.
 - If a panel includes BYOK `provider:model` lanes and repo/diff/file context, the helper prints a BYOK disclosure and records it in the run caveats. Treat that as an explicit reminder that code context is leaving the Google Antigravity lane for the named provider.
 - If the gateway is remote, use `--gateway-token-env` rather than passing bearer tokens in argv.
 - Do not use panel mode as an always-on background swarm. Keep model counts, roles, tokens, retries, and scope bounded.
-- Run ledgers are sanitized, but avoid `--save-output full` for prompts that may contain credentials, OAuth material, `.env` content, or private account/provider stores.
+- Run ledgers never retain raw prompts. Full mode stores sanitized per-call outputs and prompt hashes/counts; still avoid saving outputs that may contain credentials, OAuth material, `.env` content, or private account/provider stores.
 - Helper workflows remain advisory. They do not create true Codex subagents, gateway virtual `panel:*`, `moa:*`, or `fusion:*` picker models, automatic code edits, recursive swarms, or background always-on model calls.
 
 ## Output Shape

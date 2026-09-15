@@ -10,11 +10,42 @@ from codex_antigravity_auth.transform import (
     clean_function_call_args,
     resolve_backend_model,
     transform_request,
+    transform_request_to_chat,
 )
 from codex_antigravity_auth.schema import clean_json_schema
 from tests.conftest import _legacy_transform_response as transform_response
 
 class TestTransformationEdgeCases(unittest.TestCase):
+    def test_adjacent_function_calls_share_one_assistant_tool_call_turn(self):
+        payload = transform_request_to_chat(
+            {
+                "input": [
+                    {"type": "function_call", "call_id": "call_a", "name": "a", "arguments": "{}"},
+                    {"type": "function_call", "call_id": "call_b", "name": "b", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call_a", "output": "a-result"},
+                    {"type": "function_call_output", "call_id": "call_b", "output": "b-result"},
+                ]
+            },
+            "deepseek-chat",
+        )
+        self.assertEqual([message["role"] for message in payload["messages"]], ["assistant", "tool", "tool"])
+        self.assertEqual(
+            [call["id"] for call in payload["messages"][0]["tool_calls"]],
+            ["call_a", "call_b"],
+        )
+
+    def test_function_calls_do_not_group_across_user_turn(self):
+        payload = transform_request_to_chat(
+            {
+                "input": [
+                    {"type": "function_call", "call_id": "call_a", "name": "a", "arguments": "{}"},
+                    {"role": "user", "content": "intervening"},
+                    {"type": "function_call", "call_id": "call_b", "name": "b", "arguments": "{}"},
+                ]
+            },
+            "deepseek-chat",
+        )
+        self.assertEqual([message["role"] for message in payload["messages"]], ["assistant", "user", "assistant"])
     def test_colon_form_reserved_prefixes_resolve_like_slash_form(self):
         # `openai:sonnet` is the natural colon spelling (used by every other
         # provider prefix) and must resolve the same way `openai/sonnet` does.

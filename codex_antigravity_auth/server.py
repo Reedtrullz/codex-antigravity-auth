@@ -6,9 +6,10 @@ import secrets
 import sys
 import time
 import httpx
+import anyio
 import email.utils
 import re
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
 from urllib.parse import urlparse
@@ -16,6 +17,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.requests import ClientDisconnect
 from .accounts import AccountManager, classify_backend_status, is_validation_required_error
 from .account_state import scoped_cooldown_expiry
 from .byok import (
@@ -52,6 +54,7 @@ from .google_transport import (
     outcome_for_http_status,
 )
 from .openai_transport import (
+    NativeResponsesStreamAdapter,
     OpenAICompatibleTransport,
     PreparedOpenAIRequest,
     TransportConfigError,
@@ -98,6 +101,10 @@ GOOGLE_BACKEND_TIMEOUT_SECONDS = 60.0
 GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS = 1.0
 GOOGLE_BACKEND_TIMEOUT_MAX_SECONDS = 600.0
 GOOGLE_BACKEND_TIMEOUT_METADATA_KEY = "antigravity_backend_timeout_seconds"
+GOOGLE_REQUEST_TIMEOUT_METADATA_KEY = "antigravity_request_timeout_seconds"
+GOOGLE_REQUEST_TIMEOUT_MIN_SECONDS = 1.0
+GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS = 600.0
+CLIENT_DISCONNECT_POLL_SECONDS = 0.1
 TEST_CLIENT_HOSTS = {"testserver"}
 REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
     native_responses=True,
@@ -136,6 +143,10 @@ class OpenAIUpstreamHTTPError(Exception):
         self.status_code = status_code
         self.body = body
         self.retry_after = retry_after
+
+
+class RequestDeadlineExceeded(Exception):
+    """The bounded native non-stream request budget expired."""
 
 
 def local_package_version() -> str:
@@ -246,7 +257,11 @@ async def acquire_active_account_for_request(model: str) -> dict | None:
 
 
 async def release_account_for_request(email: str | None) -> None:
-    await run_in_threadpool(account_manager.release_account, email)
+    await anyio.to_thread.run_sync(
+        account_manager.release_account,
+        email,
+        abandon_on_cancel=True,
+    )
 
 
 async def record_attempt_outcome(
@@ -258,16 +273,18 @@ async def record_attempt_outcome(
     usage: dict | None = None,
     error_class: str | None = None,
 ) -> None:
-    await run_in_threadpool(
-        account_manager.record_attempt,
-        email,
-        model,
-        outcome,
-        status_code=status_code,
-        error_class=(
-            None if outcome.category == "success" else (error_class or outcome.category)
+    await anyio.to_thread.run_sync(
+        lambda: account_manager.record_attempt(
+            email,
+            model,
+            outcome,
+            status_code=status_code,
+            error_class=(
+                None if outcome.category == "success" else (error_class or outcome.category)
+            ),
+            usage=usage,
         ),
-        usage=usage,
+        abandon_on_cancel=True,
     )
 
 
@@ -805,9 +822,19 @@ def validate_response_request_body(value: object) -> dict:
                 maximum=GOOGLE_BACKEND_TIMEOUT_MAX_SECONDS,
             )
             normalized_metadata[GOOGLE_BACKEND_TIMEOUT_METADATA_KEY] = float(backend_timeout)
+        request_timeout = metadata.get(GOOGLE_REQUEST_TIMEOUT_METADATA_KEY)
+        if request_timeout is not None:
+            validate_finite_number_option(
+                request_timeout,
+                f"metadata.{GOOGLE_REQUEST_TIMEOUT_METADATA_KEY}",
+                minimum=GOOGLE_REQUEST_TIMEOUT_MIN_SECONDS,
+                maximum=GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS,
+            )
+            normalized_metadata[GOOGLE_REQUEST_TIMEOUT_METADATA_KEY] = float(request_timeout)
         value["metadata"] = normalized_metadata
     validate_response_generation_options(value)
     validate_response_tool_choice(value)
+    validate_response_tool_schemas(value)
     try:
         validate_capabilities(value, REQUEST_BOUNDARY_CAPABILITIES)
     except CapabilityError as exc:
@@ -826,10 +853,26 @@ def google_backend_timeout_from_metadata(metadata: object) -> float:
     return GOOGLE_BACKEND_TIMEOUT_SECONDS
 
 
+def google_request_timeout_from_metadata(metadata: object) -> float:
+    if isinstance(metadata, dict):
+        value = metadata.get(GOOGLE_REQUEST_TIMEOUT_METADATA_KEY)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+            return max(
+                GOOGLE_REQUEST_TIMEOUT_MIN_SECONDS,
+                min(GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS, float(value)),
+            )
+    return GOOGLE_BACKEND_TIMEOUT_SECONDS
+
+
 def validate_finite_number_option(value: object, field_name: str, *, minimum: float, maximum: float | None = None) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise HTTPException(status_code=400, detail=f"{field_name} must be a finite number")
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a finite number") from exc
+    if not math.isfinite(number):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a finite number")
     if number < minimum or (maximum is not None and number > maximum):
         if maximum is None:
             raise HTTPException(status_code=400, detail=f"{field_name} must be greater than or equal to {minimum:g}")
@@ -872,6 +915,43 @@ def validate_response_tool_choice(codex_req: dict) -> None:
             status_code=400,
             detail="tool_choice function name must contain only letters, numbers, underscores, and hyphens, and be 1-64 characters",
         )
+
+
+def validate_response_tool_schemas(codex_req: dict) -> None:
+    """Reject malformed tool schemas before any provider/account work."""
+    tools = codex_req.get("tools")
+    if not isinstance(tools, list):
+        return
+
+    def visit(schema: object, path: str) -> None:
+        if not isinstance(schema, dict):
+            raise HTTPException(status_code=400, detail=f"{path} must be an object")
+        if "$ref" in schema and not isinstance(schema["$ref"], str):
+            raise HTTPException(status_code=400, detail=f"{path}.$ref must be a string")
+        if "properties" in schema:
+            properties = schema["properties"]
+            if not isinstance(properties, dict):
+                raise HTTPException(status_code=400, detail=f"{path}.properties must be an object")
+            for name, child in properties.items():
+                visit(child, f"{path}.properties[{name!r}]")
+        if "items" in schema:
+            visit(schema["items"], f"{path}.items")
+        for key in ("anyOf", "oneOf", "allOf"):
+            if key in schema:
+                options = schema[key]
+                if not isinstance(options, list):
+                    raise HTTPException(status_code=400, detail=f"{path}.{key} must be an array")
+                for index, option in enumerate(options):
+                    visit(option, f"{path}.{key}[{index}]")
+
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            function = tool
+        if isinstance(function, dict) and "parameters" in function:
+            visit(function["parameters"], f"tools[{index}].function.parameters")
 
 
 def response_stream_flag(codex_req: dict) -> bool:
@@ -998,6 +1078,7 @@ async def create_response(request: Request):
     request_id = f"req_{secrets.token_hex(8)}"
     request_started = time.monotonic()
     request_run_id: str | None = None
+    diagnostic_deadline: float | None = None
 
     async def log_request(
         status: str,
@@ -1021,6 +1102,7 @@ async def create_response(request: Request):
         cooldown_category: str | None = None,
         outcome_category: str | None = None,
         cancelled: bool = False,
+        terminal_cleanup: bool = False,
     ) -> None:
         record = {
             "request_id": request_id,
@@ -1047,7 +1129,33 @@ async def create_response(request: Request):
             "outcome_category": outcome_category,
             "cancelled": cancelled,
         }
-        await run_in_threadpool(write_request_record, record)
+        if diagnostic_deadline is None and not terminal_cleanup:
+            await run_in_threadpool(write_request_record, record)
+            return
+        remaining = 2.0 if terminal_cleanup else diagnostic_deadline - time.monotonic()
+        if remaining <= 0:
+            raise RequestDeadlineExceeded()
+        try:
+            with anyio.fail_after(min(2.0, remaining)):
+                await anyio.to_thread.run_sync(
+                    write_request_record,
+                    record,
+                    abandon_on_cancel=True,
+                )
+        except TimeoutError as exc:
+            raise RequestDeadlineExceeded() from exc
+
+    async def best_effort_diagnostic(awaitable, *, deadline: float | None = None) -> None:
+        timeout = 2.0
+        if deadline is not None:
+            timeout = min(timeout, max(0.0, deadline - time.monotonic()))
+        if timeout <= 0:
+            return
+        try:
+            with anyio.fail_after(timeout):
+                await awaitable
+        except Exception:
+            pass
 
     try:
         codex_req = await request.json()
@@ -1343,22 +1451,31 @@ async def create_response(request: Request):
                                 continue
                             if not isinstance(event, dict):
                                 continue
-                            # This lane streams OpenAI chat-completions events,
-                            # not Responses-API events: completion is signaled
-                            # by finish_reason, failure by an "error" object.
-                            error_payload = event.get("error")
-                            if isinstance(error_payload, dict):
+                            # openai_compatible_sse_generator normalizes chat
+                            # completions into Responses events before yielding.
+                            event_type = event.get("type")
+                            response_payload = event.get("response")
+                            if event_type == "response.failed":
+                                error_payload = response_payload.get("error") if isinstance(response_payload, dict) else None
+                                terminal_status = "failed"
+                                terminal_error_class = error_payload.get("code") if isinstance(error_payload, dict) else "stream_error"
+                                terminal_error = error_payload.get("message") if isinstance(error_payload, dict) else None
+                            elif event_type in {"response.completed", "response.incomplete"}:
+                                terminal_status = "success" if event_type == "response.completed" else "incomplete"
+                                terminal_http_status = 200
+                            elif event_type is None and isinstance(event.get("error"), dict):
+                                error_payload = event["error"]
                                 terminal_status = "failed"
                                 terminal_error_class = error_payload.get("code") or "stream_error"
                                 terminal_error = error_payload.get("message")
-                                continue
-                            choices = event.get("choices")
-                            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-                                finish_reason = choices[0].get("finish_reason")
-                                if finish_reason:
+                            usage = response_payload.get("usage") if isinstance(response_payload, dict) else None
+                            if not isinstance(usage, dict):
+                                usage = event.get("usage")
+                            if event_type is None:
+                                choices = event.get("choices")
+                                if isinstance(choices, list) and choices and isinstance(choices[0], dict) and choices[0].get("finish_reason"):
                                     terminal_status = "success"
                                     terminal_http_status = 200
-                            usage = event.get("usage")
                             if isinstance(usage, dict):
                                 terminal_usage = usage
                         yield chunk
@@ -1427,7 +1544,135 @@ async def create_response(request: Request):
 
     # 1. Select account automatically from pool
     family = native_model_family(model)
-    account = await acquire_active_account_for_request(model)
+    operation_deadline = time.monotonic() + google_request_timeout_from_metadata(request_metadata)
+    diagnostic_deadline = operation_deadline if not stream else None
+
+    async def wait_for_disconnect(stop_event: asyncio.Event) -> bool:
+        while not stop_event.is_set():
+            if await request_disconnected_now():
+                return True
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(),
+                    timeout=CLIENT_DISCONNECT_POLL_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                pass
+        return False
+
+    def release_late_account(task: asyncio.Task) -> None:
+        async def cleanup() -> None:
+            if task.cancelled():
+                return
+            try:
+                late_account = task.result()
+            except Exception:
+                return
+            if isinstance(late_account, dict):
+                try:
+                    with anyio.fail_after(2.0):
+                        await release_account_for_request(late_account.get("email"))
+                except Exception:
+                    pass
+
+        asyncio.create_task(cleanup())
+
+    async def request_disconnected_now() -> bool:
+        return await request.is_disconnected()
+
+    async def drain_task(task: asyncio.Task, timeout: float, *, cancel: bool = False) -> bool:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+        if not done and cancel:
+            task.cancel()
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+        if task.done():
+            with suppress(asyncio.CancelledError, Exception):
+                task.result()
+        return task.done()
+
+    async def run_bounded_operation(operation_factory, *, release_late_result: bool = False):
+        if await request_disconnected_now():
+            raise ClientDisconnect()
+        if time.monotonic() >= operation_deadline:
+            raise RequestDeadlineExceeded()
+        operation_task = asyncio.create_task(operation_factory())
+        disconnect_stop = asyncio.Event()
+        disconnect_task = asyncio.create_task(wait_for_disconnect(disconnect_stop))
+        deadline_task = asyncio.create_task(
+            asyncio.sleep(max(0.0, operation_deadline - time.monotonic()))
+        )
+        abandoned = False
+
+        async def abandon_operation() -> None:
+            nonlocal abandoned
+            abandoned = True
+            if release_late_result:
+                operation_task.add_done_callback(release_late_account)
+                return
+            operation_task.cancel()
+            if not await drain_task(operation_task, 0.2):
+                operation_task.add_done_callback(
+                    lambda task: task.exception() if not task.cancelled() else None
+                )
+
+        try:
+            done, _ = await asyncio.wait(
+                {operation_task, disconnect_task, deadline_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if disconnect_task in done:
+                await abandon_operation()
+                raise ClientDisconnect()
+            if deadline_task in done or time.monotonic() >= operation_deadline:
+                await abandon_operation()
+                raise RequestDeadlineExceeded()
+            return await operation_task
+        except asyncio.CancelledError:
+            await abandon_operation()
+            raise
+        finally:
+            disconnect_stop.set()
+            await drain_task(disconnect_task, 0.2, cancel=True)
+            deadline_task.cancel()
+            await drain_task(deadline_task, 0.2)
+            if not operation_task.done() and not abandoned:
+                await abandon_operation()
+
+    if stream:
+        account = await acquire_active_account_for_request(model)
+    else:
+        try:
+            account = await run_bounded_operation(
+                lambda: acquire_active_account_for_request(model),
+                release_late_result=True,
+            )
+        except ClientDisconnect:
+            await best_effort_diagnostic(log_request(
+                "cancelled",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                error_class="cancelled",
+                outcome_category="cancelled",
+                cancelled=True,
+                error="Client disconnected before account acquisition completed",
+                terminal_cleanup=True,
+            ))
+            raise
+        except RequestDeadlineExceeded:
+            await best_effort_diagnostic(log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=504,
+                error_class="request_deadline_exceeded",
+                error="Native non-stream request deadline expired during account acquisition",
+                terminal_cleanup=True,
+            ))
+            raise HTTPException(status_code=504, detail="Antigravity request deadline exceeded")
     if not account:
         await log_request(
             "failed",
@@ -1484,6 +1729,12 @@ async def create_response(request: Request):
             )
             raise
 
+    async def request_backend_with_boundary(selected_account: dict) -> httpx.Response | None:
+        return await run_bounded_operation(lambda: request_backend(selected_account))
+
+    async def run_nonstream_diagnostic(function, *args, **kwargs):
+        return await run_bounded_operation(lambda: function(*args, **kwargs))
+
     # Handle standard non-streaming response path
     if not stream:
         response_account = account
@@ -1492,24 +1743,30 @@ async def create_response(request: Request):
         cooldown_scope: str | None = None
         cooldown_category: str | None = None
         try:
-            res = await request_backend(response_account)
+            res = await request_backend_with_boundary(response_account)
             if not res:
-                new_account = await acquire_active_account_for_request(model)
+                new_account = await run_bounded_operation(
+                    lambda: acquire_active_account_for_request(model),
+                    release_late_result=True,
+                )
                 rotation_attempted = True
                 if new_account:
-                    await record_attempt_outcome(
-                        response_account.get("email", ""),
+                    previous_account = response_account
+                    response_attempts.append(new_account)
+                    response_account = new_account
+                    await run_nonstream_diagnostic(
+                        record_attempt_outcome,
+                        previous_account.get("email", ""),
                         model,
                         AttemptOutcome(scope="none", category="transport"),
                         status_code=502,
                         error_class="connection_error",
                     )
-                    response_attempts.append(new_account)
-                    response_account = new_account
-                    res = await request_backend(response_account)
+                    res = await request_backend_with_boundary(response_account)
 
             if not res:
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     AttemptOutcome(scope="none", category="transport"),
@@ -1546,7 +1803,8 @@ async def create_response(request: Request):
                 is_validation = is_validation_required_error(res.status_code, res.text)
                 cooldown_scope = "family" if error_category == "rate_limit" else "account"
                 cooldown_category = error_category
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     AttemptOutcome(
@@ -1557,14 +1815,18 @@ async def create_response(request: Request):
                     status_code=res.status_code,
                     error_class="validation_required" if is_validation else None,
                 )
-                new_account = await acquire_active_account_for_request(model)
+                new_account = await run_bounded_operation(
+                    lambda: acquire_active_account_for_request(model),
+                    release_late_result=True,
+                )
                 rotation_attempted = True
                 if new_account:
                     response_attempts.append(new_account)
                     response_account = new_account
-                    res = await request_backend(response_account)
+                    res = await request_backend_with_boundary(response_account)
                 if not res:
-                    await record_attempt_outcome(
+                    await run_nonstream_diagnostic(
+                        record_attempt_outcome,
                         response_account.get("email", ""),
                         model,
                         AttemptOutcome(scope="none", category="transport"),
@@ -1600,7 +1862,8 @@ async def create_response(request: Request):
                 retry_after_source = retry_after_source_from_response(res)
                 is_validation = is_validation_required_error(res.status_code, res.text)
                 error_class = "validation_required" if is_validation else "auth_failure"
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     outcome_for_http_status(res.status_code),
@@ -1641,7 +1904,8 @@ async def create_response(request: Request):
             if res.status_code == 429:
                 retry_after_seconds = retry_after_seconds_from_response(res)
                 retry_after_source = retry_after_source_from_response(res)
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     outcome_for_http_status(429),
@@ -1672,7 +1936,8 @@ async def create_response(request: Request):
                 )
 
             if res.status_code != 200:
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     outcome_for_http_status(res.status_code),
@@ -1709,7 +1974,8 @@ async def create_response(request: Request):
                 backend_error = backend_error_from_payload(gemini_resp)
                 if backend_error:
                     code, message = backend_error
-                    await record_attempt_outcome(
+                    await run_nonstream_diagnostic(
+                        record_attempt_outcome,
                         response_account.get("email", ""),
                         model,
                         outcome_for_backend_error(code, message),
@@ -1743,7 +2009,8 @@ async def create_response(request: Request):
                     created_at=int(time.time()),
                 )
                 request_succeeded = provider_result.terminal.kind is not TerminalKind.FAILED
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     AttemptOutcome(
@@ -1777,7 +2044,8 @@ async def create_response(request: Request):
             except HTTPException:
                 raise
             except Exception as e:
-                await record_attempt_outcome(
+                await run_nonstream_diagnostic(
+                    record_attempt_outcome,
                     response_account.get("email", ""),
                     model,
                     AttemptOutcome(scope="none", category="transport"),
@@ -1796,9 +2064,57 @@ async def create_response(request: Request):
                     error=safe_error_detail(e),
                 )
                 raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
+        except RequestDeadlineExceeded:
+            await best_effort_diagnostic(log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=504,
+                rotation_attempted=rotation_attempted,
+                error_class="request_deadline_exceeded",
+                error="Native non-stream request deadline expired before completion",
+                attempt_count=len(response_attempts),
+                rotation_count=max(0, len(response_attempts) - 1),
+                terminal_cleanup=True,
+            ))
+            raise HTTPException(status_code=504, detail="Antigravity request deadline exceeded")
+        except ClientDisconnect:
+            await best_effort_diagnostic(record_attempt_outcome(
+                response_account.get("email", ""),
+                model,
+                AttemptOutcome(scope="none", category="cancelled"),
+                error_class="cancelled",
+            ))
+            await best_effort_diagnostic(log_request(
+                "cancelled",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                error_class="cancelled",
+                terminal_kind="failed",
+                terminal_reason="cancelled",
+                attempt_count=len(response_attempts),
+                rotation_count=max(0, len(response_attempts) - 1),
+                outcome_category="cancelled",
+                cancelled=True,
+                error="Client disconnected before the Antigravity response completed",
+                terminal_cleanup=True,
+            ))
+            raise
         finally:
-            for used_account in response_attempts:
-                await release_account_for_request(used_account.get("email"))
+            async def release_response_accounts() -> None:
+                for used_account in response_attempts:
+                    try:
+                        with anyio.fail_after(2.0):
+                            await release_account_for_request(used_account.get("email"))
+                    except Exception:
+                        pass
+
+            with anyio.CancelScope(shield=True):
+                await release_response_accounts()
 
     # Handle standard SSE streaming response path
     stream_attempts = [account]
@@ -2019,36 +2335,54 @@ async def create_response(request: Request):
             async for chunk in sse_generator():
                 yield chunk
         finally:
-            cancelled = any(
-                used_account.get("email", "") not in recorded_stream_attempts
-                for used_account in stream_attempts
-            )
-            if cancelled:
-                await log_request(
-                    "cancelled",
-                    model=model,
-                    route="google",
-                    family=family,
-                    stream=True,
-                    terminal_kind="failed",
-                    terminal_reason="cancelled",
-                    attempt_count=len(stream_attempts),
-                    rotation_count=max(0, len(stream_attempts) - 1),
-                    outcome_category="cancelled",
-                    cancelled=True,
-                    error_class="cancelled",
+            async def cleanup_stream_accounts() -> None:
+                cancelled = any(
+                    used_account.get("email", "") not in recorded_stream_attempts
+                    for used_account in stream_attempts
                 )
-            released_emails = set()
-            for used_account in stream_attempts:
-                await record_stream_attempt(
-                    used_account,
-                    AttemptOutcome(scope="none", category="cancelled"),
-                    error_class="cancelled",
-                )
-                email = used_account.get("email")
-                if email and email not in released_emails:
-                    released_emails.add(email)
-                    await release_account_for_request(email)
+                try:
+                    with anyio.fail_after(1.0):
+                        if cancelled:
+                            await log_request(
+                                "cancelled",
+                                model=model,
+                                route="google",
+                                family=family,
+                                stream=True,
+                                terminal_kind="failed",
+                                terminal_reason="cancelled",
+                                attempt_count=len(stream_attempts),
+                                rotation_count=max(0, len(stream_attempts) - 1),
+                                outcome_category="cancelled",
+                                cancelled=True,
+                                error_class="cancelled",
+                            )
+                except Exception:
+                    pass
+                released_emails = set()
+                for used_account in stream_attempts:
+                    try:
+                        with anyio.fail_after(1.0):
+                            await record_stream_attempt(
+                                used_account,
+                                AttemptOutcome(scope="none", category="cancelled"),
+                                error_class="cancelled",
+                            )
+                    except Exception:
+                        pass
+                    email = used_account.get("email")
+                    if email and email not in released_emails:
+                        released_emails.add(email)
+                        try:
+                            with anyio.fail_after(2.0):
+                                await release_account_for_request(email)
+                        except Exception:
+                            pass
+
+            # Essential lease cleanup must finish even when ASGI cancellation
+            # arrives while diagnostics are being recorded.
+            with anyio.CancelScope(shield=True):
+                await cleanup_stream_accounts()
 
     return StreamingResponse(managed_sse_generator(), media_type="text/event-stream")
 
@@ -2287,10 +2621,14 @@ async def openai_upstream_sse_generator(
             return
 
     client, stream_context, response = stream_state
+    adapter = NativeResponsesStreamAdapter(display_model=display_model)
     try:
         async for chunk in response.aiter_text():
-            # Upstream already speaks Responses SSE, so proxy its frames as-is.
-            yield chunk
+            for event in adapter.consume_bytes(chunk.encode("utf-8", errors="replace")):
+                yield f"data: {json.dumps(event)}\n\n"
+        for event in adapter.finish():
+            yield f"data: {json.dumps(event)}\n\n"
+        yield "data: [DONE]\n\n"
     finally:
         await _close_openai_upstream_stream(client, stream_context)
 

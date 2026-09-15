@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from codex_antigravity_auth.service_manager import ServiceResult, ServiceState, observed_service_result
-from codex_antigravity_auth.service import install_service, uninstall_service
+from codex_antigravity_auth.service import install_service, service_status, uninstall_service
 
 
 class TestServiceResult(unittest.TestCase):
@@ -76,6 +76,45 @@ class TestServiceResult(unittest.TestCase):
 
         self.assertTrue(result["installed"])
         self.assertEqual(result["state"], "failed")
+
+    def test_macos_loaded_but_stopped_is_not_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gateway.plist"
+            path.write_text("plist", encoding="utf-8")
+            with patch("codex_antigravity_auth.service.macos_launch_agent_path", return_value=path):
+                with patch(
+                    "codex_antigravity_auth.service._run",
+                    return_value=subprocess.CompletedProcess([], 0, "state = exited\n", ""),
+                ):
+                    result = service_status(51122, platform_name="macos")
+
+        self.assertTrue(result["installed"])
+        self.assertTrue(result["loaded"])
+        self.assertFalse(result["active"])
+        self.assertEqual(result["state"], "installed_inactive")
+
+    def test_macos_running_and_windows_registered_states_are_distinct(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gateway.plist"
+            path.write_text("plist", encoding="utf-8")
+            with patch("codex_antigravity_auth.service.macos_launch_agent_path", return_value=path):
+                with patch(
+                    "codex_antigravity_auth.service._run",
+                    return_value=subprocess.CompletedProcess([], 0, "state = running\n", ""),
+                ):
+                    macos = service_status(51122, platform_name="macos")
+
+        with patch(
+            "codex_antigravity_auth.service._run",
+            return_value=subprocess.CompletedProcess([], 0, "TaskName: foo\nStatus: Ready\n", ""),
+        ):
+            windows = service_status(51122, platform_name="windows")
+
+        self.assertTrue(macos["active"])
+        self.assertEqual(macos["state"], "active_unreachable")
+        self.assertTrue(windows["installed"])
+        self.assertFalse(windows["active"])
+        self.assertEqual(windows["state"], "installed_inactive")
 
 
 if __name__ == "__main__":

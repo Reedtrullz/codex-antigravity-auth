@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -522,9 +525,10 @@ class AntiHelperTests(unittest.TestCase):
 
             old_cwd = Path.cwd()
             output = io.StringIO()
+            error_output = io.StringIO()
             try:
                 os.chdir(root)
-                with contextlib.redirect_stdout(output):
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error_output):
                     rc = anti.main(
                         [
                             "review",
@@ -597,13 +601,9 @@ class AntiHelperTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-        self.assertEqual(rc, 0, output.getvalue())
-        self.assertLessEqual(len(calls[-1]), 2500)
-        self.assertIn("chunk-finding", calls[-1])
-        result = json.loads(output.getvalue())
-        self.assertLessEqual(result["metadata"]["synthesis_prompt_chars"], 2500)
-        self.assertTrue(result["metadata"]["synthesis_truncated_outputs"])
-        self.assertTrue(any("Synthesis chunk outputs truncated" in caveat for caveat in result["caveats"]))
+        self.assertEqual(rc, 1, output.getvalue())
+        self.assertTrue(calls)
+        self.assertNotIn("Chunked Review Manifest", calls[-1])
 
     def test_review_chunked_off_preserves_single_incomplete_call(self) -> None:
         anti = load_anti()
@@ -643,11 +643,8 @@ class AntiHelperTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-        self.assertEqual(rc, 0, output.getvalue())
-        self.assertEqual(len(calls), 1)
-        result = json.loads(output.getvalue())
-        self.assertFalse(result["metadata"]["chunked"])
-        self.assertEqual(result["metadata"]["status"], "incomplete")
+        self.assertEqual(rc, 1, output.getvalue())
+        self.assertEqual(calls, [])
 
     def test_review_zero_chunk_count_means_unlimited(self) -> None:
         anti = load_anti()
@@ -1035,7 +1032,10 @@ class AntiHelperTests(unittest.TestCase):
 
         self.assertEqual(text, "ok")
         self.assertEqual(model_used, "claude-sonnet-4-6")
-        self.assertEqual(payloads[0]["metadata"], {"run_id": "anti-run_123"})
+        self.assertEqual(
+            payloads[0]["metadata"],
+            {"run_id": "anti-run_123", "antigravity_request_timeout_seconds": 110.0},
+        )
         self.assertEqual(metadata["usage"], {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3})
 
     def test_long_generation_sends_backend_timeout_metadata(self) -> None:
@@ -1059,7 +1059,35 @@ class AntiHelperTests(unittest.TestCase):
 
         self.assertEqual(text, "ok")
         self.assertEqual(model_used, "claude-opus-4-6-thinking")
-        self.assertEqual(payloads[0]["metadata"], {"antigravity_backend_timeout_seconds": 230.0})
+        self.assertEqual(
+            payloads[0]["metadata"],
+            {
+                "antigravity_backend_timeout_seconds": 230.0,
+                "antigravity_request_timeout_seconds": 230.0,
+            },
+        )
+
+    def test_generation_sends_total_request_timeout_below_client_timeout(self) -> None:
+        anti = load_anti()
+        args = anti.build_parser().parse_args(["consult", "--prompt", "hello", "--timeout", "90"])
+        payloads: list[dict] = []
+
+        def fake_request_json(method, url, *, payload=None, timeout=10.0, token_env=anti.DEFAULT_TOKEN_ENV):
+            payloads.append(payload or {})
+            return 200, {"output_text": "ok"}
+
+        anti.request_json = fake_request_json
+        text, _model_used, _metadata = anti.generate_with_fallback(
+            args,
+            model="claude-sonnet-4-6",
+            prompt="hello",
+            max_output_tokens=16,
+            purpose="consult",
+            model_ids={"claude-sonnet-4-6"},
+        )
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(payloads[0]["metadata"]["antigravity_request_timeout_seconds"], 80.0)
 
     def test_base_url_rejects_userinfo_without_echoing_secret(self) -> None:
         anti = load_anti()
@@ -1376,10 +1404,10 @@ class AntiHelperTests(unittest.TestCase):
                     ]
                 )
 
-            self.assertEqual(rc, 0, output.getvalue())
+            self.assertEqual(rc, 1, output.getvalue())
             record = json.loads(next(Path(tmp).glob("*.json")).read_text(encoding="utf-8"))
-            self.assertEqual(len(record["prompt_text"]), 1200)
-            self.assertEqual(record["metadata"]["prompt_chars"], 1200)
+            self.assertNotIn("prompt_text", record)
+            self.assertIn("exact budget", record["error"])
 
     def test_large_plan_prompt_is_split_before_generation(self) -> None:
         anti = load_anti()
@@ -1438,6 +1466,7 @@ class AntiHelperTests(unittest.TestCase):
                         "1800",
                         "--max-plan-chunks",
                         "2",
+                        "--allow-partial",
                         "--save-output",
                         "full",
                         "--run-id",
@@ -1446,14 +1475,18 @@ class AntiHelperTests(unittest.TestCase):
                     ]
                 )
 
-            self.assertEqual(rc, 0, output.getvalue())
+            self.assertEqual(rc, 1, output.getvalue())
             record = json.loads(next(Path(tmp).glob("*.json")).read_text(encoding="utf-8"))
             ledger = record["execution_ledger"]
-            self.assertEqual([entry["prompt"] for entry in ledger], calls)
+            self.assertEqual(
+                [entry["promptSha256"] for entry in ledger],
+                [hashlib.sha256(prompt.encode("utf-8")).hexdigest() for prompt in calls],
+            )
+            self.assertTrue(all("prompt" not in entry for entry in ledger))
             self.assertEqual([entry["stage"] for entry in ledger], ["plan_chunk_1", "plan_chunk_2", "plan_synthesis"])
             self.assertEqual(record["id"], "deterministic-run-7")
             self.assertEqual(record["metadata"]["request_log_correlation_id"], "deterministic-run-7")
-            self.assertNotEqual(record["prompt_text"], ("x" * 1800))
+            self.assertNotIn("prompt_text", record)
 
     def test_default_claude_plan_auto_chunks_before_large_single_call(self) -> None:
         anti = load_anti()
@@ -1809,7 +1842,7 @@ class AntiHelperTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertTrue(parsed["metadata"]["chunked"])
         self.assertEqual(parsed["metadata"]["status"], "incomplete")
@@ -1988,7 +2021,7 @@ class AntiHelperTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             rc = anti.main(["panel", "--mode", "ask", "--prompt", "x", "--json"])
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["findings_status"], "fallback")
         self.assertEqual(parsed["output_text"], "judge-output")
@@ -2072,7 +2105,9 @@ class AntiHelperTests(unittest.TestCase):
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
-            rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json"])
+            rc = anti.main(
+                ["panel", "--mode", "ask", "--prompt", "What next?", "--retry", "0", "--json"]
+            )
 
         self.assertEqual(rc, 0, output.getvalue())
         parsed = json.loads(output.getvalue())
@@ -2080,6 +2115,298 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(parsed["metadata"]["retried_models"], ["claude-opus-4-6-thinking"])
         self.assertEqual(parsed["metadata"]["failed_models"], [])
         self.assertIn("output-claude-opus-4-6-thinking", judge_prompts[0])
+        lane_plan = next(
+            stage for stage in parsed["metadata"]["execution_plan"]
+            if stage["name"] == "panel_lane_2"
+        )
+        self.assertEqual(lane_plan["retry_count"], 0)
+        self.assertEqual(lane_plan["logical_attempts"], 2)
+
+    def test_panel_synthesis_preserves_large_successful_lane_material_when_budget_fits(self) -> None:
+        anti = load_anti()
+        tail = "FULL_LANE_TAIL"
+        results = [
+            {
+                "model": "claude-sonnet-4-6",
+                "status": "success",
+                "output_text": "sonnet output",
+                "actual_model": "claude-sonnet-4-6",
+                "provider": "google-antigravity",
+            },
+            {
+                "model": "claude-opus-4-6-thinking",
+                "status": "success",
+                "output_text": "opus output\n" + ("x" * 9000) + "\n" + tail,
+                "actual_model": "claude-opus-4-6-thinking",
+                "provider": "google-antigravity",
+            },
+        ]
+
+        prompt, _caveats, metadata = anti.build_panel_synthesis_prompt(
+            panel_mode="review",
+            source_prompt="source",
+            panel_results=results,
+            metadata={"status": "complete_multi_model"},
+            caveats=[],
+            roles=[],
+            max_chars=64000,
+            anonymize=False,
+        )
+
+        self.assertLess(len(prompt), 64000)
+        self.assertIn(tail, prompt)
+        self.assertEqual(metadata["synthesis_truncated_source"], False)
+        self.assertEqual(metadata["synthesis_truncated_models"], [])
+
+    def test_panel_synthesis_preserves_full_structured_lane_material_and_fails_closed(self) -> None:
+        anti = load_anti()
+        summary_tail = "STRUCTURED_SUMMARY_TAIL"
+        finding_tail = "STRUCTURED_FINDING_TAIL"
+        list_tail = "STRUCTURED_LIST_TAIL"
+        structured = {
+            "summary": "structured summary\n" + ("s" * 9000) + summary_tail,
+            "disagreements": ["disagreement " + ("d" * 700) + list_tail],
+            "findings": [
+                {
+                    "id": "F1",
+                    "claim": "finding claim " + ("c" * 2300) + finding_tail,
+                    "severity": "high",
+                    "lanes": ["claude-opus-4-6-thinking"],
+                    "verify": "run the focused regression",
+                }
+            ],
+            "unverifiable": [],
+            "recommended_next_actions": [],
+            "caveats": [],
+        }
+        results = [
+            {
+                "model": "claude-opus-4-6-thinking",
+                "status": "success",
+                "output_text": json.dumps(structured),
+                "actual_model": "claude-opus-4-6-thinking",
+                "provider": "google-antigravity",
+            }
+        ]
+        metadata = {"status": "complete_multi_model"}
+
+        prompt, _caveats, _synthesis_metadata = anti.build_panel_synthesis_prompt(
+            panel_mode="review",
+            source_prompt="source",
+            panel_results=results,
+            metadata=metadata,
+            caveats=[],
+            roles=[],
+            max_chars=64000,
+            anonymize=False,
+        )
+
+        self.assertIn(summary_tail, prompt)
+        self.assertIn(finding_tail, prompt)
+        self.assertIn(list_tail, prompt)
+        self.assertEqual(metadata["judge_input_status"], "complete")
+        self.assertEqual(metadata["judge_input_lossy_lanes"], [])
+        with self.assertRaisesRegex(anti.AntiError, "exact budget"):
+            anti.build_panel_synthesis_prompt(
+                panel_mode="review",
+                source_prompt="source",
+                panel_results=results,
+                metadata=metadata,
+                caveats=[],
+                roles=[],
+                max_chars=len(prompt) - 1,
+                anonymize=False,
+            )
+
+    def test_panel_review_preserves_large_summary_through_actual_panel_path(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+        }
+        summary_tail = "FULL_SUMMARY_TAIL"
+        summary = "bounded summary\n" + ("s" * 9000) + "\n" + summary_tail
+        summary_metadata = {
+            "status": "complete",
+            "scope_status": "complete",
+            "coverage": [],
+            "declared_files": ["fixture.py"],
+            "included_files": ["fixture.py"],
+            "included_items": ["fixture.py part 1/1"],
+            "omitted_files": [],
+            "omitted_chunk_count": 0,
+            "planned_chunk_count": 1,
+            "completed_chunk_count": 1,
+            "failed_chunk_count": 0,
+            "chunk_count": 1,
+            "chunk_prompts": [],
+            "chunk_generation": [],
+            "sourceCommit": "test-source",
+            "_execution_ledger": [],
+        }
+        lane_prompts: list[str] = []
+
+        def fake_chunked_review(**_kwargs):
+            return summary, [], summary_metadata
+
+        def fake_post_response(**kwargs):
+            prompt = kwargs["prompt"]
+            if "You are synthesizing an Antigravity multi-model advisory panel" in prompt:
+                return json.dumps(
+                    {
+                        "summary": "ok",
+                        "disagreements": [],
+                        "findings": [],
+                        "unverifiable": [],
+                        "recommended_next_actions": [],
+                        "caveats": [],
+                    }
+                )
+            if "This panel review context was summarized" in prompt:
+                lane_prompts.append(prompt)
+            return "lane output"
+
+        anti.run_chunked_review = fake_chunked_review
+        anti.post_response = fake_post_response
+        with tempfile.TemporaryDirectory(prefix="anti-summary-path-") as tmp:
+            root = Path(tmp)
+            (root / "fixture.py").write_text("VALUE = 1\n", encoding="utf-8")
+            anti.RUNS_DIR = root / "runs"
+            old_cwd = Path.cwd()
+            output = io.StringIO()
+            try:
+                os.chdir(root)
+                with contextlib.redirect_stdout(output):
+                    rc = anti.main(
+                        [
+                            "panel", "--mode", "review", "--scope", "files", "--file", "fixture.py",
+                            "--model", "sonnet", "--model", "opus", "--judge", "opus",
+                            "--max-prompt-chars", "12000", "--max-synthesis-chars", "64000",
+                            "--max-review-chunks", "3", "--chunked", "always", "--save-output", "never",
+                            "--json", "--no-progress",
+                        ]
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(len(lane_prompts), 2)
+        self.assertTrue(all(summary_tail in prompt for prompt in lane_prompts))
+        self.assertTrue(all(anti.PANEL_REVIEW_LANE_CONTRACT in prompt for prompt in lane_prompts))
+        self.assertTrue(all("## Review Manifest" not in prompt for prompt in lane_prompts))
+        self.assertFalse(parsed["metadata"].get("summary_input_lossy", False))
+        self.assertEqual(parsed["metadata"]["prompt_chars"], len(lane_prompts[0]))
+
+    def test_panel_retry_preserves_review_lane_contract(self) -> None:
+        anti = load_anti()
+        prompts: list[str] = []
+        responses = [
+            ("partial", "claude-sonnet-4-6", {"usage": {"output_tokens": 2}}),
+            ("complete", "claude-sonnet-4-6", {"usage": {"output_tokens": 1}}),
+        ]
+
+        def fake_generate(_args, **kwargs):
+            prompts.append(kwargs["prompt"])
+            return responses.pop(0)
+
+        anti.generate_with_fallback = fake_generate
+        result = anti.run_panel_call(
+            args=argparse.Namespace(mode="review"),
+            model="claude-sonnet-4-6",
+            prompt=anti.PANEL_REVIEW_LANE_CONTRACT,
+            max_output_tokens=2,
+            model_ids={"claude-sonnet-4-6"},
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(prompts), 2)
+        self.assertIn(anti.PANEL_REVIEW_LANE_CONTRACT, prompts[1])
+        self.assertIn("Do not generate code, patches, or implementation steps.", prompts[1])
+
+    def test_non_review_panel_retry_keeps_implementation_answers_allowed(self) -> None:
+        anti = load_anti()
+        for mode in ("plan", "ask"):
+            prompts: list[str] = []
+            responses = [
+                ("partial", "claude-sonnet-4-6", {"usage": {"output_tokens": 2}}),
+                ("complete", "claude-sonnet-4-6", {"usage": {"output_tokens": 1}}),
+            ]
+
+            def fake_generate(_args, **kwargs):
+                prompts.append(kwargs["prompt"])
+                return responses.pop(0)
+
+            anti.generate_with_fallback = fake_generate
+            result = anti.run_panel_call(
+                args=argparse.Namespace(mode=mode),
+                model="claude-sonnet-4-6",
+                prompt="Implement the requested plan.",
+                max_output_tokens=2,
+                model_ids={"claude-sonnet-4-6"},
+            )
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(len(prompts), 2)
+            self.assertNotIn(anti.PANEL_REVIEW_LANE_CONTRACT, prompts[1])
+
+    def test_panel_review_rejects_lossy_summary_before_lane_generation(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+        }
+        summary_metadata = {
+            "status": "complete",
+            "scope_status": "complete",
+            "coverage": [],
+            "declared_files": ["fixture.py"],
+            "included_files": ["fixture.py"],
+            "included_items": ["fixture.py part 1/1"],
+            "omitted_files": [],
+            "omitted_chunk_count": 0,
+            "planned_chunk_count": 1,
+            "completed_chunk_count": 1,
+            "failed_chunk_count": 0,
+            "chunk_count": 1,
+            "chunk_prompts": [],
+            "chunk_generation": [],
+            "sourceCommit": "test-source",
+            "_execution_ledger": [],
+        }
+        provider_calls: list[dict] = []
+
+        anti.run_chunked_review = lambda **_kwargs: (
+            "bounded summary\n" + ("s" * 9000) + "\nFULL_SUMMARY_TAIL",
+            [],
+            summary_metadata,
+        )
+        anti.post_response = lambda **kwargs: provider_calls.append(kwargs) or "unexpected provider call"
+        with tempfile.TemporaryDirectory(prefix="anti-summary-reject-") as tmp:
+            root = Path(tmp)
+            (root / "fixture.py").write_text("VALUE = 1\n", encoding="utf-8")
+            anti.RUNS_DIR = root / "runs"
+            old_cwd = Path.cwd()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            try:
+                os.chdir(root)
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    rc = anti.main(
+                        [
+                            "panel", "--mode", "review", "--scope", "files", "--file", "fixture.py",
+                            "--model", "sonnet", "--model", "opus", "--judge", "opus",
+                            "--max-prompt-chars", "3000", "--max-synthesis-chars", "64000",
+                            "--max-review-chunks", "3", "--chunked", "always", "--save-output", "never",
+                            "--json", "--no-progress",
+                        ]
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(provider_calls, [])
+        self.assertIn("panel review summary", stderr.getvalue())
 
     def test_panel_non_answer_lane_counts_as_failure_below_min_successes(self) -> None:
         anti = load_anti()
@@ -2157,7 +2484,7 @@ class AntiHelperTests(unittest.TestCase):
                 ["panel", "--mode", "ask", "--prompt", "What next?", "--min-successes", "1", "--json"]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         opus = parsed["panel_results"][1]
         self.assertEqual(opus["status"], "non_answer")
@@ -2231,7 +2558,7 @@ class AntiHelperTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json"])
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         self.assertEqual(len(calls), 3, "two lanes plus one judge call; repair avoided the retry")
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["findings_status"], "parsed")
@@ -2300,7 +2627,7 @@ class AntiHelperTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json"])
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["findings_status"], "fallback")
         self.assertEqual(parsed["findings"]["findings"], [])
@@ -2360,14 +2687,14 @@ class AntiHelperTests(unittest.TestCase):
         full = json.loads(full_output.getvalue())
         self.assertEqual(
             set(full),
-            {"caveats", "findings", "gateway", "judge_model", "metadata", "mode", "output_text", "panel_mode", "panel_models", "panel_results"},
+            {"caveats", "coverage", "findings", "gateway", "judge_model", "metadata", "mode", "output_text", "panelStatus", "panel_models", "panel_mode", "panel_results", "runId", "runStatus", "schemaVersion", "scopeStatus", "verification"},
         )
         self.assertIsInstance(full["panel_results"], list)
         self.assertIsInstance(full["findings"], dict)
         contract = json.loads(contract_output.getvalue())
         self.assertEqual(
             set(contract),
-            {"caveats", "disagreements", "findings", "findings_dropped", "findings_total", "parse_warning", "recommended_next_actions", "summary", "unverifiable"},
+            {"caveats", "coverage", "disagreements", "findings", "findings_dropped", "findings_total", "panelStatus", "parse_warning", "recommended_next_actions", "runStatus", "schemaVersion", "scopeStatus", "summary", "unverifiable", "verification"},
         )
 
     def test_panel_errors_are_redacted_in_json_output(self) -> None:
@@ -2387,7 +2714,7 @@ class AntiHelperTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--min-successes", "1", "--json"])
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         rendered = json.dumps(parsed)
         self.assertNotIn("CLIENTSECRET1234567890", rendered)
@@ -2429,7 +2756,7 @@ class AntiHelperTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         self.assertEqual(calls[:2], ["claude-opus-4-6-thinking", "claude-sonnet-4-6"])
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["panel_results"][0]["model_used"], "claude-sonnet-4-6")
@@ -2490,7 +2817,7 @@ class AntiHelperTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         results = {item["model"]: item for item in parsed["panel_results"]}
         for model in requested:
@@ -2638,7 +2965,7 @@ class AntiHelperTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         failed = parsed["panel_results"][0]
         self.assertEqual(failed["requestedModel"], "claude-opus-4-6-thinking")
@@ -2700,7 +3027,7 @@ class AntiHelperTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["judge_model"], "claude-opus-4-6-thinking")
         metadata = parsed["metadata"]
@@ -2727,7 +3054,7 @@ class AntiHelperTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--min-successes", "1", "--json"])
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["panel_results"][0]["status"], "error")
         self.assertEqual(parsed["panel_results"][1]["status"], "success")
@@ -2796,7 +3123,7 @@ class AntiHelperTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["panel_results"][0]["status"], "success")
         self.assertEqual(parsed["panel_results"][1]["status"], "error")
@@ -2837,7 +3164,7 @@ class AntiHelperTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         statuses = {item["model"]: item for item in parsed["panel_results"]}
         self.assertEqual(statuses["claude-sonnet-4-6"]["status"], "success")
@@ -2943,11 +3270,8 @@ class AntiHelperTests(unittest.TestCase):
                 ]
         )
 
-        self.assertEqual(rc, 0, output.getvalue())
-        self.assertLessEqual(judge_prompt_lengths[0], 2200)
-        parsed = json.loads(output.getvalue())
-        self.assertLessEqual(parsed["metadata"]["synthesis_prompt_chars"], 2200)
-        self.assertTrue(parsed["metadata"]["synthesis_truncated_models"])
+        self.assertEqual(rc, 1, output.getvalue())
+        self.assertEqual(judge_prompt_lengths, [])
 
     def test_panel_large_review_summarizes_before_fanout(self) -> None:
         anti = load_anti()
@@ -2980,9 +3304,10 @@ class AntiHelperTests(unittest.TestCase):
             (root / "large.py").write_text("LARGE = '" + ("x" * 6000) + "'\n", encoding="utf-8")
             old_cwd = Path.cwd()
             output = io.StringIO()
+            error_output = io.StringIO()
             try:
                 os.chdir(root)
-                with contextlib.redirect_stdout(output):
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error_output):
                     rc = anti.main(
                         [
                             "panel",
@@ -3000,11 +3325,9 @@ class AntiHelperTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-        self.assertEqual(rc, 0, output.getvalue())
-        self.assertTrue(panel_prompts)
-        parsed = json.loads(output.getvalue())
-        self.assertEqual(parsed["metadata"]["panel_review_context"], "chunked-summary")
-        self.assertTrue(any("bounded chunked summary" in caveat for caveat in parsed["caveats"]))
+        self.assertEqual(rc, 1, output.getvalue())
+        self.assertEqual(panel_prompts, [])
+        self.assertIn("panel review summary requires", error_output.getvalue())
 
     def test_default_claude_panel_review_summarizes_before_large_fanout(self) -> None:
         anti = load_anti()
@@ -3243,6 +3566,35 @@ class PostResponseGuardTests(unittest.TestCase):
         )
         self.assertIn("Good review", str(result))
 
+    def test_upstream_incomplete_and_empty_completed_are_not_success(self) -> None:
+        anti = load_anti()
+        model_ids = {"gemini-3.5-flash-high"}
+        anti.request_json = lambda *a, **kw: (200, {
+            "model": "gemini-3.5-flash-high",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "partial"}]}],
+        })
+        incomplete = anti.post_response(
+            base_url="http://x", model="gemini-3.5-flash-high", prompt="x",
+            max_output_tokens=100, timeout=5, token_env="", retries=0, model_ids=model_ids,
+        )
+        self.assertEqual(incomplete.response_metadata["upstream_status"], "incomplete")
+        self.assertNotEqual(
+            anti.lane_output_status(str(incomplete), incomplete.usage, 100, incomplete.response_metadata),
+            "success",
+        )
+
+        anti.request_json = lambda *a, **kw: (200, {
+            "model": "gemini-3.5-flash-high", "status": "completed", "output": [],
+        })
+        empty = anti.post_response(
+            base_url="http://x", model="gemini-3.5-flash-high", prompt="x",
+            max_output_tokens=100, timeout=5, token_env="", retries=0, model_ids=model_ids,
+        )
+        self.assertTrue(empty.response_metadata["upstream_output_empty"])
+        self.assertEqual(anti.lane_output_status(str(empty), empty.usage, 100, empty.response_metadata), "empty")
+
 
 class ErrorRetryableTests(unittest.TestCase):
     """Tests for error_is_retryable covering status 'failed' pattern."""
@@ -3382,13 +3734,15 @@ class BugfixRegressionTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         self.assertTrue(calls)
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["status"], "incomplete")
         self.assertTrue(parsed["metadata"]["omitted_files"])
         self.assertGreater(parsed["metadata"]["omitted_chunk_count"], 0)
         self.assertEqual(parsed["metadata"]["scopeStatus"], "partial")
+        self.assertEqual(parsed["runStatus"], "partial")
+        self.assertEqual(parsed["scopeStatus"], "partial")
         self.assertIn("⚠ INCOMPLETE", parsed["output_text"])
 
     def test_review_zero_max_chunks_reviews_everything(self) -> None:
@@ -3587,15 +3941,16 @@ class BugfixRegressionTests(unittest.TestCase):
                 )
             parsed = json.loads(output.getvalue())
             record = json.loads(next(Path(tmp).glob("*.json")).read_text(encoding="utf-8"))
+            artifact = json.loads(Path(record["resultPath"]).read_text(encoding="utf-8"))
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         self.assertEqual(caps, [40, 80])
         self.assertEqual(parsed["metadata"]["status"], "truncated")
         self.assertTrue(any("truncated at the token cap" in caveat for caveat in parsed["caveats"]))
-        self.assertEqual(record["status"], "success")
-        self.assertEqual(record["runStatus"], "success")
-        self.assertIn("output_text", record)
-        self.assertIn("answer that ends mid-sentence", record["output_text"])
+        self.assertEqual(record["status"], "partial")
+        self.assertEqual(record["runStatus"], "partial")
+        self.assertNotIn("output_text", record)
+        self.assertIn("answer that ends mid-sentence", artifact["output_text"])
         self.assertIn("consult_attempts", record["metadata"])
         self.assertEqual(len(record["metadata"]["consult_attempts"]), 2)
 
@@ -3801,6 +4156,60 @@ class BugfixRegressionTests(unittest.TestCase):
         self.assertIn("[dry-run] plan", stdout.getvalue())
         self.assertIn("[dry-run] panel ask", stdout.getvalue())
 
+    def test_dry_run_reports_stages_prices_retries_and_unknowns(self) -> None:
+        anti = load_anti()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(["plan", "--prompt", "Plan this", "--dry-run", "--json", "--budget", "1"])
+        self.assertEqual(rc, 0)
+        payload = json.loads(output.getvalue())
+        self.assertIn("stages", payload)
+        self.assertIn("known_prices", payload)
+        self.assertIn("possible_retries", payload)
+        self.assertIn("unknowns", payload)
+        self.assertEqual(payload["budget_limit"], 1.0)
+
+    def test_chunked_plan_budget_refusal_keeps_completed_progress_and_makes_no_extra_call(self) -> None:
+        anti = load_anti()
+        args = anti.build_parser().parse_args([
+            "plan", "--prompt", "x" * 5000, "--max-prompt-chars", "1800",
+            "--max-plan-chunks", "5", "--budget", "0.006",
+        ])
+        calls: list[str] = []
+
+        def fake_generate(fake_args, *, model, prompt, **_kwargs):
+            reservation = anti.reserve_budget_call(
+                fake_args,
+                model=model,
+                prompt_chars=len(prompt),
+                max_output_tokens=fake_args.chunk_output_tokens,
+                purpose="test plan chunk",
+            )
+            calls.append(prompt)
+            anti.settle_budget_call(
+                reservation,
+                model=model,
+                generation={},
+                prompt_chars=len(prompt),
+                max_output_tokens=fake_args.chunk_output_tokens,
+            )
+            return "chunk-note", model, {}
+
+        anti.generate_with_fallback = fake_generate
+        with self.assertRaises(anti.AntiError) as raised:
+            anti.run_chunked_plan(
+                args=args,
+                model="claude-sonnet-4-6",
+                prompt="x" * 5000,
+                caveats=[],
+                max_prompt_chars=1800,
+            )
+        metadata = raised.exception.run_metadata
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(metadata["completed_chunk_count"], 1)
+        self.assertEqual(metadata["failed_chunk_count"], 1)
+        self.assertGreater(metadata["not_sent_chunk_count"], 0)
+
     def test_chunk_prompts_do_not_carry_stale_single_prompt_diff_caveat(self) -> None:
         anti = load_anti()
         anti.generate_with_fallback = lambda args, **kwargs: (
@@ -3913,7 +4322,7 @@ class BugfixRegressionTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertTrue(parsed["caveats"])
         self.assertTrue(any("bounded chunked summary" in caveat for caveat in parsed["caveats"]))
@@ -4104,6 +4513,24 @@ class BugfixRegressionTests(unittest.TestCase):
         self.assertTrue(metadata["omitted_items"])
         self.assertEqual(chunks, [])
 
+    def test_tiny_prompt_budget_file_scope_fails_closed(self) -> None:
+        anti = load_anti()
+        context = {
+            "scope_line": "files",
+            "diff": "",
+            "file_texts": [("fixture.py", "VALUE = 1\n" * 80)],
+            "file_records": [{"path": "fixture.py", "contentStatus": "complete"}],
+            "paths": ["fixture.py"],
+            "excluded": [],
+            "caveats": [],
+        }
+        chunks, metadata = anti.build_review_chunk_prompts(
+            context, max_prompt_chars=800, max_chunks=0
+        )
+        self.assertEqual(chunks, [])
+        self.assertEqual(metadata["status"], "incomplete")
+        self.assertTrue(metadata["omitted_items"])
+
     def test_run_id_validated_even_without_save_output(self) -> None:
         anti = load_anti()
         stderr = io.StringIO()
@@ -4150,10 +4577,804 @@ class BugfixRegressionTests(unittest.TestCase):
                  "--judge", "opus", "--max-output-tokens", "10", "--json"]
             )
 
-        self.assertEqual(rc, 0, output.getvalue())
+            self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual([item["status"] for item in parsed["panel_results"]], ["success", "success"])
         self.assertEqual(
             {item["model"] for item in parsed["panel_results"]},
             {"claude-opus-4-6-thinking", "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"},
         )
+
+
+class ScopeIntegrityContractTests(unittest.TestCase):
+    """Regression coverage for the 2026-09-14 scope-integrity report."""
+
+    def test_staged_git_scope_is_nul_safe_and_includes_deletions_renames(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-git-scope-") as tmp:
+            root = Path(tmp)
+
+            def git(*args: str) -> None:
+                subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+
+            git("init", "-q")
+            git("config", "user.name", "Anti fixture")
+            git("config", "user.email", "anti-fixture@example.invalid")
+            newline_name = "line\nname.py"
+            names = ["keep.py", "deleted.py", "føø.py", "space name.py", "rename-old.py"]
+            if os.name != "nt":
+                names.append(newline_name)
+            for name in names:
+                (root / name).write_text("VALUE = 1\n", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            (root / "keep.py").write_text("VALUE = 2\n", encoding="utf-8")
+            (root / "deleted.py").unlink()
+            (root / "føø.py").write_text("VALUE = 2\n", encoding="utf-8")
+            (root / "space name.py").write_text("VALUE = 2\n", encoding="utf-8")
+            if os.name != "nt":
+                (root / newline_name).write_bytes(b"VALUE = 2\n")
+            git("mv", "rename-old.py", "rename-new.py")
+            git("add", "-A")
+
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                args = anti.build_parser().parse_args(["review", "--scope", "staged"])
+                context = anti.collect_review_context(args)
+            finally:
+                os.chdir(old_cwd)
+
+        paths = set(context["paths"])
+        expected_paths = {"keep.py", "deleted.py", "føø.py", "space name.py"}
+        if os.name != "nt":
+            expected_paths.add("line\nname.py")
+        self.assertTrue(expected_paths <= paths)
+        self.assertTrue({"rename-old.py", "rename-new.py"} <= paths)
+        self.assertIn("deleted.py", context["diff"])
+        self.assertIn("føø.py", context["diff"])
+        self.assertTrue(any(record["path"] == "deleted.py" for record in context["file_records"]))
+
+    def test_review_context_uses_one_source_snapshot(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-snapshot-") as tmp:
+            root = Path(tmp)
+            path = root / "fixture.py"
+            path.write_bytes(b"BEFORE\n")
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                args = anti.build_parser().parse_args(["review", "--scope", "files", "--file", "fixture.py"])
+                context = anti.collect_review_context(args)
+                path.write_bytes(b"AFTER\n")
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(context["file_texts"], [("fixture.py", "BEFORE\n")])
+        self.assertEqual(context["file_records"][0]["sha256"], __import__("hashlib").sha256(b"BEFORE\n").hexdigest())
+
+    def test_file_manifest_records_content_coverage_and_hash(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:
+            root = Path(tmp)
+            path = root / "large.py"
+            path.write_bytes(b"VALUE = '" + (b"x" * anti.MAX_FILE_BYTES) + b"'\n")
+            declared_bytes = path.stat().st_size
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                args = anti.build_parser().parse_args(
+                    ["review", "--scope", "files", "--file", "large.py", "--max-prompt-chars", "30000"]
+                )
+                context = anti.collect_review_context(args)
+                _chunks, metadata = anti.build_review_chunk_prompts(
+                    context, max_prompt_chars=30000, max_chunks=0
+                )
+            finally:
+                os.chdir(old_cwd)
+
+        record = context["file_records"][0]
+        self.assertEqual(record["path"], "large.py")
+        self.assertEqual(record["bytesDeclared"], declared_bytes)
+        self.assertEqual(record["contentStatus"], "complete")
+        self.assertEqual(record["bytesSent"], record["bytesDeclared"])
+        self.assertEqual(len(record["sha256"]), 64)
+        self.assertEqual(metadata["status"], "complete")
+        self.assertEqual(metadata["coverage"][0]["contentStatus"], "complete")
+
+    def test_chunked_off_refuses_incomplete_content_before_model_call(self) -> None:
+        anti = load_anti()
+        anti.generate_with_fallback = lambda **kwargs: self.fail("model call must not happen")
+        with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:
+            root = Path(tmp)
+            (root / "large.py").write_bytes(b"x" * (anti.MAX_FILE_BYTES + 1))
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                args = anti.build_parser().parse_args(
+                    [
+                        "review", "--scope", "files", "--file", "large.py",
+                        "--chunked", "off", "--max-prompt-chars", "30000",
+                    ]
+                )
+                with self.assertRaisesRegex(anti.AntiError, "chunked|incomplete|truncated"):
+                    anti.command_review(args)
+            finally:
+                os.chdir(old_cwd)
+
+    def test_partial_chunk_manifest_reports_bytes_and_boundaries(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:
+            root = Path(tmp)
+            path = root / "large.py"
+            path.write_text("VALUE = 1\n" * 4000, encoding="utf-8")
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                args = anti.build_parser().parse_args(
+                    ["review", "--scope", "files", "--file", "large.py"]
+                )
+                context = anti.collect_review_context(args)
+                chunks, metadata = anti.build_review_chunk_prompts(
+                    context, max_prompt_chars=3000, max_chunks=1
+                )
+            finally:
+                os.chdir(old_cwd)
+
+        record = metadata["coverage"][0]
+        self.assertGreater(record["chunksExpected"], record["chunksSent"])
+        self.assertLess(record["bytesSent"], record["bytesDeclared"])
+        self.assertEqual(record["firstChunkId"], chunks[0]["id"])
+        self.assertIsNotNone(record["lastChunkId"])
+        self.assertEqual(chunks[0]["metadata"]["source_ranges"]["large.py"]["lineStart"], 1)
+        self.assertGreater(chunks[0]["metadata"]["source_ranges"]["large.py"]["lineEnd"], 1)
+        all_chunks, _all_metadata = anti.build_review_chunk_prompts(
+            context, max_prompt_chars=3000, max_chunks=0
+        )
+        self.assertEqual(all_chunks[0]["metadata"]["source_ranges"]["large.py"]["lineStart"], 1)
+        self.assertEqual(all_chunks[-1]["metadata"]["source_ranges"]["large.py"]["lineEnd"], 4000)
+        self.assertEqual(
+            [chunk["metadata"]["source_ranges"]["large.py"]["lineStart"] for chunk in all_chunks],
+            sorted(chunk["metadata"]["source_ranges"]["large.py"]["lineStart"] for chunk in all_chunks),
+        )
+        coverage = anti.coverage_summary(metadata)
+        self.assertEqual(coverage["status"], "partial")
+        self.assertEqual(coverage["partialFiles"], ["large.py"])
+
+    def test_chunk_payloads_equal_source_at_tight_budgets(self) -> None:
+        anti = load_anti()
+        source = "".join(f"LINE_{index:03d} = '{index:03d}-" + ("x" * 44) + "'\n" for index in range(100))
+        with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:
+            root = Path(tmp)
+            (root / "fixture.py").write_bytes(source.encode("utf-8"))
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                args = anti.build_parser().parse_args(
+                    ["review", "--scope", "files", "--file", "fixture.py"]
+                )
+                context = anti.collect_review_context(args)
+                for cap in (1000, 3000):
+                    chunks, metadata = anti.build_review_chunk_prompts(
+                        context, max_prompt_chars=cap, max_chunks=0
+                    )
+                    payload = []
+                    for chunk in chunks:
+                        block = chunk["prompt"].split("```text\n", 1)[1].split("\n```", 1)[0]
+                        payload.append(block)
+                        self.assertLessEqual(chunk["prompt_chars"], cap)
+                    self.assertEqual("".join(payload), source)
+                    self.assertEqual(metadata["coverage"][0]["bytesSent"], len(source.encode()))
+            finally:
+                os.chdir(old_cwd)
+
+    def test_cli_chunk_artifact_matches_plan_and_failure_ledger(self) -> None:
+        anti = load_anti()
+        source = "".join(f"LINE_{index:03d} = '{index:03d}-" + ("x" * 44) + "'\n" for index in range(100))
+        with tempfile.TemporaryDirectory(prefix="anti-artifact-") as tmp:
+            root = Path(tmp) / "workspace"
+            root.mkdir()
+            (root / "fixture.py").write_bytes(source.encode("utf-8"))
+            anti.RUNS_DIR = Path(tmp) / "runs"
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                for cap in (1000, 3000):
+                    dry_output = io.StringIO()
+                    with contextlib.redirect_stdout(dry_output), contextlib.redirect_stderr(io.StringIO()):
+                        dry_rc = anti.main([
+                            "review", "--scope", "files", "--file", "" + "fixture.py",
+                            "--max-prompt-chars", str(cap), "--max-review-chunks", "0",
+                            "--chunked", "always", "--dry-run", "--json", "--no-progress",
+                        ])
+                    self.assertEqual(dry_rc, 0)
+                    dry_plan = json.loads(dry_output.getvalue())
+                    chunk_stage = next(stage for stage in dry_plan["stages"] if stage["name"] == "review_chunk")
+
+                    calls: list[str] = []
+                    attempts = {"count": 0}
+
+                    def fake_generate(_args, *, model, prompt, **_kwargs):
+                        calls.append(prompt)
+                        attempts["count"] += 1
+                        if cap == 1000 and attempts["count"] == 2:
+                            raise anti.AntiError("provider broke at chunk 2")
+                        return (
+                            "synthesis" if "Chunked Review Manifest" in prompt else "chunk",
+                            model,
+                            {"usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}},
+                        )
+
+                    anti.generate_with_fallback = fake_generate
+                    run_id = f"tight-cap-{cap}"
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                        rc = anti.main([
+                            "review", "--scope", "files", "--file", "fixture.py",
+                            "--max-prompt-chars", str(cap), "--max-review-chunks", "0",
+                            "--chunked", "always", "--run-id", run_id,
+                            "--save-output", "summary", "--json", "--no-progress",
+                        ])
+
+                    artifact = json.loads((anti.RUNS_DIR / run_id / "result.json").read_text(encoding="utf-8"))
+                    planned = chunk_stage["planned_calls"]
+                    if cap == 1000:
+                        self.assertEqual(rc, 1)
+                        self.assertEqual(len(calls), 2)
+                        record = json.loads((anti.RUNS_DIR / f"{run_id}.json").read_text(encoding="utf-8"))
+                        generation = record["metadata"]["chunk_generation"]
+                        self.assertEqual(record["metadata"]["failed_chunk"], record["metadata"]["chunk_prompts"][1]["label"])
+                        self.assertEqual(artifact["coverage"]["chunksExpected"], planned)
+                        self.assertEqual(artifact["coverage"]["chunksCompleted"], 1)
+                        self.assertEqual(artifact["coverage"]["chunksFailed"], 1)
+                        self.assertEqual(len(artifact["coverage"]["chunks"]), planned)
+                        self.assertEqual(artifact["coverage"]["chunks"][1]["status"], "failed")
+                        self.assertTrue(all(item["status"] == "not_sent" for item in artifact["coverage"]["chunks"][2:]))
+                    else:
+                        self.assertEqual(rc, 0)
+                        self.assertEqual(len(calls), planned + 1)
+                        self.assertEqual(artifact["coverage"]["chunksExpected"], planned)
+                        self.assertEqual(artifact["coverage"]["chunksCompleted"], planned)
+
+                    file_record = artifact["coverage"]["files"][0]
+                    self.assertEqual(artifact["coverage"]["includedFiles"], ["fixture.py"])
+                    self.assertEqual(file_record["bytesDeclared"], len(source.encode()))
+                    self.assertEqual(file_record["firstChunkId"], artifact["coverage"]["chunks"][0]["id"])
+                    self.assertEqual(file_record["lastChunkId"], artifact["coverage"]["chunks"][-1]["id"])
+                    self.assertEqual(file_record["sentFirstChunkId"], artifact["coverage"]["chunks"][0]["id"])
+            finally:
+                os.chdir(old_cwd)
+
+    def test_chunk_failure_separates_failed_from_never_sent_chunks(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:
+            root = Path(tmp)
+            (root / "large.py").write_text("VALUE = 1\n" * 1200, encoding="utf-8")
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                args = anti.build_parser().parse_args(
+                    ["review", "--scope", "files", "--file", "large.py", "--max-review-chunks", "0"]
+                )
+                context = anti.collect_review_context(args)
+                chunks, metadata = anti.build_review_chunk_prompts(
+                    context, max_prompt_chars=3000, max_chunks=0
+                )
+                calls = {"count": 0}
+
+                def generate(*args, **kwargs):
+                    calls["count"] += 1
+                    if calls["count"] == 2:
+                        raise anti.AntiError("provider broke")
+                    return "chunk result", "claude-sonnet-4-6", {
+                        "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+                    }
+
+                anti.generate_with_fallback = generate
+                with self.assertRaises(anti.AntiError) as raised:
+                    anti.run_chunked_review(
+                        args=args,
+                        context=context,
+                        model="claude-sonnet-4-6",
+                        base_metadata={},
+                        max_prompt_chars=3000,
+                        chunks=chunks,
+                        chunk_metadata=metadata,
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        run_metadata = raised.exception.run_metadata
+        coverage = anti.coverage_summary(run_metadata)
+        self.assertEqual(str(raised.exception), "provider broke")
+        self.assertEqual(run_metadata["completed_chunk_count"], 1)
+        self.assertEqual(run_metadata["failed_chunk_count"], 1)
+        self.assertGreater(len(chunks), 2)
+        expected_not_sent = len(chunks) - 2
+        self.assertEqual(run_metadata["not_sent_chunk_count"], expected_not_sent)
+        self.assertEqual(coverage["chunksCompleted"], 1)
+        self.assertEqual(coverage["chunksFailed"], 1)
+        self.assertEqual(coverage["chunksOmitted"], expected_not_sent)
+        self.assertEqual(coverage["chunksNotSent"], expected_not_sent)
+        self.assertEqual(len(coverage["chunks"]), len(chunks))
+        self.assertEqual(coverage["chunks"][1]["status"], "failed")
+
+    def test_synthesis_failure_does_not_mark_reviewed_file_omitted(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+        }
+        source = "".join(f"LINE_{index:03d} = '{index:03d}-" + ("x" * 44) + "'\n" for index in range(100))
+
+        def generate(_args, *, model, prompt, **_kwargs):
+            if "Chunked Review Manifest" in prompt:
+                raise anti.AntiError("synthesis broke")
+            return "chunk", model, {
+                "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+            }
+
+        anti.generate_with_fallback = generate
+        with tempfile.TemporaryDirectory(prefix="anti-synthesis-failure-") as tmp:
+            root = Path(tmp) / "workspace"
+            root.mkdir()
+            (root / "fixture.py").write_bytes(source.encode("utf-8"))
+            anti.RUNS_DIR = Path(tmp) / "runs"
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                rc = anti.main([
+                    "panel", "--mode", "review", "--scope", "files", "--file", "fixture.py",
+                    "--model", "sonnet", "--model", "opus", "--judge", "opus",
+                    "--max-prompt-chars", "3000", "--max-review-chunks", "0",
+                    "--chunked", "always", "--run-id", "synthesis-failure",
+                    "--save-output", "summary", "--json", "--no-progress",
+                ])
+            finally:
+                os.chdir(old_cwd)
+
+            artifact = json.loads(
+                (anti.RUNS_DIR / "synthesis-failure" / "result.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(rc, 1)
+        coverage = artifact["coverage"]
+        self.assertEqual(coverage["status"], "partial")
+        self.assertEqual(coverage["includedFiles"], ["fixture.py"])
+        self.assertEqual(coverage["omittedFiles"], [])
+        self.assertEqual(coverage["chunksExpected"], 3)
+        self.assertEqual(coverage["chunksCompleted"], 3)
+        self.assertEqual(coverage["chunksFailed"], 0)
+        self.assertEqual(coverage["files"][0]["contentStatus"], "complete")
+        self.assertEqual(coverage["files"][0]["bytesReviewed"], len(source.encode("utf-8")))
+
+    def test_incomplete_synthesis_does_not_mark_reviewed_file_omitted(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+        }
+        source = "".join(f"LINE_{index:03d} = '{index:03d}-" + ("x" * 44) + "'\n" for index in range(100))
+
+        def generate(_args, *, model, prompt, **_kwargs):
+            if "Chunked Review Manifest" in prompt:
+                return "synthesis" + ("x" * 9000), model, {
+                    "usage": {"input_tokens": 1, "output_tokens": 2048, "total_tokens": 2049}
+                }
+            return "chunk", model, {
+                "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+            }
+
+        anti.generate_with_fallback = generate
+        with tempfile.TemporaryDirectory(prefix="anti-incomplete-synthesis-") as tmp:
+            root = Path(tmp) / "workspace"
+            root.mkdir()
+            (root / "fixture.py").write_bytes(source.encode("utf-8"))
+            anti.RUNS_DIR = Path(tmp) / "runs"
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                rc = anti.main([
+                    "panel", "--mode", "review", "--scope", "files", "--file", "fixture.py",
+                    "--model", "sonnet", "--model", "opus", "--judge", "opus",
+                    "--max-prompt-chars", "3000", "--max-review-chunks", "0",
+                    "--chunked", "always", "--max-output-tokens", "2048",
+                    "--run-id", "incomplete-synthesis", "--save-output", "summary",
+                    "--json", "--no-progress",
+                ])
+            finally:
+                os.chdir(old_cwd)
+
+            artifact = json.loads(
+                (anti.RUNS_DIR / "incomplete-synthesis" / "result.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(artifact["coverage"]["includedFiles"], ["fixture.py"])
+        self.assertEqual(artifact["coverage"]["omittedFiles"], [])
+        self.assertEqual(artifact["coverage"]["chunksCompleted"], 3)
+        self.assertEqual(artifact["coverage"]["files"][0]["contentStatus"], "complete")
+
+    def test_required_file_cannot_be_dropped_by_chunk_cap(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:
+            root = Path(tmp)
+            (root / "required.py").write_text("VALUE = 1\n" * 4000, encoding="utf-8")
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                args = anti.build_parser().parse_args(
+                    ["review", "--scope", "files", "--file", "required.py"]
+                )
+                context = anti.collect_review_context(args)
+                with self.assertRaisesRegex(anti.AntiError, "required.py"):
+                    anti.build_review_chunk_prompts(
+                        context,
+                        max_prompt_chars=3000,
+                        max_chunks=1,
+                        required_paths=["required.py"],
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+    def test_chunk_manifest_preserves_paths_containing_part_text(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:
+            root = Path(tmp)
+            path = root / "module part one.py"
+            path.write_text("VALUE = 1\n" * 4000, encoding="utf-8")
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                args = anti.build_parser().parse_args(
+                    ["review", "--scope", "files", "--file", path.name]
+                )
+                context = anti.collect_review_context(args)
+                _chunks, metadata = anti.build_review_chunk_prompts(
+                    context, max_prompt_chars=3000, max_chunks=0
+                )
+            finally:
+                os.chdir(old_cwd)
+
+        record = metadata["coverage"][0]
+        self.assertEqual(record["path"], path.name)
+        self.assertEqual(record["contentStatus"], "complete")
+        self.assertEqual(record["bytesSent"], record["bytesDeclared"])
+        self.assertEqual(metadata["included_files"], [path.name])
+
+    def test_panel_synthesis_refuses_lossy_over_budget_input(self) -> None:
+        anti = load_anti()
+        results = [
+            {
+                "model": "claude-sonnet-4-6",
+                "status": "success",
+                "output_text": "finding\n" + ("x" * 5000),
+                "actual_model": "claude-sonnet-4-6",
+                "provider": "google-antigravity",
+            },
+            {
+                "model": "claude-opus-4-6-thinking",
+                "status": "success",
+                "output_text": "finding\n" + ("y" * 5000),
+                "actual_model": "claude-opus-4-6-thinking",
+                "provider": "google-antigravity",
+            },
+        ]
+        with self.assertRaisesRegex(anti.AntiError, "synthesis|budget|bounded"):
+            anti.build_panel_synthesis_prompt(
+                panel_mode="ask",
+                source_prompt="source",
+                panel_results=results,
+                metadata={"status": "complete_multi_model"},
+                caveats=[],
+                roles=[],
+                max_chars=1000,
+            )
+
+    def test_capped_plan_is_partial_and_nonzero(self) -> None:
+        anti = load_anti()
+        calls: list[str] = []
+
+        def fake_post_response(**kwargs):
+            calls.append(kwargs["prompt"])
+            return "bounded plan"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            rc = anti.main([
+                "plan", "--prompt", "task " * 3000, "--max-prompt-chars", "2000",
+                "--max-plan-chunks", "1", "--allow-partial", "--json", "--no-progress",
+            ])
+
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertEqual(parsed["runStatus"], "partial")
+        self.assertEqual(parsed["scopeStatus"], "partial")
+        self.assertGreater(parsed["coverage"]["chunksExpected"], parsed["coverage"]["chunksCompleted"])
+        self.assertTrue(calls)
+
+    def test_same_provider_multi_model_is_explicitly_limited(self) -> None:
+        anti = load_anti()
+        _models, providers, status = anti.annotate_panel_results(
+            [
+                {"model": "claude-sonnet-4-6", "status": "success", "actual_model": "claude-sonnet-4-6"},
+                {"model": "claude-opus-4-6-thinking", "status": "success", "actual_model": "claude-opus-4-6-thinking"},
+            ]
+        )
+        self.assertEqual(status, "same_provider_multi_model")
+        self.assertEqual(providers, ["google-antigravity"])
+
+    def test_panel_json_exposes_authoritative_status_at_top_level(self) -> None:
+        anti = load_anti()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            anti.print_panel_result(
+                panel_mode="review",
+                base_url="http://127.0.0.1:51122/v1",
+                judge_model="claude-opus-4-6-thinking",
+                panel_models=["claude-sonnet-4-6"],
+                panel_results=[],
+                text="partial",
+                caveats=[],
+                metadata={
+                    "runStatus": "partial",
+                    "scopeStatus": "partial",
+                    "panelStatus": "partial_multi_model",
+                    "coverage": [],
+                },
+                output_json=True,
+            )
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(parsed["runStatus"], "partial")
+        self.assertEqual(parsed["scopeStatus"], "partial")
+        self.assertEqual(parsed["panelStatus"], "partial_multi_model")
+        self.assertIn("coverage", parsed)
+
+    def test_partial_panel_cannot_report_complete_panel_status(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+        }
+
+        def fake_post_response(**kwargs):
+            if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
+                return json.dumps(
+                    {
+                        "summary": "bounded",
+                        "disagreements": [],
+                        "findings": [],
+                        "unverifiable": [],
+                        "recommended_next_actions": [],
+                        "caveats": [],
+                    }
+                )
+            return "lane output"
+
+        anti.post_response = fake_post_response
+        with tempfile.TemporaryDirectory(prefix="anti-scope-") as tmp:
+            root = Path(tmp)
+            for index in range(4):
+                (root / f"file{index}.py").write_text("VALUE = '" + ("x" * 5000) + "'\n", encoding="utf-8")
+            old_cwd = Path.cwd()
+            output = io.StringIO()
+            try:
+                os.chdir(root)
+                with contextlib.redirect_stdout(output):
+                    rc = anti.main(
+                        [
+                            "panel", "--mode", "review", "--scope", "files",
+                            *sum((["--file", f"file{i}.py"] for i in range(4)), []),
+                            "--max-prompt-chars", "3000", "--max-review-chunks", "1",
+                            "--allow-partial", "--json",
+                        ]
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(rc, 1, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(parsed["runStatus"], "partial")
+        self.assertEqual(parsed["scopeStatus"], "partial")
+        self.assertNotEqual(parsed["panelStatus"], "complete_multi_model")
+        self.assertEqual(parsed["coverage"]["status"], "partial")
+        self.assertTrue(parsed["coverage"]["partialFiles"] or parsed["coverage"]["truncatedFiles"])
+
+    def test_run_record_has_stable_result_artifact(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            args = anti.build_parser().parse_args(
+                ["consult", "--prompt", "x", "--run-id", "scope-test", "--save-output", "summary"]
+            )
+            record_path = anti.write_run_record(
+                args,
+                mode="review",
+                status="partial",
+                metadata={
+                    "scope_status": "partial",
+                    "panel_status": "partial_multi_model",
+                    "coverage": [{"path": "a.py", "contentStatus": "complete"}],
+                },
+            )
+            assert record_path is not None
+            artifact_path = Path(tmp) / "scope-test" / "result.json"
+            self.assertTrue(artifact_path.exists())
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(record["resultPath"], str(artifact_path))
+        self.assertEqual(artifact["schemaVersion"], 1)
+        self.assertEqual(artifact["runId"], "scope-test")
+        self.assertEqual(artifact["runStatus"], "partial")
+        self.assertEqual(artifact["scopeStatus"], "partial")
+        self.assertEqual(artifact["panelStatus"], "partial_multi_model")
+        self.assertEqual(artifact["coverage"]["omittedFiles"], [])
+        self.assertEqual(artifact["coverage"]["truncatedFiles"], [])
+        self.assertEqual(artifact["artifacts"]["resultPath"], str(artifact_path))
+        self.assertEqual(len(artifact["helper"]["treeHash"]), 64)
+
+    def test_normalized_findings_start_unverified_with_provenance_fields(self) -> None:
+        anti = load_anti()
+        finding = anti.normalize_finding_item(
+            {"claim": "claim", "verify": "run the test", "file": "a.py", "line": 4},
+            1,
+        )
+        assert finding is not None
+        self.assertEqual(finding["verificationStatus"], "unverified")
+        self.assertIn("sourceCommit", finding)
+        self.assertIn("chunkId", finding)
+        self.assertIn("laneId", finding)
+        self.assertIn("excerptSha256", finding)
+        self.assertIn("scopeStatus", finding)
+
+    def test_enrich_finding_provenance_rejects_forged_chunk_and_uses_snapshot(self) -> None:
+        anti = load_anti()
+        findings = {"findings": [{
+            "file": "a.py", "line": 1, "chunkId": "forged", "excerptSha256": "f" * 64,
+        }]}
+        result = anti.enrich_finding_provenance(findings, {
+            "sourceCommit": "commit-1",
+            "scopeStatus": "complete",
+            "workspace_root": "/does/not/exist",
+            "coverage": [{"path": "a.py", "contentStatus": "complete"}],
+            "_review_context": {"file_texts": [("a.py", "VALUE = 1\n")]},
+        })
+        assert result is not None
+        finding = result["findings"][0]
+        self.assertIsNone(finding["chunkId"])
+        self.assertEqual(finding["sourceCommit"], "commit-1")
+        self.assertEqual(
+            finding["excerptSha256"],
+            hashlib.sha256(b"VALUE = 1").hexdigest(),
+        )
+
+    def test_enrich_finding_provenance_clears_unresolved_hashes_and_ranges(self) -> None:
+        anti = load_anti()
+        findings = {"findings": [
+            {"file": "a.py", "line": 99, "chunkId": "forged", "excerptSha256": "f" * 64},
+            {"file": "a.py", "line": 1, "chunkId": "forged", "excerptSha256": "f" * 64},
+        ]}
+        result = anti.enrich_finding_provenance(findings, {
+            "sourceCommit": "commit-1",
+            "scopeStatus": "complete",
+            "coverage": [{"path": "a.py", "contentStatus": "complete"}],
+            "_review_context": {"file_texts": [("a.py", "one\n")]},
+        })
+        assert result is not None
+        self.assertIsNone(result["findings"][0]["line"])
+        self.assertIsNone(result["findings"][0]["excerptSha256"])
+        self.assertEqual(result["findings"][1]["excerptSha256"], hashlib.sha256(b"one").hexdigest())
+
+    def test_enrich_finding_provenance_uses_structured_ranges_for_comma_path(self) -> None:
+        anti = load_anti()
+        findings = {"findings": [{"file": "a, b.py", "line": 1}]}
+        result = anti.enrich_finding_provenance(findings, {
+            "sourceCommit": "commit-1",
+            "scopeStatus": "complete",
+            "coverage": [{"path": "a, b.py", "contentStatus": "complete"}],
+            "chunk_prompts": [{
+                "id": "chunk-real",
+                "label": "a, b.py",
+                "source_ranges": {"a, b.py": {"lineStart": 1, "lineEnd": 1}},
+            }],
+            "_review_context": {"file_texts": [("a, b.py", "one\n")]},
+        })
+        assert result is not None
+        self.assertEqual(result["findings"][0]["chunkId"], "chunk-real")
+
+    def test_enrich_finding_provenance_does_not_wildcard_chunk_without_range(self) -> None:
+        anti = load_anti()
+        result = anti.enrich_finding_provenance(
+            {"findings": [{"file": "a.py", "line": 99}]},
+            {
+                "sourceCommit": "commit-1",
+                "scopeStatus": "complete",
+                "coverage": [{"path": "a.py", "contentStatus": "complete"}],
+                "chunk_prompts": [{"id": "chunk-real", "label": "a.py"}],
+                "_review_context": {"file_texts": [("a.py", "one\n")]},
+            },
+        )
+        assert result is not None
+        self.assertIsNone(result["findings"][0]["chunkId"])
+
+    def test_plan_chunked_off_refuses_before_provider_call(self) -> None:
+        anti = load_anti()
+        calls: list[str] = []
+        anti.post_response = lambda **kwargs: calls.append(kwargs["prompt"]) or "must not run"
+        output = io.StringIO()
+        error = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+            rc = anti.main([
+                "plan", "--prompt", "task " * 3000, "--chunked", "off",
+                "--max-prompt-chars", "2000", "--save-output", "never", "--json", "--no-progress",
+            ])
+        self.assertEqual(rc, 1)
+        self.assertFalse(calls)
+        self.assertIn("exact budget", error.getvalue())
+
+    def test_plan_chunked_off_refuses_in_real_cli_subprocess(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "plan",
+                "--prompt",
+                "task " * 3000,
+                "--chunked",
+                "off",
+                "--max-prompt-chars",
+                "2000",
+                "--save-output",
+                "never",
+                "--json",
+                "--no-progress",
+            ],
+            cwd=Path.cwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("exact budget", completed.stderr)
+
+    def test_full_result_writes_atomic_raw_lane_paths_and_summary_keeps_index_compact(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            full_args = anti.build_parser().parse_args(
+                ["consult", "--prompt", "x", "--run-id", "full-run", "--save-output", "full"]
+            )
+            full_record_path = anti.write_run_record(
+                full_args,
+                mode="consult",
+                status="success",
+                output_text="answer",
+                execution_ledger=[{"stage": "consult", "output": "answer"}],
+            )
+            full_artifact = json.loads(Path(json.loads(full_record_path.read_text())["resultPath"]).read_text())
+            lane_paths = full_artifact["artifacts"]["rawLanePaths"]
+            self.assertEqual(len(lane_paths), 1)
+            self.assertEqual(json.loads(Path(lane_paths[0]).read_text())["output"], "answer")
+
+            summary_args = anti.build_parser().parse_args(
+                ["consult", "--prompt", "x", "--run-id", "summary-run", "--save-output", "summary"]
+            )
+            summary_record_path = anti.write_run_record(
+                summary_args,
+                mode="consult",
+                status="success",
+                output_text="answer-" + "x" * 2000,
+            )
+            summary_record = json.loads(summary_record_path.read_text())
+            summary_artifact = json.loads(Path(summary_record["resultPath"]).read_text())
+        self.assertNotIn("output_text", summary_record)
+        self.assertEqual(summary_artifact["output_text"], "answer-" + "x" * 2000)
+        self.assertEqual(summary_artifact["artifacts"]["rawLanePaths"], [])

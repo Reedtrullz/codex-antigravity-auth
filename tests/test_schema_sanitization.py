@@ -78,5 +78,10 @@ class TestSchemaSanitization(unittest.TestCase):
         self.assertEqual(root["properties"]["name"]["type"], "string")
         self.assertEqual(root["properties"]["child"], {})
 
+    def test_invalid_schema_nodes_fail_closed_without_traversal_errors(self):
+        for raw in (["not-a-schema"], None, {"$ref": 7}, {"properties": []}, {"items": []}):
+            with self.subTest(raw=raw):
+                self.assertIsInstance(clean_json_schema(raw), dict)
+
 if __name__ == "__main__":
     unittest.main()

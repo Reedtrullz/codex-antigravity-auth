@@ -237,40 +237,41 @@ def run_local_oauth_flow(*, select_account: bool = False) -> dict:
         print("[!] Google account email was missing from userinfo response.")
         sys.exit(1)
 
-    # Save to storage
-    data = _cli.load_accounts()
-    accounts = data.setdefault("accounts", [])
-
-    # Check if account already exists, update if so, or add new
-    existing_idx = None
-    for idx, acc in enumerate(accounts):
-        if acc.get("email") == email:
-            existing_idx = idx
-            break
-
     refresh_token = tokens.get("refresh_token")
-    if not refresh_token and existing_idx is not None:
-        refresh_token = accounts[existing_idx].get("refreshToken")
-    if not refresh_token:
+    result: dict | None = None
+
+    def merge_login(data: dict) -> bool:
+        nonlocal result
+        existing = next(
+            (account for account in data.get("accounts", [])
+             if isinstance(account, dict) and account.get("email") == email),
+            None,
+        )
+        token = refresh_token or (existing or {}).get("refreshToken")
+        if not token:
+            raise ValueError("Google did not return a refresh token")
+        account_entry = {
+            "email": email,
+            "refreshToken": token,
+            "accessToken": tokens["access_token"],
+            "expiresAt": int(time.time()) + _cli.token_expires_in_seconds(tokens),
+        }
+        if project_id:
+            account_entry["projectId"] = project_id
+        result = _cli.upsert_google_account(data, account_entry)
+        return True
+
+    try:
+        _cli.update_accounts(merge_login)
+    except ValueError:
         print("[!] Google did not return a refresh token. Revoke this client grant and run login again.")
         sys.exit(1)
-
-    account_entry = {
-        "email": email,
-        "refreshToken": refresh_token,
-        "accessToken": tokens["access_token"],
-        "expiresAt": int(time.time()) + _cli.token_expires_in_seconds(tokens),
-    }
-    if project_id:
-        account_entry["projectId"] = project_id
-
-    result = _cli.upsert_google_account(data, account_entry)
+    assert result is not None
     if result["created"]:
         print(f"[+] Successfully authenticated new Google Account: {email}")
     else:
         print(f"[+] Successfully re-authenticated and updated Google Account: {email}")
 
-    _cli.save_accounts(data)
     print(f"[+] {email} is in the Google account rotation pool ({result['account_count']} total).")
     return result
 

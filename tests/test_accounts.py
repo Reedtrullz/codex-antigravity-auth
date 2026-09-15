@@ -1,6 +1,7 @@
 import unittest
 import time
 import tempfile
+import threading
 from pathlib import Path
 from codex_antigravity_auth.accounts import AccountManager
 from codex_antigravity_auth.response_protocol import AttemptOutcome
@@ -102,6 +103,137 @@ class TestAccounts(unittest.TestCase):
         self.assertEqual(selected["email"], "primary@gmail.com")
         self.assertIn("fingerprint", selected)
         self.assertEqual(mutation_results, [True])
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.refresh_access_token", side_effect=RuntimeError("expired"))
+    def test_selection_refresh_failure_persists_cooldown(self, _mock_refresh, mock_update):
+        data = {
+            "accounts": [
+                {"email": "primary@gmail.com", "refreshToken": "ref", "accessToken": "old", "expiresAt": 0},
+                {"email": "secondary@gmail.com", "refreshToken": "ref2", "accessToken": "ok", "expiresAt": time.time() + 3600},
+            ],
+            "activeIndex": 0,
+            "activeIndexByFamily": {"claude": 0, "gemini": 0},
+            "accountState": {"schemaVersion": 2, "failures": {}, "cooldowns": {}, "counters": {}},
+        }
+        results = self.capture_mutation_results(mock_update, data)
+
+        selected = AccountManager().select_active_account("gemini-3.8-flash")
+
+        self.assertEqual(selected["email"], "secondary@gmail.com")
+        self.assertEqual(results, [True])
+        self.assertIn("primary@gmail.com", data["accountState"]["cooldowns"])
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.refresh_access_token", side_effect=RuntimeError("expired"))
+    def test_hard_refresh_failure_persists_for_select_and_acquire(self, _mock_refresh, mock_update):
+        for expires_at in (0, time.time() + 120):
+            for acquire in (False, True):
+                with self.subTest(expires_at=expires_at, acquire=acquire):
+                    data = {
+                        "accounts": [
+                            {"email": "primary@gmail.com", "refreshToken": "ref", "accessToken": "old", "expiresAt": expires_at},
+                            {"email": "secondary@gmail.com", "refreshToken": "ref2", "accessToken": "ok", "expiresAt": time.time() + 3600},
+                        ],
+                        "activeIndex": 0,
+                        "activeIndexByFamily": {"claude": 0, "gemini": 0},
+                        "accountState": {"schemaVersion": 2, "failures": {}, "cooldowns": {}, "counters": {}},
+                    }
+                    results = self.capture_mutation_results(mock_update, data)
+                    manager = AccountManager()
+                    selected = manager.acquire_account("gemini-3.8-flash") if acquire else manager.select_active_account("gemini-3.8-flash")
+                    self.assertEqual(selected["email"], "secondary@gmail.com")
+                    self.assertEqual(results[-1], True)
+                    self.assertIn("primary@gmail.com", data["accountState"]["cooldowns"])
+                    reloaded = AccountManager().select_active_account("gemini-3.8-flash")
+                    self.assertEqual(reloaded["email"], "secondary@gmail.com")
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.load_accounts")
+    @patch("codex_antigravity_auth.accounts.refresh_access_token")
+    @patch("codex_antigravity_auth.accounts.accounts_json_path_read_only")
+    def test_selection_does_not_wait_on_background_same_account_refresh(self, mock_read_only, mock_refresh, mock_load, mock_update):
+        data = {
+            "accounts": [
+                {"email": "primary@gmail.com", "refreshToken": "ref", "accessToken": "old", "expiresAt": time.time() + 120, "projectId": "fixture-project"},
+                {"email": "secondary@gmail.com", "refreshToken": "ref2", "accessToken": "ok", "expiresAt": time.time() + 3600},
+            ],
+            "activeIndex": 0,
+            "activeIndexByFamily": {"claude": 0, "gemini": 0},
+            "accountState": {"schemaVersion": 2, "failures": {}, "cooldowns": {}, "counters": {}},
+        }
+        mock_load.return_value = data
+        mock_update.side_effect = lambda mutator: mutator(data)
+        mock_read_only.return_value.exists.return_value = True
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_refresh(_token):
+            started.set()
+            self.assertTrue(release.wait(1))
+            return {"access_token": "fresh", "expires_in": 3600}
+
+        mock_refresh.side_effect = blocked_refresh
+        manager = AccountManager()
+        worker = threading.Thread(target=manager.refresh_expiring_accounts, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(1))
+
+            started_at = time.monotonic()
+            selected = manager.select_active_account("gemini-3.8-flash")
+            elapsed = time.monotonic() - started_at
+
+            self.assertEqual(selected["email"], "secondary@gmail.com")
+            self.assertLess(elapsed, 0.5)
+            self.assertNotIn("primary@gmail.com", data["accountState"]["cooldowns"])
+        finally:
+            release.set()
+            worker.join(timeout=1)
+            self.assertFalse(worker.is_alive())
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.load_accounts")
+    @patch("codex_antigravity_auth.accounts.refresh_access_token")
+    @patch("codex_antigravity_auth.accounts.accounts_json_path_read_only")
+    def test_busy_sole_account_is_transient_and_selectable_after_refresh(self, mock_read_only, mock_refresh, mock_load, mock_update):
+        data = {
+            "accounts": [
+                {"email": "primary@gmail.com", "refreshToken": "ref", "accessToken": "old", "expiresAt": time.time() + 120, "projectId": "fixture-project"},
+            ],
+            "activeIndex": 0,
+            "activeIndexByFamily": {"claude": 0, "gemini": 0},
+            "accountState": {"schemaVersion": 2, "failures": {}, "cooldowns": {}, "counters": {}},
+        }
+        mock_load.return_value = data
+        mock_update.side_effect = lambda mutator: mutator(data)
+        mock_read_only.return_value.exists.return_value = True
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_refresh(_token):
+            started.set()
+            self.assertTrue(release.wait(1))
+            return {"access_token": "fresh", "expires_in": 3600}
+
+        mock_refresh.side_effect = blocked_refresh
+        manager = AccountManager()
+        worker = threading.Thread(target=manager.refresh_expiring_accounts, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(1))
+
+            started_at = time.monotonic()
+            self.assertIsNone(manager.select_active_account("gemini-3.8-flash"))
+            self.assertLess(time.monotonic() - started_at, 0.5)
+            self.assertNotIn("primary@gmail.com", data["accountState"]["cooldowns"])
+        finally:
+            release.set()
+            worker.join(timeout=1)
+            self.assertFalse(worker.is_alive())
+
+        self.assertEqual(data["accounts"][0]["accessToken"], "fresh")
+        self.assertEqual(manager.select_active_account("gemini-3.8-flash")["email"], "primary@gmail.com")
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
     def test_empty_normalized_account_store_skips_persisted_write(self, mock_update):
@@ -387,11 +519,13 @@ class TestAccounts(unittest.TestCase):
         self.assertEqual(counter["total_tokens"], 9)
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.load_accounts")
     @patch("codex_antigravity_auth.accounts.refresh_access_token")
-    def test_refresh_expiring_accounts_refreshes_ahead(self, mock_refresh, mock_update):
+    def test_refresh_expiring_accounts_refreshes_ahead(self, mock_refresh, mock_load, mock_update):
         self.accounts_data["accounts"][0]["expiresAt"] = time.time() + 120
         self.accounts_data["accounts"][1]["expiresAt"] = time.time() + 1000
         mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+        mock_load.return_value = self.accounts_data
         mock_refresh.return_value = {"access_token": "fresh_access", "expires_in": 3600}
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -414,6 +548,68 @@ class TestAccounts(unittest.TestCase):
         self.assertEqual(summary["failed"], 0)
         self.assertEqual(self.accounts_data["accounts"][0]["accessToken"], "fresh_access")
         mock_refresh.assert_called_once_with("ref_1")
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.load_accounts")
+    @patch("codex_antigravity_auth.accounts.refresh_access_token", side_effect=RuntimeError("expired"))
+    def test_refresh_failure_persists_cooldown(self, _mock_refresh, mock_load, mock_update):
+        self.accounts_data["accounts"][0]["expiresAt"] = time.time() + 1
+        mock_load.return_value = self.accounts_data
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "accounts.json"
+            path.write_text("{}", encoding="utf-8")
+            with patch("codex_antigravity_auth.accounts.accounts_json_path_read_only", return_value=path):
+                summary = AccountManager().refresh_expiring_accounts(window_seconds=300)
+
+        self.assertEqual(summary["failed"], 1)
+        self.assertIn("primary@gmail.com", self.accounts_data["accountState"]["cooldowns"])
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.load_accounts")
+    @patch("codex_antigravity_auth.accounts.refresh_access_token")
+    def test_refresh_does_not_overwrite_rotated_token(self, mock_refresh, mock_load, mock_update):
+        self.accounts_data["accounts"][0]["expiresAt"] = time.time() + 1
+        mock_load.return_value = self.accounts_data
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+
+        def rotate_before_merge(_refresh_token):
+            self.accounts_data["accounts"][0]["refreshToken"] = "rotated_elsewhere"
+            return {"access_token": "stale_access", "expires_in": 3600}
+
+        mock_refresh.side_effect = rotate_before_merge
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "accounts.json"
+            path.write_text("{}", encoding="utf-8")
+            with patch("codex_antigravity_auth.accounts.accounts_json_path_read_only", return_value=path):
+                summary = AccountManager().refresh_expiring_accounts(window_seconds=300)
+
+        self.assertEqual(summary["refreshed"], 0)
+        self.assertEqual(self.accounts_data["accounts"][0]["accessToken"], "acc_1")
+
+    @patch("codex_antigravity_auth.accounts.update_accounts")
+    @patch("codex_antigravity_auth.accounts.load_accounts")
+    @patch("codex_antigravity_auth.accounts.refresh_access_token")
+    def test_refresh_does_not_overwrite_same_refresh_token_with_newer_access(self, mock_refresh, mock_load, mock_update):
+        self.accounts_data["accounts"][0]["expiresAt"] = time.time() + 1
+        mock_load.return_value = self.accounts_data
+        mock_update.side_effect = lambda mutator: mutator(self.accounts_data)
+
+        def newer_access(_refresh_token):
+            self.accounts_data["accounts"][0]["accessToken"] = "fresh_access_elsewhere"
+            self.accounts_data["accounts"][0]["expiresAt"] = time.time() + 3600
+            return {"access_token": "stale_access", "expires_in": 3600}
+
+        mock_refresh.side_effect = newer_access
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "accounts.json"
+            path.write_text("{}", encoding="utf-8")
+            with patch("codex_antigravity_auth.accounts.accounts_json_path_read_only", return_value=path):
+                summary = AccountManager().refresh_expiring_accounts(window_seconds=300)
+
+        self.assertEqual(summary["refreshed"], 0)
+        self.assertEqual(self.accounts_data["accounts"][0]["accessToken"], "fresh_access_elsewhere")
 
 
 
