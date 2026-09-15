@@ -887,11 +887,15 @@ The follow-up keeps the final judge normalizer strict, but separates actual
 content loss from lane-schema normalization. Complete structured payloads are
 passed to the judge unchanged after redaction; affected lanes expose
 `judge_input_contract_status=partial` and explicit normalization warnings,
-while `judge_input_status` remains `complete`. Parse repair, truncation, or
-failure to preserve safe content remains fail-closed and lossy. Offline
-fixtures reproduce v5 and v6 behavior.
+while `judge_input_status` remains `complete`. This contract status is
+advisory lane-schema metadata, not a bypass of the mandatory final judge
+findings contract: the synthesis prompt still requires strict `claim` and
+`verify` fields, and the candidate live judge parsed with
+`findings_dropped=0`. Parse repair, truncation, or failure to preserve safe
+content remains fail-closed and lossy. Offline fixtures reproduce v5 and v6
+behavior.
 
-Evidence: Anti-specific tests `211 passed, 9 subtests`; full suite `834 passed,
+Evidence: Anti-specific tests `212 passed, 9 subtests`; full suite `835 passed,
 220 subtests, 2 warnings`. Candidate live run
 `anti-output-contract-fix-candidate-live-v1` completed exact 2/2 file coverage
 and 5,353/5,353 bytes, with one successful Sonnet lane, one successful Opus

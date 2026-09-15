@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -2024,6 +2025,8 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["findings_status"], "fallback")
+        self.assertEqual(parsed["runStatus"], "partial")
+        self.assertEqual(parsed["panelStatus"], "partial_multi_model")
         self.assertEqual(parsed["output_text"], "judge-output")
         self.assertTrue(any("structured findings" in caveat for caveat in parsed["caveats"]))
 
@@ -2221,18 +2224,22 @@ class AntiHelperTests(unittest.TestCase):
     def test_panel_synthesis_preserves_v5_structured_lane_payload_without_false_loss(self) -> None:
         anti = load_anti()
         fixture_dir = Path(__file__).parent / "fixtures"
+        payloads = [
+            json.loads((fixture_dir / "v5-lane-sonnet.json").read_text()),
+            json.loads((fixture_dir / "v5-lane-opus.json").read_text()),
+        ]
         results = [
             {
                 "model": "claude-sonnet-4-6",
                 "status": "success",
-                "output_text": (fixture_dir / "v5-lane-sonnet.json").read_text(),
+                "output_text": json.dumps(payloads[0]),
                 "actual_model": "claude-sonnet-4-6",
                 "provider": "google-antigravity",
             },
             {
                 "model": "claude-opus-4-6-thinking",
                 "status": "success",
-                "output_text": (fixture_dir / "v5-lane-opus.json").read_text(),
+                "output_text": json.dumps(payloads[1]),
                 "actual_model": "claude-opus-4-6-thinking",
                 "provider": "google-antigravity",
             },
@@ -2250,8 +2257,15 @@ class AntiHelperTests(unittest.TestCase):
             anonymize=False,
         )
 
-        self.assertIn("Symlink escape bypasses workspace containment", prompt)
-        self.assertIn("Finding dictionaries are mutated in place on some paths.", prompt)
+        structured_materials = []
+        for block in re.findall(r"```json\n(.*?)\n```", prompt, flags=re.DOTALL):
+            parsed_block = json.loads(block)
+            if "structuredOutput" in parsed_block:
+                structured_materials.append(parsed_block["structuredOutput"])
+        self.assertEqual(
+            sorted(json.dumps(item, sort_keys=True) for item in structured_materials),
+            sorted(json.dumps(item, sort_keys=True) for item in payloads),
+        )
         self.assertEqual(metadata["judge_input_status"], "complete")
         self.assertEqual(metadata["judge_input_lossy_lanes"], [])
         self.assertEqual(metadata["judge_input_contract_status"], "partial")
@@ -2260,6 +2274,46 @@ class AntiHelperTests(unittest.TestCase):
             ["claude-sonnet-4-6", "claude-opus-4-6-thinking"],
         )
         self.assertTrue(any("final findings list" in caveat for caveat in caveats))
+
+    def test_panel_synthesis_marks_missing_safe_structured_payload_lossy(self) -> None:
+        anti = load_anti()
+        parsed = {
+            "summary": "safe",
+            "disagreements": [],
+            "findings": [{"claim": "claim", "verify": "verify", "severity": "high"}],
+            "unverifiable": [],
+            "recommended_next_actions": [],
+            "caveats": [],
+            "findings_dropped": 0,
+        }
+        results = [{
+            "model": "claude-sonnet-4-6",
+            "status": "success",
+            "output_text": "lane output",
+            "actual_model": "claude-sonnet-4-6",
+            "provider": "google-antigravity",
+        }]
+        metadata = {"status": "same_provider_multi_model"}
+
+        with unittest.mock.patch.object(
+            anti,
+            "parse_panel_findings",
+            return_value=(parsed, None, {"repaired": False, "safe_structured": None}),
+        ):
+            anti.build_panel_synthesis_prompt(
+                panel_mode="review",
+                source_prompt="source",
+                panel_results=results,
+                metadata=metadata,
+                caveats=[],
+                roles=[],
+                max_chars=64000,
+                anonymize=False,
+            )
+
+        self.assertEqual(metadata["judge_input_status"], "partial")
+        self.assertEqual(metadata["judge_input_lossy_lanes"], ["claude-sonnet-4-6"])
+        self.assertEqual(metadata["judge_input_contract_status"], "complete")
 
     def test_panel_synthesis_keeps_v6_prose_lane_complete(self) -> None:
         anti = load_anti()
@@ -2633,6 +2687,7 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(parsed["metadata"]["findings_status"], "parsed")
         self.assertEqual(parsed["metadata"]["judge_json_repaired"], True)
         self.assertEqual(parsed["metadata"]["judge_retried"], False)
+        self.assertEqual(parsed["runStatus"], "partial")
         self.assertEqual(parsed["findings"]["findings_total"], 2)
         self.assertEqual(parsed["findings"]["findings_dropped"], 0)
         self.assertIn("repaired", parsed["findings"]["parse_warning"])
@@ -5135,7 +5190,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 "provider": "google-antigravity",
             },
         ]
-        with self.assertRaisesRegex(anti.AntiError, "synthesis|budget|bounded"):
+        with self.assertRaisesRegex(anti.AntiError, r"requires \d+ characters but the exact budget is \d+"):
             anti.build_panel_synthesis_prompt(
                 panel_mode="ask",
                 source_prompt="source",
