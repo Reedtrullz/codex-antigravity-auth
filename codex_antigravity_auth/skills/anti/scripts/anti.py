@@ -5085,18 +5085,19 @@ def build_panel_synthesis_prompt(
         "requested_output": output_mode,
     }
 
-    def lane_material(result: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    def lane_material(result: dict[str, Any]) -> tuple[dict[str, Any], bool, str | None]:
         raw = str(result.get("output_text", "")).strip()
         if result.get("status") not in {"success", "truncated"}:
             return {
                 "status": result.get("status"),
                 "error": clean_string(result.get("error"), max_chars=1200),
-            }, False
+            }, False, None
         parsed, warning, diagnostics = parse_panel_findings(raw)
         normalized_lossy = bool(
             diagnostics.get("repaired")
-            or (isinstance(parsed, dict) and parsed.get("findings_dropped", 0))
+            or (isinstance(parsed, dict) and not isinstance(diagnostics.get("safe_structured"), dict))
         )
+        normalization_warning = None
         if isinstance(parsed, dict):
             severity_order = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
             findings = sorted(
@@ -5117,6 +5118,14 @@ def build_panel_synthesis_prompt(
             safe_structured = diagnostics.get("safe_structured")
             if isinstance(safe_structured, dict):
                 material["structuredOutput"] = safe_structured
+            findings_dropped = int(parsed.get("findings_dropped") or 0)
+            if findings_dropped:
+                normalization_warning = (
+                    f"{findings_dropped} finding item(s) were normalized out of Anti's final findings list; "
+                    "the complete redacted structured lane payload is preserved for judging."
+                )
+                material["structuredNormalizationWarnings"] = [normalization_warning]
+                material["caveats"] = [*list(material.get("caveats") or []), normalization_warning]
             if warning:
                 material["caveats"] = [*material["caveats"], warning]
         else:
@@ -5132,19 +5141,29 @@ def build_panel_synthesis_prompt(
                 "lane output truncated at the token cap; partial content below is incomplete",
                 *list(material.get("caveats") or []),
             ]
-        return material, normalized_lossy
+        return material, normalized_lossy, normalization_warning
 
     lane_materials: list[dict[str, Any]] = []
     lossy_lanes: list[str] = []
+    normalization_warning_lanes: list[str] = []
+    normalization_warnings: list[str] = []
     for result in panel_results:
-        material, lossy = lane_material(result)
+        material, lossy, normalization_warning = lane_material(result)
         lane_materials.append(material)
         if lossy:
             lossy_lanes.append(str(result.get("model")))
+        if normalization_warning:
+            lane = str(result.get("model"))
+            normalization_warning_lanes.append(lane)
+            normalization_warnings.append(f"{lane}: {normalization_warning}")
     metadata["judge_input_status"] = "partial" if lossy_lanes else "complete"
     metadata["judge_input_lossy_lanes"] = lossy_lanes
+    metadata["judge_input_contract_status"] = "partial" if normalization_warning_lanes else "complete"
+    metadata["judge_input_normalization_warnings"] = normalization_warning_lanes
     manifest["judge_input_status"] = metadata["judge_input_status"]
     manifest["judge_input_lossy_lanes"] = lossy_lanes
+    manifest["judge_input_contract_status"] = metadata["judge_input_contract_status"]
+    manifest["judge_input_normalization_warnings"] = normalization_warning_lanes
 
     def render(source: str, materials: list[dict[str, Any]]) -> str:
         # Phase 3: anonymize lane labels and shuffle before judging
@@ -5230,7 +5249,10 @@ def build_panel_synthesis_prompt(
 
     prompt = render(source_prompt, lane_materials)
     original_len = len(prompt)
-    synthesis_caveats: list[str] = []
+    synthesis_caveats: list[str] = [
+        f"Panel lane schema normalization: {warning}"
+        for warning in normalization_warnings
+    ]
     synthesis_metadata: dict[str, Any] = {
         "synthesis_prompt_original_chars": original_len,
         "synthesis_truncated_source": False,

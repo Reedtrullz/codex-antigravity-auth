@@ -55,6 +55,7 @@ codex_antigravity_auth = [
   "skills/anti/scripts/*.py",
   "skills/anti/scripts/anti_lib/*.py",
   "skills/anti/tests/*.py",
+  "skills/anti/tests/fixtures/*.json",
 ]
 
 [tool.pytest.ini_options]
