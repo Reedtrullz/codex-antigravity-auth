@@ -1,0 +1,20 @@
+{
+  "summary": "The verifier has path, mutation, and diagnostic robustness concerns.",
+  "disagreements": [],
+  "findings": [
+    {
+      "severity": "medium",
+      "file": "src/verifier.py",
+      "description": "Finding dictionaries are mutated in place on some paths."
+    },
+    {
+      "severity": "low",
+      "file": "src/verifier.py",
+      "title": "The syntax check recognizes too narrow an error label",
+      "detail": "Some compiler failures may not include the literal SyntaxError label."
+    }
+  ],
+  "unverifiable": ["Tool availability was not checked."],
+  "recommended_next_actions": [],
+  "caveats": []
+}

@@ -2218,6 +2218,75 @@ class AntiHelperTests(unittest.TestCase):
                 anonymize=False,
             )
 
+    def test_panel_synthesis_preserves_v5_structured_lane_payload_without_false_loss(self) -> None:
+        anti = load_anti()
+        fixture_dir = Path(__file__).parent / "fixtures"
+        results = [
+            {
+                "model": "claude-sonnet-4-6",
+                "status": "success",
+                "output_text": (fixture_dir / "v5-lane-sonnet.json").read_text(),
+                "actual_model": "claude-sonnet-4-6",
+                "provider": "google-antigravity",
+            },
+            {
+                "model": "claude-opus-4-6-thinking",
+                "status": "success",
+                "output_text": (fixture_dir / "v5-lane-opus.json").read_text(),
+                "actual_model": "claude-opus-4-6-thinking",
+                "provider": "google-antigravity",
+            },
+        ]
+        metadata = {"status": "same_provider_multi_model"}
+
+        prompt, caveats, _synthesis_metadata = anti.build_panel_synthesis_prompt(
+            panel_mode="review",
+            source_prompt="source",
+            panel_results=results,
+            metadata=metadata,
+            caveats=[],
+            roles=[],
+            max_chars=64000,
+            anonymize=False,
+        )
+
+        self.assertIn("Symlink escape bypasses workspace containment", prompt)
+        self.assertIn("Finding dictionaries are mutated in place on some paths.", prompt)
+        self.assertEqual(metadata["judge_input_status"], "complete")
+        self.assertEqual(metadata["judge_input_lossy_lanes"], [])
+        self.assertEqual(metadata["judge_input_contract_status"], "partial")
+        self.assertEqual(
+            metadata["judge_input_normalization_warnings"],
+            ["claude-sonnet-4-6", "claude-opus-4-6-thinking"],
+        )
+        self.assertTrue(any("final findings list" in caveat for caveat in caveats))
+
+    def test_panel_synthesis_keeps_v6_prose_lane_complete(self) -> None:
+        anti = load_anti()
+        results = [{
+            "model": "claude-sonnet-4-6",
+            "status": "success",
+            "output_text": "## Review\nNo concrete defect found. V6_PROSE_TAIL",
+            "actual_model": "claude-sonnet-4-6",
+            "provider": "google-antigravity",
+        }]
+        metadata = {"status": "same_provider_multi_model"}
+
+        prompt, _caveats, _synthesis_metadata = anti.build_panel_synthesis_prompt(
+            panel_mode="review",
+            source_prompt="source",
+            panel_results=results,
+            metadata=metadata,
+            caveats=[],
+            roles=[],
+            max_chars=64000,
+            anonymize=False,
+        )
+
+        self.assertIn("V6_PROSE_TAIL", prompt)
+        self.assertEqual(metadata["judge_input_status"], "complete")
+        self.assertEqual(metadata["judge_input_lossy_lanes"], [])
+
     def test_panel_review_preserves_large_summary_through_actual_panel_path(self) -> None:
         anti = load_anti()
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {

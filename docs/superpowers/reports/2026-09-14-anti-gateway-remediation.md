@@ -872,3 +872,36 @@ at `391297d7...9b7db09` and `1959f85e...416b94`. The accounts state was
 preserved after live refresh at `33853cf8...d8732a82`; it was not rolled back.
 No install, merge, force-push, tag, PyPI action, credential/provider edit, or
 additional live trial was made.
+
+## 2026-09-15 — Follow-up: preserve complete structured lane input
+
+The installed v5 proof isolated the remaining acceptance issue. Both provider
+lanes returned valid JSON, but their finding items used alternate fields such
+as `title`/`detail` or `description` instead of the strict final findings
+schema's `claim`/`verify` fields. `parse_panel_findings()` normalized those
+items out of its final findings list and `build_panel_synthesis_prompt()` then
+classified the lanes as lossy, even though the complete redacted JSON was
+already retained in `structuredOutput`.
+
+The follow-up keeps the final judge normalizer strict, but separates actual
+content loss from lane-schema normalization. Complete structured payloads are
+passed to the judge unchanged after redaction; affected lanes expose
+`judge_input_contract_status=partial` and explicit normalization warnings,
+while `judge_input_status` remains `complete`. Parse repair, truncation, or
+failure to preserve safe content remains fail-closed and lossy. Offline
+fixtures reproduce v5 and v6 behavior.
+
+Evidence: Anti-specific tests `211 passed, 9 subtests`; full suite `834 passed,
+220 subtests, 2 warnings`. Candidate live run
+`anti-output-contract-fix-candidate-live-v1` completed exact 2/2 file coverage
+and 5,353/5,353 bytes, with one successful Sonnet lane, one successful Opus
+lane, and one successful Opus judge; no retries or fallbacks. It reports
+`runStatus=success`, `scopeStatus=complete`, and
+`panelStatus=same_provider_multi_model`. Both actual providers were
+`google-antigravity`; provider-independent consensus is not claimed. The
+structured lane-contract warning remains explicit in the saved metadata.
+
+Artifacts: `/Users/reidar/.codex/anti-runs/anti-output-contract-fix-candidate-live-v1/`.
+The candidate helper/bundle parity harness matched at
+`22be374eb0016e31ad3d399e9616d7199feb80868bdac8e40c1fd05b3ad6e5e4`; no new
+package install or live runtime/config mutation was performed.

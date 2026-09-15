@@ -1,0 +1,21 @@
+{
+  "summary": "The verifier has concrete path and mutation risks.",
+  "disagreements": [],
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "high",
+      "file": "src/verifier.py",
+      "title": "Symlink escape bypasses workspace containment",
+      "detail": "A workspace symlink can cause the verifier to read outside the intended root."
+    },
+    {
+      "severity": "medium",
+      "file": "src/verifier.py",
+      "description": "The verifier mutates caller-owned finding dictionaries inconsistently."
+    }
+  ],
+  "unverifiable": [],
+  "recommended_next_actions": ["Add a focused containment regression."],
+  "caveats": ["The supplied scope is bounded to the listed files."]
+}
