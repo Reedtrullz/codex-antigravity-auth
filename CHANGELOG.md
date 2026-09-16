@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.3.0 - Unified Routing & Review Integrity (Unreleased)
+## v2.3.0 - Unified Routing & Review Integrity (Sep 16, 2026)
 
 ### Added
 
@@ -30,7 +30,6 @@
   coverage fields, not infer completion from generated prose.
 - After upgrading, run `codex-antigravity install-skill --force --verify` to
   back up, refresh, and verify the installed Anti helper.
-- This is a release candidate; no v2.3.0 tag or PyPI publication is claimed.
 
 ## v2.2.0 - Security Hardening & Release Readiness (Aug 21, 2026)
 

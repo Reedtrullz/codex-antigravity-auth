@@ -1,6 +1,6 @@
 # Verification Guide
 
-> **Release preparation — 2026-09-16:** v2.3.0 is an unpublished candidate based on `3b34116913969d24c120ed9c3f0e41ff71c551da`. The base passed CI run `34947657262`. Latest public GitHub release: v2.2.0. Candidate verification is recorded in the release PR; no new tag, PyPI publication, or credentialed live generation is claimed. Earlier release evidence below is historical.
+> **Release verification — 2026-09-16:** v2.3.0 includes the changes through `3b34116913969d24c120ed9c3f0e41ff71c551da`. Release preparation passed 835 tests and 220 subtests, distribution checks, and 212 installed Anti tests; CI run `35087469306` passed all five OS/Python jobs and packaging. See PR #29 and the v2.3.0 tag workflows for final publication status. No fresh credentialed live generation is claimed. Earlier release evidence below is historical.
 
 ## Quick Start (5 minutes)
 
@@ -81,7 +81,7 @@ curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
 
 Treat verification evidence in layers: unit/mocked route tests prove local contracts; wheel and installed-skill checks prove packaging; `/health`, service status, and model-catalog readbacks prove the running local gateway; only an explicit `doctor --codex-ready --live` or manual `/v1/responses` call proves a credentialed provider path. Do not present local or mocked evidence as a live-provider claim.
 
-The `1.7.0` release-candidate paragraph below is historical and must not be used as current release state. For the v2.3.0 candidate, use the release PR verification; the prior v2.2.0 publication is historical evidence. No fresh credentialed live-provider result is claimed.
+The `1.7.0` release-candidate paragraph below is historical and must not be used as current release state. For v2.3.0, use the release PR verification; the prior v2.2.0 publication is historical evidence. No fresh credentialed live-provider result is claimed.
 
 ## Manual Smoke Test
 ```bash
