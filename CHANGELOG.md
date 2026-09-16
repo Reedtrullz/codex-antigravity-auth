@@ -1,5 +1,36 @@
 # Changelog
 
+## v2.3.0 - Unified Routing & Review Integrity (Sep 16, 2026)
+
+### Added
+
+- Opt-in unified Codex model picker and routing for OpenAI, Antigravity, and
+  configured BYOK models, with explicit authentication and provider errors.
+- Gemini 3.8 Flash catalog support.
+- Durable, sanitized Anti result artifacts with explicit completion, scope,
+  coverage, provider identity, budget, and installed-skill parity information.
+
+### Hardened
+
+- Anti reviews fail closed on incomplete scope, synthesis overflow, and lost
+  lane input; preserve complete structured findings and chunk provenance.
+- Panel results distinguish model diversity from independent providers and
+  retain partial/failure diagnostics rather than claiming complete coverage.
+- Account leases, concurrent token refresh, request replay, and schema
+  validation handle failure and contention more consistently.
+- Native non-stream requests have bounded deadlines and deterministic
+  cancellation/cleanup; OpenAI streaming HTTP failures remain visible.
+- Packaged Anti fixtures and regressions cover installed helper behavior.
+
+### Upgrade Notes
+
+- Unified routing remains opt-in; classic Antigravity configuration is retained.
+- Incomplete Anti runs may now explicitly fail or report partial results where
+  previous versions could imply success. Consumers should inspect status and
+  coverage fields, not infer completion from generated prose.
+- After upgrading, run `codex-antigravity install-skill --force --verify` to
+  back up, refresh, and verify the installed Anti helper.
+
 ## v2.2.0 - Security Hardening & Release Readiness (Aug 21, 2026)
 
 ### Security Fixes

@@ -1,6 +1,6 @@
 # Verification Guide
 
-> **Current release snapshot — 2026-08-24:** Canonical `main` is v2.2.0 at `499ff436c311638ebe67cea6ad2de354a309e6ec`. CI run `32522720655` and Publish run `32522720637` passed for that exact SHA, the public GitHub release is [v2.2.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v2.2.0), and the PyPI index reports `codex-antigravity-auth==2.2.0`. The release-candidate paragraphs below refer to July 1.7.0 evidence and remain historical; no fresh credentialed live generation was run in this audit.
+> **Release verification — 2026-09-16:** v2.3.0 includes the changes through `3b34116913969d24c120ed9c3f0e41ff71c551da`. Release preparation passed 835 tests and 220 subtests, distribution checks, and 212 installed Anti tests; CI run `35087469306` passed all five OS/Python jobs and packaging. See PR #29 and the v2.3.0 tag workflows for final publication status. No fresh credentialed live generation is claimed. Earlier release evidence below is historical.
 
 ## Quick Start (5 minutes)
 
@@ -81,7 +81,7 @@ curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
 
 Treat verification evidence in layers: unit/mocked route tests prove local contracts; wheel and installed-skill checks prove packaging; `/health`, service status, and model-catalog readbacks prove the running local gateway; only an explicit `doctor --codex-ready --live` or manual `/v1/responses` call proves a credentialed provider path. Do not present local or mocked evidence as a live-provider claim.
 
-The `1.7.0` release-candidate paragraph below is historical and must not be used as current release state. For the current v2.2.0 release, use the exact-SHA CI/Publish and PyPI evidence in the snapshot above. No fresh credentialed live-provider result is claimed.
+The `1.7.0` release-candidate paragraph below is historical and must not be used as current release state. For v2.3.0, use the release PR verification; the prior v2.2.0 publication is historical evidence. No fresh credentialed live-provider result is claimed.
 
 ## Manual Smoke Test
 ```bash

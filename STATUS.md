@@ -1,8 +1,8 @@
 # Integration Status — historical baseline 12 July 2026
 
-> **Current snapshot — 2026-08-24:** The canonical `main` checkout is released at v2.2.0 (`499ff436c311638ebe67cea6ad2de354a309e6ec`). CI run `32522720655` and Publish run `32522720637` both passed for that exact SHA; the GitHub release is public. The July 1.7.0 release-candidate notes below are historical evidence and are not current release state. No fresh credentialed live generation was run in this audit.
+> **Release verification — 2026-09-16:** v2.3.0 includes the changes through `3b34116913969d24c120ed9c3f0e41ff71c551da`. Release preparation passed 835 tests and 220 subtests, distribution checks, and 212 installed Anti tests; CI run `35087469306` passed all five OS/Python jobs and packaging. See PR #29 and the v2.3.0 tag workflows for final publication status. No fresh credentialed live generation is claimed. Earlier release evidence below is historical.
 
-> The Build & Test Health, Core Features, and Known Limitations sections below retain the July 1.7.0 evidence record. Use the current v2.2.0 source, changelog, and release snapshot above for present capability/catalog claims.
+> The Build & Test Health, Core Features, and Known Limitations sections below retain the July 1.7.0 evidence record. Use the v2.3.0 source, changelog, and release PR for present capability/catalog claims.
 
 ## Build & Test Health
 - **local pytest**: the `1.7.0` release-hardening worktree passes `577` tests plus `193` subtests on Python 3.10.4 and Python 3.14.5 ✅
@@ -137,12 +137,12 @@
 - Helper-level MoA/Fusion remains advisory; virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not implemented.
 
 ## Release State
-- Current package metadata: `2.2.0` on canonical `main` at `499ff436c311638ebe67cea6ad2de354a309e6ec`.
+- Release package metadata: `2.3.0`; based on `3b34116913969d24c120ed9c3f0e41ff71c551da`.
 - Latest public GitHub release verified on 2026-08-24: [v2.2.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v2.2.0), published 2026-08-21; CI run `32522720655` and Publish run `32522720637` passed for the exact release SHA.
 - PyPI `codex-antigravity-auth==2.2.0` was directly verified on 2026-08-24; the published wheel and sdist match the release metadata. No fresh credentialed provider generation was run in this audit.
 
 ## Next Priorities
-1. Keep current v2.2.0 release/docs truth synchronized; treat the July 1.7.0 release-hardening artifacts as historical.
+1. Keep v2.3.0 release evidence synchronized; treat the July 1.7.0 release-hardening artifacts as historical.
 2. Add `/v1/responses/compact` support.
 3. Expand live backend smoke coverage beyond DeepSeek/OpenRouter to additional BYOK providers.
 4. Add a documented credentialed smoke-test profile for 1Password-backed BYOK providers without persisting raw API keys.
