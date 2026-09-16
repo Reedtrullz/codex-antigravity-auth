@@ -1,6 +1,6 @@
 # AGENTS.md — Codex Antigravity Auth
 
-**Current verification snapshot:** 2026-08-24 — `main`/`v2.2.0` at `499ff436c311638ebe67cea6ad2de354a309e6ec`; CI run `32522720655` and Publish run `32522720637` passed for that SHA. The historical release-candidate notes elsewhere in this repository are not current release claims.
+> **Release preparation — 2026-09-16:** v2.3.0 is an unpublished candidate based on `3b34116913969d24c120ed9c3f0e41ff71c551da`. The base passed CI run `34947657262`. Latest public GitHub release: v2.2.0. Candidate verification is recorded in the release PR; no new tag, PyPI publication, or credentialed live generation is claimed. Earlier release evidence below is historical.
 
 Guidance for AI coding agents (Codex, Claude Code, OpenCode, etc.) working on this project.
 
