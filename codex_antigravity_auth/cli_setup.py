@@ -259,6 +259,11 @@ def run_local_oauth_flow(*, select_account: bool = False) -> dict:
         if project_id:
             account_entry["projectId"] = project_id
         result = _cli.upsert_google_account(data, account_entry)
+        state = data.get("accountState")
+        if isinstance(state, dict) and isinstance(state.get("disabled"), dict):
+            state["disabled"].pop(email, None)
+        if isinstance(state, dict) and isinstance(state.get("authStrikes"), dict):
+            state["authStrikes"].pop(email, None)
         return True
 
     try:

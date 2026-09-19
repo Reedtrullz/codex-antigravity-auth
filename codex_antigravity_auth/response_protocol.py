@@ -41,6 +41,10 @@ _OUTCOME_CATEGORIES = frozenset(
     {"success", "rate_limit", "quota", "auth", "invalid_request", "transport", "cancelled"}
 )
 
+# Mirrors is_validation_required_error: curable auth blocks ride the normal
+# cooldown path and must not escalate the terminal-ban strike counter.
+CURABLE_AUTH_ERROR_CLASSES = frozenset({"validation_required", "age_rejection"})
+
 
 @dataclass(frozen=True)
 class AttemptOutcome:
@@ -49,6 +53,7 @@ class AttemptOutcome:
         "success", "rate_limit", "quota", "auth", "invalid_request", "transport", "cancelled"
     ]
     retry_after_seconds: float | None = None
+    curable_auth: bool = False
 
     def __post_init__(self) -> None:
         if self.scope not in _OUTCOME_SCOPES:

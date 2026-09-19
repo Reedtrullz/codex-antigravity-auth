@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import threading
 import time
@@ -13,6 +13,12 @@ from .response_protocol import AttemptOutcome
 
 SCHEMA_VERSION = 2
 FAMILIES = ("claude", "gemini")
+
+# Consecutive account-scoped auth failures before an account is disabled.
+# Curable blocks (VALIDATION_REQUIRED) are exempt: they follow the normal
+# cooldown path instead of escalating. A successful request resets the
+# counter, so flapping accounts never accumulate strikes.
+BAN_STRIKE_LIMIT = 3
 
 
 def _number(value: Any) -> float:
@@ -73,6 +79,37 @@ def _scoped(value: object, *, legacy: bool, now: float = 0.0, use_epoch: bool = 
     return result
 
 
+def _disabled_entries(value: object, *, emails: set[str]) -> dict[str, dict[str, str]]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, dict[str, str]] = {}
+    for raw_email, raw_entry in value.items():
+        email = str(raw_email)
+        if email not in emails or not isinstance(raw_entry, dict):
+            continue
+        reason = str(raw_entry.get("reason", "")).strip()
+        if not reason:
+            continue
+        result[email] = {
+            "reason": reason[:200],
+            "errorClass": str(raw_entry.get("errorClass", "auth_failure"))[:100],
+            "since": str(raw_entry.get("since", ""))[:40],
+        }
+    return result
+
+
+def _strike_entries(value: object, *, emails: set[str]) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, int] = {}
+    for raw_email, raw_count in value.items():
+        email = str(raw_email)
+        count = int(_number(raw_count))
+        if email in emails and count > 0:
+            result[email] = count
+    return result
+
+
 def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str, Any], bool]:
     original = copy.deepcopy(data)
     normalized = copy.deepcopy(data) if isinstance(data, dict) else {}
@@ -85,7 +122,7 @@ def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str
     }
     raw_state = normalized.get("accountState")
     raw_state = raw_state if isinstance(raw_state, dict) else {}
-    legacy = raw_state.get("schemaVersion") != SCHEMA_VERSION
+    legacy = not isinstance(raw_state.get("schemaVersion"), int)
 
     failures = {}
     raw_failures = raw_state.get("failures")
@@ -106,6 +143,7 @@ def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str
                 cooldowns[email] = scoped
 
     counters = {}
+    strikes = _strike_entries(raw_state.get("authStrikes"), emails=emails)
     raw_counters = raw_state.get("counters")
     if isinstance(raw_counters, dict):
         for email, families in raw_counters.items():
@@ -122,6 +160,11 @@ def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str
         "cooldowns": cooldowns,
         "counters": counters,
     }
+    if strikes:
+        normalized["accountState"]["authStrikes"] = strikes
+    disabled = _disabled_entries(raw_state.get("disabled"), emails=emails)
+    if disabled:
+        normalized["accountState"]["disabled"] = disabled
     return normalized, normalized != original
 
 
@@ -177,6 +220,8 @@ class AccountState:
                     continue
                 email = str(account["email"])
                 if exclude_emails and email in exclude_emails:
+                    continue
+                if self.state.get("disabled", {}).get(email):
                     continue
                 scoped = self.state["cooldowns"].get(email, {})
                 if scoped.get("account", 0) > now or scoped.get(family, 0) > now:
@@ -248,6 +293,7 @@ class AccountState:
         *,
         usage: dict[str, Any] | None = None,
         error_class: str | None = None,
+        curable_auth: bool = False,
     ) -> None:
         if family not in FAMILIES:
             raise ValueError(f"unsupported model family: {family}")
@@ -260,6 +306,11 @@ class AccountState:
             if outcome.category == "success":
                 counter["successes"] += 1
                 counter["last_success"] = timestamp
+                strikes = self.state.get("authStrikes")
+                if isinstance(strikes, dict):
+                    strikes.pop(email, None)
+                    if not strikes:
+                        self.state.pop("authStrikes", None)
                 if email in self.state["failures"]:
                     scoped_failures = self.state["failures"][email]
                     if isinstance(scoped_failures, dict):
@@ -286,10 +337,31 @@ class AccountState:
                         counter[field] += count
             if outcome.scope == "none":
                 return
+            if curable_auth:
+                outcome = replace(outcome, curable_auth=True)
             self._apply_cooldown(email, family, outcome)
 
     def _apply_cooldown(self, email: str, family: str, outcome: AttemptOutcome) -> float:
         scope = "account" if outcome.scope == "account" else family
+        # Validation-required blocks are curable (operator re-auth or account
+        # verification); they cooldown but never count toward a ban.
+        if outcome.category == "auth" and scope == "account" and not outcome.curable_auth:
+            strikes = self.state.setdefault("authStrikes", {})
+            if not isinstance(strikes, dict):
+                strikes = {}
+                self.state["authStrikes"] = strikes
+            count = int(strikes.get(email, 0) or 0) + 1
+            if count >= BAN_STRIKE_LIMIT:
+                self._disable_account(
+                    email,
+                    reason=f"{BAN_STRIKE_LIMIT} consecutive auth failures",
+                    error_class="auth_failure",
+                )
+                strikes.pop(email, None)
+                if not strikes:
+                    self.state.pop("authStrikes", None)
+            else:
+                strikes[email] = count
         failures = self.state["failures"].setdefault(email, {})
         if not isinstance(failures, dict):
             failures = {}
@@ -304,6 +376,39 @@ class AccountState:
             self.state["cooldowns"][email] = cooldowns
         cooldowns[scope] = self._now() + duration
         return duration
+
+    def _disable_account(self, email: str, *, reason: str, error_class: str) -> None:
+        disabled = self.state.setdefault("disabled", {})
+        if not isinstance(disabled, dict):
+            disabled = {}
+            self.state["disabled"] = disabled
+        disabled.setdefault(
+            email,
+            {
+                "reason": reason[:200],
+                "errorClass": error_class[:100],
+                "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._now())),
+            },
+        )
+
+    def auth_strikes(self, email: str) -> int:
+        with self._lock:
+            strikes = self.state.get("authStrikes", {})
+            if not isinstance(strikes, dict):
+                return 0
+            return max(0, int(strikes.get(email, 0) or 0))
+
+    def clear_disabled(self, email: str) -> bool:
+        """Clear a manual ban override; called after successful re-auth."""
+        with self._lock:
+            removed = False
+            disabled = self.state.get("disabled")
+            if isinstance(disabled, dict) and disabled.pop(email, None) is not None:
+                removed = True
+            strikes = self.state.get("authStrikes")
+            if isinstance(strikes, dict):
+                strikes.pop(email, None)
+            return removed
 
     def apply_cooldown(self, email: str, family: str, outcome: AttemptOutcome) -> float:
         if outcome.scope == "none":

@@ -442,6 +442,43 @@ class TestServerStreaming(unittest.TestCase):
         record.assert_called_once()
         self.assertEqual(record.call_args.args[2].category, "quota")
 
+    def test_google_non_streaming_marks_validation_required_as_curable_auth(self):
+        app = server_module.app
+        fake_account = {"email": "acc@example.com", "accessToken": "tok", "family": "gemini"}
+
+        class MockClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            async def post(self, *args, **kwargs):
+                return httpx.Response(
+                    403,
+                    json={"error": {"status": "PERMISSION_DENIED", "message": "VALIDATION_REQUIRED: verify your account"}},
+                )
+
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
+            with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
+                with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                    response = TestClient(app).post(
+                        "/v1/responses",
+                        json={"model": "gemini-3.5-flash-high", "input": "hello"},
+                    )
+
+        self.assertEqual(response.status_code, 403)
+        # The retry path and the terminal path both record; every record for a
+        # VALIDATION_REQUIRED rejection must be flagged curable so it never
+        # escalates to a ban strike.
+        self.assertGreaterEqual(record.call_count, 1)
+        for call in record.call_args_list:
+            self.assertTrue(call.kwargs.get("curable_auth"))
+            self.assertEqual(call.kwargs.get("error_class"), "validation_required")
+
     def test_google_non_streaming_releases_acquired_account_on_backend_failure(self):
         fake_account = {"email": "test@gmail.com", "accessToken": "dummy_access"}
 

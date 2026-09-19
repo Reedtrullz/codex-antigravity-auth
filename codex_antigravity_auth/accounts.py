@@ -339,6 +339,7 @@ class AccountManager:
         status_code: int | None = None,
         error_class: str | None = None,
         usage: dict[str, Any] | None = None,
+        curable_auth: bool = False,
     ) -> None:
         del status_code
         if not email:
@@ -353,6 +354,7 @@ class AccountManager:
                     error_class=(
                         redact_secret_text(str(error_class))[:200] if error_class else None
                     ),
+                    curable_auth=curable_auth,
                 )
             )
 

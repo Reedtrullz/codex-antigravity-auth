@@ -73,7 +73,7 @@ from .storage import (
     save_accounts,
     update_accounts,
 )
-from .account_state import scoped_cooldown_expiry
+from .account_state import BAN_STRIKE_LIMIT, scoped_cooldown_expiry
 from .constants import (
     get_codex_home,
     is_loopback_host,
@@ -536,6 +536,8 @@ def account_rotation_lines(data: dict | None = None) -> list[str]:
     failures = state.get("failures", {}) if isinstance(state.get("failures"), dict) else {}
     cooldowns = state.get("cooldowns", {}) if isinstance(state.get("cooldowns"), dict) else {}
     counters = state.get("counters", {}) if isinstance(state.get("counters"), dict) else {}
+    disabled = state.get("disabled", {}) if isinstance(state.get("disabled"), dict) else {}
+    strikes = state.get("authStrikes", {}) if isinstance(state.get("authStrikes"), dict) else {}
     now = time.time()
     lines = [f"[*] Google account rotation pool: {len(accounts)} account(s)"]
 
@@ -564,6 +566,16 @@ def account_rotation_lines(data: dict | None = None) -> list[str]:
             cooldown_status = "available"
         failure_count = failures.get(email, 0)
         failure_text = f", failures={failure_count}" if failure_count else ""
+        disabled_entry = disabled.get(email)
+        if isinstance(disabled_entry, dict) and disabled_entry.get("reason"):
+            status_text = f"DISABLED (banned): {disabled_entry['reason']}"
+            if disabled_entry.get("since"):
+                status_text += f" since {disabled_entry['since']}"
+        else:
+            status_text = cooldown_status
+            strike_count = max(0, int(strikes.get(email, 0) or 0))
+            if strike_count:
+                status_text += f", auth-strikes={strike_count}/{BAN_STRIKE_LIMIT}"
         counter_texts = []
         family_counters = counters.get(email, {}) if isinstance(counters, dict) else {}
         if isinstance(family_counters, dict):
@@ -579,7 +591,7 @@ def account_rotation_lines(data: dict | None = None) -> list[str]:
                     f"429s={counter_int(counter.get('rate_limits', 0))}"
                 )
         marker_text = f" [{', '.join(markers)}]" if markers else ""
-        lines.append(f"    [{idx}] {email}{marker_text} - {token_status}, {cooldown_status}{failure_text}")
+        lines.append(f"    [{idx}] {email}{marker_text} - {token_status}, {status_text}{failure_text}")
         for counter_text in counter_texts:
             lines.append(f"        usage: {counter_text}")
     return lines
