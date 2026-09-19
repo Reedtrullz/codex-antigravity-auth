@@ -547,6 +547,7 @@ class RoutingAndCostTests(unittest.TestCase):
         self.assertIn("RESTRICTED_AGE", enriched)
         self.assertNotIn("re-authorize", enriched)
         self.assertNotIn("re-authenticate", enriched)
+        self.assertNotIn("re-authentication", enriched)
 
     def test_detect_repo_profile_python_project(self):
         import tempfile

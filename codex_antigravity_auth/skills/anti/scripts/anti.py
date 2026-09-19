@@ -1011,7 +1011,7 @@ def enrich_validation_required_error(error: str) -> str:
             error
             + "\n[ACTION REQUIRED] Google rejected this account as age/eligibility-restricted"
             " (RESTRICTED_AGE). Do not retry this account for Claude models;"
-            " it will not resolve by re-authentication. Verify age/eligibility via"
+            " repeated attempts only churn cooldowns. Verify age/eligibility via"
             " Google's official account settings, or rotate to a different account/provider."
         )
     if "VALIDATION_REQUIRED" not in error:

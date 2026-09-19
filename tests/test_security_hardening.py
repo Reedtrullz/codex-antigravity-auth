@@ -102,6 +102,18 @@ class TestRedaction(unittest.TestCase):
         self.assertNotIn("flow=Glif", rendered)
         self.assertIn("https://accounts.google.com/signin/continue?REDACTED", rendered)
 
+    def test_validation_url_without_query_string_passes_through(self):
+        body = '"validation_url": "https://accounts.google.com/signin/continue"'
+        rendered = redact_secret_text(body)
+
+        self.assertEqual(rendered, body)
+
+    def test_non_google_urls_are_not_validation_url_redacted(self):
+        body = '"url": "https://evil.example.com/signin/continue?plt=secret-token"'
+        rendered = redact_secret_text(body)
+
+        self.assertNotIn("?REDACTED", rendered)
+
 
 class TestCredentialResolution(unittest.TestCase):
     def test_partial_env_credentials_merge_with_file_and_repair_permissions(self):

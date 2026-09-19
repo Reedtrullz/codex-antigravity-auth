@@ -503,6 +503,7 @@ def google_failure_detail(
     if attempt_count is not None:
         safe_attempt_count = max(0, int(attempt_count))
         diagnostics["attempt_count"] = safe_attempt_count
+        diagnostics["rotation_count"] = max(0, safe_attempt_count - 1)
         diagnostics["attempted_account_refs"] = [
             f"account-{index}" for index in range(1, safe_attempt_count + 1)
         ]

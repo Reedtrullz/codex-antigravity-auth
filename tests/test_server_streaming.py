@@ -515,6 +515,7 @@ class TestServerStreaming(unittest.TestCase):
         detail = response.json()["detail"]
         diagnostics = detail["diagnostics"]
         self.assertEqual(diagnostics["attempt_count"], 2)
+        self.assertEqual(diagnostics["rotation_count"], 1)
         self.assertEqual(diagnostics["attempted_account_refs"], ["account-1", "account-2"])
         self.assertTrue(diagnostics["rotation_attempted"])
         self.assertNotIn("sarp=1", detail["message"])
