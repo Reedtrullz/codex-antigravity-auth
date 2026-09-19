@@ -4,6 +4,7 @@ import unittest
 from codex_antigravity_auth.account_state import (
     BAN_STRIKE_LIMIT,
     AccountState,
+    _strike_entries,
     migrate_account_state,
     scoped_cooldown_expiry,
 )
@@ -73,6 +74,18 @@ class TestAccountStateMigration(unittest.TestCase):
         self.assertEqual(state["failures"], {})
         self.assertEqual(state["cooldowns"], {})
         self.assertEqual(state["counters"], {})
+
+    def test_strike_entries_normalise_malformed_input(self):
+        strikes = _strike_entries(
+            {
+                "person@example.com": True,
+                "other@example.com": "3",
+                "bad@example.com": float("nan"),
+                "gone@example.com": 5,
+            },
+            emails={"person@example.com", "other@example.com", "bad@example.com"},
+        )
+        self.assertEqual(strikes, {"other@example.com": 3})
 
 
 class TestScopedAccountState(unittest.TestCase):
