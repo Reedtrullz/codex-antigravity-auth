@@ -60,6 +60,7 @@ from .openai_transport import (
     TransportConfigError,
 )
 from .response_protocol import (
+    CURABLE_AUTH_ERROR_CLASSES,
     AttemptOutcome,
     CapabilityError,
     ProviderCapabilities,
@@ -283,6 +284,9 @@ async def record_attempt_outcome(
                 None if outcome.category == "success" else (error_class or outcome.category)
             ),
             usage=usage,
+            curable_auth=(
+                outcome.category == "auth" and (error_class or "") in CURABLE_AUTH_ERROR_CLASSES
+            ),
         ),
         abandon_on_cancel=True,
     )
@@ -315,12 +319,20 @@ def account_health_summary() -> dict:
     try:
         data = load_accounts_read_only()
     except Exception:
-        return {"configured_accounts": 0, "cooldowns": {}, "counters": {}, "load_error": "account store unavailable"}
+        return {
+            "configured_accounts": 0,
+            "disabled_accounts": 0,
+            "cooldowns": {},
+            "counters": {},
+            "load_error": "account store unavailable",
+        }
     accounts = data.get("accounts", []) if isinstance(data, dict) else []
     state = data.get("accountState", {}) if isinstance(data.get("accountState"), dict) else {}
     cooldowns = state.get("cooldowns", {}) if isinstance(state.get("cooldowns"), dict) else {}
     counters = state.get("counters", {}) if isinstance(state.get("counters"), dict) else {}
+    disabled = state.get("disabled", {}) if isinstance(state.get("disabled"), dict) else {}
     now = time.time()
+    disabled_count = 0
     cooldown_summary: dict[str, dict[str, int]] = {
         "claude": {"cooling_down": 0, "available": 0},
         "gemini": {"cooling_down": 0, "available": 0},
@@ -333,7 +345,14 @@ def account_health_summary() -> dict:
         if not isinstance(account, dict):
             continue
         email = str(account.get("email") or "")
+        disabled_entry = disabled.get(email) if isinstance(disabled.get(email), dict) else None
+        banned = bool(email and disabled_entry and disabled_entry.get("reason"))
+        if banned:
+            disabled_count += 1
         for family in ("claude", "gemini"):
+            if banned:
+                # Disabled accounts are out of the pool, not "available".
+                continue
             cooldown_end = scoped_cooldown_expiry(cooldowns.get(email, 0), family)
             if cooldown_end > now:
                 cooldown_summary[family]["cooling_down"] += 1
@@ -354,6 +373,7 @@ def account_health_summary() -> dict:
                 counter_summary[family][key] += max(0, parsed)
     return {
         "configured_accounts": len(accounts),
+        "disabled_accounts": disabled_count,
         "cooldowns": cooldown_summary,
         "counters": counter_summary,
     }

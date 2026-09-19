@@ -1,7 +1,12 @@
 import copy
 import unittest
 
-from codex_antigravity_auth.account_state import AccountState, migrate_account_state, scoped_cooldown_expiry
+from codex_antigravity_auth.account_state import (
+    BAN_STRIKE_LIMIT,
+    AccountState,
+    migrate_account_state,
+    scoped_cooldown_expiry,
+)
 from codex_antigravity_auth.response_protocol import AttemptOutcome
 
 
@@ -137,6 +142,83 @@ class TestScopedAccountState(unittest.TestCase):
         state.record(lease, AttemptOutcome(scope="account", category="auth"))
         self.assertEqual(counter["total_requests"], 2)
         self.assertEqual(persisted["failures"]["primary@example.com"]["account"], 1)
+
+    def test_ban_strikes_disable_account_and_skip_selection(self):
+        state = AccountState(self.data, now=lambda: self.now)
+        auth = AttemptOutcome(scope="account", category="auth")
+
+        for _ in range(BAN_STRIKE_LIMIT):
+            state.record_email("primary@example.com", "claude", auth)
+
+        persisted = self.data["accountState"]
+        self.assertIn("primary@example.com", persisted["disabled"])
+        self.assertEqual(persisted["disabled"]["primary@example.com"]["errorClass"], "auth_failure")
+        self.assertEqual(persisted.get("authStrikes", {}), {})
+        for _ in range(10):
+            lease = state.acquire("claude")
+            self.assertEqual(lease.account["email"], "secondary@example.com")
+            state.release(lease)
+
+    def test_success_resets_auth_strikes(self):
+        state = AccountState(self.data, now=lambda: self.now)
+        auth = AttemptOutcome(scope="account", category="auth")
+
+        state.record_email("primary@example.com", "claude", auth)
+        state.record_email("primary@example.com", "claude", auth)
+        state.record_email(
+            "primary@example.com",
+            "claude",
+            AttemptOutcome(scope="none", category="success"),
+        )
+        state.record_email("primary@example.com", "claude", auth)
+
+        persisted = self.data["accountState"]
+        self.assertEqual(persisted["authStrikes"]["primary@example.com"], 1)
+        self.assertNotIn("disabled", persisted)
+
+    def test_curable_auth_errors_never_ban(self):
+        state = AccountState(self.data, now=lambda: self.now)
+        curable = AttemptOutcome(scope="account", category="auth", curable_auth=True)
+
+        for _ in range(BAN_STRIKE_LIMIT + 2):
+            state.record_email("primary@example.com", "claude", curable)
+
+        persisted = self.data["accountState"]
+        self.assertNotIn("disabled", persisted)
+        self.assertEqual(persisted.get("authStrikes", {}), {})
+        self.assertIn("primary@example.com", persisted["cooldowns"])
+
+    def test_clear_disabled_reenables_account(self):
+        state = AccountState(self.data, now=lambda: self.now)
+        auth = AttemptOutcome(scope="account", category="auth")
+        for _ in range(BAN_STRIKE_LIMIT):
+            state.record_email("primary@example.com", "claude", auth)
+
+        self.assertTrue(state.clear_disabled("primary@example.com"))
+        self.assertFalse(state.clear_disabled("primary@example.com"))
+        self.assertEqual(state.auth_strikes("primary@example.com"), 0)
+        self.assertEqual(state.auth_strikes("secondary@example.com"), 0)
+
+    def test_migration_preserves_strikes_and_disabled_and_stays_idempotent(self):
+        raw_state = {
+            "failures": {"primary@example.com": {"account": 1}},
+            "cooldowns": {"primary@example.com": {"account": self.now + 60}},
+            "authStrikes": {"primary@example.com": 2},
+            "disabled": {
+                "primary@example.com": {"reason": "banned", "errorClass": "auth_failure", "since": "t"}
+            },
+        }
+        first, first_changed = migrate_account_state(
+            {"accounts": [{"email": "primary@example.com"}], "accountState": raw_state},
+            now=self.now,
+        )
+        self.assertEqual(first["accountState"]["authStrikes"]["primary@example.com"], 2)
+        self.assertEqual(first["accountState"]["disabled"]["primary@example.com"]["reason"], "banned")
+        self.assertTrue(first_changed)
+
+        second, second_changed = migrate_account_state(first, now=self.now)
+        self.assertFalse(second_changed)
+        self.assertEqual(second, first)
 
 
 if __name__ == "__main__":
