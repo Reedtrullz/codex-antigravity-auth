@@ -474,6 +474,56 @@ class TestServerStreaming(unittest.TestCase):
         self.assertEqual(diagnostics["attempted_account_refs"], ["account-1"])
         self.assertEqual([call.args[0] for call in release.call_args_list], ["test@gmail.com"])
 
+    def test_google_non_streaming_403_after_rotation_reports_attempt_counts(self):
+        fake_accounts = [
+            {"email": "blocked@gmail.com", "accessToken": "blocked-token"},
+            {"email": "blocked2@gmail.com", "accessToken": "blocked2-token"},
+        ]
+        validation_body = json.dumps({
+            "error": {
+                "code": 403,
+                "status": "PERMISSION_DENIED",
+                "message": "Verify your account to continue.",
+                "details": [{"reason": "VALIDATION_REQUIRED"}],
+            }
+        })
+
+        class MockClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            async def post(self, *args, **kwargs):
+                return httpx.Response(403, text=validation_body)
+
+        with patch("codex_antigravity_auth.server.account_manager.acquire_account", side_effect=fake_accounts):
+            with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
+                with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
+                    with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
+                        with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                            response = TestClient(app).post(
+                                "/v1/responses",
+                                json={"model": "gemini-3.5-flash-high", "input": "hello"},
+                            )
+
+        self.assertEqual(response.status_code, 403)
+        detail = response.json()["detail"]
+        diagnostics = detail["diagnostics"]
+        self.assertEqual(diagnostics["attempt_count"], 2)
+        self.assertEqual(diagnostics["rotation_count"], 1)
+        self.assertEqual(diagnostics["attempted_account_refs"], ["account-1", "account-2"])
+        self.assertTrue(diagnostics["rotation_attempted"])
+        self.assertNotIn("sarp=1", detail["message"])
+        self.assertEqual(
+            [call.args[0] for call in release.call_args_list],
+            ["blocked@gmail.com", "blocked2@gmail.com"],
+        )
+
     def test_google_rotation_records_and_releases_every_attempted_account(self):
         first = {"email": "first@gmail.com", "accessToken": "first-token"}
         second = {"email": "second@gmail.com", "accessToken": "second-token"}

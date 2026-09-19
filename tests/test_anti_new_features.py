@@ -540,6 +540,15 @@ class RoutingAndCostTests(unittest.TestCase):
         body = "HTTP 429: rate limited"
         self.assertEqual(anti.enrich_validation_required_error(body), body)
 
+    def test_enrich_validation_required_restricted_age_gets_age_guidance(self):
+        body = "HTTP 403: PERMISSION_DENIED reason=RESTRICTED_AGE error_number=1007"
+        enriched = anti.enrich_validation_required_error(body)
+        self.assertIn("[ACTION REQUIRED]", enriched)
+        self.assertIn("RESTRICTED_AGE", enriched)
+        self.assertNotIn("re-authorize", enriched)
+        self.assertNotIn("re-authenticate", enriched)
+        self.assertNotIn("re-authentication", enriched)
+
     def test_detect_repo_profile_python_project(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:

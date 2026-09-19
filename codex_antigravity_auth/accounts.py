@@ -507,8 +507,15 @@ class AccountManager:
 
 
 def is_validation_required_error(status_code: int, body: str | None = None) -> bool:
-    """Check if an error is a VALIDATION_REQUIRED auth issue rather than rate limit."""
+    """Check if an error is a VALIDATION_REQUIRED auth issue rather than rate limit.
+
+    Structured rejection reasons such as RESTRICTED_AGE also carry
+    PERMISSION_DENIED status strings; those are account-eligibility blocks,
+    not the re-authentication flow this predicate gates.
+    """
     if status_code == 403:
+        if body and "RESTRICTED_AGE" in body:
+            return False
         if body and "VALIDATION_REQUIRED" in body:
             return True
         if body and "permission_denied" in body.lower():

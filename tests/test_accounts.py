@@ -622,6 +622,24 @@ class TestErrorClassification(unittest.TestCase):
         from codex_antigravity_auth.accounts import is_validation_required_error
         self.assertTrue(is_validation_required_error(403, 'PERMISSION_DENIED'))
 
+    def test_is_validation_required_error_403_restricted_age_is_not_validation(self):
+        from codex_antigravity_auth.accounts import is_validation_required_error
+        age_body = (
+            '{"error": {"code": 403, "status": "PERMISSION_DENIED", '
+            '"message": "restricted", "details": [{"reason": "RESTRICTED_AGE", '
+            '"error_number": 1007}]}}'
+        )
+        self.assertFalse(is_validation_required_error(403, age_body))
+
+    def test_is_validation_required_error_403_restricted_age_wins_over_validation(self):
+        from codex_antigravity_auth.accounts import is_validation_required_error
+        dual_body = (
+            '{"error": {"code": 403, "status": "PERMISSION_DENIED", '
+            '"details": [{"reason": "RESTRICTED_AGE"}, '
+            '{"reason": "VALIDATION_REQUIRED"}]}}'
+        )
+        self.assertFalse(is_validation_required_error(403, dual_body))
+
     def test_is_validation_required_error_403_without_body(self):
         from codex_antigravity_auth.accounts import is_validation_required_error
         self.assertFalse(is_validation_required_error(403, None))

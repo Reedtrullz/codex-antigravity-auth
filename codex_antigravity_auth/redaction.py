@@ -71,6 +71,9 @@ _HEADER_SECRET_RE = re.compile(
     r"(?im)(^|[ \t])((?:authorization|proxy-authorization|cookie|set-cookie|[\w-]*(?:api[-_]?key|api[-_]?token|token|secret|credential|password)[\w-]*)\s*:\s*)[^\r\n]+"
 )
 _PROVIDER_KEY_RE = re.compile(r"\b(?:sk-or-v1|sk)-[A-Za-z0-9][A-Za-z0-9._-]{12,}\b")
+_GOOGLE_VALIDATION_URL_RE = re.compile(
+    r'(?i)(https://accounts\.google\.com/[^\s"<>]+)[?][^\s"<>]*'
+)
 
 
 def _is_secret_key(key: Any) -> bool:
@@ -118,6 +121,8 @@ def redact_secret_text(text: str) -> str:
     if not text:
         return text
     text = _PROVIDER_KEY_RE.sub(REDACTED, text)
+    # Validation URLs carry account-binding query params (e.g. plt=...); keep the bare flow URL.
+    text = _GOOGLE_VALIDATION_URL_RE.sub(r"\1?REDACTED", text)
     redacted = _BEARER_RE.sub("Bearer " + REDACTED, text)
     redacted = _HEADER_SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + REDACTED, redacted)
     redacted = _QUERY_SECRET_RE.sub(lambda m: m.group(1) + REDACTED, redacted)

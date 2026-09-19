@@ -503,6 +503,7 @@ def google_failure_detail(
     if attempt_count is not None:
         safe_attempt_count = max(0, int(attempt_count))
         diagnostics["attempt_count"] = safe_attempt_count
+        diagnostics["rotation_count"] = max(0, safe_attempt_count - 1)
         diagnostics["attempted_account_refs"] = [
             f"account-{index}" for index in range(1, safe_attempt_count + 1)
         ]
@@ -1880,16 +1881,21 @@ async def create_response(request: Request):
                     retry_after_source=retry_after_source,
                     rotation_attempted=rotation_attempted,
                     error_class=error_class,
-                    error=safe_error_detail(res.text),
+                    error="Google provider rejected all attempted accounts"
+                          " (see diagnostics; avoid persisting raw provider bodies).",
+                    attempt_count=len(response_attempts),
+                    rotation_count=max(0, len(response_attempts) - 1),
                 )
                 if is_validation:
+                    safe_text = safe_error_detail(res.text)
                     detail_msg = (
                         f"Google account requires verification (VALIDATION_REQUIRED). "
                         f"Run 'codex-antigravity login' to re-authenticate. "
-                        f"{safe_error_detail(res.text)}"
+                        f"{safe_text}"
                     )
                 else:
-                    detail_msg = f"Google Authentication failure: {safe_error_detail(res.text)}"
+                    safe_text = safe_error_detail(res.text)
+                    detail_msg = f"Google Authentication failure: {safe_text}"
                 raise HTTPException(
                     status_code=res.status_code,
                     detail=google_failure_detail(
@@ -1898,6 +1904,7 @@ async def create_response(request: Request):
                         retry_after_seconds=retry_after_seconds,
                         retry_after_source=retry_after_source,
                         rotation_attempted=rotation_attempted,
+                        attempt_count=len(response_attempts),
                     ),
                 )
 
