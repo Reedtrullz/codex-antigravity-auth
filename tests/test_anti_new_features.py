@@ -689,6 +689,29 @@ class VerifierTests(unittest.TestCase):
             self.assertEqual(verify_finding(no_file, root), no_file)
 
 
+class FreeLanePresetTests(unittest.TestCase):
+    def test_apply_free_lane_preset_expands_deterministic_list(self):
+        args = anti.build_parser().parse_args(["panel", "--mode", "ask", "--model-free", "--prompt", "x"])
+        self.assertIsNone(args.model)
+        anti.apply_free_lane_preset(args)
+        self.assertEqual(args.model, ["nemotron-ultra", "poolside", "gemma-4", "nemotron-super"])
+
+    def test_panel_model_free_conflicts_with_model(self):
+        args = anti.build_parser().parse_args(["panel", "--mode", "ask", "--model-free", "--model", "sonnet"])
+        with self.assertRaises(anti.AntiError):
+            anti.apply_free_lane_preset(args)
+
+    def test_workflow_model_free_conflicts_with_model(self):
+        args = anti.build_parser().parse_args(["workflow", "consensus", "--model-free", "--model", "sonnet"])
+        with self.assertRaises(anti.AntiError):
+            anti.apply_free_lane_preset(args)
+
+    def test_workflow_model_free_without_model_expands(self):
+        args = anti.build_parser().parse_args(["workflow", "consensus", "--model-free", "--dry-run", "--prompt", "x"])
+        anti.apply_free_lane_preset(args)
+        self.assertEqual(args.model, ["nemotron-ultra", "poolside", "gemma-4", "nemotron-super"])
+
+
 class ReflectionTests(unittest.TestCase):
     def setUp(self):
         self._original_dir = reflections.REFLECTIONS_DIR

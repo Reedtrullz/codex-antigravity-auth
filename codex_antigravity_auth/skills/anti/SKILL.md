@@ -142,6 +142,7 @@ python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged 
 python3 ~/.codex/skills/anti/scripts/anti.py plan --prompt "Plan a long autonomous hardening pass"
 python3 ~/.codex/skills/anti/scripts/anti.py plan --scope working-tree --prompt "Plan the next PR"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged
+python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged --model-free
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope diff --base origin/main --model sonnet --model opus --judge opus
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode plan --scope working-tree --prompt "Plan this PR"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode ask --model sonnet --model openrouter:deepseek/deepseek-chat --judge opus --prompt "Compare these approaches"
@@ -155,6 +156,7 @@ python3 ~/.codex/skills/anti/scripts/anti.py workflow provider-compare --model d
 python3 ~/.codex/skills/anti/scripts/anti.py workflow security-review --scope staged --output findings
 python3 ~/.codex/skills/anti/scripts/anti.py workflow quick-check --scope staged
 python3 ~/.codex/skills/anti/scripts/anti.py workflow consensus --scope staged --prompt "Review for bugs"
+python3 ~/.codex/skills/anti/scripts/anti.py workflow consensus --model-free --scope staged --prompt "Review for bugs"
 python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "Intermittent 502s after rotation"
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
 python3 ~/.codex/skills/anti/scripts/anti.py runs reflections --repo /path/to/repo
@@ -227,6 +229,7 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 
 ## New Flags
 
+- `--model-free` — Expand the explicit free-lane preset (`nemotron-ultra`, `poolside`, `gemma-4`, `nemotron-super`) as the panel/workflow lane list. Shell convenience only: requested identities stay visible in logs and run manifests, no automatic routing, and combining it with `--model` fails closed.
 - `--auto-route` — Automatically pick the cheapest adequate model based on diff size and file risk. Small diffs use flash-3.8, medium use sonnet, large or high-risk files use opus. Only activates when `--model` is not explicitly passed.
 - `--budget <cost>` — Maximum estimated cost for a run. Admission happens before each chunk/synthesis/lane/judge call; refused work is marked not-sent. Cost is in arbitrary units (not real USD), with estimated ceilings, observed usage, and unknown-usage markers kept separate.
 - `--no-verify` — Skip evidence-linked verification of findings (syntax, secrets, eslint checks on referenced files).

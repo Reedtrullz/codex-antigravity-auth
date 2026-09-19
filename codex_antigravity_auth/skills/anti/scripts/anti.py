@@ -340,7 +340,16 @@ DEFAULT_CONSULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_PLAN_MODEL = "claude-opus-4-6-thinking"
 DEFAULT_PANEL_MODELS = ["claude-sonnet-4-6", "claude-opus-4-6-thinking"]
 DEFAULT_PANEL_JUDGE_MODEL = "claude-opus-4-6-thinking"
+FREE_LANE_PRESET_MODELS = ["nemotron-ultra", "poolside", "gemma-4", "nemotron-super"]
 COLLAB_PROFILES = {"none"}
+
+
+def apply_free_lane_preset(args: argparse.Namespace) -> None:
+    """Expand --model-free into the explicit free-lane list; never mixes with --model."""
+    if getattr(args, "model_free", False):
+        if getattr(args, "model", None):
+            raise AntiError("--model-free and --model are mutually exclusive; pick one explicit lane list")
+        args.model = list(FREE_LANE_PRESET_MODELS)
 MAX_FILE_BYTES = 180_000
 RESULT_SCHEMA_VERSION = 1
 VERIFICATION_REQUIRED_CHECKS = [
@@ -6115,6 +6124,7 @@ def maybe_summarize_panel_review(
 def command_panel(args: argparse.Namespace) -> int:
     if args.output not in PANEL_OUTPUT_MODES:
         raise AntiError(f"unsupported panel output mode: {args.output}")
+    apply_free_lane_preset(args)
     collab_profile = normalize_collab_profile(getattr(args, "collab", "none"))
     auto_route_model = None
     auto_route_reason = None
@@ -7968,6 +7978,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
 
 def command_workflow(args: argparse.Namespace) -> int:
     args.workflow_name = args.name
+    apply_free_lane_preset(args)
     if not getattr(args, "run_label", None):
         args.run_label = args.name
     expanded = workflow_expansion(args)
@@ -8236,6 +8247,11 @@ def build_parser() -> argparse.ArgumentParser:
     panel.add_argument("--mode", choices=["review", "plan", "ask"], default="review")
     # --collab removed: no active collaboration profiles
     panel.add_argument("--model", action="append", help="Panel model alias/id; repeatable; defaults to sonnet + opus")
+    panel.add_argument(
+        "--model-free",
+        action="store_true",
+        help="Use the explicit free-lane preset: nemotron-ultra, poolside, gemma-4, nemotron-super",
+    )
     panel.add_argument("--judge", default="opus", help="Judge model alias/id; defaults to opus")
     panel.add_argument("--role", action="append", help="Review/planning lens such as security, correctness, tests, ux")
     panel.add_argument("--scope", choices=["none", "working-tree", "staged", "files", "diff"], default="working-tree")
@@ -8398,6 +8414,11 @@ def build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--no-anonymize", action="store_true", help="Do not anonymize lane labels before judge synthesis")
     workflow.add_argument("--no-verify", action="store_true", help="Skip evidence-linked verification of findings")
     workflow.add_argument("--model", action="append", help="Model alias/id for the workflow; repeatable for panels")
+    workflow.add_argument(
+        "--model-free",
+        action="store_true",
+        help="Use the explicit free-lane preset: nemotron-ultra, poolside, gemma-4, nemotron-super",
+    )
     workflow.add_argument("--judge", default="opus")
     workflow.add_argument("--role", action="append")
     workflow.add_argument("--scope", choices=["auto", "none", "working-tree", "staged", "files", "diff"], default="auto")
