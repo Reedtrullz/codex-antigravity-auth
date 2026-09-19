@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.4.1 - Anti Free-Lane Preset (Sep 19, 2026)
+
+### Added
+
+- Anti helper `--model-free` flag for `panel` and `workflow` commands: expands
+  deterministically into the explicit free-lane preset (`nemotron-ultra`,
+  `poolside`, `gemma-4`, `nemotron-super`). Pure shell convenience; the requested
+  identities remain visible in logs and run manifests. No automatic routing.
+- `--model-free` fails closed when combined with `--model` instead of silently merging.
+
+## v2.4.0 - Terminal Ban Detection (Sep 19, 2026)
+
+### Added
+
+- Accounts are disabled after repeated terminal account-scoped auth failures
+  (limit 3, `BAN_STRIKE_LIMIT`); any success resets strikes. Curable blocks
+  (`validation_required`, `age_rejection`) ride the normal cooldown path and never
+  accrue strikes; `codex-antigravity login` clears ban state and strikes on re-auth.
+- Rotation lines surface `DISABLED (banned)` and `auth-strikes=N/3`;
+  `account_health_summary` exposes `disabled_accounts` and excludes banned accounts
+  from per-family availability counts.
+
 ## v2.3.0 - Unified Routing & Review Integrity (Sep 16, 2026)
 
 ### Added
