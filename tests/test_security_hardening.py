@@ -92,6 +92,16 @@ class TestRedaction(unittest.TestCase):
                 self.assertNotIn("value-123", rendered)
                 self.assertIn(REDACTED, rendered)
 
+    def test_redacts_google_validation_url_query_params(self):
+        body = (
+            '"validation_url": "https://accounts.google.com/signin/continue?plt=secret-token&flow=Glif"'
+        )
+        rendered = redact_secret_text(body)
+
+        self.assertNotIn("secret-token", rendered)
+        self.assertNotIn("flow=Glif", rendered)
+        self.assertIn("https://accounts.google.com/signin/continue?REDACTED", rendered)
+
 
 class TestCredentialResolution(unittest.TestCase):
     def test_partial_env_credentials_merge_with_file_and_repair_permissions(self):

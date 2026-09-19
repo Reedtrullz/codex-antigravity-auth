@@ -1004,6 +1004,16 @@ def extract_validation_url(error_text: str) -> str | None:
 
 def enrich_validation_required_error(error: str) -> str:
     """Surface actionable recovery steps for Google VALIDATION_REQUIRED 403 errors."""
+    if "RESTRICTED_AGE" in error:
+        # Age/eligibility blocks are not resolvable by re-auth; retrying the
+        # same account only churns cooldowns, so give the operator the real path.
+        return (
+            error
+            + "\n[ACTION REQUIRED] Google rejected this account as age/eligibility-restricted"
+            " (RESTRICTED_AGE). Do not retry this account for Claude models;"
+            " it will not resolve by re-authentication. Verify age/eligibility via"
+            " Google's official account settings, or rotate to a different account/provider."
+        )
     if "VALIDATION_REQUIRED" not in error:
         return error
     url = extract_validation_url(error)
