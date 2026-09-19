@@ -1,6 +1,6 @@
 # AGENTS.md — Codex Antigravity Auth
 
-> **Release verification — 2026-09-16:** v2.3.0 includes the changes through `3b34116913969d24c120ed9c3f0e41ff71c551da`. Release preparation passed 835 tests and 220 subtests, distribution checks, and 212 installed Anti tests; CI run `35087469306` passed all five OS/Python jobs and packaging. See PR #29 and the v2.3.0 tag workflows for final publication status. No fresh credentialed live generation is claimed. Earlier release evidence below is historical.
+> **Release verification — 2026-09-19:** v2.4.1 includes the changes through `4873b2a` (merge of PR #32; v2.4.0 terminal ban detection shipped earlier the same day via PR #31). Release preparation passed 853 tests and 220 subtests, CI run `35466501475` passed all five OS/Python jobs, and Publish run `35466590922` published to PyPI. The installed 212-test Anti suite passes against the installed 2.4.1 bundle. Live post-checks: gateway on 127.0.0.1:51122 serves 2.4.1 with 17 models, and terminal ban detection fired live for reidjoss@gmail.com (3 consecutive account-auth failures, disabled from rotation, 7 of 8 accounts available). No fresh credentialed live generation is claimed. Earlier release evidence below is historical.
 
 Guidance for AI coding agents (Codex, Claude Code, OpenCode, etc.) working on this project.
 
