@@ -6981,7 +6981,6 @@ def command_consult(args: argparse.Namespace) -> int:
             print(prompt)
         return 0
     ensure_run_id(args)
-    model_ids = fetch_model_ids(args.base_url, timeout=args.timeout, token_env=args.gateway_token_env)
     try:
         text, model_used, generation_metadata = generate_with_fallback(
             args,
@@ -6989,7 +6988,6 @@ def command_consult(args: argparse.Namespace) -> int:
             prompt=prompt,
             max_output_tokens=args.max_output_tokens,
             purpose="consult",
-            model_ids=model_ids,
         )
     except AntiError as exc:
         raise
@@ -7016,7 +7014,6 @@ def command_consult(args: argparse.Namespace) -> int:
                 prompt=retry_prompt,
                 max_output_tokens=retry_cap,
                 purpose="consult (retry)",
-                model_ids=model_ids,
             )
         except AntiError as exc:
             raise
