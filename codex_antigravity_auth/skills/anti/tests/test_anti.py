@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import unittest.mock
@@ -19,16 +20,40 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "anti.py"
 
+_ACTIVE_TEST_RUNS_DIR: list[Path] = []
+
 
 def load_anti():
     spec = importlib.util.spec_from_file_location("anti_skill_helper", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
+    if _ACTIVE_TEST_RUNS_DIR:
+        module.RUNS_DIR = _ACTIVE_TEST_RUNS_DIR[-1]
     return module
 
 
+def _ensure_reflections_importable():
+    anti_lib_dir = str(SCRIPT.resolve().parent)
+    if anti_lib_dir not in sys.path:
+        sys.path.insert(0, anti_lib_dir)
+    import anti_lib.reflections as reflections_module
+    return reflections_module
+
+
 class AntiHelperTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._runs_tmp = tempfile.TemporaryDirectory(prefix="anti-test-runs-")
+        _ACTIVE_TEST_RUNS_DIR.append(Path(self._runs_tmp.name))
+        self._reflections_module = _ensure_reflections_importable()
+        self._original_reflections_dir = self._reflections_module.REFLECTIONS_DIR
+        self._reflections_module.REFLECTIONS_DIR = Path(self._runs_tmp.name) / "reflections"
+
+    def tearDown(self) -> None:
+        self._reflections_module.REFLECTIONS_DIR = self._original_reflections_dir
+        _ACTIVE_TEST_RUNS_DIR.pop()
+        self._runs_tmp.cleanup()
+
     def test_path_exclusion_balances_secret_safety_with_code_paths(self) -> None:
         anti = load_anti()
         for path in [
@@ -1156,6 +1181,7 @@ class AntiHelperTests(unittest.TestCase):
     def test_interrupted_saved_run_has_deterministic_correlation_record(self) -> None:
         anti = load_anti()
         anti.post_response = lambda **kwargs: (_ for _ in ()).throw(KeyboardInterrupt())
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
         with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
             anti.RUNS_DIR = Path(tmp)
             stderr = io.StringIO()
@@ -3260,6 +3286,13 @@ class AntiHelperTests(unittest.TestCase):
             "claude-sonnet-4-6",
         }
 
+        anti_lib_dir = str(Path(SCRIPT).resolve().parent)
+        if anti_lib_dir not in sys.path:
+            sys.path.insert(0, anti_lib_dir)
+        import anti_lib.reflections as reflections_module
+
+        original_reflections_dir = reflections_module.REFLECTIONS_DIR
+
         def fake_post_response(**kwargs):
             self.assertEqual(kwargs["model"], "claude-sonnet-4-6")
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
@@ -3267,26 +3300,35 @@ class AntiHelperTests(unittest.TestCase):
             return "deepseek-panel-output"
 
         anti.post_response = fake_post_response
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            rc = anti.main(
-                [
-                    "panel",
-                    "--mode",
-                    "ask",
-                    "--prompt",
-                    "compare",
-                    "--model",
-                    "nonexistent:model",
-                    "--model",
-                    "sonnet",
-                    "--judge",
-                    "sonnet",
-                    "--min-successes",
-                    "1",
-                    "--json",
-                ]
-            )
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            reflections_module.REFLECTIONS_DIR = Path(tmp) / "reflections"
+            original_cwd = Path.cwd()
+            os.chdir(tmp)
+            output = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(output):
+                    rc = anti.main(
+                        [
+                            "panel",
+                            "--mode",
+                            "ask",
+                            "--prompt",
+                            "compare",
+                            "--model",
+                            "nonexistent:model",
+                            "--model",
+                            "sonnet",
+                            "--judge",
+                            "sonnet",
+                            "--min-successes",
+                            "1",
+                            "--json",
+                        ]
+                    )
+            finally:
+                os.chdir(original_cwd)
+                reflections_module.REFLECTIONS_DIR = original_reflections_dir
 
         self.assertEqual(rc, 1, output.getvalue())
         parsed = json.loads(output.getvalue())
@@ -4046,6 +4088,7 @@ class BugfixRegressionTests(unittest.TestCase):
     def test_consult_truncated_output_retries_and_saves_full_output(self) -> None:
         anti = load_anti()
         caps: list[int] = []
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
 
         def fake_post_response(**kwargs):
             caps.append(kwargs["max_output_tokens"])
@@ -5502,3 +5545,416 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertNotIn("output_text", summary_record)
         self.assertEqual(summary_artifact["output_text"], "answer-" + "x" * 2000)
         self.assertEqual(summary_artifact["artifacts"]["rawLanePaths"], [])
+
+
+class AntiHardeningTests(unittest.TestCase):
+    """Regression tests for consult retry, run correlation, panel caps, and new commands."""
+
+    def test_consult_provider_incomplete_max_tokens_retries(self) -> None:
+        anti = load_anti()
+        calls: list[int] = []
+
+        def fake_post_response(**kwargs):
+            calls.append(kwargs["max_output_tokens"])
+            if len(calls) == 1:
+                return anti.ResponseText(
+                    "partial answer",
+                    usage={"input_tokens": 10, "output_tokens": 40, "total_tokens": 50},
+                    response_metadata={"upstream_status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+                )
+            return anti.ResponseText(
+                "complete answer with full detail.",
+                usage={"input_tokens": 10, "output_tokens": 7, "total_tokens": 17},
+            )
+
+        anti.post_response = fake_post_response
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                rc = anti.main(["consult", "--prompt", "hello", "--max-output-tokens", "40", "--json"])
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(calls, [40, 80])
+        self.assertEqual(parsed["metadata"]["retry_disposition"], "succeeded")
+        self.assertEqual(parsed["metadata"]["result_quality"], "complete")
+        self.assertEqual(len(parsed["metadata"]["consult_attempts"]), 2)
+
+    def test_consult_retry_exhaustion_is_explicit_partial(self) -> None:
+        anti = load_anti()
+        calls: list[int] = []
+
+        def fake_post_response(**kwargs):
+            calls.append(kwargs["max_output_tokens"])
+            return anti.ResponseText(
+                "still cut off",
+                usage={"input_tokens": 10, "output_tokens": kwargs["max_output_tokens"], "total_tokens": 50},
+                response_metadata={"upstream_status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+            )
+
+        anti.post_response = fake_post_response
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                rc = anti.main(["consult", "--prompt", "hello", "--max-output-tokens", "40", "--json"])
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
+        self.assertEqual(calls, [40, 80])
+        self.assertEqual(parsed["metadata"]["retry_disposition"], "exhausted")
+        self.assertEqual(parsed["metadata"]["result_quality"], "incomplete")
+        self.assertEqual(parsed["metadata"]["status"], "truncated")
+        self.assertEqual(parsed["metadata"]["runStatus"], "partial")
+
+    def test_consult_non_token_incomplete_is_not_retried(self) -> None:
+        anti = load_anti()
+        calls: list[int] = []
+
+        def fake_post_response(**kwargs):
+            calls.append(kwargs["max_output_tokens"])
+            return anti.ResponseText(
+                "policy-blocked partial",
+                usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                response_metadata={"upstream_status": "incomplete", "incomplete_details": {"reason": "other"}},
+            )
+
+        anti.post_response = fake_post_response
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                rc = anti.main(["consult", "--prompt", "hello", "--max-output-tokens", "40", "--json"])
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
+        self.assertEqual(calls, [40])
+        self.assertEqual(parsed["metadata"]["retry_disposition"], "not_applicable")
+        self.assertEqual(parsed["metadata"]["result_quality"], "incomplete")
+        self.assertEqual(parsed["metadata"]["status"], "incomplete")
+
+    def test_never_mode_writes_minimal_record_with_correlation(self) -> None:
+        anti = load_anti()
+        heartbeat_seen: dict[str, object] = {}
+
+        def fake_post_response(**kwargs):
+            records = list(Path(tmp).glob("*.json"))
+            heartbeat_seen["records_before_response"] = len(records)
+            return "ok"
+
+        anti.post_response = fake_post_response
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                rc = anti.main(["consult", "--prompt", "hello secret prompt body", "--save-output", "never", "--json"])
+            self.assertEqual(rc, 0, output.getvalue())
+            self.assertEqual(heartbeat_seen["records_before_response"], 1)
+            parsed = json.loads(output.getvalue())
+            run_id = parsed["metadata"]["run_id"]
+            self.assertTrue(run_id)
+            self.assertEqual(parsed["metadata"]["request_log_correlation_id"], run_id)
+            record = json.loads((Path(tmp) / f"{run_id}.json").read_text(encoding="utf-8"))
+            self.assertEqual(record["status"], "success")
+            self.assertEqual(record["save_output"], "never")
+            self.assertEqual(record["metadata"]["request_log_correlation_id"], run_id)
+            self.assertNotIn("prompt_chars", record)
+            self.assertNotIn("output_chars", record)
+            self.assertNotIn("prompt_text", record)
+            self.assertNotIn("output_text", record)
+            self.assertNotIn("hello secret prompt body", json.dumps(record))
+
+    def test_interrupted_never_mode_run_leaves_queryable_record(self) -> None:
+        anti = load_anti()
+        anti.post_response = lambda **kwargs: (_ for _ in ()).throw(KeyboardInterrupt())
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                rc = anti.main(["consult", "--prompt", "hello", "--save-output", "never", "--no-progress"])
+            self.assertEqual(rc, 130)
+            records = list(Path(tmp).glob("*.json"))
+            self.assertEqual(len(records), 1)
+            record = json.loads(records[0].read_text(encoding="utf-8"))
+            self.assertEqual(record["status"], "interrupted")
+            self.assertEqual(record["metadata"]["request_log_correlation_id"], record["id"])
+            self.assertNotIn("hello", json.dumps(record))
+
+    def test_panel_estimated_total_accumulates_per_lane(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+
+        def fake_post_response(**kwargs):
+            if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
+                return json.dumps({"summary": "s", "findings": []})
+            return "lane-output"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json", "--no-progress"])
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertGreater(parsed["metadata"]["estimated_total"], 0)
+
+    def test_panel_respects_provider_parallel_cap(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        lock = threading.Lock()
+        state = {"current": 0, "peak": 0}
+
+        def fake_post_response(**kwargs):
+            if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
+                return json.dumps({"summary": "s", "findings": []})
+            with lock:
+                state["current"] += 1
+                state["peak"] = max(state["peak"], state["current"])
+            time.sleep(0.05)
+            with lock:
+                state["current"] -= 1
+            return "lane-output"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json", "--no-progress", "--max-parallel", "8"])
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertLessEqual(state["peak"], anti.PROVIDER_PARALLEL_CAPS["google-antigravity"])
+
+    def test_panel_judge_truncated_via_metadata_makes_run_partial(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+
+        def fake_post_response(**kwargs):
+            if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
+                return anti.ResponseText(
+                    '{"summary": "cut"',
+                    usage={"input_tokens": 10, "output_tokens": kwargs["max_output_tokens"], "total_tokens": 50},
+                    response_metadata={"upstream_status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+                )
+            return "lane-output"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json", "--no-progress"])
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
+        self.assertTrue(parsed["metadata"]["judge_truncated"])
+        self.assertEqual(parsed["runStatus"], "partial")
+
+    def test_runs_list_filters_by_status(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            (anti.RUNS_DIR / "run-partial.json").write_text(json.dumps({"id": "run-partial", "status": "partial", "mode": "consult"}), encoding="utf-8")
+            (anti.RUNS_DIR / "run-success.json").write_text(json.dumps({"id": "run-success", "status": "success", "mode": "consult"}), encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = anti.main(["runs", "list", "--status", "partial", "--json"])
+        self.assertEqual(rc, 0)
+        rows = json.loads(output.getvalue())
+        self.assertEqual([row["id"] for row in rows], ["run-partial"])
+
+    def test_runs_list_filters_status_before_limit(self) -> None:
+        anti = load_anti()
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            # Reverse-lexicographic order puts the success record first, so a
+            # limit slice applied before the status filter would hide the match.
+            (anti.RUNS_DIR / "run-a.json").write_text(json.dumps({"id": "run-a", "status": "partial", "mode": "consult"}), encoding="utf-8")
+            (anti.RUNS_DIR / "run-z.json").write_text(json.dumps({"id": "run-z", "status": "success", "mode": "consult"}), encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = anti.main(["runs", "list", "--status", "partial", "--limit", "1", "--json"])
+        self.assertEqual(rc, 0)
+        rows = json.loads(output.getvalue())
+        self.assertEqual([row["id"] for row in rows], ["run-a"])
+
+    def test_compare_happy_path_reports_per_model_status(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.ensure_models_available = lambda **kwargs: None
+        anti.post_response = lambda **kwargs: "compare-ok"
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                rc = anti.main(["compare", "--model", "sonnet", "--model", "opus", "--prompt", "hello", "--json", "--no-progress"])
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(rc, 0, output.getvalue())
+        statuses = {entry["model"]: entry["status"] for entry in parsed["results"]}
+        self.assertEqual(statuses, {"claude-sonnet-4-6": "success", "claude-opus-4-6-thinking": "success"})
+        self.assertIn("run_id", parsed["metadata"])
+
+    def test_compare_partial_when_one_lane_errors(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.ensure_models_available = lambda **kwargs: None
+
+        def fake_post_response(**kwargs):
+            if kwargs["model"] == "claude-opus-4-6-thinking":
+                raise anti.AntiError("backend failure")
+            return "compare-ok"
+
+        anti.post_response = fake_post_response
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                rc = anti.main(["compare", "--model", "sonnet", "--model", "opus", "--prompt", "hello", "--json", "--no-progress"])
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(rc, 1, output.getvalue())
+        statuses = {entry["model"]: entry["status"] for entry in parsed["results"]}
+        self.assertEqual(statuses, {"claude-sonnet-4-6": "success", "claude-opus-4-6-thinking": "error"})
+
+    def test_compare_dry_run_does_not_contact_gateway(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: (_ for _ in ()).throw(AssertionError("gateway must not be contacted"))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(["compare", "--model", "sonnet", "--model", "opus", "--prompt", "hello", "--json", "--dry-run"])
+        self.assertEqual(rc, 0)
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(parsed["mode"], "compare")
+        self.assertEqual(len(parsed["estimates"]), 2)
+
+    def test_smoke_probe_runs_tiny_generation_after_readiness(self) -> None:
+        anti = load_anti()
+        anti.find_cli = lambda: (["codex-antigravity"], None)
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
+        anti.fetch_gateway_package_version = lambda base_url, *, timeout, token_env: "2.4.1"
+        probe_calls: list[dict[str, object]] = []
+
+        def fake_post_response(**kwargs):
+            probe_calls.append(kwargs)
+            return "OK"
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(["smoke", "--skip-doctor", "--model", "sonnet", "--probe", "sonnet", "--json"])
+        self.assertEqual(rc, 0, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(len(probe_calls), 1)
+        self.assertEqual(probe_calls[0]["max_output_tokens"], 32)
+        probe = next(check for check in parsed["checks"] if check["name"] == "probe")
+        self.assertEqual(probe["status"], "pass")
+
+    def test_smoke_probe_failure_fails_smoke(self) -> None:
+        anti = load_anti()
+        anti.find_cli = lambda: (["codex-antigravity"], None)
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6"}
+        anti.fetch_gateway_package_version = lambda base_url, *, timeout, token_env: "2.4.1"
+
+        def fake_post_response(**kwargs):
+            raise anti.AntiError("generation refused")
+
+        anti.post_response = fake_post_response
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = anti.main(["smoke", "--skip-doctor", "--model", "sonnet", "--probe", "sonnet", "--json"])
+        self.assertEqual(rc, 1, output.getvalue())
+        parsed = json.loads(output.getvalue())
+        probe = next(check for check in parsed["checks"] if check["name"] == "probe")
+        self.assertEqual(probe["status"], "fail")
+
+    def test_reflection_verdict_round_trip(self) -> None:
+        anti = load_anti()
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti_lib_dir = str(Path(SCRIPT).resolve().parent)
+        if anti_lib_dir not in sys.path:
+            sys.path.insert(0, anti_lib_dir)
+        import anti_lib.reflections as reflections_module
+
+        original_record_review = reflections_module.record_review
+        original_reflections_dir = reflections_module.REFLECTIONS_DIR
+
+        def fake_post_response(**kwargs):
+            if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
+                return json.dumps({"summary": "s", "findings": [{"id": "F1", "claim": "c", "severity": "low"}]})
+            return "lane-output"
+
+        anti.post_response = fake_post_response
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            anti.RUNS_DIR = Path(tmp)
+            reflections_module.REFLECTIONS_DIR = Path(tmp) / "reflections"
+            try:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                    rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json", "--no-progress"])
+                self.assertEqual(rc, 0, output.getvalue())
+                parsed = json.loads(output.getvalue())
+                run_id = parsed["metadata"]["run_id"]
+                records = list(reflections_module.REFLECTIONS_DIR.glob("*.json"))
+                self.assertEqual(len(records), 1)
+                stored = json.loads(records[0].read_text(encoding="utf-8"))
+                self.assertTrue(any(entry.get("run_id") == run_id for entry in stored))
+            finally:
+                reflections_module.REFLECTIONS_DIR = original_reflections_dir
+
+        # Verdict round trip through the CLI.
+        with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
+            reflections_module.REFLECTIONS_DIR = Path(tmp) / "reflections"
+            try:
+                original_cwd = Path.cwd()
+                os.chdir(tmp)
+                try:
+                    reflections_module.record_review(
+                        repo_path=Path(tmp),
+                        findings=[{"id": "F1", "fingerprint": "fp-1", "severity": "low", "claim": "c", "evidence": "e"}],
+                        models=["claude-sonnet-4-6"],
+                        panel_status="complete_multi_model",
+                        mode="ask",
+                        scope="none",
+                        run_id="run-verdict-1",
+                    )
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        rc = anti.main(["runs", "reflections", "--repo", str(tmp), "--run-id", "run-verdict-1", "--verify-verdict", "confirmed"])
+                    self.assertEqual(rc, 0, output.getvalue())
+                    self.assertIn("Verdict for run run-verdict-1 set to confirmed", output.getvalue())
+                    records = list(reflections_module.REFLECTIONS_DIR.glob("*.json"))
+                    stored = json.loads(records[0].read_text(encoding="utf-8"))
+                    self.assertEqual(stored[-1]["verdict"], "confirmed")
+                finally:
+                    os.chdir(original_cwd)
+            finally:
+                reflections_module.REFLECTIONS_DIR = original_reflections_dir
+
+    def test_reflections_run_id_lookup_ignores_default_limit(self) -> None:
+        anti = load_anti()
+        anti_lib_dir = str(Path(SCRIPT).resolve().parent)
+        if anti_lib_dir not in sys.path:
+            sys.path.insert(0, anti_lib_dir)
+        import anti_lib.reflections as reflections_module
+
+        original_reflections_dir = reflections_module.REFLECTIONS_DIR
+        with tempfile.TemporaryDirectory(prefix="anti-refl-") as tmp:
+            reflections_module.REFLECTIONS_DIR = Path(tmp) / "reflections"
+            try:
+                original_cwd = Path.cwd()
+                os.chdir(tmp)
+                try:
+                    for index in range(15):
+                        reflections_module.record_review(
+                            repo_path=Path(tmp),
+                            findings=[],
+                            models=["claude-sonnet-4-6"],
+                            panel_status="complete_multi_model",
+                            mode="ask",
+                            scope="none",
+                            run_id=f"run-old-{index}",
+                        )
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        rc = anti.main(["runs", "reflections", "--repo", str(tmp), "--run-id", "run-old-0"])
+                    self.assertEqual(rc, 0, output.getvalue())
+                    self.assertIn("run-old-0", output.getvalue())
+                finally:
+                    os.chdir(original_cwd)
+            finally:
+                reflections_module.REFLECTIONS_DIR = original_reflections_dir
