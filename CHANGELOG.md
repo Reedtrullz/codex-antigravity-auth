@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.4.2 - Anti Hardening (Sep 22, 2026)
+
+### Fixed
+
+- Anti consult retry now treats `incomplete/max_tokens` output as retryable: one
+  bounded retry at a doubled output cap, with explicit `retry_disposition`
+  (attempted/succeeded/exhausted/not_applicable) and `result_quality` metadata
+  instead of accepting a silently truncated provider answer.
+- `--save-output never` writes a durable content-free heartbeat run record
+  before the first provider call and a final minimal record on completion or
+  interrupt, so never-mode runs get correlation ids and SIGTERM evidence without
+  storing prompt or output content.
+- Terminal `VALIDATION_REQUIRED` account blocks are classified as account-level
+  and non-retryable, surfacing the validation URL instead of burning retries.
+- `runs list` filters by status before applying `--limit` and sorts by mtime
+  (newest first) instead of a filename sort that buried current records.
+- `runs reflections --run-id` scans all records instead of applying the limit
+  slice before filtering, so lookups cannot miss stored entries.
+- Anti test suite no longer writes reflection or run records into the real
+  `~/.codex/anti-runs` store: `RUNS_DIR` and `REFLECTIONS_DIR` are isolated
+  per test.
+
 ## v2.4.1 - Anti Free-Lane Preset (Sep 19, 2026)
 
 ### Added

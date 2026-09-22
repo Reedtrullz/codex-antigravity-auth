@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import concurrent.futures
+from collections import deque
 import email.utils
 import fnmatch
 import json
@@ -37,7 +39,14 @@ from anti_lib.ledger import execution_entry, prompts_as_text
 from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
 from anti_lib.runner import presentable_result
 from anti_lib.verifier import verify_findings
-from anti_lib.reflections import record_review, get_summary, list_records, clear_records, prune_reflections_older_than
+from anti_lib.reflections import (
+    record_review,
+    update_verdict,
+    get_summary,
+    list_records,
+    clear_records,
+    prune_reflections_older_than,
+)
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:51122/v1"
@@ -379,6 +388,10 @@ SAVE_OUTPUT_MODES = {"never", "summary", "full"}
 # logic below keep structured findings and lane coverage from silently dropping.
 PANEL_LANE_RETRY_CEILING_TOKENS = 16_384
 JUDGE_RETRY_CEILING_TOKENS = 16_384
+# ponytail: fixed caps; wire real per-provider concurrency metrics in if
+# panel fan-out ever shows provider-side throttling at these limits.
+PROVIDER_PARALLEL_CAPS = {"google-antigravity": 2, "openrouter": 2}
+TOKEN_CAP_INCOMPLETE_REASONS = {"max_output_tokens", "max_tokens"}
 PANEL_LANE_INSTRUCTION = (
     "You are one lane of an advisory panel. The task below is complete and self-contained: "
     "produce your independent review or answer directly from the supplied context. "
@@ -592,18 +605,18 @@ def ensure_run_id(args: argparse.Namespace) -> str | None:
     if run_id:
         if not RUN_ID_RE.fullmatch(str(run_id)):
             raise AntiError("run id must contain only letters, numbers, '_' or '-'")
-    if save_output_mode(args) == "never":
-        return None
     if run_id:
         # Mirror the auto-generated branch: downstream record writes and
         # metadata read args.run_id, so the explicit id must land there too.
         args.run_id = str(run_id)
-        write_start_record(args, run_id=str(run_id))
-        return str(run_id)
-    run_id = new_run_id()
-    args.run_id = run_id
-    write_start_record(args, run_id=run_id)
-    return run_id
+    else:
+        run_id = new_run_id()
+        args.run_id = run_id
+    # Correlation is decoupled from retention: every run gets a durable id
+    # and a minimal running placeholder even in --save-output never mode,
+    # while write_run_record keeps the never-mode record content-free.
+    write_start_record(args, run_id=str(run_id))
+    return str(run_id)
 
 
 def write_start_record(args: argparse.Namespace, *, run_id: str) -> None:
@@ -735,7 +748,62 @@ def write_run_record(
 ) -> Path | None:
     output_mode = save_output_mode(args)
     if output_mode == "never":
-        return None
+        # Minimal lifecycle record: correlation survives even when prompt and
+        # output retention are disabled (bug report root cause 2).
+        record_id = getattr(args, "run_id", None)
+        if not record_id:
+            return None
+        if not RUN_ID_RE.fullmatch(str(record_id)):
+            raise AntiError("run id must contain only letters, numbers, '_' or '-'")
+        if RUNS_DIR.is_symlink():
+            raise AntiError(f"refusing to write Anti run record through symlinked directory: {RUNS_DIR}")
+        os.makedirs(RUNS_DIR, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(RUNS_DIR, 0o700)
+        except OSError:
+            pass
+        record: dict[str, Any] = {
+            "id": str(record_id),
+            "created_at": utc_timestamp(),
+            "command": getattr(args, "command", mode),
+            "workflow": getattr(args, "workflow_name", None),
+            "run_label": getattr(args, "run_label", None),
+            "mode": mode,
+            "status": status,
+            "gateway": base_url,
+            "models": models or [],
+            "save_output": output_mode,
+            "helper": helper_identity(),
+            "runStatus": "failed" if status == "error" else status,
+            "metadata": {
+                **(metadata or {}),
+                "request_log_correlation_id": str(record_id),
+            },
+        }
+        if error:
+            record["error"] = error
+        record = sanitize_json(record)
+        record["id"] = str(record_id)
+        record["metadata"]["request_log_correlation_id"] = str(record_id)
+        record_path = RUNS_DIR / f"{record['id']}.json"
+        if record_path.exists() and record_path.is_symlink():
+            raise AntiError(f"refusing to overwrite symlinked run record: {record_path}")
+        tmp_path = record_path.with_suffix(record_path.suffix + ".tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(tmp_path, flags, 0o600)
+        except FileExistsError:
+            if tmp_path.is_symlink():
+                raise
+            tmp_path.unlink()
+            fd = os.open(tmp_path, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+        args.run_record_written = status != "running"
+        os.replace(tmp_path, record_path)
+        return record_path
 
     if RUNS_DIR.is_symlink():
         raise AntiError(f"refusing to write Anti run record through symlinked directory: {RUNS_DIR}")
@@ -1847,6 +1915,26 @@ def generate_with_fallback(
     _pre_flight_cost_suggestion(args, model, model_ids, prompt)
     failures: list[dict[str, str]] = []
 
+    @contextlib.contextmanager
+    def elapsed_ticker(label: str):
+        if not getattr(args, "progress", True):
+            yield
+            return
+        started = time.monotonic()
+        stop = threading.Event()
+
+        def tick() -> None:
+            while not stop.wait(30.0):
+                progress(args, f"{label}: still running ({int(time.monotonic() - started)}s elapsed)")
+
+        worker = threading.Thread(target=tick, daemon=True)
+        worker.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            worker.join(timeout=1.0)
+
     def identity_metadata(
         *,
         actual_model: str | None,
@@ -1896,19 +1984,20 @@ def generate_with_fallback(
 
     progress(args, f"{purpose}: calling {model} ({len(prompt)} prompt chars)")
     try:
-        raw_text = post_response(
-            base_url=args.base_url,
-            model=model,
-            prompt=prompt,
-            max_output_tokens=max_output_tokens,
-            timeout=args.timeout,
-            token_env=args.gateway_token_env,
-            retries=args.retry,
-            model_ids=model_ids,
-            run_id=getattr(args, "run_id", None),
-            budget_args=args,
-            budget_purpose=purpose,
-        )
+        with elapsed_ticker(f"{purpose}: {model}"):
+            raw_text = post_response(
+                base_url=args.base_url,
+                model=model,
+                prompt=prompt,
+                max_output_tokens=max_output_tokens,
+                timeout=args.timeout,
+                token_env=args.gateway_token_env,
+                retries=args.retry,
+                model_ids=model_ids,
+                run_id=getattr(args, "run_id", None),
+                budget_args=args,
+                budget_purpose=purpose,
+            )
         text = str(raw_text)
         call_metadata = response_call_metadata(raw_text)
         actual_model = str(call_metadata.get("backend_model") or model)
@@ -1936,19 +2025,20 @@ def generate_with_fallback(
             raise_with_metadata(enrich_generation_error(args, error), exc, failure_metadata)
         progress(args, f"{purpose}: {model} failed; trying fallback {fallback_model}")
         try:
-            raw_text = post_response(
-                base_url=args.base_url,
-                model=fallback_model,
-                prompt=prompt,
-                max_output_tokens=max_output_tokens,
-                timeout=args.timeout,
-                token_env=args.gateway_token_env,
-                retries=args.retry,
-                model_ids=model_ids,
-                run_id=getattr(args, "run_id", None),
-                budget_args=args,
-                budget_purpose=f"{purpose} fallback",
-            )
+            with elapsed_ticker(f"{purpose}: fallback {fallback_model}"):
+                raw_text = post_response(
+                    base_url=args.base_url,
+                    model=fallback_model,
+                    prompt=prompt,
+                    max_output_tokens=max_output_tokens,
+                    timeout=args.timeout,
+                    token_env=args.gateway_token_env,
+                    retries=args.retry,
+                    model_ids=model_ids,
+                    run_id=getattr(args, "run_id", None),
+                    budget_args=args,
+                    budget_purpose=f"{purpose} fallback",
+                )
         except AntiError as fallback_exc:
             fallback_error = redact_sensitive_text(str(fallback_exc))
             failures.append({"model": fallback_model, "error": fallback_error})
@@ -5305,6 +5395,10 @@ def lane_output_status(
     """Classify a panel lane's output as answered, truncated, empty, or a non-answer."""
     response_metadata = response_metadata or getattr(output_text, "response_metadata", {}) or {}
     if response_metadata.get("upstream_status") in {"incomplete", "failed"}:
+        if response_metadata["upstream_status"] == "incomplete":
+            reason = (response_metadata.get("incomplete_details") or {}).get("reason")
+            if reason in TOKEN_CAP_INCOMPLETE_REASONS:
+                return "truncated"
         return "incomplete" if response_metadata["upstream_status"] == "incomplete" else "failed"
     if response_metadata.get("upstream_output_empty"):
         return "empty"
@@ -6295,15 +6389,29 @@ def command_panel(args: argparse.Namespace) -> int:
     ]
     max_workers = min(args.max_parallel, len(available_panel_models))
     running_cost = 0.0
-    estimated_total = 0.0
     budget_exceeded = False
-    futures: dict[concurrent.futures.Future, int] = {}
-    reserved_models: dict[int, str] = {}  # H-1: track reserved model per lane
+    estimated_total = 0.0
+    pending: deque[tuple[int, str]] = deque(
+        (index, model)
+        for index, model in enumerate(panel_models)
+        if model not in missing_panel_models
+    )
+    provider_queues: dict[str, deque[tuple[int, str]]] = {}
+    provider_in_flight: dict[str, int] = {}
+    for item in pending:
+        provider = provider_for_model(item[1]) or "google-antigravity"
+        provider_queues.setdefault(provider, deque()).append(item)
+    futures: dict[concurrent.futures.Future, tuple[int, str]] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for index, model in enumerate(panel_models):
-            if model in missing_panel_models:
-                continue
-            reserved_models[index] = model  # H-1: remember reserved model
+        def _maybe_submit(provider: str) -> bool:
+            """Submit one queued lane for provider while under its parallel cap."""
+            nonlocal estimated_total
+            queue = provider_queues.get(provider)
+            if not queue:
+                return False
+            if provider_in_flight.get(provider, 0) >= PROVIDER_PARALLEL_CAPS.get(provider, args.max_parallel):
+                return False
+            index, model = queue.popleft()
             futures[executor.submit(
                 run_panel_call,
                 args=args,
@@ -6311,14 +6419,27 @@ def command_panel(args: argparse.Namespace) -> int:
                 prompt=prompt,
                 max_output_tokens=args.max_output_tokens,
                 model_ids=model_ids,
-            )] = index
-        for future in concurrent.futures.as_completed(futures):
-            index = futures[future]
-            result = future.result()
-            panel_results[index] = result
-            reserved = reserved_models.get(index, panel_models[index])
-            actual_model = panel_results[index].get("model", reserved)
-            running_cost += actual_call_cost(actual_model, result.get("generation"), prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens)
+            )] = (index, model)
+            provider_in_flight[provider] = provider_in_flight.get(provider, 0) + 1
+            estimated_total += estimate_call_cost(model, len(prompt), args.max_output_tokens)
+            return True
+
+        for provider, queue in provider_queues.items():
+            while _maybe_submit(provider):
+                pass
+        while futures:
+            done, _not_done = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                index, model = futures.pop(future)
+                provider = provider_for_model(model) or "google-antigravity"
+                provider_in_flight[provider] = max(0, provider_in_flight.get(provider, 1) - 1)
+                result = future.result()
+                panel_results[index] = result
+                actual_model = result.get("model", model)
+                running_cost += actual_call_cost(actual_model, result.get("generation"), prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens)
+            for provider in provider_queues:
+                while _maybe_submit(provider):
+                    pass
     metadata["estimated_total"] = estimated_total
     metadata["estimated_cost"] = running_cost
     metadata["budget_exceeded"] = budget_exceeded
@@ -6595,9 +6716,7 @@ def command_panel(args: argparse.Namespace) -> int:
     judge_generation["fallback_reasons"] = judge_fallback_reasons
 
     judge_usage = normalize_usage(judge_generation.get("usage"))
-    judge_truncated = bool(
-        judge_usage and judge_usage.get("output_tokens") is not None and int(judge_usage["output_tokens"]) >= judge_cap
-    )
+    judge_truncated = lane_output_status(judge_text, judge_usage, judge_cap, judge_generation) == "truncated"
     metadata["judge_requested_model"] = judge_model
     metadata["judge_model_used"] = judge_model_used
     metadata["judge_actual_model"] = judge_model_used
@@ -6802,6 +6921,7 @@ def command_panel(args: argparse.Namespace) -> int:
             panel_status=panel_status,
             mode=args.mode,
             scope=metadata.get("scope", ""),
+            run_id=getattr(args, "run_id", None),
         )
     except Exception:
         pass  # Reflection recording is best-effort
@@ -6875,8 +6995,12 @@ def command_consult(args: argparse.Namespace) -> int:
     usage = generation_metadata.get("usage")
     output_status = lane_output_status(text, usage, args.max_output_tokens, generation_metadata)
     last_prompt_chars = len(prompt)
+    retry_disposition = "not_applicable"
+    last_call_cap = args.max_output_tokens
     if output_status == "truncated":
         retry_cap = min(PANEL_LANE_RETRY_CEILING_TOKENS, args.max_output_tokens * 2)
+        retry_disposition = "attempted"
+        last_call_cap = retry_cap
         progress(
             args,
             f"consult output hit the {args.max_output_tokens}-token cap; retrying once at {retry_cap} tokens",
@@ -6896,6 +7020,10 @@ def command_consult(args: argparse.Namespace) -> int:
         attempts_metadata.append(retry_metadata)
         usage = retry_metadata.get("usage")
         output_status = lane_output_status(text, usage, retry_cap, retry_metadata)
+        if output_status == "success":
+            retry_disposition = "succeeded"
+        else:
+            retry_disposition = "exhausted"
         caveats.append("Consult output was truncated at the token cap and retried once at a higher cap")
         if output_status == "truncated":
             caveats.append(
@@ -6904,8 +7032,10 @@ def command_consult(args: argparse.Namespace) -> int:
     metadata = {
         "prompt_chars": last_prompt_chars,
         "budget_limit": args.budget,
-        "estimated_total": actual_call_cost(model_used, attempts_metadata[-1], prompt_chars=last_prompt_chars, max_output_tokens=args.max_output_tokens),
+        "estimated_total": actual_call_cost(model_used, attempts_metadata[-1], prompt_chars=last_prompt_chars, max_output_tokens=last_call_cap),
         "budget_exceeded": False,
+        "retry_disposition": retry_disposition,
+        "result_quality": "complete" if output_status == "success" else "incomplete",
         **budget_metadata(args),
         **attempts_metadata[-1],
         "consult_attempts": attempts_metadata,
@@ -7179,6 +7309,7 @@ def command_review(args: argparse.Namespace) -> int:
             panel_status="single_model",
             mode="review",
             scope=scope_line,
+            run_id=getattr(args, "run_id", None),
         )
     except Exception:
         pass
@@ -7457,6 +7588,47 @@ def command_smoke(args: argparse.Namespace) -> int:
         if not args.json:
             print(f"[FAIL] Gateway /v1/models: {error}")
 
+    probe_model = getattr(args, "probe", None)
+    if probe_model:
+        if not statuses.get("models_reachable"):
+            ok = False
+            statuses["checks"].append(
+                {"name": "probe", "status": "fail", "model": probe_model, "detail": "model catalog was not reachable; skipping live probe"}
+            )
+            if not args.json:
+                print("[FAIL] Live probe skipped: gateway models endpoint was not reachable")
+        elif not statuses.get("sidecar_ready"):
+            ok = False
+            statuses["checks"].append(
+                {"name": "probe", "status": "fail", "model": probe_model, "detail": "model readiness checks failed; live probe refused"}
+            )
+            if not args.json:
+                print("[FAIL] Live probe refused: model readiness checks did not pass")
+        else:
+            resolved_probe_model = resolve_model(probe_model, default=probe_model)
+            try:
+                raw_text = post_response(
+                    base_url=args.base_url,
+                    model=resolved_probe_model,
+                    prompt="Reply with the single word OK.",
+                    max_output_tokens=32,
+                    timeout=args.timeout,
+                    token_env=args.gateway_token_env,
+                    model_ids=ids,
+                )
+                probe_text = str(raw_text).strip()
+                statuses["checks"].append(
+                    {"name": "probe", "status": "pass", "model": resolved_probe_model, "response_chars": len(probe_text)}
+                )
+                if not args.json:
+                    print(f"[PASS] Live probe {resolved_probe_model}: {len(probe_text)} output char(s)")
+            except Exception as exc:
+                ok = False
+                error = redact_sensitive_text(str(exc))
+                statuses["checks"].append({"name": "probe", "status": "fail", "model": resolved_probe_model, "detail": error})
+                if not args.json:
+                    print(f"[FAIL] Live probe {resolved_probe_model}: {error}")
+
     if getattr(args, "check_documented", False) and statuses.get("models_reachable"):
         documented = sorted({resolve_model(alias, default=alias) for alias in MODEL_ALIASES})
         missing_documented = [
@@ -7552,6 +7724,111 @@ def command_smoke(args: argparse.Namespace) -> int:
         print(json.dumps(sanitize_json(statuses), indent=2, sort_keys=True))
 
     return 0 if ok else 1
+
+
+def command_compare(args: argparse.Namespace) -> int:
+    """Send one bounded prompt through each requested model and report the outcomes."""
+    if args.dry_run:
+        print(format_dry_run(
+            mode="compare",
+            model=args.model[0],
+            prompt_chars=len(read_prompt(args)),
+            max_output_tokens=args.max_output_tokens,
+            extra_models=args.model[1:],
+            output_json=args.json,
+            stage_plan=[
+                {"name": "compare", "calls": len(args.model), "max_output_tokens": args.max_output_tokens, "possible_retries": 0},
+            ],
+            budget_limit=args.budget,
+        ))
+        return 0
+    ensure_run_id(args)
+    models = [resolve_model(model, default=model) for model in args.model]
+    if not models:
+        raise AntiError("compare requires at least one --model")
+    model_ids = fetch_model_ids(args.base_url, timeout=args.timeout, token_env=args.gateway_token_env)
+    ensure_models_available(base_url=args.base_url, models=models, timeout=args.timeout, token_env=args.gateway_token_env)
+    prompt = read_prompt(args)
+    caveats: list[str] = []
+    results: list[dict[str, Any]] = []
+    for model in models:
+        progress(args, f"compare: querying {model}")
+        entry: dict[str, Any] = {"model": model}
+        try:
+            text, model_used, generation_metadata = generate_with_fallback(
+                args,
+                model=model,
+                prompt=prompt,
+                max_output_tokens=args.max_output_tokens,
+                purpose=f"compare {model}",
+                model_ids=model_ids,
+            )
+        except AntiError as exc:
+            entry["status"] = "error"
+            entry["error"] = redact_sensitive_text(str(exc))
+            results.append(entry)
+            caveats.append(f"Compare model {model} failed: {entry['error']}")
+            continue
+        status = lane_output_status(
+            text,
+            generation_metadata.get("usage"),
+            args.max_output_tokens,
+            generation_metadata,
+        )
+        entry["status"] = status
+        entry["actual_model"] = model_used
+        entry["provider"] = provider_for_model(model_used)
+        entry["output_chars"] = len(text.strip())
+        entry["usage"] = generation_metadata.get("usage")
+        entry["elapsed_ms"] = generation_metadata.get("elapsed_ms")
+        if status == "success":
+            entry["output_text"] = text.strip() if args.save_output == "full" else None
+        else:
+            entry["error"] = f"output status {status}"
+            caveats.append(f"Compare model {model} returned {status} output")
+        results.append(entry)
+    metadata = {
+        "prompt_chars": len(prompt),
+        "budget_limit": args.budget,
+        "estimated_total": sum(
+            estimate_call_cost(model, len(prompt), args.max_output_tokens) for model in models
+        ),
+        "budget_exceeded": False,
+        **budget_metadata(args),
+        "compare_results": results,
+    }
+    if getattr(args, "run_id", None):
+        metadata["run_id"] = args.run_id
+        metadata["request_log_correlation_id"] = args.run_id
+    all_ok = all(result.get("status") == "success" for result in results)
+    write_run_record(
+        args,
+        mode="compare",
+        status="success" if all_ok else "partial",
+        models=models,
+        base_url=args.base_url,
+        prompt_text=prompt if args.save_output == "full" else None,
+        caveats=caveats,
+        metadata=metadata,
+    )
+    payload = {
+        "mode": "compare",
+        "base_url": args.base_url,
+        "prompt_chars": len(prompt),
+        "results": results,
+        "caveats": caveats,
+        "metadata": metadata,
+    }
+    if args.json:
+        print(json.dumps(sanitize_json(payload), indent=2, sort_keys=True))
+    else:
+        for result in results:
+            status = result.get("status", "error")
+            detail = result.get("error") or f"{result.get('output_chars', 0)} chars"
+            print(f"{result.get('model')}: {status} ({detail})")
+        for caveat in caveats:
+            print(f"- {caveat}")
+    return 0 if all_ok else 1
 
 
 def command_start(args: argparse.Namespace) -> int:
@@ -7650,7 +7927,7 @@ def command_doctor(args: argparse.Namespace) -> int:
 
 def _install_run_signal_handlers(args: argparse.Namespace) -> None:
     """Write an interrupted record (over the running placeholder) on SIGTERM/SIGHUP."""
-    if not hasattr(args, "save_output") or save_output_mode(args) == "never":
+    if not hasattr(args, "save_output"):
         return
 
     def handler(signum: int, _frame: Any) -> None:
@@ -8011,7 +8288,9 @@ def iter_run_records() -> list[Path]:
     if not RUNS_DIR.exists():
         return []
     records: list[Path] = []
-    for path in sorted(RUNS_DIR.glob("*.json"), reverse=True):
+    # Newest records first by actual write time; filenames are not
+    # trustworthy for ordering because custom run ids are not timestamped.
+    for path in sorted(RUNS_DIR.glob("*.json"), key=lambda p: (p.stat().st_mtime, p.name), reverse=True):
         if path.is_symlink() or not path.is_file():
             eprint(f"[anti] skipping non-regular run record: {path}")
             continue
@@ -8056,8 +8335,9 @@ def resolve_run_record_path(run_id: str) -> Path:
 
 def command_runs(args: argparse.Namespace) -> int:
     if args.runs_command == "list":
+        status_filter = getattr(args, "status", None)
         rows = []
-        for path in iter_run_records()[: args.limit]:
+        for path in iter_run_records():
             size = path.stat().st_size
             if size == 0:
                 rows.append(
@@ -8104,6 +8384,9 @@ def command_runs(args: argparse.Namespace) -> int:
                     "interrupted": data.get("status") == "running",
                 }
             )
+        if status_filter:
+            rows = [row for row in rows if row.get("status") == status_filter]
+        rows = rows[: args.limit]
         if args.json:
             print(json.dumps(rows, indent=2, sort_keys=True))
         else:
@@ -8150,6 +8433,10 @@ def command_runs(args: argparse.Namespace) -> int:
         return 0
     if args.runs_command == "reflections":
         repo = Path(args.repo).resolve()
+        verify_verdict = getattr(args, "verify_verdict", None)
+        run_id_filter = getattr(args, "run_id", None)
+        if verify_verdict and not run_id_filter:
+            raise AntiError("--verify-verdict requires --run-id")
         if args.clear:
             count = clear_records(repo)
             print(f"[+] Cleared {count} reflection record(s) for {repo}")
@@ -8176,13 +8463,23 @@ def command_runs(args: argparse.Namespace) -> int:
             print(f"- Severity distribution: {summary['severity_distribution']}")
         if summary.get("models_used"):
             print(f"- Models used: {summary['models_used']}")
-        # Show recent records
-        records = list_records(repo, limit=args.limit)
+        if run_id_filter:
+            records = [record for record in list_records(repo, limit=None) if record.get("run_id") == run_id_filter]
+        else:
+            records = list_records(repo, limit=args.limit)
         if records:
             print(f"\n## Recent Records (last {len(records)})")
             for r in records:
                 ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(r.get("timestamp", 0)))
-                print(f"  [{ts}] {r.get('mode','?')} | {r.get('panel_status','?')} | {r.get('findings_count',0)} findings | models: {', '.join(r.get('models',[]))}")
+                verdict = r.get("verdict") or "pending"
+                run_part = f" | run: {r.get('run_id')}" if r.get("run_id") else ""
+                print(f"  [{ts}] {r.get('mode','?')} | {r.get('panel_status','?')} | {r.get('findings_count',0)} findings | models: {', '.join(r.get('models',[]))} | verdict: {verdict}{run_part}")
+        if verify_verdict and run_id_filter:
+            updated = update_verdict(repo, run_id_filter, verify_verdict)
+            if updated is None:
+                print(f"[*] No reflection record found for run id {run_id_filter}")
+                return 1
+            print(f"[+] Verdict for run {run_id_filter} set to {verify_verdict}")
         return 0
     raise AntiError(f"unknown runs command: {args.runs_command}")
 
@@ -8320,6 +8617,18 @@ def build_parser() -> argparse.ArgumentParser:
     consult.add_argument("--json", action="store_true", help="Emit structured JSON output")
     consult.add_argument("prompt_parts", nargs="*", help="Positional prompt text")
     consult.set_defaults(func=command_consult)
+
+    compare = sub.add_parser("compare", help="Send one bounded prompt through each requested model and compare outcomes")
+    add_gateway_args(compare, default_timeout=120.0)
+    add_generation_control_args(compare)
+    compare.add_argument("--model", action="append", required=True, help="Model alias/id to compare; repeatable")
+    compare.add_argument("--prompt", help="Prompt text")
+    compare.add_argument("--prompt-file", help="Read prompt text from file")
+    compare.add_argument("--max-output-tokens", type=positive_int, default=512, help="Max output tokens per model")
+    compare.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
+    compare.add_argument("--json", action="store_true", help="Emit structured JSON output")
+    compare.add_argument("--dry-run", action="store_true", help="Print the compare plan without contacting gateway")
+    compare.set_defaults(func=command_compare)
 
     plan = sub.add_parser(
         "plan",
@@ -8464,6 +8773,7 @@ def build_parser() -> argparse.ArgumentParser:
     runs_sub = runs.add_subparsers(dest="runs_command", required=True)
     runs_list = runs_sub.add_parser("list")
     runs_list.add_argument("--limit", type=positive_int, default=20)
+    runs_list.add_argument("--status", help="Filter records by lifecycle status (for example: success, partial, error, running, interrupted)")
     runs_list.add_argument("--json", action="store_true")
     runs_show = runs_sub.add_parser("show")
     runs_show.add_argument("id")
@@ -8473,6 +8783,12 @@ def build_parser() -> argparse.ArgumentParser:
     runs_reflections = runs_sub.add_parser("reflections", help="Show repo-level reflection history")
     runs_reflections.add_argument("--repo", default=".", help="Repository path (default: cwd)")
     runs_reflections.add_argument("--limit", type=positive_int, default=10)
+    runs_reflections.add_argument("--run-id", help="Only show the reflection record for this run id")
+    runs_reflections.add_argument(
+        "--verify-verdict",
+        choices=["confirmed", "rejected", "partially_confirmed"],
+        help="Record a verdict on the run-id's reflection record (requires --run-id)",
+    )
     runs_reflections.add_argument("--clear", action="store_true", help="Delete all reflection records for this repo")
     runs.set_defaults(func=command_runs)
 
@@ -8493,6 +8809,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     smoke.add_argument("--skip-doctor", action="store_true")
     smoke.add_argument("--json", action="store_true", help="Emit structured JSON readiness output")
+    smoke.add_argument(
+        "--probe",
+        metavar="MODEL",
+        help="Explicit opt-in tiny live generation probe for MODEL after readiness checks pass",
+    )
     smoke.set_defaults(func=command_smoke)
 
     start = sub.add_parser("start", help="Start gateway in background if it is not reachable")

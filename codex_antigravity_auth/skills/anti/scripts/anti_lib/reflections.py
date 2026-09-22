@@ -114,6 +114,7 @@ def record_review(
     panel_status: str,
     mode: str,
     scope: str = "",
+    run_id: str | None = None,
     verdict: str = "pending",
 ) -> dict[str, Any]:
     """Record a review's findings for future pattern analysis.
@@ -127,6 +128,7 @@ def record_review(
         "scope": scope,
         "models": models,
         "panel_status": panel_status,
+        "run_id": run_id,
         "verdict": verdict,
         "findings": [
             {
@@ -157,10 +159,28 @@ def record_review(
     return record
 
 
-def list_records(repo_path: Path, limit: int = 20) -> list[dict[str, Any]]:
+def update_verdict(repo_path: Path, run_id: str, verdict: str) -> dict[str, Any] | None:
+    """Update the verdict of the reflection record matching run_id."""
+    path = _reflection_path(repo_path)
+    updated: dict[str, Any] | None = None
+    with file_lock(path):
+        records = _load_records(path)
+        for record in reversed(records):
+            if record.get("run_id") == run_id:
+                record["verdict"] = verdict
+                updated = record
+                break
+        if updated is not None:
+            _save_records(path, records)
+    return updated
+
+
+def list_records(repo_path: Path, limit: int | None = 20) -> list[dict[str, Any]]:
     """List recent reflection records for a repo."""
     records = _load_records(_reflection_path(repo_path))
-    return list(reversed(records[-limit:]))
+    if limit is not None:
+        records = records[-limit:]
+    return list(reversed(records))
 
 
 def get_summary(repo_path: Path) -> dict[str, Any]:
