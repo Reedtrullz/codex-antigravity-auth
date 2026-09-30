@@ -10,6 +10,7 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import shutil
+import _socket
 import socket
 import subprocess
 import sys
@@ -62,6 +63,28 @@ def allow_listener(sock):
 
 def remove_listener(endpoint):
     _allowed_endpoints.discard(endpoint)
+
+
+def guarded_socketpair(family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0):
+    """Owned TCP pair for platforms without native socketpair (Windows)."""
+    if family not in {socket.AF_INET, socket.AF_INET6} or type != socket.SOCK_STREAM:
+        raise ValueError("test socketpair requires an IP stream")
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM, proto)
+    endpoint = allow_listener(listener)
+    client = None
+    try:
+        listener.listen(1)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM, proto)
+        client.connect(endpoint)
+        peer, _ = listener.accept()
+        return client, peer
+    except BaseException:
+        if client is not None:
+            client.close()
+        raise
+    finally:
+        listener.close()
+        remove_listener(endpoint)
 
 
 def install():
@@ -176,6 +199,8 @@ def install():
                     _deny("test attempted to access a real user credential/configuration path")
 
     sys.addaudithook(audit)
+    if not hasattr(_socket, "socketpair"):
+        socket.socketpair = guarded_socketpair
 
     def finish():
         if not inherited_root:

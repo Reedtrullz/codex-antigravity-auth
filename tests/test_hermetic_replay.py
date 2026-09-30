@@ -265,3 +265,16 @@ def test_native_parser_unicode_byte_split_contract():
         adapter = NativeResponsesStreamAdapter(display_model="fixture")
         events = adapter.consume_bytes(wire[:split]) + adapter.consume_bytes(wire[split:])
         assert events[0]["delta"] == "hé🙂"
+
+
+def test_windows_style_socketpair_uses_an_owned_listener():
+    from _test_isolation import guarded_socketpair, _allowed_endpoints
+    before = set(_allowed_endpoints)
+    left, right = guarded_socketpair()
+    try:
+        left.sendall(b"synthetic")
+        assert right.recv(9) == b"synthetic"
+        assert _allowed_endpoints == before
+    finally:
+        left.close()
+        right.close()
