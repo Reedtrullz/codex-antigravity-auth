@@ -37,14 +37,13 @@ def _diagnostic_all_provider_configs() -> dict[str, dict]:
 def _responses_output_preview(payload: dict) -> str:
     if not isinstance(payload, dict):
         return ""
-    direct = payload.get("output_text")
-    if isinstance(direct, str) and direct.strip():
-        return direct.strip()
     fragments: list[str] = []
     output = payload.get("output")
     if isinstance(output, list):
         for item in output:
             if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            if item.get("role") != "assistant" or item.get("status") != "completed":
                 continue
             content = item.get("content")
             if isinstance(content, list):
@@ -77,7 +76,7 @@ def _generation_probe_outcome(payload: object) -> tuple[str, str, str | None]:
         return "incomplete", reason, f"Generation incomplete ({reason}); completed text is required"
     if status != "completed":
         return status, "not_completed", f"Generation status is {status}; completed text is required"
-    output = payload.get("output", [])
+    output = payload.get("output")
     if not isinstance(output, list) or any(not isinstance(item, dict) for item in output):
         return "malformed", "invalid_output", "Gateway response output must be a list of objects"
     for item in output:
@@ -88,7 +87,7 @@ def _generation_probe_outcome(payload: object) -> tuple[str, str, str | None]:
             return "malformed", "invalid_content", "Gateway response message content must be a list of objects"
         if any(part.get("type") == "refusal" for part in content):
             return "refusal", "refused", "Generation was refused; the readiness probe requires usable text"
-        if item.get("status", "completed") != "completed":
+        if item.get("status") != "completed":
             return "incomplete", "message_not_completed", "Generation contains an unfinished message"
     if not _responses_output_preview(payload):
         return "empty", "empty_output", "Generation completed with empty output; usable text is required"
