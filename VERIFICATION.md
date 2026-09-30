@@ -75,7 +75,7 @@ codex-antigravity start
 codex-antigravity doctor        # diagnostics
 codex-antigravity doctor --byok-only
 codex-antigravity doctor --codex-ready --json  # read-only store/schema/service/capability report
-python3 -m pytest -q             # current full local suite
+python3 scripts/run_tests.py -q  # full suite with credential/socket isolation
 curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
 ```
 
