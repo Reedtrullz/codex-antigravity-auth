@@ -6,6 +6,10 @@ This refactor preserves the public `/health`, `/v1/models`, and `/v1/responses` 
 
 `accountState.schemaVersion` is now `2`. Cooldowns and failure counters are scoped separately to the whole account, the Claude family, or the Gemini family. Legacy account-wide numeric values and millisecond epoch timestamps are normalized in memory and migrated transactionally on the next normal store write.
 
+Only unversioned legacy state (no `schemaVersion` field) and integer version `2` are supported. Explicit null, boolean, string, fractional, and other integer versions are rejected before normalization or rewriting store contents. There is no defined version-1 migration. Unknown additive fields at the store and `accountState` levels are preserved; known routing buckets still undergo their documented normalization.
+
+Every account writer validates the current file while holding the store lock, including direct saves and background refresh merges. A process with an older snapshot therefore cannot overwrite a newer schema written by another process. Doctor reports `migration: blocked` and `error_class: unsupported_account_state_version` for unsupported formats, without exposing account content. Use a compatible gateway version or restore a matching backup with the gateway stopped; do not reset the store or edit the version number to bypass the guard.
+
 Use `codex-antigravity doctor --codex-ready --json` to inspect `diagnostics.account_store`. A `migration` value of `pending` means the store is readable but still plaintext or uses the legacy account-state schema. Diagnostics are read-only: they do not create keys, chmod files, migrate content, or rewrite configuration.
 
 Before upgrading a production-like local setup, copy the encrypted account/provider files while the gateway is stopped. To roll back, stop the gateway, reinstall the previous package, and restore the matching pre-upgrade store copies. Do not hand-edit Fernet ciphertext. A previous package may not understand schema-version `2`, so restoring the matching backup is the safe rollback path.
