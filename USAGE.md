@@ -55,6 +55,10 @@ The request JSONL log is capped and rotated at `10 MiB`. It records request ids,
 
 `codex-antigravity doctor --codex-ready --json` includes read-only account/provider store format and migration status, account-state schema version, observed service state, and provider capability mismatches under `diagnostics`. These checks do not migrate stores or rewrite config. See `docs/refactor-migration.md` before upgrading or rolling back a store used by an older package.
 
+OAuth inspection in `setup --check`, `setup --json`, `setup-v2 --check-google`, and `doctor` does not repair credential files, migrate account/provider stores, or create encryption keys. Unsafe POSIX credential permissions produce a warning and prevent use of the file's credentials until repaired; symlinked credential paths are refused. Set the credential file mode to `0600`, or use explicit `setup --write` or `login` to repair permissions. Environment credentials retain precedence. On Windows these checks do not change permissions or assess ACLs.
+
+The package-version check is a separate side effect: setup/readiness and doctor may query PyPI and create or refresh `~/.codex/antigravity-version-check.json` once daily. Set `CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1` to disable both this lookup and its cache writes when requiring a filesystem read-only check. `setup-v2` does not perform the version check.
+
 Google account selection is sticky for sequential requests but load-aware for concurrent ones. `AccountState` owns family/account cooldowns, process-local leases, attempt counters, and persisted schema-version `2` state; request handlers release every lease when non-streaming responses finish or streaming responses end/disconnect.
 
 To expose a local model definition in Codex's model picker, add an overlay entry:

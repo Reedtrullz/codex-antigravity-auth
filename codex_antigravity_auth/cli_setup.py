@@ -93,8 +93,8 @@ def run_setup_v2(args) -> None:
     providers = {}
     if args.check_byok:
         try:
-            providers = _cli.all_provider_configs()
-            stored_providers = _cli.load_provider_config().get("providers", {})
+            providers = _cli._diagnostic_all_provider_configs()
+            stored_providers = _cli.load_provider_config_read_only().get("providers", {})
             stored_provider_ids = set(stored_providers) if isinstance(stored_providers, dict) else set()
         except Exception as exc:
             print(f"[WARN] BYOK provider visibility: could not load provider config ({_cli.redact_secret_text(str(exc))})")
@@ -124,12 +124,15 @@ def run_setup_v2(args) -> None:
         print("[INFO] BYOK provider checks skipped; pass --check-byok to inspect provider readiness")
 
     if args.check_google:
-        cid, csec = _cli.resolve_oauth_credentials()
+        credential_warnings: list[str] = []
+        cid, csec = _cli.resolve_oauth_credentials(read_only=True, warnings=credential_warnings)
+        for warning in credential_warnings:
+            print(f"[WARN] Google OAuth credentials: {_cli.redact_secret_text(warning)}")
         if cid and csec:
             print("[PASS] Google OAuth credentials: configured")
         else:
             print("[WARN] Google OAuth credentials: missing")
-        accounts = _cli.load_accounts().get("accounts", [])
+        accounts = _cli._diagnostic_load_accounts().get("accounts", [])
         print(f"[INFO] Google account rotation pool: {len(accounts)} account(s)")
 
     if args.check_byok and providers:
@@ -406,7 +409,7 @@ def setup_byok_preflight(provider_prefix: str, provider_model: str) -> tuple[str
     if not provider_model:
         return "fail", f"BYOK model must include a model id after '{provider_prefix}:'", None
     try:
-        providers = _cli.all_provider_configs()
+        providers = _cli._diagnostic_all_provider_configs()
     except Exception as exc:
         return "fail", f"Could not load BYOK provider configuration: {_cli.redact_secret_text(str(exc))}", None
     provider = providers.get(provider_prefix)
@@ -637,7 +640,10 @@ def run_setup(args) -> dict:
                 _cli._print_setup_report(report)
                 raise SystemExit("OpenAI upstream is not configured; Codex config was not modified.")
     elif google_route:
-        cid, csec = _cli.resolve_oauth_credentials()
+        credential_warnings: list[str] = []
+        cid, csec = _cli.resolve_oauth_credentials(read_only=not args.write, warnings=credential_warnings)
+        for warning in credential_warnings:
+            _cli._setup_check(checks, "google_oauth_credentials_file", "warn", _cli.redact_secret_text(warning))
         if args.write and (not cid or not csec):
             prompted_cid, prompted_csec = _cli.maybe_prompt_and_save_oauth_credentials(args, checks)
             cid = cid or prompted_cid
