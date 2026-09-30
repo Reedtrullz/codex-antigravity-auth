@@ -30,7 +30,7 @@ def main():
             env = {key: value for key, value in os.environ.items() if key.upper() in {"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TMPDIR", "TMP", "TEMP", "LANG"}}
             home = root / "home"
             home.mkdir()
-            env.update({"HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(home), "LOCALAPPDATA": str(home), "XDG_CONFIG_HOME": str(home), "XDG_DATA_HOME": str(home), "PIP_CONFIG_FILE": os.devnull, "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
+            env.update({"ANTIGRAVITY_TEST_ORIGINAL_HOME": os.environ.get("ANTIGRAVITY_TEST_ORIGINAL_HOME") or str(Path.home()), "HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(home), "LOCALAPPDATA": str(home), "XDG_CONFIG_HOME": str(home), "XDG_DATA_HOME": str(home), "PIP_CONFIG_FILE": os.devnull, "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
             environment = root / "venv"
             # Run venv creation with the same scrubbed environment as installation.
             subprocess.run([sys.executable, "-m", "venv", str(environment)], cwd=root, env=env, check=True)

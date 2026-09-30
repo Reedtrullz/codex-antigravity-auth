@@ -9,7 +9,7 @@ import httpx
 import anyio
 import email.utils
 import re
-from contextlib import asynccontextmanager, suppress
+from contextlib import aclosing, asynccontextmanager, suppress
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
 from urllib.parse import urlparse
@@ -81,6 +81,18 @@ from .unified import (
     strip_reserved_openai_prefix,
 )
 from .unified import OpenAIUpstreamAuthError
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    """Own the body iterator when disconnect cancels ASGI send between yields."""
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            close = getattr(self.body_iterator, "aclose", None)
+            if close is not None:
+                with anyio.CancelScope(shield=True):
+                    await close()
 
 
 @asynccontextmanager
@@ -2183,20 +2195,21 @@ async def create_response(request: Request):
             stream_account = stream_attempts[attempt_num]
             terminal_event: dict | None = None
             try:
-                async for event in google_transport.stream_events(
+                async with aclosing(google_transport.stream_events(
                     codex_req,
                     account_lease(stream_account),
                     response_id=response_id,
                     display_model=model,
                     adapter=adapter,
-                ):
-                    if isinstance(event, dict) and event.get("type") in {
-                        "response.completed",
-                        "response.incomplete",
-                        "response.failed",
-                    }:
-                        terminal_event = event
-                    yield serialize_transport_event(event)
+                )) as events:
+                    async for event in events:
+                        if isinstance(event, dict) and event.get("type") in {
+                            "response.completed",
+                            "response.incomplete",
+                            "response.failed",
+                        }:
+                            terminal_event = event
+                        yield serialize_transport_event(event)
             except GoogleHTTPError as exc:
                 try:
                     retry_after = (
@@ -2359,8 +2372,9 @@ async def create_response(request: Request):
 
     async def managed_sse_generator() -> AsyncGenerator[str, None]:
         try:
-            async for chunk in sse_generator():
-                yield chunk
+            async with aclosing(sse_generator()) as source:
+                async for chunk in source:
+                    yield chunk
         finally:
             async def cleanup_stream_accounts() -> None:
                 cancelled = any(
@@ -2411,7 +2425,7 @@ async def create_response(request: Request):
             with anyio.CancelScope(shield=True):
                 await cleanup_stream_accounts()
 
-    return StreamingResponse(managed_sse_generator(), media_type="text/event-stream")
+    return _ClosingStreamingResponse(managed_sse_generator(), media_type="text/event-stream")
 
 
 async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str) -> dict:
