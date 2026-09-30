@@ -132,8 +132,12 @@ def run_setup_v2(args) -> None:
             print("[PASS] Google OAuth credentials: configured")
         else:
             print("[WARN] Google OAuth credentials: missing")
-        accounts = _cli._diagnostic_load_accounts().get("accounts", [])
-        print(f"[INFO] Google account rotation pool: {len(accounts)} account(s)")
+        try:
+            accounts = _cli._diagnostic_load_accounts().get("accounts", [])
+        except Exception as exc:
+            print(f"[WARN] Google account rotation pool: could not inspect account store ({_cli.redact_secret_text(str(exc))})")
+        else:
+            print(f"[INFO] Google account rotation pool: {len(accounts)} account(s)")
 
     if args.check_byok and providers:
         unusable = [

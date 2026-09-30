@@ -227,3 +227,52 @@ def test_disabled_version_check_does_not_create_cache(monkeypatch, isolated_home
     monkeypatch.setattr(cli, "latest_pypi_version", MagicMock(side_effect=AssertionError("no version lookup")))
     assert cli.version_check_result()["status"] == "skip"
     assert not isolated_home.exists()
+
+
+@pytest.mark.parametrize("store_kind", ["malformed", "encrypted-without-key", "symlink"])
+def test_setup_v2_warns_without_crashing_or_repairing_unreadable_account_store(
+    monkeypatch, capsys, isolated_home, store_kind,
+):
+    write_credentials(isolated_home, "private")
+    write_stores(isolated_home)
+    accounts = isolated_home / ".codex/antigravity-accounts.json"
+    if store_kind == "symlink":
+        target = isolated_home / "accounts-target.json"
+        accounts.rename(target)
+        try:
+            accounts.symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+    elif store_kind == "malformed":
+        accounts.write_text('{"accounts": [')
+    else:
+        from cryptography.fernet import Fernet
+        accounts.write_bytes(Fernet(Fernet.generate_key()).encrypt(b'{"accounts": []}'))
+    before = tree_snapshot(isolated_home)
+    monkeypatch.setattr(sys, "argv", ["codex-antigravity", "setup-v2", "--check-google"])
+    cli.main()
+    output = capsys.readouterr().out
+    assert "[WARN] Google account rotation pool: could not inspect account store" in output
+    assert FILE_SECRET not in output
+    assert tree_snapshot(isolated_home) == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits do not describe Windows ACLs")
+@pytest.mark.parametrize("json_output", [False, True])
+def test_readiness_warns_about_unsafe_credentials_even_without_codex_config(
+    monkeypatch, capsys, isolated_home, json_output,
+):
+    write_credentials(isolated_home, "insecure")
+    before = tree_snapshot(isolated_home)
+    command = ["codex-antigravity", "doctor", "--codex-ready"]
+    monkeypatch.setattr(sys, "argv", command + (["--json"] if json_output else []))
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    output = capsys.readouterr().out
+    assert "Unsafe OAuth credential permissions" in output
+    assert "0600" in output and "setup --write" in output
+    if json_output:
+        warning = next(check for check in json.loads(output)["checks"] if check["name"] == "google_oauth_credentials_file")
+        assert warning["status"] == "warn"
+    assert tree_snapshot(isolated_home) == before

@@ -571,7 +571,7 @@ def codex_ready_report(
                 else:
                     add("google_rotation", "fail", f"No Google accounts configured for {family}", **rotation)
 
-    if route == "google":
+    if route in {"google", "unknown"}:
         credential_warnings: list[str] = []
         _cli.resolve_oauth_credentials(read_only=True, warnings=credential_warnings)
         for warning in credential_warnings:
