@@ -19,7 +19,10 @@ escaping Python's runtime.
 
 `fake_upstream.upstream` scripts real HTTP responses, captures synthetic request
 payloads and asserts complete script consumption. `split_bytes` uses a fixed seed;
-parser tests also exercise every single byte split, including UTF-8 code points.
+Google and Chat parser tests also exercise every single byte split, including
+UTF-8 code points. TCP writes can be coalesced; the parser-level byte streams
+establish exact boundaries separately from the real HTTP flows. A strict expected
+failure records the existing native Responses UTF-8 decoder defect (#77).
 The replay suite covers terminal outcomes, tools, malformed/partial streams,
 refresh through encrypted temporary storage, Retry-After rotation with a fixed
 account clock, disconnect cleanup and telemetry. Unit tests remain useful for

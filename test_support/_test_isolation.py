@@ -19,6 +19,7 @@ _installed = False
 _allowed_endpoints: set[tuple[str, int]] = set()
 _binding = False
 _violations: list[str] = []
+_protected_paths: list[Path] = []
 _SAFE_ENV = {"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL",
              "TMPDIR", "TEMP", "TMP", "VIRTUAL_ENV"}
 _STORAGE_KEY = base64.urlsafe_b64encode(b"\0" * 32).decode("ascii")
@@ -72,13 +73,15 @@ def install():
     original_home = Path(os.environ.get("ANTIGRAVITY_TEST_ORIGINAL_HOME") or Path.home())
     root = Path(inherited_root or tempfile.mkdtemp(prefix="antigravity-tests-"))
     root.mkdir(parents=True, exist_ok=True)
+    child_home = os.environ.get("ANTIGRAVITY_TEST_CHILD_HOME") if inherited_root else None
+    home = Path(child_home) if child_home else root
     support = str(Path(__file__).resolve().parent)
     safe = {k: v for k, v in os.environ.items() if k.upper() in _SAFE_ENV}
     safe.update({
-        "HOME": str(root), "USERPROFILE": str(root),
-        "XDG_CONFIG_HOME": str(root / "config"), "XDG_DATA_HOME": str(root / "data"),
-        "XDG_CACHE_HOME": str(root / "cache"), "APPDATA": str(root / "appdata"),
-        "LOCALAPPDATA": str(root / "localappdata"),
+        "HOME": str(home), "USERPROFILE": str(home),
+        "XDG_CONFIG_HOME": str(home / "config"), "XDG_DATA_HOME": str(home / "data"),
+        "XDG_CACHE_HOME": str(home / "cache"), "APPDATA": str(home / "appdata"),
+        "LOCALAPPDATA": str(home / "localappdata"),
         "ANTIGRAVITY_TEST_ROOT": str(root),
         "ANTIGRAVITY_TEST_ORIGINAL_HOME": str(original_home),
         "ANTIGRAVITY_STORAGE_KEY": _STORAGE_KEY,
@@ -92,7 +95,7 @@ def install():
     # Do not carry credential variables or explicit user state roots into collection.
     os.environ.clear()
     os.environ.update(safe)
-    protected = [original_home / p for p in (".codex", ".config", ".local/share/keyrings", "Library/Keychains")]
+    _protected_paths.extend(original_home / p for p in (".codex", ".config", ".ssh", ".aws", ".azure", ".netrc", "_netrc", ".local/share/keyrings", "Library/Keychains", "AppData/Roaming/Python Keyring"))
 
     original_expanduser = os.path.expanduser
 
@@ -118,6 +121,12 @@ def install():
             argv = [os.fspath(a) for a in args]
             command = Path(argv[0]).name.lower()
             env = dict(os.environ if kwargs.get("env") is None else kwargs["env"])
+            # Capture HOME from this already-isolated process, not a caller's
+            # explicit child env. Child startup may only preserve this value.
+            private_home = Path(os.environ.get("HOME") or str(home)).resolve()
+            if private_home == original_home.resolve() or original_home / ".codex" in private_home.parents:
+                _deny("Python child HOME must remain isolated")
+            env["ANTIGRAVITY_TEST_CHILD_HOME"] = str(private_home)
             # Children retain synthetic per-test env, but cannot omit the guard.
             for key in ("ANTIGRAVITY_TEST_ROOT", "ANTIGRAVITY_TEST_ORIGINAL_HOME", "PYTHONPATH", "PYTHON_KEYRING_BACKEND",
                         "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT"):
@@ -157,10 +166,14 @@ def install():
                 _deny("test listener must be created by the fake-upstream fixture")
         elif event in {"os.system", "os.exec", "os.posix_spawn", "os.spawn"}:
             _deny("unguarded subprocess creation is forbidden in tests")
-        elif event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
-            path = Path(os.fsdecode(args[0])).absolute()
-            if any(path == p or p in path.parents for p in protected):
-                _deny("test attempted to open a real user credential/configuration path")
+        elif event in {"open", "os.remove", "os.rmdir", "os.mkdir", "os.rename", "os.chmod", "os.chown", "os.truncate", "os.listdir", "os.scandir", "os.link", "os.symlink"}:
+            paths = args[:2] if event in {"os.rename", "os.link", "os.symlink"} else args[:1]
+            for value in paths:
+                if not isinstance(value, (str, bytes, os.PathLike)):
+                    continue
+                path = Path(os.fsdecode(value)).resolve()
+                if any(path == p or p in path.parents for p in _protected_paths):
+                    _deny("test attempted to access a real user credential/configuration path")
 
     sys.addaudithook(audit)
 

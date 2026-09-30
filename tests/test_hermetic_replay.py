@@ -1,6 +1,7 @@
 """Real ASGI -> HTTP -> adapter -> terminal/telemetry, using synthetic identity."""
 import asyncio
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -38,6 +39,11 @@ def test_chat_http_replay(monkeypatch, seed, finish, delta, terminal):
     events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ") and line != "data: [DONE]"]
     terminals = [event for event in events if event.get("type") in {"response.completed", "response.failed", "response.incomplete"}]
     assert [e["type"] for e in terminals] == ["response." + terminal]
+    terminal_response = terminals[0]["response"]
+    if finish == "content_filter":
+        assert terminal_response["output"][0]["content"] == [{"type": "refusal", "refusal": "The provider declined this response (CONTENT_FILTER)."}]
+    elif finish == "length":
+        assert terminal_response["incomplete_details"]["reason"] == "max_output_tokens"
     assert requests[0]["path"] == "/v1/chat/completions"
     assert requests[0]["body"]["messages"] == [{"role": "user", "content": "hello"}]
     assert requests[0]["headers"]["Authorization"] == "Bearer synthetic-test-key"
@@ -71,6 +77,8 @@ from _test_isolation import expected_denial
 assert os.environ.get('OPENAI_API_KEY') is None
 assert os.environ.get('CODEX_HOME') is None
 assert os.environ['ANTIGRAVITY_TEST_ROOT']
+import sys
+assert os.environ['HOME'] == sys.argv[1]
 try:
     with expected_denial():
         socket.create_connection(('127.0.0.1', 51122))
@@ -85,7 +93,7 @@ except keyring.errors.NoKeyringError:
 else:
     raise AssertionError('keyring escaped')
 """
-    result = subprocess.run([sys.executable, "-c", code], env=environment, capture_output=True, text=True)
+    result = subprocess.run([sys.executable, "-c", code, os.environ["HOME"]], env=environment, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
 
@@ -157,7 +165,7 @@ def test_google_retry_after_rotates_and_persists_cooldown(monkeypatch):
     now = 2_000_000_000.0
     monkeypatch.setattr(accounts, "time", SimpleNamespace(time=lambda: now))
     generation = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "second account"}]}}]}
-    with upstream((429, {"Retry-After": "10"}, b'{"error":{"message":"rate limit"}}'),
+    with upstream((429, {"Retry-After": "600"}, b'{"error":{"message":"rate limit"}}'),
                   (200, {"Content-Type": "application/json"}, json.dumps(generation).encode())) as (base, requests):
         monkeypatch.setattr(server, "GoogleTransport", lambda **kw: google_transport.GoogleTransport(endpoint=base, **kw))
         manager = accounts.AccountManager()
@@ -169,7 +177,11 @@ def test_google_retry_after_rotates_and_persists_cooldown(monkeypatch):
     assert requests[0]["headers"]["Authorization"] != requests[1]["headers"]["Authorization"]
     assert not manager._in_flight
     cooldowns = storage.load_accounts()["accountState"]["cooldowns"]
-    assert any(value.get("gemini", 0) >= now + 10 for value in cooldowns.values())
+    assert any(value.get("gemini", 0) == now + 600 for value in cooldowns.values())
+    records = [json.loads(line) for line in request_log_path().read_text().splitlines()]
+    assert records[-1]["rotation_attempted"] is True
+    # Successful-rotation telemetry currently drops retry_after_source (#37);
+    # the exact persisted expiry above proves the header affected real policy.
 
 
 def test_google_http_stream_disconnect_releases_lease(monkeypatch):
@@ -204,3 +216,52 @@ def test_google_http_stream_disconnect_releases_lease(monkeypatch):
     assert not manager._in_flight
     records = [json.loads(line) for line in request_log_path().read_text().splitlines()]
     assert records[-1]["cancelled"] is True
+
+
+def test_protected_file_reads_and_mutations_are_denied_with_synthetic_canary(tmp_path):
+    from _test_isolation import _protected_paths
+    private = tmp_path / "fixture-credentials"
+    private.mkdir()
+    canary = private / "credential.json"
+    canary.write_text("synthetic-canary")
+    replacement = tmp_path / "replacement"
+    replacement.write_text("synthetic-replacement")
+    _protected_paths.append(private)
+    try:
+        for operation in (lambda: canary.read_text(), lambda: canary.unlink(),
+                          lambda: os.replace(replacement, canary), lambda: canary.chmod(0o777)):
+            with expected_denial(), pytest.raises(AssertionError, match="credential/configuration path"):
+                operation()
+    finally:
+        _protected_paths.remove(private)
+    assert canary.read_text() == "synthetic-canary"
+    assert replacement.read_text() == "synthetic-replacement"
+
+
+def test_google_parser_all_byte_splits_preserve_terminal_and_unicode():
+    from codex_antigravity_auth.google_transport import GoogleTransport, AccountLease
+    wire = ('data: {"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"hé🙂"}]}}]}\n\n').encode()
+
+    async def replay(split):
+        class Bytes(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield wire[:split]
+                yield wire[split:]
+        def client_factory(**kwargs):
+            return httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=Bytes())), **kwargs)
+        transport = GoogleTransport(timeout=1, client_factory=client_factory)
+        return [event async for event in transport.stream_events({"model": "gemini-3.8-flash", "input": "hi"}, AccountLease("synthetic", "project", "synthetic"), response_id="resp_fixture", display_model="fixture")]
+    for split in range(1, len(wire)):
+        events = asyncio.run(replay(split))
+        terminal = next(event for event in events if isinstance(event, dict) and event.get("type") == "response.completed")
+        assert terminal["response"]["output"][0]["content"][0]["text"] == "hé🙂"
+
+
+@pytest.mark.xfail(strict=True, reason="Known #77: native adapter decodes each UTF-8 byte chunk separately")
+def test_native_parser_unicode_byte_split_contract():
+    from codex_antigravity_auth.openai_transport import NativeResponsesStreamAdapter
+    wire = 'data: {"type":"response.output_text.delta","delta":"hé🙂"}\n\n'.encode()
+    for split in range(1, len(wire)):
+        adapter = NativeResponsesStreamAdapter(display_model="fixture")
+        events = adapter.consume_bytes(wire[:split]) + adapter.consume_bytes(wire[split:])
+        assert events[0]["delta"] == "hé🙂"
