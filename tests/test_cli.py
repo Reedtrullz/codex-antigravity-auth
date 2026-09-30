@@ -1287,7 +1287,7 @@ class TestInstallSkill(unittest.TestCase):
             captured["body"] = json.loads(req.data.decode("utf-8"))
             response = MagicMock()
             response.status = 200
-            response.read.return_value = b'{"output":[{"content":[{"type":"output_text","text":"ready"}]}]}'
+            response.read.return_value = b'{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ready"}]}]}'
             response.__enter__ = lambda self_: response
             response.__exit__ = lambda self_, *exc: False
             return response
