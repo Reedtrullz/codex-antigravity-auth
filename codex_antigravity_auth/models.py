@@ -29,6 +29,7 @@ class NativeModel:
     supports_parallel_tool_calls: bool = True
     aliases: tuple[str, ...] = ()
     input_modalities: tuple[str, ...] = ("text",)
+    reasoning_mapping: str | None = None
 
 
 DEFAULT_CLAUDE_MODEL_ID = "claude-sonnet-4-6"
@@ -42,6 +43,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
     # thinkingConfig.thinkingLevel rather than suffixed wire ids.
     NativeModel(
         id="gemini-3.8-flash",
+        reasoning_mapping="thinking_level",
         backend_id="gemini-3.8-flash-tiered",
         display_name="Gemini 3.8 Flash",
         context_window=1_048_576,
@@ -54,6 +56,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
     # 3.7 Flash uses the same tiered request shape as 3.8.
     NativeModel(
         id="gemini-3.7-flash",
+        reasoning_mapping="thinking_level",
         backend_id="gemini-3.7-flash-tiered",
         display_name="Gemini 3.7 Flash",
         context_window=1_048_576,
@@ -84,6 +87,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
     # ── Claude (via Google Antigravity) ──
     NativeModel(
         id="claude-sonnet-4-6",
+        reasoning_mapping="thinking_budget",
         backend_id="claude-sonnet-4-6",
         display_name="Claude Sonnet 4.6 (Google)",
         context_window=250_000,
@@ -93,6 +97,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
     ),
     NativeModel(
         id="claude-opus-4-6-thinking",
+        reasoning_mapping="thinking_budget",
         backend_id="claude-opus-4-6-thinking",
         display_name="Claude Opus 4.6 (Google)",
         context_window=250_000,
@@ -114,6 +119,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
     # Keep saved configs working while the current catalog moves forward.
     NativeModel(
         id="gemini-3.6-flash-high",
+        reasoning_mapping="thinking_level",
         backend_id="gemini-3.7-flash-tiered",
         display_name="Gemini 3.6 Flash (High)",
         context_window=1_048_576,
@@ -273,6 +279,9 @@ def validate_overlay_model(data: dict[str, Any]) -> NativeModel:
         supports_parallel_tool_calls = data.get("supportsParallelToolCalls", True)
     if not isinstance(supports_parallel_tool_calls, bool):
         raise ValueError("supports_parallel_tool_calls must be a boolean")
+    mapping = data.get("reasoning_mapping")
+    if mapping is not None and mapping not in ("thinking_level", "thinking_budget"):
+        raise ValueError("reasoning_mapping must be thinking_level or thinking_budget")
     aliases = validate_model_aliases(data.get("aliases"))
     modalities = data.get("input_modalities", ["text"])
     if not isinstance(modalities, list) or "text" not in modalities or any(not isinstance(value, str) or value not in {"text", "image"} for value in modalities):
@@ -287,6 +296,7 @@ def validate_overlay_model(data: dict[str, Any]) -> NativeModel:
         supports_parallel_tool_calls=supports_parallel_tool_calls,
         aliases=aliases,
         input_modalities=tuple(dict.fromkeys(modalities)),
+        reasoning_mapping=mapping,
     )
 
 
@@ -391,6 +401,8 @@ def render_model_overlay_toml(models: list[NativeModel]) -> str:
                 "",
             ]
         )
+        if model.reasoning_mapping:
+            lines.insert(len(lines) - 1, "reasoning_mapping = " + json.dumps(model.reasoning_mapping))
     return "\n".join(lines)
 
 
@@ -496,12 +508,13 @@ def capabilities_for_native_definition(definition: NativeModel | None) -> Provid
         ),
         structured_output=True,
         stop_sequences=True,
-        reasoning=True,
+        reasoning=bool(definition and definition.reasoning_mapping),
         streaming_usage=True,
         input_modalities=frozenset(definition.input_modalities if definition else {"text"}),
         image_detail=False,
         reasoning_replay=False,
-        reasoning_effort_levels=("low", "medium", "high", "xhigh") if definition and definition.family == "claude" else ("low", "medium", "high"),
+        reasoning_effort_levels=(("low", "medium", "high", "xhigh") if definition.reasoning_mapping == "thinking_budget" else ("low", "medium", "high")) if definition and definition.reasoning_mapping else (),
+        reasoning_effort_parameter=definition.reasoning_mapping if definition else None,
     )
 
 

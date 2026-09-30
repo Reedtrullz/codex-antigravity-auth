@@ -112,3 +112,13 @@ malformed versioned entries cannot retain stale capability support.
 Only the tracked bundled skill is maintained in this repository; no user-installed
 skill copy or personal configuration is modified by these changes. The generated
 snapshot is parity-gated; the surrounding skill documentation is hand-maintained.
+
+Native effort declarations are tied to explicit `thinking_level` or
+`thinking_budget` mappings on the model definition. A model without a mapping
+advertises no effort control and rejects requested reasoning instead of silently
+ignoring it (including 3.1 Pro, GPT-OSS and undeclared overlays). An overlay can
+explicitly set `reasoning_mapping` to one of those implemented mappings. Thinking
+budgets require an output cap above 1024 when explicitly requested. The native
+picker, validator and wire payload are covered together for every published level.
+Adapter output types remain listed separately from effective types: undeclared
+BYOK reasoning/function-call outputs are not promoted to effective support.

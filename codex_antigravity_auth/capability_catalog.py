@@ -50,9 +50,17 @@ def contract(*, canonical_id: str, backend_id: str, route: str, family: str,
         for name, key in (("tools", "tool_choice_modes"), ("parallel_tool_calls", "parallel_tool_calls"), ("structured_output", "structured_output")):
             if key not in declared_capabilities:
                 result["effective"][name] = None
+    effective_outputs = ["text", "refusal"]
+    if result["effective"]["tools"] is True:
+        effective_outputs.append("function_call")
+    if capabilities.reasoning:
+        effective_outputs.append("reasoning")
+    result["effective"]["output_types"] = effective_outputs
+    result["effective"]["reasoning_mapping"] = capabilities.reasoning_effort_parameter
     result["declared_backend"] = {
         "input_modalities": list(result["effective"]["input_modalities"]),
         "tools": result["effective"]["tools"],
+        "output_types": list(effective_outputs),
         "structured_output": result["effective"]["structured_output"],
         "context_limit": dict(result["context_limit"]),
         "availability": "unknown",

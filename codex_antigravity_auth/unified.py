@@ -232,7 +232,7 @@ def openai_catalog() -> list[dict[str, Any]]:
                 "family": "openai",
                 "input_modalities": list(model.input_modalities),
                 "default_reasoning_level": "high",
-                "supports_parallel_tool_calls": True,
+                "supports_parallel_tool_calls": openai_model_capabilities(model.id).parallel_tool_calls,
             }
         )
     return entries

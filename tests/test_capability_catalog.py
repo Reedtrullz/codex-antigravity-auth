@@ -80,6 +80,8 @@ def test_unknown_openai_and_byok_context_is_not_invented(monkeypatch):
         assert entries[name]["capabilities"]["context_limit"] == {"known": False, "tokens": None, "basis": "unknown"}
         assert entries[name]["input_modalities"] == ["text"]
         assert entries[name]["capabilities"]["availability"] == "unknown"
+    assert entries["fixture:unknown"]["capabilities"]["effective"]["output_types"] == ["text", "refusal"]
+    assert "function_call" in entries["fixture:unknown"]["capabilities"]["transport"]["output_types"]
     assert entries["fixture:unknown"]["capabilities"]["effective"]["tools"] is None
     assert entries["fixture:unknown"]["capabilities"]["declared_backend"]["tools"] is None
     assert openai_model_capabilities("custom-openai").input_modalities == frozenset({"text"})
@@ -129,3 +131,53 @@ def test_native_picker_efforts_match_validation(monkeypatch):
             validate_capabilities({"input": "hello", "reasoning": {"effort": effort}}, caps)
     with pytest.raises(ValueError, match="reasoning.effort"):
         validate_capabilities({"input": "hello", "reasoning": {"effort": "xhigh"}}, native_model_capabilities("gemini-3.8-flash"))
+
+
+def test_every_advertised_native_effort_changes_the_wire_contract():
+    from codex_antigravity_auth.google_transport import GoogleTransport, AccountLease
+    from codex_antigravity_auth.models import resolve_backend_model
+    transport = GoogleTransport(timeout=1)
+    budgets = {"low": 4000, "medium": 8000, "high": 16000, "xhigh": 32000}
+    for definition in NATIVE_MODELS:
+        caps = native_model_capabilities(definition.id)
+        for effort in caps.reasoning_effort_levels:
+            wire = transport.build_request({"model": definition.id, "input": "fixture", "max_output_tokens": 40000, "reasoning": {"effort": effort}}, AccountLease("fixture", "project", "synthetic"))
+            assert wire["model"] == resolve_backend_model(definition.id)
+            thinking = wire["request"]["generationConfig"]["thinkingConfig"]
+            if definition.reasoning_mapping == "thinking_level":
+                assert thinking == {"thinkingLevel": effort}
+            else:
+                assert thinking == {"thinking_budget": budgets[effort], "include_thoughts": True}
+
+
+def test_unmapped_native_effort_is_rejected_before_account(monkeypatch):
+    from unittest.mock import Mock
+    save_model_overlays([NativeModel("unrelated-reviewer", "arbitrary-backend", "Reviewer", 12000, "claude")])
+    acquire = Mock()
+    monkeypatch.setattr(server.account_manager, "acquire_account", acquire)
+    for model in ("gemini-3.1-pro", "gpt-oss-120b-medium", "unrelated-reviewer"):
+        assert native_model_capabilities(model).reasoning_effort_levels == ()
+        response = TestClient(server.app).post("/v1/responses", json={"model": model, "input": "hello", "reasoning": {"effort": "high"}})
+        assert response.status_code == 400
+    acquire.assert_not_called()
+
+
+def test_explicit_overlay_budget_mapping_does_not_depend_on_backend_name():
+    from codex_antigravity_auth.transform import transform_request
+    save_model_overlays([NativeModel("reviewer", "arbitrary-backend", "Reviewer", 12000, "claude", reasoning_mapping="thinking_budget")])
+    wire = transform_request({"model": "reviewer", "input": "hello", "reasoning": {"effort": "high"}})
+    assert wire["model"] == "arbitrary-backend"
+    assert wire["request"]["generationConfig"]["thinkingConfig"]["thinking_budget"] == 16000
+    assert native_model_definition("reviewer").reasoning_mapping == "thinking_budget"
+
+
+def test_unknown_openai_picker_and_output_types_match_dispatch(monkeypatch):
+    from codex_antigravity_auth.response_protocol import validate_capabilities
+    monkeypatch.setenv("ANTIGRAVITY_UNIFIED_MODEL_PICKER", "1")
+    monkeypatch.setenv("ANTIGRAVITY_OPENAI_MODELS", "custom-openai")
+    entry = next(item for item in catalog(monkeypatch)["data"] if item["id"] == "custom-openai")
+    assert entry["supports_parallel_tool_calls"] is False
+    assert entry["capabilities"]["effective"]["output_types"] == ["text", "refusal"]
+    for value in (True, False):
+        with pytest.raises(ValueError, match="parallel_tool_calls"):
+            validate_capabilities({"input": "hello", "parallel_tool_calls": value}, openai_model_capabilities("custom-openai"))
