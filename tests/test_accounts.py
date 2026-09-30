@@ -9,6 +9,9 @@ from unittest.mock import patch
 
 class TestAccounts(unittest.TestCase):
     def setUp(self):
+        discovery = patch("codex_antigravity_auth.oauth.discover_project_id", return_value="fixture-project")
+        discovery.start()
+        self.addCleanup(discovery.stop)
         # Clear storage
         self.accounts_data = {
             "accounts": [
