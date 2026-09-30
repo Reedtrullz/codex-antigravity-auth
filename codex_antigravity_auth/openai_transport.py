@@ -383,8 +383,9 @@ class OpenAICompatibleTransport:
         stream: bool,
     ) -> PreparedOpenAIRequest:
         try:
-            validate_capabilities(request, provider_capabilities(provider, provider_model))
-            payload = transform_request_to_chat({**request, "stream": stream}, provider_model)
+            capabilities = provider_capabilities(provider, provider_model)
+            validate_capabilities(request, capabilities)
+            payload = transform_request_to_chat({**request, "stream": stream}, provider_model, capabilities=capabilities)
         except ValueError as exc:
             raise TransportConfigError(400, str(exc)) from exc
         payload["stream"] = stream

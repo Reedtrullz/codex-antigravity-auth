@@ -33,3 +33,41 @@ Google output text carrying `thoughtSignature` remains ordinary text unless the
 provider explicitly marks it as a thought. This contract does not claim that
 opaque Google continuation signatures are preserved or that they are required by
 an upstream model. Those are separate from input image support.
+
+## BYOK reasoning
+
+A provider/model must explicitly declare its request-effort mapping. A legacy
+`reasoning: true` boolean alone is insufficient and advertises no effort levels.
+Absent reasoning settings remain compatible; unsupported requested settings fail
+before key resolution or HTTP. The currently implemented mapping follows
+[OpenRouter's reasoning contract](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)
+(accessed 2026-10-01): Responses `reasoning.effort` becomes the nested Chat
+`reasoning.effort` field. Support must be declared for each configured model or
+inherited from its provider, never inferred from the model's name.
+
+Example per-model capability declaration:
+
+```json
+{
+  "id": "vendor/model",
+  "capabilities": {
+    "reasoning_effort": {
+      "parameter": "reasoning.effort",
+      "levels": ["low", "medium", "high"]
+    },
+    "reasoning_replay": true
+  }
+}
+```
+
+Declare only documented levels for that provider/model. The picker lists exactly
+those levels; unsupported summary, token-budget or other options are rejected.
+`reasoning: false` disables the inherited mapping; `reasoning_effort: null` clears
+it. Other wire mappings remain unsupported until implemented with evidence.
+
+`reasoning_replay` is a separate, opt-in BYOK capability for the existing plaintext
+summary/tool-continuation mapping. Effort support does not imply replay support.
+Opaque encrypted reasoning or structured reasoning-details replay is rejected on
+translated routes, whose adapter cannot preserve it. Native Responses can carry
+those fields without translation. This is a transport contract, not a claim that
+an arbitrary backend accepts every form of historical reasoning.

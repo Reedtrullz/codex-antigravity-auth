@@ -127,6 +127,7 @@ REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
     reasoning=True,
     streaming_usage=True,
     input_modalities=frozenset({"text", "image"}),
+    opaque_reasoning_replay=True,
 )
 # OpenAI upstream speaks Responses natively, so the full boundary holds.
 OPENAI_ROUTE_CAPABILITIES = ProviderCapabilities(
@@ -137,6 +138,7 @@ OPENAI_ROUTE_CAPABILITIES = ProviderCapabilities(
     reasoning=True,
     streaming_usage=True,
     input_modalities=frozenset({"text", "image"}),
+    opaque_reasoning_replay=True,
 )
 PACKAGE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}$")
 
@@ -566,6 +568,7 @@ def codex_model_metadata(
     default_reasoning_level: str = "high",
     supports_parallel_tool_calls: bool = True,
     input_modalities: list[str] | None = None,
+    supported_reasoning_efforts: tuple[str, ...] | None = None,
 ) -> dict:
     reasoning_levels = [
         {"effort": "low", "description": "Fast responses with lighter reasoning"},
@@ -573,6 +576,11 @@ def codex_model_metadata(
         {"effort": "high", "description": "Greater reasoning depth for complex problems"},
         {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
     ]
+    if supported_reasoning_efforts is not None:
+        descriptions = {item["effort"]: item["description"] for item in reasoning_levels}
+        reasoning_levels = [{"effort": effort, "description": descriptions.get(effort, effort)} for effort in supported_reasoning_efforts]
+        if default_reasoning_level not in supported_reasoning_efforts:
+            default_reasoning_level = supported_reasoning_efforts[0] if supported_reasoning_efforts else None
     modalities = input_modalities if input_modalities is not None else ["text"]
     return {
         "id": model_id,
@@ -657,6 +665,7 @@ def provider_model_catalog(created: int) -> list[dict]:
                     created,
                     supports_parallel_tool_calls=capabilities.parallel_tool_calls,
                     input_modalities=sorted(capabilities.input_modalities),
+                    supported_reasoning_efforts=capabilities.reasoning_effort_levels,
                 )
             )
     return byok_models

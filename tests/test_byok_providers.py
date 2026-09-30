@@ -1171,7 +1171,9 @@ class TestBYOKProviders(unittest.TestCase):
             self.assertEqual(model["default_verbosity"], "medium")
             self.assertEqual(model["truncation_policy"], {"mode": "tokens", "limit": 10000})
             self.assertEqual(model["experimental_supported_tools"], [])
-            self.assertIsInstance(model["supported_reasoning_levels"][0], dict)
+            if model["owned_by"] == "google-antigravity":
+                self.assertTrue(model["supported_reasoning_levels"])
+            self.assertTrue(all(isinstance(level, dict) for level in model["supported_reasoning_levels"]))
 
     def test_env_enabled_providers_require_valid_env_key_before_advertising(self):
         self.assertEqual(

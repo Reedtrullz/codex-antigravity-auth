@@ -626,10 +626,15 @@ def transform_gemini_candidate(candidate: dict) -> dict:
         }
     return result
 
-def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
+def transform_request_to_chat(codex_req: dict, provider_model: str, *, capabilities=None) -> dict:
     """Translate Responses API input into OpenAI-compatible Chat Completions."""
     from .input_fidelity import validate_input, image_source
     validate_input(codex_req, {"text", "image"})
+    if capabilities is not None:
+        from .response_protocol import validate_capabilities
+        validate_capabilities(codex_req, capabilities)
+    elif codex_req.get("reasoning") is not None:
+        raise ValueError("reasoning requires an explicit provider/model mapping")
     messages = []
     system_texts = []
     function_names_by_call_id = {}
@@ -814,6 +819,10 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
     if codex_req.get("stream"):
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
+    if capabilities is not None and capabilities.reasoning_effort_parameter and isinstance(codex_req.get("reasoning"), dict):
+        effort = codex_req["reasoning"].get("effort")
+        if effort is not None:
+            payload["reasoning"] = {"effort": effort}
     if "temperature" in codex_req:
         payload["temperature"] = codex_req["temperature"]
     if "max_output_tokens" in codex_req:

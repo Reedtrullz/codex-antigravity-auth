@@ -77,6 +77,10 @@ class ProviderCapabilities:
     input_modalities: frozenset[str] = frozenset({"text"})
     image_forms: frozenset[str] = frozenset({"url", "data_url"})
     image_detail: bool = True
+    reasoning_effort_parameter: str | None = None
+    reasoning_effort_levels: tuple[str, ...] = ()
+    reasoning_replay: bool = True
+    opaque_reasoning_replay: bool = False
     tool_choice_modes: frozenset[str] = field(
         default_factory=lambda: frozenset({"auto", "none", "required", "function"})
     )
@@ -281,8 +285,26 @@ def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabil
 
     if "stop" in request and not capabilities.stop_sequences:
         raise CapabilityError("stop sequences are not supported by the selected route")
-    if "reasoning" in request and not capabilities.reasoning:
-        raise CapabilityError("reasoning is not supported by the selected route")
+    if request.get("reasoning") is not None:
+        if not capabilities.reasoning:
+            raise CapabilityError("reasoning is not supported by the selected route")
+        if capabilities.reasoning_effort_parameter is not None:
+            reasoning = request["reasoning"]
+            if not isinstance(reasoning, dict):
+                raise CapabilityError("reasoning must be an object")
+            if set(reasoning) - {"effort"}:
+                raise CapabilityError("reasoning: only effort is supported by this BYOK mapping")
+            if "effort" in reasoning and reasoning["effort"] not in capabilities.reasoning_effort_levels:
+                raise CapabilityError("reasoning.effort is not supported by the selected provider/model")
+    items = request.get("input")
+    if isinstance(items, list):
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("type") != "reasoning":
+                continue
+            if not capabilities.reasoning_replay:
+                raise CapabilityError(f"input[{index}]: reasoning replay is not supported by the selected route")
+            if not capabilities.opaque_reasoning_replay and any(key in item for key in ("encrypted_content", "reasoning_details")):
+                raise CapabilityError(f"input[{index}]: opaque reasoning replay is not supported by the selected route")
 
     text = request.get("text")
     if isinstance(text, dict) and text.get("format") is not None and not capabilities.structured_output:
