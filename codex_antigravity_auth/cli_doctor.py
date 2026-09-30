@@ -614,10 +614,13 @@ def codex_ready_report(
             status = "warn"
         else:
             status = "pass"
+        detail = f"{store.get('format')} store; migration {store.get('migration')}"
+        if store.get("error"):
+            detail += f"; {_cli.redact_secret_text(str(store['error']))}"
         add(
             name,
             status,
-            f"{store.get('format')} store; migration {store.get('migration')}",
+            detail,
             store=store,
         )
     if not capability_mismatches:
