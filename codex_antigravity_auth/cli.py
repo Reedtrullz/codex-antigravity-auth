@@ -25,6 +25,7 @@ from .byok import (
     all_provider_configs_read_only,
     has_provider_api_key_env,
     load_provider_config,
+    load_provider_config_read_only,
     provider_auth_mode,
     provider_capabilities,
     provider_allows_keyless_local_use,
