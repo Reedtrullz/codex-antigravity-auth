@@ -77,3 +77,38 @@ Google reasoning-history replay is explicitly unsupported until a preserving
 mapping exists. Translated reasoning summaries contain no fabricated encrypted
 content fields. BYOK effort configuration must select an effort; an empty object
 is rejected instead of being erased.
+
+## Versioned route catalog and standalone Anti
+
+`/v1/models` retains the `data` and `models` picker lists and adds
+`capability_catalog_version: 1`. Each entry carries `canonical_id`, `alias_of`
+and a versioned `capabilities` object: route, backend identity, family, aliases,
+transport-supported input/output types, effective declarations, context-limit
+provenance, and explicitly unknown availability. Backend support is distinct from
+what an adapter can encode. Missing BYOK declarations for tools/structured output
+remain null in the contract; a client must not treat null as supported.
+
+Known context limits mean **explicitly declared**, not measured provider limits.
+Unknown BYOK and user-extended OpenAI limits are null; the former assumed 128K/400K
+values are no longer fabricated. Image/audio/video output is not listed merely
+because an upstream model offers it. Registry membership never establishes health.
+
+Canonical native IDs precede aliases, and native definitions precede the OpenAI
+registry on overlaps, preserving the router's existing priority. The picker emits
+one identity and `shadowed_routes` explains the suppressed OpenAI declaration.
+Account selection and cooldowns call the same canonical family resolver, including
+Claude-family overlays whose IDs do not contain “claude”. Classic unknown-backend
+text passthrough remains available.
+
+Anti consumes this contract during its existing catalog fetch; no second network
+request is added. Its standalone snapshot is generated from pure built-in native
+definitions by `scripts/generate_capability_snapshot.py`. A test checks exact
+snapshot parity; the package asset manifest covers both the consumer and JSON.
+Local shorthand/effort aliases remain client conveniences; capability matching
+uses the canonical catalog aliases. Unknown BYOK models are conservative in the
+snapshot. Missing catalog versions use that explicit fallback; unsupported or
+malformed versioned entries cannot retain stale capability support.
+
+Only the tracked bundled skill is maintained in this repository; no user-installed
+skill copy or personal configuration is modified by these changes. The generated
+snapshot is parity-gated; the surrounding skill documentation is hand-maintained.

@@ -4514,13 +4514,13 @@ class BugfixRegressionTests(unittest.TestCase):
             self.assertIn(model_id, anti.MODEL_CAPABILITIES, model_id)
             self.assertEqual(anti.model_cost_tier(model_id), "paid", model_id)
             self.assertGreater(anti.MODEL_QUALITY_RANK.get(model_id, 0), 0, model_id)
-            self.assertTrue(anti.model_supports(model_id, "tools"), model_id)
+            self.assertFalse(anti.model_supports(model_id, "tools"), model_id)
 
     def test_ollama_models_are_text_only(self) -> None:
         anti = load_anti()
         for model_id in ("ollama:gpt-oss:20b", "ollama:qwen3:8b"):
             self.assertFalse(anti.model_supports(model_id, "images"), model_id)
-            self.assertTrue(anti.model_supports(model_id, "tools"), model_id)
+            self.assertFalse(anti.model_supports(model_id, "tools"), model_id)
 
     def test_cheapest_models_for_task_resolves_aliases(self) -> None:
         anti = load_anti()

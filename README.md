@@ -446,6 +446,10 @@ python3 scripts/check_artifacts.py
 python3 scripts/check_installed.py
 ```
 
+The [capability contract](codex_antigravity_auth/design/capabilities.md) describes
+attachment validation, explicit BYOK reasoning mappings, canonical identities and
+the versioned catalog consumed by standalone Anti.
+
 The asset manifest in `codex_antigravity_auth/skill_assets.json` is checked against
 the entire bundled skill tree and both archives, and is also used by skill
 installation verification. Add new assets there when adding packaged helpers or

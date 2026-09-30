@@ -15,6 +15,8 @@ def test_installed_origin_and_complete_skill(tmp_path):
     names = cli.bundled_skill_asset_names()
     assert "scripts/anti_lib/reflections.py" in names
     assert "scripts/anti_lib/verifier.py" in names
+    assert "scripts/anti_lib/capabilities.json" in names
+    assert "scripts/anti_lib/capabilities.py" in names
     assert any(name.startswith("tests/fixtures/") for name in names)
     action, destination, _ = cli.install_codex_skill(tmp_path / "skills")
     assert action == "installed"

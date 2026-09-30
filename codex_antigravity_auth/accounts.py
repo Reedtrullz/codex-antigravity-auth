@@ -155,7 +155,8 @@ class AccountManager:
 
     @staticmethod
     def _model_family(model: str) -> str:
-        return "claude" if "claude" in str(model).lower() else "gemini"
+        from .models import native_model_family
+        return native_model_family(model)
 
     @staticmethod
     def _normalize_expires_at(value: Any) -> float:

@@ -437,14 +437,18 @@ def all_native_models(*, include_overlays: bool = True, strict_overlays: bool = 
     return tuple(models_by_id[model_id] for model_id in model_order)
 
 
-def _alias_map(*, include_overlays: bool = True, strict_overlays: bool = False) -> dict[str, str]:
-    alias_map: dict[str, str] = {}
-    for native_model in all_native_models(include_overlays=include_overlays, strict_overlays=strict_overlays):
-        alias_map.setdefault(native_model.id.lower(), native_model.id)
-        alias_map.setdefault(native_model.backend_id.lower(), native_model.id)
-        for alias in native_model.aliases:
-            alias_map.setdefault(alias.lower(), native_model.id)
+def alias_map_for_models(models) -> dict[str, str]:
+    # Canonical identities win over aliases regardless of declaration order.
+    alias_map = {model.id.lower(): model.id for model in models}
+    for model in models:
+        alias_map.setdefault(model.backend_id.lower(), model.id)
+        for alias in model.aliases:
+            alias_map.setdefault(alias.lower(), model.id)
     return alias_map
+
+
+def _alias_map(*, include_overlays: bool = True, strict_overlays: bool = False) -> dict[str, str]:
+    return alias_map_for_models(all_native_models(include_overlays=include_overlays, strict_overlays=strict_overlays))
 
 
 def canonical_model_id(model: str) -> str:
@@ -480,7 +484,11 @@ def native_model_family(model: str) -> str:
 
 
 def native_model_capabilities(model: str) -> ProviderCapabilities:
-    definition = native_model_definition(model)
+    return capabilities_for_native_definition(native_model_definition(model))
+
+
+def capabilities_for_native_definition(definition: NativeModel | None) -> ProviderCapabilities:
+    """Pure capability owner, also used to generate the standalone snapshot."""
     return ProviderCapabilities(
         native_responses=False,
         parallel_tool_calls=(
@@ -493,6 +501,7 @@ def native_model_capabilities(model: str) -> ProviderCapabilities:
         input_modalities=frozenset(definition.input_modalities if definition else {"text"}),
         image_detail=False,
         reasoning_replay=False,
+        reasoning_effort_levels=("low", "medium", "high", "xhigh") if definition and definition.family == "claude" else ("low", "medium", "high"),
     )
 
 
