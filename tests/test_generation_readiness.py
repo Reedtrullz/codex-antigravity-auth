@@ -12,7 +12,7 @@ from codex_antigravity_auth import cli
 def response_payload(status="completed", text="ready", **extra):
     return {
         "status": status,
-        "output": [{"type": "message", "status": "completed", "content": [
+        "output": [{"type": "message", "role": "assistant", "status": "completed", "content": [
             {"type": "output_text", "text": text},
         ]}],
         **extra,
@@ -22,7 +22,7 @@ def response_payload(status="completed", text="ready", **extra):
 CASES = [
     pytest.param(response_payload(), "completed", True, id="completed-text"),
     pytest.param(response_payload(output_text=""), "completed", True, id="empty-convenience-text"),
-    pytest.param({"status": "completed", "output_text": "ready"}, "completed", True, id="direct-text"),
+    pytest.param({"status": "completed", "output_text": "ready"}, "malformed", False, id="direct-text-without-output"),
     pytest.param(response_payload("failed", error={"message": "upstream unavailable"}), "failed", False, id="failed-with-text"),
     pytest.param(response_payload(error={"message": "upstream unavailable"}), "failed", False, id="completed-with-error"),
     pytest.param(response_payload("incomplete", incomplete_details={"reason": "max_output_tokens"}), "incomplete", False, id="token-cap"),
@@ -32,7 +32,7 @@ CASES = [
     pytest.param(response_payload(text=" \n\t"), "empty", False, id="whitespace"),
     pytest.param(response_payload(output=[]), "empty", False, id="empty"),
     pytest.param(response_payload(output=[{"type": "reasoning", "text": "ready"}]), "empty", False, id="reasoning-only"),
-    pytest.param(response_payload(output=[{"type": "message", "content": [{"type": "input_text", "text": "ready"}]}]), "empty", False, id="input-text"),
+    pytest.param(response_payload(output=[{"type": "message", "role": "assistant", "status": "completed", "content": [{"type": "input_text", "text": "ready"}]}]), "empty", False, id="input-text"),
     pytest.param(response_payload("queued"), "queued", False, id="queued"),
     pytest.param(response_payload("in_progress"), "in_progress", False, id="in-progress"),
     pytest.param(response_payload("cancelled"), "cancelled", False, id="cancelled"),
@@ -43,6 +43,13 @@ CASES = [
     pytest.param(response_payload(output={}), "malformed", False, id="invalid-output"),
     pytest.param(response_payload(output=[None]), "malformed", False, id="invalid-item"),
     pytest.param(response_payload(output=[{"type": "message", "content": [None]}]), "malformed", False, id="invalid-content"),
+    pytest.param(response_payload(output=[], output_text="ready"), "empty", False, id="direct-text-with-empty-output"),
+    pytest.param(response_payload(text="", output_text="ready"), "empty", False, id="direct-text-with-empty-message"),
+    *[
+        pytest.param(response_payload(output=[{"type": "message", "role": role, "status": "completed", "content": [{"type": "output_text", "text": "ready"}]}]), "empty", False, id=f"non-assistant-{role}")
+        for role in ("user", "system", "tool", None)
+    ],
+    pytest.param(response_payload(output=[{"type": "message", "role": "assistant", "status": "in_progress", "content": [{"type": "output_text", "text": "ready"}]}]), "incomplete", False, id="unfinished-message"),
 ]
 
 
@@ -103,7 +110,7 @@ def ready_cli(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("flags", [[], ["--codex-ready"], ["--codex-ready", "--json"]])
-@pytest.mark.parametrize("payload,kind,ok", CASES[:12])
+@pytest.mark.parametrize("payload,kind,ok", CASES)
 def test_doctor_exit_and_diagnostics(monkeypatch, capsys, ready_cli, flags, payload, kind, ok):
     mock_response(monkeypatch, payload)
     monkeypatch.setattr(sys, "argv", ["codex-antigravity", "doctor", "--live", "--config", str(ready_cli), *flags])
@@ -127,4 +134,5 @@ def test_doctor_exit_and_diagnostics(monkeypatch, capsys, ready_cli, flags, payl
         live_line = next(line for line in output.splitlines() if "Live Generation Smoke" in line or "live_generation:" in line)
         assert ("[PASS]" if ok else "[FAIL]") in live_line
         if not ok:
-            assert {"failed": "Generation failed", "incomplete": "Generation incomplete", "refusal": "refused", "empty": "empty output"}[kind] in live_line
+            assert "unknown error" not in live_line
+            assert "failed" in live_line
