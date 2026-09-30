@@ -107,9 +107,12 @@ def validate_input(request: dict[str, Any], modalities, image_forms=IMAGE_FORMS,
         if kind is not None and not isinstance(kind, str):
             raise ValueError(f"{path}.type: expected an input type string")
         if kind in {None, "message"}:
+            role = item.get("role", "user")
+            if not isinstance(role, str):
+                raise ValueError(f"{path}.role: expected a role string")
             parts = item.get("content", "")
             content(parts, path + ".content")
-            if item.get("role") in {"system", "developer"} and isinstance(parts, list):
+            if role in {"system", "developer"} and isinstance(parts, list):
                 for part_index, part in enumerate(parts):
                     if part.get("type") not in {"text", "input_text", "output_text"}:
                         raise ValueError(f"{path}.content[{part_index}]: only text is supported in system/developer messages")

@@ -112,3 +112,12 @@ def test_roles_that_only_carry_text_reject_images(monkeypatch, role, mixed, mode
     assert result.status_code == 400
     assert "system/developer" in result.json()["detail"]
     selection.assert_not_called()
+
+
+@pytest.mark.parametrize("role", [[], {}])
+def test_invalid_role_shape_is_a_field_error(role):
+    request = request_with({"type": "input_text", "text": "hello"})
+    request["input"][0]["role"] = role
+    result = TestClient(server.app, raise_server_exceptions=False).post("/v1/responses", json=request)
+    assert result.status_code == 400
+    assert "input[0].role" in result.json()["detail"]
