@@ -32,6 +32,7 @@ class TestReleaseWorkflow(unittest.TestCase):
                 ("ubuntu-latest", "3.12"),
                 ("ubuntu-latest", "3.14"),
                 ("windows-latest", "3.12"),
+                ("macos-latest", "3.12"),
             },
         )
         self.assertEqual(set(jobs["publish"]["needs"]), {"build", "test"})
@@ -77,3 +78,45 @@ class TestAntiSkillDocumentation(unittest.TestCase):
         self.assertIn("## Agent Execution Pattern", self.skill_text)
         self.assertIn("exec_command", self.skill_text)
         self.assertIn("yield_time_ms", self.skill_text)
+
+
+class TestArtifactCompleteness(unittest.TestCase):
+    def test_manifest_covers_every_source_asset_and_archive_omissions_fail(self):
+        import importlib.util
+        import tempfile
+        import zipfile
+        import tarfile
+        import io
+        spec = importlib.util.spec_from_file_location("check_artifacts", ROOT / "scripts/check_artifacts.py")
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        required = checker.required_assets()
+        assets = {name for name in required if "/skills/anti/" in name}
+        self.assertGreaterEqual(len(assets), 14)
+        with tempfile.TemporaryDirectory() as temporary:
+            for omitted in assets:
+                for suffix in ("whl", "tar.gz"):
+                    path = Path(temporary) / ("fixture." + suffix)
+                    names = (required - {omitted}) | {"LICENSE"}
+                    if suffix == "whl":
+                        with zipfile.ZipFile(path, "w") as archive:
+                            for name in names:
+                                archive.writestr(name, b"fixture")
+                    else:
+                        with tarfile.open(path, "w:gz") as archive:
+                            for name in names:
+                                info = tarfile.TarInfo("fixture/" + name)
+                                info.size = 7
+                                archive.addfile(info, io.BytesIO(b"fixture"))
+                    with self.assertRaisesRegex(ValueError, "missing assets"):
+                        checker.check_archive(path, required)
+
+    def test_both_workflows_share_the_installed_gate_and_macos_lane(self):
+        for name in ("ci", "publish"):
+            text = (ROOT / ".github/workflows" / (name + ".yml")).read_text()
+            self.assertIn("python scripts/check_artifacts.py", text)
+            self.assertIn("python scripts/check_installed.py", text)
+            self.assertIn("os: macos-latest", text)
+            self.assertIn("python scripts/run_tests.py", text)
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        self.assertIn("tomli>=2.0; python_version < '3.11'", project["project"]["optional-dependencies"]["dev"])

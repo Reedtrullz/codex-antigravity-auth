@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "files": [
+    "SKILL.md",
+    "agents/openai.yaml",
+    "scripts/anti.py",
+    "scripts/anti_lib/__init__.py",
+    "scripts/anti_lib/chunking.py",
+    "scripts/anti_lib/context.py",
+    "scripts/anti_lib/ledger.py",
+    "scripts/anti_lib/redaction.py",
+    "scripts/anti_lib/reflections.py",
+    "scripts/anti_lib/runner.py",
+    "scripts/anti_lib/verifier.py",
+    "tests/fixtures/v5-lane-opus.json",
+    "tests/fixtures/v5-lane-sonnet.json",
+    "tests/test_anti.py"
+  ]
+}
