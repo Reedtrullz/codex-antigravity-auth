@@ -28,6 +28,7 @@ class NativeModel:
     default_reasoning_level: str = "high"
     supports_parallel_tool_calls: bool = True
     aliases: tuple[str, ...] = ()
+    input_modalities: tuple[str, ...] = ("text",)
 
 
 DEFAULT_CLAUDE_MODEL_ID = "claude-sonnet-4-6"
@@ -44,6 +45,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         backend_id="gemini-3.8-flash-tiered",
         display_name="Gemini 3.8 Flash",
         context_window=1_048_576,
+        input_modalities=("text", "image"),
         family="gemini",
         default_reasoning_level="medium",
         aliases=("gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"),
@@ -55,6 +57,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         backend_id="gemini-3.7-flash-tiered",
         display_name="Gemini 3.7 Flash",
         context_window=1_048_576,
+        input_modalities=("text", "image"),
         family="gemini",
         aliases=("gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low"),
     ),
@@ -65,6 +68,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         backend_id="gemini-3.1-pro-low",
         display_name="Gemini 3.1 Pro",
         context_window=1_048_576,
+        input_modalities=("text", "image"),
         family="gemini",
         aliases=("gemini-3.1-pro-high", "gemini-pro-agent", "gemini-3.1-pro-preview"),
     ),
@@ -74,6 +78,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         backend_id="gemini-3.1-flash-image",
         display_name="Gemini 3.1 Flash Image",
         context_window=1_048_576,
+        input_modalities=("text", "image"),
         family="gemini",
     ),
     # ── Claude (via Google Antigravity) ──
@@ -82,6 +87,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         backend_id="claude-sonnet-4-6",
         display_name="Claude Sonnet 4.6 (Google)",
         context_window=250_000,
+        input_modalities=("text", "image"),
         family="claude",
         aliases=("sonnet", "claude-sonnet", "claude-3.5-sonnet", "claude-3-5-sonnet"),
     ),
@@ -90,6 +96,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         backend_id="claude-opus-4-6-thinking",
         display_name="Claude Opus 4.6 (Google)",
         context_window=250_000,
+        input_modalities=("text", "image"),
         family="claude",
         default_reasoning_level="xhigh",
         aliases=("opus", "claude-opus", "claude-opus-4-6"),
@@ -100,6 +107,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         backend_id="gpt-oss-120b-medium",
         display_name="GPT-OSS 120B (Medium)",
         context_window=131_072,
+        input_modalities=("text",),
         family="gemini",
     ),
     # ── Compatibility Flash generations ──
@@ -109,6 +117,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         backend_id="gemini-3.7-flash-tiered",
         display_name="Gemini 3.6 Flash (High)",
         context_window=1_048_576,
+        input_modalities=("text", "image"),
         family="gemini",
         aliases=("gemini-3.6-flash", "gemini-3.6-flash-medium", "gemini-3.6-flash-low"),
     ),
@@ -117,6 +126,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         backend_id="gemini-3-flash-agent",
         display_name="Gemini 3.5 Flash (High)",
         context_window=1_048_576,
+        input_modalities=("text", "image"),
         family="gemini",
         aliases=("gemini-3.5-flash", "gemini-3.5-flash-medium", "gemini-3.5-flash-low", "gemini-3.5-flash-extra-low"),
     ),
@@ -264,6 +274,9 @@ def validate_overlay_model(data: dict[str, Any]) -> NativeModel:
     if not isinstance(supports_parallel_tool_calls, bool):
         raise ValueError("supports_parallel_tool_calls must be a boolean")
     aliases = validate_model_aliases(data.get("aliases"))
+    modalities = data.get("input_modalities", ["text"])
+    if not isinstance(modalities, list) or "text" not in modalities or any(not isinstance(value, str) or value not in {"text", "image"} for value in modalities):
+        raise ValueError("input_modalities must contain text and optionally image")
     return NativeModel(
         id=model_id,
         backend_id=backend_id,
@@ -273,6 +286,7 @@ def validate_overlay_model(data: dict[str, Any]) -> NativeModel:
         default_reasoning_level=default_reasoning_level,
         supports_parallel_tool_calls=supports_parallel_tool_calls,
         aliases=aliases,
+        input_modalities=tuple(dict.fromkeys(modalities)),
     )
 
 
@@ -370,6 +384,7 @@ def render_model_overlay_toml(models: list[NativeModel]) -> str:
                 f"display_name = {json.dumps(model.display_name)}",
                 f"family = {json.dumps(model.family)}",
                 f"context_window = {model.context_window}",
+                "input_modalities = " + json.dumps(list(model.input_modalities)),
                 f"default_reasoning_level = {json.dumps(model.default_reasoning_level)}",
                 f"supports_parallel_tool_calls = {'true' if model.supports_parallel_tool_calls else 'false'}",
                 "aliases = [" + ", ".join(json.dumps(alias) for alias in model.aliases) + "]",
@@ -475,6 +490,8 @@ def native_model_capabilities(model: str) -> ProviderCapabilities:
         stop_sequences=True,
         reasoning=True,
         streaming_usage=True,
+        input_modalities=frozenset(definition.input_modalities if definition else {"text"}),
+        image_detail=False,
     )
 
 
@@ -492,6 +509,7 @@ def native_model_catalog(*, strict_overlays: bool = False) -> list[dict[str, Any
                 "default_reasoning_level": model.default_reasoning_level,
                 "supports_parallel_tool_calls": model.supports_parallel_tool_calls,
                 "aliases": list(model.aliases),
+                "input_modalities": list(model.input_modalities),
             }
         )
         seen_ids.add(model.id.lower())

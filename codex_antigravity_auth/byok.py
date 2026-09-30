@@ -281,14 +281,27 @@ def provider_capabilities(
                 break
 
     tool_choice_modes = PROVIDER_TOOL_CHOICE_MODES
+    input_modalities = frozenset({"text"})
+    image_forms = frozenset({"url", "data_url"})
     for raw_overrides in overrides:
         if raw_overrides is None:
             continue
         if not isinstance(raw_overrides, dict):
             raise ValueError("provider capabilities must be an object")
-        unknown = set(raw_overrides) - PROVIDER_CAPABILITY_FIELDS - {"tool_choice_modes"}
+        unknown = set(raw_overrides) - PROVIDER_CAPABILITY_FIELDS - {"tool_choice_modes", "input_modalities", "image_forms"}
         if unknown:
             raise ValueError(f"unknown provider capability: {sorted(unknown)[0]}")
+        for name, allowed in (("input_modalities", {"text", "image"}), ("image_forms", {"url", "data_url"})):
+            if name in raw_overrides:
+                values = raw_overrides[name]
+                if not isinstance(values, list) or not all(isinstance(v, str) and v in allowed for v in values):
+                    raise ValueError(f"{name} contains an unsupported value")
+                if name == "input_modalities":
+                    if "text" not in values:
+                        raise ValueError("input_modalities must include text")
+                    input_modalities = frozenset(values)
+                else:
+                    image_forms = frozenset(values)
         for field_name in PROVIDER_CAPABILITY_FIELDS:
             if field_name not in raw_overrides:
                 continue
@@ -305,7 +318,7 @@ def provider_capabilities(
                 raise ValueError("tool_choice_modes contains an unsupported mode")
             tool_choice_modes = normalized_modes
 
-    return ProviderCapabilities(**defaults, tool_choice_modes=tool_choice_modes)
+    return ProviderCapabilities(**defaults, tool_choice_modes=tool_choice_modes, input_modalities=input_modalities, image_forms=image_forms)
 
 
 def provider_oauth_unsupported_message(provider_id: str) -> str:

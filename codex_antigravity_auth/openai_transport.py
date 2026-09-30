@@ -12,6 +12,7 @@ import uuid
 import httpx
 
 from .byok import (
+    provider_capabilities,
     resolve_api_key,
     validate_http_base_url,
     validate_provider_api_key,
@@ -22,6 +23,7 @@ from .redaction import redact_secret_text
 
 from .response_protocol import (
     ProviderCapabilities,
+    validate_capabilities,
     ProviderResult,
     ProviderTerminal,
     ResponseEventBuilder,
@@ -381,6 +383,7 @@ class OpenAICompatibleTransport:
         stream: bool,
     ) -> PreparedOpenAIRequest:
         try:
+            validate_capabilities(request, provider_capabilities(provider, provider_model))
             payload = transform_request_to_chat({**request, "stream": stream}, provider_model)
         except ValueError as exc:
             raise TransportConfigError(400, str(exc)) from exc

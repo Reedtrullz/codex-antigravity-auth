@@ -74,6 +74,9 @@ class ProviderCapabilities:
     stop_sequences: bool
     reasoning: bool
     streaming_usage: bool
+    input_modalities: frozenset[str] = frozenset({"text"})
+    image_forms: frozenset[str] = frozenset({"url", "data_url"})
+    image_detail: bool = True
     tool_choice_modes: frozenset[str] = field(
         default_factory=lambda: frozenset({"auto", "none", "required", "function"})
     )
@@ -249,6 +252,12 @@ def _advertised_function_names(request: dict[str, Any]) -> set[str]:
 
 
 def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabilities) -> None:
+    from .input_fidelity import validate_input
+    try:
+        validate_input(request, capabilities.input_modalities, capabilities.image_forms, image_detail=capabilities.image_detail)
+    except ValueError as exc:
+        raise CapabilityError(str(exc)) from exc
+
     if "parallel_tool_calls" in request and not isinstance(request["parallel_tool_calls"], bool):
         raise CapabilityError("parallel_tool_calls must be a boolean")
     if "parallel_tool_calls" in request and not capabilities.parallel_tool_calls:
