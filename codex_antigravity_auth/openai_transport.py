@@ -142,7 +142,6 @@ def _message_output(message: object) -> list[dict[str, Any]]:
             {
                 "type": "reasoning",
                 "id": f"rs_{uuid.uuid4().hex[:8]}",
-                "encrypted_content": "",
                 "step_by_step_summary": reasoning,
             }
         )
@@ -260,7 +259,6 @@ class ChatResponseAccumulator:
                 {
                     "type": "reasoning",
                     "id": f"rs_{uuid.uuid4().hex[:8]}",
-                    "encrypted_content": "",
                     "step_by_step_summary": self._reasoning,
                 }
             )

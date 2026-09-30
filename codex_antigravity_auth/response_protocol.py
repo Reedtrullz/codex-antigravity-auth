@@ -292,8 +292,8 @@ def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabil
             reasoning = request["reasoning"]
             if not isinstance(reasoning, dict):
                 raise CapabilityError("reasoning must be an object")
-            if set(reasoning) - {"effort"}:
-                raise CapabilityError("reasoning: only effort is supported by this BYOK mapping")
+            if set(reasoning) != {"effort"}:
+                raise CapabilityError("reasoning: this BYOK mapping requires exactly one effort setting")
             if "effort" in reasoning and reasoning["effort"] not in capabilities.reasoning_effort_levels:
                 raise CapabilityError("reasoning.effort is not supported by the selected provider/model")
     items = request.get("input")
@@ -512,7 +512,6 @@ class ResponseEventBuilder:
                     item={
                         "type": "reasoning",
                         "id": self._reasoning_state["id"],
-                        "encrypted_content": "",
                         "step_by_step_summary": "",
                     },
                 )
@@ -538,7 +537,6 @@ class ResponseEventBuilder:
         item = {
             "type": "reasoning",
             "id": self._reasoning_state["id"],
-            "encrypted_content": "",
             "step_by_step_summary": self._reasoning_state["text"],
         }
         self._completed_items[self._reasoning_state["output_index"]] = dict(item)

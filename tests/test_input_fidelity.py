@@ -97,3 +97,18 @@ def test_overlay_requires_explicit_image_declaration_and_round_trips():
     save_model_overlays([model])
     assert native_model_capabilities("my-vision").input_modalities == frozenset({"text", "image"})
     assert native_model_capabilities("my-vision") == native_model_capabilities("private-vision")
+
+
+@pytest.mark.parametrize("role", ["system", "developer"])
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("model", ["gemini-3.8-flash", "vision:configured"])
+def test_roles_that_only_carry_text_reject_images(monkeypatch, role, mixed, model):
+    request = request_with({"type": "input_image", "image_url": "https://example.invalid/a.png"}, model, mixed)
+    request["input"][0]["role"] = role
+    selection = Mock(side_effect=AssertionError("dispatch must not happen"))
+    monkeypatch.setattr(server.account_manager, "acquire_account", selection)
+    monkeypatch.setattr(server, "all_provider_configs", selection)
+    result = TestClient(server.app).post("/v1/responses", json=request)
+    assert result.status_code == 400
+    assert "system/developer" in result.json()["detail"]
+    selection.assert_not_called()

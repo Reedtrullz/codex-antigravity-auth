@@ -280,9 +280,10 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     """Translate standard Codex Responses API request body to Antigravity format."""
     model = codex_req.get("model", DEFAULT_GEMINI_MODEL_ID)
     from .models import native_model_capabilities
-    from .input_fidelity import validate_input, image_source
+    from .input_fidelity import image_source
+    from .response_protocol import validate_capabilities
     capabilities = native_model_capabilities(model)
-    validate_input(codex_req, capabilities.input_modalities, capabilities.image_forms, image_detail=False)
+    validate_capabilities(codex_req, capabilities)
     backend_model = resolve_backend_model(model)
     
     # 1. Parse Codex input.
@@ -621,7 +622,6 @@ def transform_gemini_candidate(candidate: dict) -> dict:
         result["reasoning"] = {
             "type": "reasoning",
             "id": f"rs_{uuid.uuid4().hex[:8]}",
-            "encrypted_content": "", # dummy
             "step_by_step_summary": reasoning_text
         }
     return result

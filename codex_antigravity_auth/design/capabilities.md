@@ -23,7 +23,8 @@ BYOK routes default to text. Provider or per-model `capabilities` may declare
 Use only forms supported by that provider/model. Per-model declarations override
 provider declarations. The picker and dispatch use the same contract.
 
-Audio, video, files, unresolved image file IDs and unknown content types return a
+Images in system/developer roles are rejected because those adapter roles carry
+only text. Audio, video, files, unresolved image file IDs and unknown content types return a
 400 with an input field path. A mixed request is rejected in full; no unsupported
 attachment is converted into a text label or silently discarded. No implicit
 text-reference mode, media downloader or transcoder is provided. Tool-result
@@ -71,3 +72,8 @@ Opaque encrypted reasoning or structured reasoning-details replay is rejected on
 translated routes, whose adapter cannot preserve it. Native Responses can carry
 those fields without translation. This is a transport contract, not a claim that
 an arbitrary backend accepts every form of historical reasoning.
+
+Google reasoning-history replay is explicitly unsupported until a preserving
+mapping exists. Translated reasoning summaries contain no fabricated encrypted
+content fields. BYOK effort configuration must select an effort; an empty object
+is rejected instead of being erased.

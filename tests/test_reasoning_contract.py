@@ -32,7 +32,7 @@ def test_declared_reasoning_mapping_reaches_real_http(monkeypatch, effort):
 @pytest.mark.parametrize("model,reasoning", [
     ("unverified", {"effort": "high"}), ("unknown", {"effort": "high"}),
     ("verified", {"effort": "medium"}), ("verified", {"summary": "auto"}),
-    ("verified", {"max_tokens": 100}), ("verified", {"effort": []}),
+    ("verified", {}), ("verified", {"max_tokens": 100}), ("verified", {"effort": []}),
 ])
 def test_unmapped_reasoning_is_rejected_before_http_and_key_resolution(monkeypatch, model, reasoning):
     from codex_antigravity_auth import openai_transport
@@ -77,3 +77,17 @@ def test_plain_legacy_request_does_not_gain_reasoning_fields(monkeypatch):
     assert response.status_code == 200
     assert "reasoning" not in requests[0]["body"]
     assert "reasoning_effort" not in requests[0]["body"]
+
+
+def test_google_replay_is_rejected_and_generated_summaries_are_not_fake_ciphertext(monkeypatch):
+    from codex_antigravity_auth.models import native_model_capabilities
+    from codex_antigravity_auth.google_transport import GoogleTransport
+    assert not native_model_capabilities("sonnet").reasoning_replay
+    acquire = Mock()
+    monkeypatch.setattr(server.account_manager, "acquire_account", acquire)
+    response = TestClient(server.app).post("/v1/responses", json={"model": "sonnet", "input": [{"type": "reasoning", "step_by_step_summary": "prior summary"}]})
+    assert response.status_code == 400
+    acquire.assert_not_called()
+    result = GoogleTransport(timeout=1).parse_response({"candidates": [{"finishReason": "STOP", "content": {"parts": [{"thought": True, "text": "summary"}, {"thoughtSignature": "opaque", "text": "answer"}]}}]})
+    assert "encrypted_content" not in result.output[0]
+    assert result.output[1]["content"][0]["text"] == "answer"

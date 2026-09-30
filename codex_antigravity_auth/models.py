@@ -492,6 +492,7 @@ def native_model_capabilities(model: str) -> ProviderCapabilities:
         streaming_usage=True,
         input_modalities=frozenset(definition.input_modalities if definition else {"text"}),
         image_detail=False,
+        reasoning_replay=False,
     )
 
 
