@@ -2,6 +2,15 @@
 
 This guide describes real-world examples, advanced configurations, and diagnostics routines to run Google Antigravity models inside OpenAI Codex efficiently.
 
+## Local-only gateway and Anti workflows
+
+Use an explicitly configured loopback inference server and start the gateway with
+`codex-antigravity start --local-only`. Anti's `--local-only` / `--local-profile`
+requires that gateway mode and checks every selected stage, including fallback
+and judge. It never downloads models or substitutes hosted defaults. See the
+[local-only guide](codex_antigravity_auth/skills/anti/LOCAL_ONLY.md) for setup,
+settings export, diversity semantics and the third-party networking boundary.
+
 ## 0. Quick Codex Setup
 
 Install the command from PyPI, then run the primary Claude-in-Codex setup:

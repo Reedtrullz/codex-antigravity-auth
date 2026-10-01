@@ -17,11 +17,14 @@ class CapabilityRegistry:
         self.entries: dict[str, dict[str, Any]] = {}
         self.aliases: dict[str, str] = {}
         self.source = "snapshot"
+        self.local_only_contract = None
         self.load(self.snapshot)
 
     def load(self, payload: dict[str, Any]) -> None:
         """Replace state atomically; unknown versions never retain stale support."""
         entries = {}
+        local = payload.get('local_only_policy')
+        self.local_only_contract = dict(local) if isinstance(local, dict) else None
         if type(payload.get("capability_catalog_version")) is int and payload["capability_catalog_version"] == CATALOG_VERSION:
             for entry in payload.get("data", []) if isinstance(payload.get("data"), list) else []:
                 if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):

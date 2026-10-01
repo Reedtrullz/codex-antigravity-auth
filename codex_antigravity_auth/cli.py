@@ -1,4 +1,5 @@
-from .endpoint_policy import open_http_request
+from .endpoint_policy import open_http_request, is_loopback_endpoint
+from .skills.anti.scripts.anti_lib.local_policy import environment_enabled as local_environment_enabled
 import sys
 import os
 import argparse
@@ -1326,6 +1327,16 @@ def run_configure_codex(args) -> None:
     print("[*] Optional sidecar skill: codex-antigravity install-skill")
 
 
+def configure_local_gateway_environment(args):
+    if getattr(args, 'local_only', False) is True or local_environment_enabled():
+        if not is_loopback_endpoint(args.host) or getattr(args, 'allow_remote', False):
+            raise SystemExit('Local-only gateway mode requires a loopback host and no --allow-remote')
+        if getattr(args, 'op_env_file', None) or getattr(args, 'op_environment', None):
+            raise SystemExit('Local-only gateway mode does not launch the 1Password network wrapper; supply local configuration instead')
+        os.environ['ANTIGRAVITY_LOCAL_ONLY'] = '1'
+        os.environ['CODEX_ANTIGRAVITY_NO_UPDATE_CHECK'] = '1'
+
+
 def main():
     _ensure_split_modules()
     parser = argparse.ArgumentParser(description="Codex Antigravity Auth CLI Utility")
@@ -1611,6 +1622,7 @@ def main():
         action="store_true",
         help="Allow non-loopback clients when ANTIGRAVITY_GATEWAY_TOKEN is set to at least 32 visible ASCII characters",
     )
+    start_parser.add_argument("--local-only", action="store_true", help="Allow only configured loopback provider endpoints; disable cloud refresh/update work")
     start_parser.add_argument("--background", action="store_true", help="Start the gateway as a background process with pid/log files")
     start_parser.add_argument(
         "--op-env-file",
@@ -1761,6 +1773,7 @@ def main():
             else:
                 print(f"[*] No stored BYOK provider named {args.provider}")
     elif args.command == "start":
+        configure_local_gateway_environment(args)
         ensure_unified_env_for_gateway(args)
         if args.background:
             start_gateway_background(args)

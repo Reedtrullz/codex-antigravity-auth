@@ -40,6 +40,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 from anti_lib.run_control import RunControl, DeadlineExceeded, CURRENT_RUN
 from anti_lib.spend_control import SpendControl, SpendRefused, AdmissionConfigError
 from anti_lib.capabilities import CapabilityRegistry
+from anti_lib import local_policy as local_workflow
 
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
@@ -591,6 +592,7 @@ class SpendAdmissionError(SpendRefused, AntiError):
 
 
 def run_control(args=None):
+    local_settings = local_workflow.prepare_args(args)
     if args is not None and hasattr(args, 'timeout'):
         if not math.isfinite(float(args.timeout)) or float(args.timeout) <= 0:
             raise AntiError('HTTP timeout must be finite and greater than zero')
@@ -618,6 +620,8 @@ def run_control(args=None):
                     raise AntiError('Invalid attempt admission configuration: ' + str(exc)) from exc
                 except (OSError, ValueError, TypeError, KeyError) as exc:
                     raise AntiError('Invalid attempt admission configuration: check numeric limits and pricing-file fields') from exc
+    if local_settings is not None:
+        current.local_policy = local_settings
     if args is not None:
         args._run_control = current
     return current
@@ -674,6 +678,11 @@ def scheduling_metadata(metadata=None, control=None):
     if control is not None:
         snapshot = control.snapshot()
         metadata['run_control'] = snapshot
+        local = getattr(control, 'local_policy', None)
+        if local is not None:
+            metadata['local_policy'] = {'enabled':True, 'destination_scope':'declared_loopback',
+                                        'profile_sha256':local.get('profile_sha256'),
+                                        'third_party_network_behavior':'not_attested'}
         for source, target in (('panel_results','panel_lane_count'),('judge_attempts','judge_attempt_count'),('consult_attempts','consult_attempt_count')):
             if isinstance(metadata.get(source), list): metadata[target] = len(metadata[source])
         policy = getattr(control, 'spend_control', None)
@@ -1379,7 +1388,8 @@ def transport_entry_timeout(method, timeout, *, payload=None, body=None, url=Non
         if policy is not None and policy.enabled:
             if not isinstance(payload, dict) or not isinstance(body, bytes) or type(payload.get('max_output_tokens')) is not int:
                 raise SpendAdmissionError('admission refused: request/output reservation is unknown')
-            gateway = url[:-len('/responses')] if isinstance(url, str) and url.endswith('/responses') else None
+            suffix = '/local/responses' if getattr(control, 'local_policy', None) else '/responses'
+            gateway = url[:-len(suffix)] if isinstance(url, str) and url.endswith(suffix) else None
             ticket = policy.reserve(payload.get('model'), len(body), payload['max_output_tokens'], gateway=gateway)
             _SPEND_TICKET.set((policy, ticket, submitted_count))
         if control is not None:
@@ -1391,7 +1401,10 @@ def transport_entry_timeout(method, timeout, *, payload=None, body=None, url=Non
 
 
 def open_gateway_request(request, *, timeout, payload=None, body=None):
-    return open_http_request(request, timeout=timeout, before_open=lambda prepared, selected_timeout:
+    local = getattr(CURRENT_RUN.get(), 'local_policy', None)
+    if local is not None:
+        local_workflow.loopback_url(request.full_url)
+    return open_http_request(request, timeout=timeout, loopback_only=local is not None, before_open=lambda prepared, selected_timeout:
         transport_entry_timeout(prepared.get_method(), selected_timeout, payload=payload, body=body,
                                 url=prepared.full_url))
 
@@ -1435,7 +1448,7 @@ def request_json(
             raw = read_response_body(exc, timeout)
         status = int(exc.code)
         retry_after_header = exc.headers.get("Retry-After")
-    except (DeadlineExceeded, SpendRefused):
+    except (DeadlineExceeded, SpendRefused, local_workflow.LocalPolicyError):
         raise
     except Exception as exc:
         raise AntiError(f"request to {url} failed: {exc}") from exc
@@ -1519,6 +1532,8 @@ def fetch_model_ids(base_url: str, *, timeout: float, token_env: str) -> set[str
         raise AntiError(f"/v1/models returned HTTP {status}: {detail}")
     ids = model_ids_from_catalog(payload)
     CAPABILITY_REGISTRY.consume(payload)
+    if getattr(CURRENT_RUN.get(), 'local_policy', None) is not None:
+        local_workflow.require_catalog(CAPABILITY_REGISTRY)
     global MODEL_CAPABILITIES
     MODEL_CAPABILITIES = {model: CAPABILITY_REGISTRY.features(model) for model in set(MODEL_ALIASES.values()) | set(CAPABILITY_REGISTRY.entries)}
     if not ids:
@@ -1726,6 +1741,9 @@ def post_response(
         (candidate for candidate in available_model_ids if catalog_model_matches(model, candidate)),
         None,
     )
+    if getattr(control, 'local_policy', None) is not None:
+        local_workflow.require_model(CAPABILITY_REGISTRY, matched_model or model,
+                                     stage='fallback' if policy_fallback else _POLICY_STAGE.get())
     if matched_model is None:
         sample = ", ".join(sorted(available_model_ids)[:12])
         suggestions = closest_catalog_models(model, available_model_ids)
@@ -1746,6 +1764,8 @@ def post_response(
     if effort:
         payload["reasoning"] = {"effort": effort}
     metadata: dict[str, Any] = {}
+    if getattr(control, 'local_policy', None) is not None:
+        metadata['antigravity_local_only'] = True
     if run_id:
         metadata["run_id"] = run_id
     backend_timeout = backend_timeout_hint(timeout)
@@ -1759,7 +1779,8 @@ def post_response(
     attempts = max(0, retries) + 1
     retryable_statuses = {408, 409, 425, 429, 500, 502, 503, 504}
     last_error: str | None = None
-    response_url = f"{normalize_base_url(base_url)}/responses"
+    endpoint = '/local/responses' if getattr(control, 'local_policy', None) is not None else '/responses'
+    response_url = normalize_base_url(base_url) + endpoint
     started = time.monotonic()
     for attempt in range(1, attempts + 1):
         control.check()
@@ -1948,6 +1969,12 @@ def generate_with_fallback(
     if fallback_policy not in FALLBACK_POLICIES:
         raise AntiError(f"unsupported fallback policy: {fallback_policy}")
 
+    if getattr(run_control(args), 'local_policy', None) is not None:
+        if model_ids is None:
+            model_ids = fetch_model_ids(args.base_url, timeout=args.timeout, token_env=args.gateway_token_env)
+        local_workflow.require_model(CAPABILITY_REGISTRY, model, stage=_POLICY_STAGE.get())
+        if fallback_model and fallback_policy != 'never':
+            local_workflow.require_model(CAPABILITY_REGISTRY, fallback_model, stage='fallback')
     _pre_flight_cost_suggestion(args, model, model_ids, prompt)
     failures: list[dict[str, Any]] = []
 
@@ -6113,12 +6140,16 @@ def command_panel(args: argparse.Namespace) -> int:
         fallback_model = resolve_model(args.fallback_model, default=args.fallback_model)
         if fallback_model not in required_models:
             required_models.append(fallback_model)
-    model_ids = ensure_models_available(
-        base_url=args.base_url,
-        models=required_models,
-        timeout=args.timeout,
-        token_env=args.gateway_token_env,
-    )
+    if getattr(args, '_local_policy', None) is not None:
+        model_ids = fetch_model_ids(args.base_url, timeout=args.timeout, token_env=args.gateway_token_env)
+        for selected, stage in [(value, 'reviewer') for value in panel_models] + [(judge_model, 'judge')]:
+            local_workflow.require_model(CAPABILITY_REGISTRY, selected, stage=stage)
+        if getattr(args, 'fallback_model', None):
+            local_workflow.require_model(CAPABILITY_REGISTRY, resolve_model(args.fallback_model, default=args.fallback_model), stage='fallback')
+    else:
+        model_ids = ensure_models_available(
+            base_url=args.base_url, models=required_models, timeout=args.timeout, token_env=args.gateway_token_env,
+        )
     def _catalog_member(model_id: str) -> str | None:
         return next(
             (candidate for candidate in model_ids if catalog_model_matches(model_id, candidate)),
@@ -7286,6 +7317,8 @@ def command_plan(args: argparse.Namespace) -> int:
 
 @controlled_command
 def command_smoke(args: argparse.Namespace) -> int:
+    if getattr(args, '_local_policy', None) is not None and args.mode != 'sidecar':
+        raise local_workflow.LocalPolicyError('local-only smoke uses sidecar mode; general Codex backend diagnostics are not part of the local workflow')
     ok = True
     statuses: dict[str, Any] = {
         "mode": args.mode,
@@ -7903,6 +7936,8 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         common.extend(["--data-policy", args.data_policy])
     for acknowledgement in getattr(args, "acknowledge_secret_hash", None) or []:
         common.extend(["--acknowledge-secret-hash", acknowledgement])
+    if getattr(args, 'local_only', False):
+        common.append('--local-only')
     if args.budget is not None:
         common.extend(["--budget", str(args.budget)])
     for name in ('max_calls', 'max_total_input_tokens', 'max_total_output_tokens', 'currency_budget', 'pricing_file'):
@@ -8128,6 +8163,8 @@ def command_workflow(args: argparse.Namespace) -> int:
     progress(args, "workflow expands to: " + workflow_command_for_progress(expanded))
     parser = build_parser()
     expanded_args = parser.parse_args(expanded)
+    expanded_args._local_policy = local_workflow.prepare_args(args)
+    expanded_args.local_only = expanded_args._local_policy is not None
     expanded_args._run_control = run_control(args)
     expanded_args.run_timeout = expanded_args._run_control.limit
 
@@ -8358,6 +8395,8 @@ def add_generation_control_args(
     *,
     default_save_output: str = "never",
 ) -> None:
+    parser.add_argument('--local-only', action='store_true', help='Require local-only gateway enforcement and loopback routes at every stage')
+    parser.add_argument('--local-profile', help='Explicit non-secret local settings profile; excludes separate gateway/model/judge/fallback flags')
     parser.add_argument("--run-timeout", type=float, default=1800.0, help="Whole-run provider deadline in seconds (default: 1800; maximum: 86400)")
 
     parser.add_argument("--data-policy", help="Explicit path to a version 1 restrictive repository submission policy")
@@ -8397,6 +8436,16 @@ def add_inventory_args(parser):
     parser.add_argument("--include-untracked", action="store_true", help="Include untracked files in working-tree or repository reviews")
     parser.add_argument("--review-root", action="append", help="Literal repository-relative directory for repository inventory; repeatable")
     parser.add_argument("--exclude-path", action="append", help="Literal file or directory to exclude from repository inventory; repeatable")
+
+
+def command_local_profile(args: argparse.Namespace) -> int:
+    value = local_workflow.profile(args.base_url,
+        [resolve_model(model, default=model) for model in args.model],
+        resolve_model(args.judge, default=args.judge),
+        resolve_model(args.fallback_model, default=args.fallback_model) if args.fallback_model else None,
+        args.fallback_policy)
+    print(json.dumps(value, indent=2, sort_keys=True))
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -8687,6 +8736,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     smoke = sub.add_parser("smoke", help="Check CLI, gateway, models, and doctor readiness")
     add_gateway_args(smoke)
+    smoke.add_argument('--local-only', action='store_true')
+    smoke.add_argument('--local-profile')
     smoke.add_argument("--run-timeout", type=float, default=1800.0, help="Whole-run provider deadline in seconds")
     add_codex_config_args(smoke)
     smoke.add_argument(
@@ -8739,6 +8790,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_codex_config_args(doctor)
     doctor.add_argument("--byok-only", action="store_true")
     doctor.set_defaults(func=command_doctor)
+    local_profile = sub.add_parser('local-profile', help='Export non-secret local-only model settings as JSON; no network lookup')
+    local_profile.add_argument('--base-url', default=DEFAULT_BASE_URL)
+    local_profile.add_argument('--model', action='append', required=True)
+    local_profile.add_argument('--judge', required=True)
+    local_profile.add_argument('--fallback-model')
+    local_profile.add_argument('--fallback-policy', choices=sorted(FALLBACK_POLICIES), default='never')
+    local_profile.set_defaults(func=command_local_profile)
     return parser
 
 
@@ -8785,7 +8843,9 @@ def _extract_error_diagnostics(exc: AntiError, args: argparse.Namespace) -> dict
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    args._provided_options = {value.split('=', 1)[0] for value in (argv if argv is not None else sys.argv[1:]) if value.startswith('--')}
     try:
+        local_workflow.prepare_args(args)
         _install_run_signal_handlers(args)
         if hasattr(args, "base_url") and args.base_url is not None:
             args.base_url = normalize_base_url(args.base_url)
@@ -8809,7 +8869,7 @@ def main(argv: list[str] | None = None) -> int:
                 pass
         eprint("Interrupted")
         return 130
-    except (AntiError, PersistenceError, PolicyError) as exc:
+    except (AntiError, PersistenceError, PolicyError, local_workflow.LocalPolicyError) as exc:
         if isinstance(exc, PolicyError) and getattr(args, "_data_policy_session", None) and not (getattr(args, "dry_run", False) or getattr(args, "print_prompt", False)):
             args.run_id = getattr(args, "run_id", None) or new_run_id()
         if hasattr(args, "save_output") and not getattr(args, "run_record_written", False) and not (getattr(args, "dry_run", False) or getattr(args, "print_prompt", False)):

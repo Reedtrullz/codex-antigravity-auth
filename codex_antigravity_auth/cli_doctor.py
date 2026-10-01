@@ -337,6 +337,9 @@ def version_check_result(*, timeout: float = 2.0) -> dict:
         "latest": None,
         "detail": "version check skipped",
     }
+    if _cli.local_environment_enabled():
+        result["detail"] = "version check disabled by local-only policy"
+        return result
     if os.environ.get("CODEX_ANTIGRAVITY_NO_UPDATE_CHECK") == "1":
         result["detail"] = "version check disabled by CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1"
         return result
