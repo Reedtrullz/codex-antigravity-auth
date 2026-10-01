@@ -45,6 +45,8 @@ Client endpoints require HTTPS for remote hosts. Plain HTTP is allowed for `loca
 
 Gateway request diagnostics are local and sanitized:
 
+Gateway and standalone Anti share credential-redaction rules for structured fields, nested JSON error strings, authorization headers, URL user information, and known token formats. Anti additionally masks provider identifiers; gateway request IDs remain available for telemetry correlation. Redaction bounds diagnostic text to 512 KiB, structured depth to 32, and visited items to 10,000; over-limit content becomes an explicit redacted marker. This policy recognizes credential fields and formats, rather than guaranteeing detection of every arbitrary secret.
+
 ```bash
 codex-antigravity logs --tail 50
 codex-antigravity logs summary --since 24h
