@@ -14,7 +14,7 @@ from codex_antigravity_auth.storage import _get_encryption_key
 
 
 class TestKeyInitialization(unittest.TestCase):
-    def test_pytest_storage_key_bypasses_system_keyring(self):
+    def test_recorded_pytest_storage_key_bypasses_system_keyring(self):
         blocked = AssertionError("tests must not access the system keyring")
         with patch(
             "codex_antigravity_auth.storage.keyring.get_password",
@@ -25,6 +25,11 @@ class TestKeyInitialization(unittest.TestCase):
                 side_effect=blocked,
             ) as set_password:
                 key = _get_encryption_key()
+                # First binding checks for existing conflicts through the fake
+                # unavailable backend. Once recorded, the environment is enough.
+                get_password.assert_called_once()
+                get_password.reset_mock()
+                self.assertEqual(_get_encryption_key(), key)
 
         Fernet(key.encode("utf-8"))
         get_password.assert_not_called()
@@ -48,11 +53,10 @@ class TestKeyInitialization(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"ANTIGRAVITY_STORAGE_KEY": ""}):
                 with patch("codex_antigravity_auth.storage.get_codex_home", return_value=Path(tmp)):
-                    with patch("codex_antigravity_auth.secure_store.fcntl", None):
-                        with patch("codex_antigravity_auth.storage.keyring.get_password", side_effect=get_password):
-                            with patch("codex_antigravity_auth.storage.keyring.set_password", side_effect=set_password):
-                                with ThreadPoolExecutor(max_workers=2) as pool:
-                                    keys = list(pool.map(lambda _index: _get_encryption_key(), range(2)))
+                    with patch("codex_antigravity_auth.storage.keyring.get_password", side_effect=get_password):
+                        with patch("codex_antigravity_auth.storage.keyring.set_password", side_effect=set_password):
+                            with ThreadPoolExecutor(max_workers=2) as pool:
+                                keys = list(pool.map(lambda _index: _get_encryption_key(), range(2)))
 
         self.assertEqual(keys[0], keys[1])
         self.assertEqual(keys[0], stored["key"])
@@ -60,7 +64,7 @@ class TestKeyInitialization(unittest.TestCase):
 
 
 class TestSecureStore(unittest.TestCase):
-    def test_file_lock_serializes_threads_without_fcntl(self):
+    def test_file_lock_serializes_threads_with_supported_process_lock(self):
         first_entered = threading.Event()
         release_first = threading.Event()
         second_entered = threading.Event()
@@ -77,16 +81,15 @@ class TestSecureStore(unittest.TestCase):
                 with file_lock(target):
                     second_entered.set()
 
-            with patch("codex_antigravity_auth.secure_store.fcntl", None):
-                first = threading.Thread(target=hold_first_lock)
-                second = threading.Thread(target=enter_second_lock)
-                first.start()
-                self.assertTrue(first_entered.wait(timeout=1))
-                second.start()
-                self.assertFalse(second_entered.wait(timeout=0.1))
-                release_first.set()
-                first.join(timeout=1)
-                second.join(timeout=1)
+            first = threading.Thread(target=hold_first_lock)
+            second = threading.Thread(target=enter_second_lock)
+            first.start()
+            self.assertTrue(first_entered.wait(timeout=1))
+            second.start()
+            self.assertFalse(second_entered.wait(timeout=0.1))
+            release_first.set()
+            first.join(timeout=1)
+            second.join(timeout=1)
 
         self.assertTrue(second_entered.is_set())
 

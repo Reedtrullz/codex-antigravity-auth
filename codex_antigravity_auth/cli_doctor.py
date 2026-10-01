@@ -362,7 +362,7 @@ def google_family_rotation_status(data: dict, family: str) -> dict:
 
 
 def _read_codex_config_for_readiness(config: str) -> tuple[Path, str | None, str | None]:
-    config_path = Path(os.path.expanduser(config))
+    config_path = _cli.client_config_path(config)
     if not config_path.is_file():
         return config_path, None, f"Codex config not found: {config_path}"
     try:
@@ -690,6 +690,7 @@ def codex_ready_report(
         "checks": checks,
         "request_log": _cli.request_log_info(),
         "diagnostics": {
+            "namespaces": _cli.namespace_diagnostics(),
             **storage_diagnostics,
             "service": service_snapshot,
             "provider_capability_mismatches": capability_mismatches,
@@ -738,7 +739,7 @@ def run_doctor(
     print("           GOOGLE ANTIGRAVITY AUTH DOCTOR           ")
     print("=" * 60)
     healthy = True
-    codex_config = Path(os.path.expanduser(config))
+    codex_config = _cli.client_config_path(config)
     codex_config_content = None
     codex_config_model = ""
     if codex_config.is_file():
@@ -762,19 +763,21 @@ def run_doctor(
             print("       Set ANTIGRAVITY_CLIENT_ID and ANTIGRAVITY_CLIENT_SECRET,")
             print("       or create ~/.codex/antigravity-credentials.json")
 
-    # Check Token secure storage status
+    # Inspect the selected identity without creating keys or modifying files.
     try:
-        from .storage import _get_encryption_key, KEYRING_SERVICE_NAME
-        import keyring
-        if os.environ.get("ANTIGRAVITY_STORAGE_KEY"):
-            _get_encryption_key()
-            print("[PASS] Token Storage Encryption: SECURE (ANTIGRAVITY_STORAGE_KEY configured)")
-        elif keyring.get_password(KEYRING_SERVICE_NAME, "storage-encryption-key"):
-            print("[PASS] Token Storage Encryption: SECURE (OS Keyring Integrated)")
+        from .storage_keys import key_diagnostics
+        encryption = key_diagnostics()
+        if encryption.get("ready"):
+            backend = {"environment": "environment key", "file": "file key", "keyring": "OS keyring key"}[encryption["selectedBackend"]]
+            print(f"[PASS] Token Storage Encryption: AVAILABLE (selected {backend})")
+        elif encryption.get("error_class"):
+            healthy = False
+            print(f"[FAIL] Token Storage Encryption: UNAVAILABLE ({encryption['error_class']}); run `codex-antigravity storage keys`")
         else:
-            print("[WARN] Token Storage Encryption: PARTIAL (Using fallback key; keyring password lookup returned empty)")
-    except Exception as e:
-        print(f"[WARN] Token Storage Encryption: PARTIAL (Fallback active. Error: {_cli.redact_secret_text(str(e))})")
+            print("[WARN] Token Storage Encryption: NOT INITIALIZED (no existing key selected)")
+    except Exception:
+        healthy = False
+        print("[FAIL] Token Storage Encryption: UNAVAILABLE (could not inspect key configuration)")
 
     # Check network connectivity to Google Antigravity backend
     if byok_only:

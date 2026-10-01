@@ -1,17 +1,18 @@
 import json
 import os
-import stat
 import threading
 import keyring
 import base64
 import hashlib
 import time
 from pathlib import Path
+from .namespaces import gateway_home, gateway_file
 from typing import Any, Callable
 from cryptography.fernet import Fernet, InvalidToken
 from .constants import ANTIGRAVITY_ACCOUNTS_FILE, get_codex_home
 from .account_state import SCHEMA_VERSION, migrate_account_state
 from .secure_store import SecureStore, file_lock as _exclusive_file_lock
+from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory, protect_descriptor, protect_existing_file
 
 _accounts_lock = threading.RLock()
 _DEFAULT_GET_CODEX_HOME = get_codex_home
@@ -20,7 +21,7 @@ _DEFAULT_GET_CODEX_HOME = get_codex_home
 def _codex_home_read_only() -> Path:
     if get_codex_home is not _DEFAULT_GET_CODEX_HOME:
         return get_codex_home()
-    return Path(os.path.expanduser("~/.codex"))
+    return gateway_home()
 
 # Stable service name for OS Keyring integration
 KEYRING_SERVICE_NAME = "codex-antigravity-auth"
@@ -71,9 +72,7 @@ def _ensure_private_file(path: Path) -> None:
     if path.is_symlink():
         raise RuntimeError(f"Refusing to use symlinked secret file: {path}")
     if path.exists():
-        mode = stat.S_IMODE(path.stat().st_mode)
-        if mode & 0o077:
-            os.chmod(path, 0o600)
+        protect_existing_file(path)
 
 
 def _normalize_fernet_key(secret: str) -> str:
@@ -84,66 +83,45 @@ def _normalize_fernet_key(secret: str) -> str:
         digest = hashlib.sha256(secret.encode("utf-8")).digest()
         return base64.urlsafe_b64encode(digest).decode("utf-8")
 
-def _get_file_fallback_key() -> str:
+def _get_file_fallback_key(candidate: str | None = None) -> str:
     path = get_codex_home() / FALLBACK_KEY_FILE
     if path.is_file():
         _ensure_private_file(path)
         return path.read_text(encoding="utf-8").strip()
 
-    key = Fernet.generate_key().decode("utf-8")
+    key = candidate or Fernet.generate_key().decode("utf-8")
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         _ensure_private_file(path)
         return path.read_text(encoding="utf-8").strip()
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(key)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            protect_descriptor(f.fileno(), path=path)
+            f.write(key)
+    except Exception:
+        path.unlink(missing_ok=True)  # We exclusively created this empty key file.
+        raise
     return key
 
 def _get_encryption_key() -> str:
-    """Retrieve or generate a secure encryption key from the system keyring."""
-    env_key = os.environ.get("ANTIGRAVITY_STORAGE_KEY")
-    if env_key:
-        return _normalize_fernet_key(env_key)
-
-    initialization_lock = get_codex_home() / "antigravity-storage-key-init"
-    with _exclusive_file_lock(initialization_lock):
-        try:
-            key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME)
-            if not key:
-                candidate = Fernet.generate_key().decode("utf-8")
-                keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME, candidate)
-                key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME) or candidate
-            return key
-        except Exception:
-            # Headless systems may not have a usable keyring. Use a generated,
-            # machine-local key instead of a source-known static key.
-            return _get_file_fallback_key()
+    from .storage_keys import get_key
+    return get_key(create=True)
 
 
 def _peek_encryption_key() -> str | None:
-    """Return an already-configured key without creating keyring or fallback state."""
-    env_key = os.environ.get("ANTIGRAVITY_STORAGE_KEY")
-    if env_key:
-        return _normalize_fernet_key(env_key)
-    try:
-        key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME)
-    except Exception:
-        key = None
-    if key:
-        return key
-    fallback = _codex_home_read_only() / FALLBACK_KEY_FILE
-    if not fallback.is_file() or fallback.is_symlink():
-        return None
-    try:
-        return fallback.read_text(encoding="utf-8").strip() or None
-    except OSError:
-        return None
+    from .storage_keys import get_key
+    return get_key(create=False)
+
+
+def _require_no_key_transition() -> None:
+    from .storage_keys import require_no_transition
+    require_no_transition()
 
 
 def account_store_diagnostics() -> dict[str, Any]:
     """Inspect account-store format and schema without migrating or writing it."""
-    path = Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    path = gateway_file(ANTIGRAVITY_ACCOUNTS_FILE, "antigravity-accounts.json")
     report: dict[str, Any] = {
         "path": str(path),
         "exists": path.is_file(),
@@ -154,6 +132,11 @@ def account_store_diagnostics() -> dict[str, Any]:
         "target_account_state_schema_version": SCHEMA_VERSION,
         "account_count": 0,
     }
+    try:
+        _require_no_key_transition()
+    except ValueError as exc:
+        report["error_class"] = getattr(exc, "code", "key_configuration_unavailable")
+        return report
     if not path.exists():
         report["accessible"] = True
         return report
@@ -213,6 +196,11 @@ def provider_store_diagnostics(path: Path) -> dict[str, Any]:
         "migration": "none" if not path.exists() else "blocked",
         "provider_count": 0,
     }
+    try:
+        _require_no_key_transition()
+    except ValueError as exc:
+        report["error_class"] = getattr(exc, "code", "key_configuration_unavailable")
+        return report
     if not path.exists():
         report["accessible"] = True
         return report
@@ -260,12 +248,12 @@ def decrypt_payload(encrypted_bytes: bytes) -> str:
 
 def get_accounts_json_path() -> Path:
     p = accounts_json_path_read_only()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(p.parent, enforce_existing=True)
     return p
 
 
 def accounts_json_path_read_only() -> Path:
-    return Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    return gateway_file(ANTIGRAVITY_ACCOUNTS_FILE, "antigravity-accounts.json")
 
 
 def _load_secure_json_unlocked(
@@ -274,6 +262,7 @@ def _load_secure_json_unlocked(
     *,
     strict: bool = False,
 ) -> tuple[dict[str, Any], bool]:
+    _require_no_key_transition()
     if not path.is_file():
         return default_factory(), False
     _ensure_private_file(path)
@@ -329,6 +318,7 @@ def load_secure_json_file_read_only(
     error_label: str,
 ) -> dict[str, Any]:
     """Read a secure store without chmod, migration, key creation, or writes."""
+    _require_no_key_transition()
     if not path.exists():
         return default_factory()
     if path.is_symlink() or not path.is_file():

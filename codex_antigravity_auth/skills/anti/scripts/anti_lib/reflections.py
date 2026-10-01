@@ -8,41 +8,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import threading
+import math
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-try:
-    from codex_antigravity_auth.secure_store import file_lock
-except ImportError:  # standalone copied skill
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - Windows uses the package lock.
-        fcntl = None
-    _locks: dict[str, threading.RLock] = {}
-    _locks_guard = threading.Lock()
+from .namespaces import gateway_home
 
-    @contextmanager
-    def file_lock(path: Path):
-        key = str(path.resolve())
-        with _locks_guard:
-            lock = _locks.setdefault(key, threading.RLock())
-        with lock:
-            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            lock_path = path.with_name(f".{path.name}.lock")
-            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-            try:
-                if fcntl is not None:
-                    fcntl.flock(descriptor, fcntl.LOCK_EX)
-                yield
-            finally:
-                if fcntl is not None:
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
-                os.close(descriptor)
+from .redaction import sanitize_json
+from .retention import summary_projection, summary_retention, summary_structure
+from .persistence import PersistenceError, atomic_write_json, file_lock
+from .file_protection import ensure_private_directory, protect_existing_file
 
-REFLECTIONS_DIR = Path.home() / ".codex" / "anti-runs" / "reflections"
+REFLECTIONS_DIR = gateway_home() / "anti-runs" / "reflections"
 MAX_ENTRIES_PER_REPO = 500
 TTL_DAYS = 90
 
@@ -62,43 +39,80 @@ def _ensure_permissions(directory: Path | None = None) -> None:
     directory = directory or REFLECTIONS_DIR
     if not directory.exists():
         return
-    os.chmod(directory, 0o700)
+    ensure_private_directory(directory, enforce_existing=True)
     for path in directory.rglob("*.json"):
-        if path.is_file():
-            current_mode = path.stat().st_mode & 0o777
-            if current_mode != 0o600:
-                os.chmod(path, 0o600)
+        if not path.is_symlink() and path.is_file():
+            protect_existing_file(path)
+
+
+def _valid_record(row: Any) -> bool:
+    """Validate reader inputs without normalizing or discarding extension fields."""
+    if not isinstance(row, dict):
+        return False
+    timestamp = row.get("timestamp")
+    if type(timestamp) not in (int, float) or not 0 <= timestamp <= 2**63 - 1 or not math.isfinite(timestamp):
+        return False
+    try:
+        time.strftime("%Y-%m-%d %H:%M", time.localtime(timestamp))
+    except (ValueError, OverflowError, OSError):
+        return False
+    count = row.get("findings_count", 0)
+    if type(count) is not int or not 0 <= count <= 2**63 - 1:
+        return False
+    models = row.get("models", [])
+    if not isinstance(models, list) or any(not isinstance(model, str) for model in models):
+        return False
+    for key in ("mode", "panel_status", "run_id", "verdict", "repo", "scope", "save_output"):
+        if key in row and row[key] is not None and not isinstance(row[key], str):
+            return False
+    findings = row.get("findings", [])
+    if not isinstance(findings, list):
+        return False
+    for finding in findings:
+        if not isinstance(finding, dict):
+            return False
+        if not isinstance(finding.get("severity", "medium"), str):
+            return False
+        # Null file/fingerprint denotes an unmapped finding and is safely
+        # skipped by readers. Containers and other scalars are malformed.
+        for key in ("fingerprint", "file"):
+            if key in finding and finding[key] is not None and not isinstance(finding[key], str):
+                return False
+    return True
+
+
+def _validate_records(path: Path, records: Any) -> None:
+    if not isinstance(records, list) or any(not _valid_record(row) for row in records):
+        raise PersistenceError(
+            f"Invalid reflection history shape at {path}. Preserve this file and make a backup "
+            "before manual recovery; no history was replaced."
+        )
 
 
 def _load_records(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
+    guidance = "Preserve this file and make a backup before manual recovery; no history was replaced."
+    if path.is_symlink() or path.parent.is_symlink():
+        raise PersistenceError(f"Refusing symlinked reflection history. {guidance}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, OSError):
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return []
+    except UnicodeError as exc:
+        raise PersistenceError(f"Corrupt reflection history at {path}. {guidance}") from exc
+    except OSError as exc:
+        raise PersistenceError(f"Unreadable reflection history at {path}. {guidance}") from exc
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise PersistenceError(f"Corrupt reflection history at {path}. {guidance}") from exc
+    _validate_records(path, data)
+    return data
 
 
 def _save_records(path: Path, records: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
-    if path.is_symlink():
-        raise RuntimeError(f"Refusing to write symlinked reflection file: {path}")
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    if temporary.exists() or temporary.is_symlink():
-        temporary.unlink()
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(records, indent=2, sort_keys=True))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    _validate_records(path, records)
+    ensure_private_directory(path.parent, enforce_existing=True)
+    atomic_write_json(path, records)
 
 
 def _prune_old(records: list[dict[str, Any]], ttl_days: int = TTL_DAYS) -> list[dict[str, Any]]:
@@ -116,12 +130,18 @@ def record_review(
     scope: str = "",
     run_id: str | None = None,
     verdict: str = "pending",
-) -> dict[str, Any]:
+    save_output: str = "summary",
+) -> dict[str, Any] | None:
     """Record a review's findings for future pattern analysis.
     
     Returns the record that was saved.
     """
+    if save_output not in {"never", "summary", "full"}:
+        raise ValueError("unsupported reflection retention mode")
+    if save_output == "never":
+        return None
     record = {
+        "save_output": save_output,
         "timestamp": int(time.time()),
         "repo": str(repo_path.resolve()),
         "mode": mode,
@@ -137,8 +157,8 @@ def record_review(
                 "severity": f.get("severity", "medium"),
                 "file": f.get("file", ""),
                 "line": f.get("line"),
-                "claim": f.get("claim", "")[:200],
-                "evidence": f.get("evidence", "unverified")[:200],
+                "claim": f.get("claim", ""),
+                "evidence": f.get("evidence", "unverified"),
                 "confidence": f.get("confidence", 0.5),
             }
             for f in findings if isinstance(f, dict)
@@ -146,10 +166,18 @@ def record_review(
         "findings_count": len(findings),
     }
     
+    record = sanitize_json(record)
+    if save_output == "summary":
+        structure = summary_structure(record, (
+            "save_output", "timestamp", "mode", "panel_status", "run_id", "verdict", "findings_count",
+        ))
+        record = summary_projection({key: value for key, value in record.items() if key not in structure})
+        record.update(structure)
+        record["retention"] = summary_retention()
     path = _reflection_path(repo_path)
-    _ensure_permissions()
     with file_lock(path):
         records = _load_records(path)
+        _ensure_permissions()
         records.append(record)
         records = _prune_old(records)
         # Keep bounded
