@@ -260,3 +260,27 @@ def test_private_namespace_components_are_masked(isolated_store, monkeypatch, in
     assert report["namespace"]["account_store"].startswith("<configured path ")
     assert diagnostics.account_eligibility_report("sonnet")["namespace"] == report["namespace"]
     assert tree_snapshot(root) == before
+
+
+def test_invalid_provider_key_cannot_print_private_labels_during_explain(isolated_store, monkeypatch, capsys):
+    root, path, write = isolated_store
+    write(fixture_data())
+    providers = path.with_name("providers.json")
+    providers.write_text(json.dumps({"providers": {"custom-fixture": {
+        "baseUrl": "https://example.invalid/v1", "displayName": "fixture-private@example.invalid",
+        "apiKey": "synthetic\ninvalid-key", "models": ["model"],
+    }}}))
+    monkeypatch.setattr(byok, "providers_json_path_read_only", lambda: providers)
+    before = tree_snapshot(root)
+    warnings_before = set(byok._warned_invalid_provider_keys)
+    for as_json in (True, False):
+        monkeypatch.setattr(sys, "argv", ["codex-antigravity", "accounts", "explain", "--model", "custom-fixture/model", *(["--json"] if as_json else [])])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        output = capsys.readouterr()
+        assert output.err == ""
+        assert "fixture-private@example.invalid" not in output.out
+        assert "synthetic" not in output.out
+    assert byok._warned_invalid_provider_keys == warnings_before
+    assert tree_snapshot(root) == before
