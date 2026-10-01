@@ -41,8 +41,8 @@ class PrimaryAlternativeSelector:
             self._unindexed_seen = True
             return alternatives
         indices = [item["index"] for item in alternatives]
-        if any(type(index) is not int or index < 0 for index in indices) or len(set(indices)) != len(indices):
-            raise ValueError("Provider alternative indices must be unique nonnegative integers")
+        if any(type(index) is not int or index < 0 for index in indices) or indices.count(0) > 1:
+            raise ValueError("Provider alternative indices must be nonnegative integers with one primary index")
         nonprimary = any(index != 0 for index in indices)
         if nonprimary and self._unindexed_seen:
             raise ValueError("Mixed indexed and unindexed provider alternatives are ambiguous")

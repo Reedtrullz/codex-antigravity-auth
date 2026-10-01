@@ -60,6 +60,7 @@ def terminal_response(events):
 @pytest.mark.parametrize("provider", ["chat", "google"])
 def test_permutations_choose_zero_and_preserve_partial_status_tools_and_aggregate_usage(provider):
     choices = [chat(0, "primary", "length", "selected_tool"), chat(1, "alternate", "stop", "unselected_tool")] if provider == "chat" else [google(0, "primary", "MAX_TOKENS", "selected_tool"), google(1, "alternate", "STOP", "unselected_tool")]
+    choices.append(dict(choices[1]))  # Duplicated secondary alternatives are irrelevant.
     for permutation in itertools.permutations(choices):
         if provider == "chat":
             result = OpenAICompatibleTransport(timeout=1).parse_chat_response({"choices": list(permutation), "usage": {"prompt_tokens": 2, "completion_tokens": 7, "total_tokens": 9}})
@@ -146,3 +147,43 @@ def test_alternate_cannot_override_primary_safety_outcome():
     chat_result = OpenAICompatibleTransport(timeout=1).parse_chat_response({"choices": [chat(0, "", "content_filter"), chat(1, "unsafe-alternative", "stop")]})
     assert chat_result.output[0]["content"][0]["type"] == "refusal"
     assert "unsafe-alternative" not in json.dumps(chat_result.output)
+
+
+@pytest.mark.parametrize("provider", ["chat", "google"])
+def test_nonstream_ambiguous_alternatives_keep_reported_usage(provider):
+    invalid = [{"index": 0}, {"index": 0}]
+    if provider == "chat":
+        result = OpenAICompatibleTransport(timeout=1).parse_chat_response({"choices": invalid, "usage": {"prompt_tokens": 2, "completion_tokens": 7, "total_tokens": 9}})
+    else:
+        result = GoogleTransport(timeout=1).parse_response({"candidates": invalid, "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 7, "totalTokenCount": 9}})
+    assert result.terminal.kind is TerminalKind.FAILED
+    assert result.usage == USAGE
+
+
+@pytest.mark.parametrize("provider", ["chat", "google"])
+@pytest.mark.parametrize("placement", ["earlier", "invalid-frame", "both"])
+def test_stream_validation_failure_keeps_latest_reported_usage(provider, placement):
+    invalid = [{"index": 0}, {"index": 0}]
+    if provider == "chat":
+        first = {"choices": [chat(0, "prefix", None, stream=True)]}
+        last = {"choices": invalid}
+        if placement in {"earlier", "both"}:
+            first["usage"] = {"prompt_tokens": 2, "completion_tokens": 7, "total_tokens": 9}
+        if placement in {"invalid-frame", "both"}:
+            last["usage"] = {"prompt_tokens": 5, "completion_tokens": 10, "total_tokens": 15}
+        events = chat_stream([first, last])
+    else:
+        first = {"candidates": [google(0, "prefix", None)]}
+        last = {"candidates": invalid}
+        if placement in {"earlier", "both"}:
+            first["usageMetadata"] = {"promptTokenCount": 2, "candidatesTokenCount": 7, "totalTokenCount": 9}
+        if placement in {"invalid-frame", "both"}:
+            last["usageMetadata"] = {"promptTokenCount": 5, "candidatesTokenCount": 10, "totalTokenCount": 15}
+        adapter = GoogleStreamEventAdapter(response_id="fixture", display_model="fixture")
+        events = [adapter.created(), *adapter.consume(first)]
+        with pytest.raises(GoogleStreamPayloadError) as exc:
+            adapter.consume(last)
+        events += adapter.fail(exc.value.code, exc.value.message)
+    result = terminal_response(events)
+    assert result["status"] == "failed"
+    assert result["usage"] == (USAGE if placement == "earlier" else {"input_tokens": 5, "output_tokens": 10, "total_tokens": 15})
