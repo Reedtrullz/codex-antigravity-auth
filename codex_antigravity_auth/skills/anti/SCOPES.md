@@ -41,6 +41,12 @@ links. This is a bounded snapshot, not a filesystem transaction against concurre
 repository mutation. Required files must be selected and fully captured; existing
 chunk planning also refuses a cap that omits any required file.
 
+Read omissions include paths and reasons in both source and synthesis manifests,
+with an incomplete status matching byte coverage. Fully captured empty files remain
+included when chunked, including required files. Untracked enumeration is reused
+for capture and excluded from tracked diff arguments; it does not launch a tracking
+query for each newly discovered file.
+
 JSON review metadata retains `inventory`: requested roots/exclusions, ignored and
 untracked exclusions with reasons, package roots, and enumeration counts. Existing
 byte/hash coverage describes captured source and chunk omissions separately.

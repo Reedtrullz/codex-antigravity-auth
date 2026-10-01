@@ -2765,6 +2765,7 @@ def review_prompt_parts(
     omitted_files: list[str],
     excluded: list[str],
     caveats: list[str],
+    omission_reasons: dict[str, str] | None = None,
 ) -> list[str]:
     incomplete = bool(omitted_files) or any("truncated" in caveat.lower() for caveat in caveats)
     manifest_lines = [
@@ -2775,6 +2776,9 @@ def review_prompt_parts(
         f"- omitted_files: {', '.join(omitted_files) if omitted_files else 'none'}",
         f"- excluded_paths: {', '.join(excluded[:20]) if excluded else 'none'}",
     ]
+    if omission_reasons:
+        manifest_lines.append("- omission_reasons:")
+        manifest_lines.extend(f"  - {path}: {reason}" for path, reason in omission_reasons.items())
     if caveats:
         manifest_lines.append("- helper_warnings:")
         manifest_lines.extend(f"  - {caveat}" for caveat in caveats)
@@ -2911,6 +2915,13 @@ def build_consult_file_context(
         return prompt, caveats, []
     
     return enhanced_prompt, caveats, read_files
+
+
+def review_read_omissions(records):
+    return {str(record['path']): str(record.get('reason') or record.get('contentStatus') or 'incomplete capture')
+            for record in records or [] if record.get('path') and coverage_is_incomplete([record])}
+
+
 def build_review_prompt(
     *,
     scope_line: str,
@@ -2935,7 +2946,9 @@ def build_review_prompt(
         record = records_by_path.get(rel)
         return bool(text) or bool(record and record.get("contentStatus") == "complete")
 
-    omitted_files = [rel for rel, text in file_texts if not is_includable(rel, text)]
+    omission_reasons = review_read_omissions(file_records)
+    omitted_files = list(dict.fromkeys([*omission_reasons,
+        *(rel for rel, text in file_texts if not is_includable(rel, text))]))
     candidates = [(rel, text) for rel, text in file_texts if is_includable(rel, text)]
     included: list[tuple[str, str]] = []
 
@@ -2945,9 +2958,10 @@ def build_review_prompt(
                 scope_line=scope_line,
                 diff=diff_for_prompt,
                 included_files=[],
-                omitted_files=[rel for rel, _text in candidates],
+                omitted_files=list(dict.fromkeys([*omitted_files, *(rel for rel, _text in candidates)])),
                 excluded=excluded,
                 caveats=caveats,
+                omission_reasons=omission_reasons,
             )
         )
         if len(prompt_without_files) > max_prompt_chars:
@@ -2955,9 +2969,10 @@ def build_review_prompt(
                 scope_line=scope_line,
                 diff="",
                 included_files=[],
-                omitted_files=[rel for rel, _text in candidates],
+                omitted_files=list(dict.fromkeys([*omitted_files, *(rel for rel, _text in candidates)])),
                 excluded=excluded,
                 caveats=caveats,
+                omission_reasons=omission_reasons,
             )
             base_len = len("\n\n".join(base_parts))
             available = max(0, max_prompt_chars - base_len - len("\n\n## Git Diff\n```diff\n\n```"))
@@ -2980,6 +2995,7 @@ def build_review_prompt(
                 omitted_files=trial_omitted,
                 excluded=excluded,
                 caveats=caveats,
+                omission_reasons=omission_reasons,
             )
         )
         if max_prompt_chars <= 0 or len(trial_prompt) <= max_prompt_chars:
@@ -2995,6 +3011,7 @@ def build_review_prompt(
             omitted_files=omitted_files,
             excluded=excluded,
             caveats=caveats,
+            omission_reasons=omission_reasons,
         )
     )
     metadata = {
@@ -3009,6 +3026,7 @@ def build_review_prompt(
         "diff_truncated": diff_for_prompt != diff,
         "included_files": [rel for rel, _text in included],
         "omitted_files": omitted_files,
+        "omission_reasons": omission_reasons,
         "excluded_paths": excluded,
         "helper_warnings": caveats,
         "coverage": [dict(record) for record in (file_records or [])],
@@ -3037,6 +3055,8 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
     if (roots or exclusions) and args.scope != "repository":
         raise AntiError("--review-root and --exclude-path require repository scope")
     inventory = None
+    untracked_paths: set[str] = set()
+    known_tracked: set[str] = set()
     try:
         if args.scope == "repository":
             if rev_range:
@@ -3047,14 +3067,18 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
             for path in [*paths, *excluded]: validate_path_list_item(path, source="repository inventory")
         else:
             paths, excluded = changed_paths(root, args.scope, selected, rev_range=rev_range)
+            if not selected and args.scope != "files":
+                known_tracked.update(paths)  # Enumerated by Git's tracked diff.
             if args.scope == "working-tree":
                 untracked = review_inventory.git_paths(root, ['--others', '--exclude-standard'], ['.'])
+                selected_path_set = set(paths)
                 inventory = {'scope':'working-tree', 'include_untracked':include_untracked,
                              'excluded':[], 'inventory_complete':True}
                 for raw in untracked:
                     validate_path_list_item(raw, source="untracked inventory")
                     rel = review_inventory.relative_path(root, raw)
-                    if rel in paths: continue  # An explicitly selected file remains explicit.
+                    untracked_paths.add(rel)
+                    if rel in selected_path_set: continue  # An explicitly selected file remains explicit.
                     kind = review_inventory.path_kind(root, rel)
                     reason = ('not_selected' if selected else 'sensitive_cache_or_binary' if path_is_excluded(rel)
                               else kind if kind != 'file' else 'untracked_not_requested' if not include_untracked else None)
@@ -3062,11 +3086,13 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
                         inventory['excluded'].append({'path':rel, 'reason':reason})
                     else:
                         paths.append(rel)
+                        selected_path_set.add(rel)
                 excluded = list(dict.fromkeys([*excluded, *(row['path'] for row in inventory['excluded'])]))
     except review_inventory.InventoryError as exc:
         raise AntiError(str(exc)) from None
     policy_paths(args, root, [*paths, *excluded])
-    diff = diff_for_paths(root, args.scope, paths, rev_range=rev_range)
+    diff_paths = [path for path in paths if path not in untracked_paths]
+    diff = diff_for_paths(root, args.scope, diff_paths, rev_range=rev_range)
     notes: list[str] = []
     file_texts: list[tuple[str, str]] = []
     file_records: list[dict[str, Any]] = []
@@ -3074,7 +3100,7 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
     include_file_text = args.scope in {"files", "repository"}
     source_budget = review_inventory.MAX_SOURCE_BYTES
     for rel in paths:
-        if include_file_text or not file_is_tracked(root, rel):
+        if include_file_text or rel in untracked_paths or (rel not in known_tracked and not file_is_tracked(root, rel)):
             # Review planning must chunk the complete source from disk. The
             # smaller read limit remains for consult/plan pre-reads.
             path = root / rel
@@ -3151,6 +3177,7 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
         "paths": paths,
         "excluded": excluded,
         "diff": diff,
+        "diff_paths": diff_paths,
         "file_texts": file_texts,
         "file_records": file_records,
         "source_commit": source_commit(root),
@@ -3249,6 +3276,7 @@ def diff_part_prompt_budget(
     excluded: list[str],
     caveats: list[str],
     max_prompt_chars: int,
+    omission_reasons: dict[str, str] | None = None,
 ) -> int:
     """Per-diff-part char budget that leaves room for prompt scaffolding.
 
@@ -3261,9 +3289,10 @@ def diff_part_prompt_budget(
         scope_line=scope_line,
         diff="",
         included_files=[],
-        omitted_files=[],
+        omitted_files=list(omission_reasons or {}),
         excluded=excluded,
         caveats=caveats,
+        omission_reasons=omission_reasons,
     )
     overhead = len("\n\n".join(base_parts)) + len("## Git Diff\n```diff\n\n```")
     budget = max_prompt_chars - overhead - 200
@@ -3292,8 +3321,9 @@ def build_review_chunk_prompts(
     """
     unlimited = max_chunks <= 0
     all_chunks: list[dict[str, Any]] = []
-    omitted_items: list[str] = []
     file_records = [dict(record) for record in context.get("file_records", [])]
+    omission_reasons = review_read_omissions(file_records)
+    omitted_items: list[str] = list(omission_reasons)
     records_by_path = {
         str(record.get("path")): record for record in file_records if record.get("path")
     }
@@ -3301,6 +3331,14 @@ def build_review_chunk_prompts(
     source_offsets: dict[str, int] = {}
     priority = normalized_priority_paths(context, priority_paths)
     required = normalized_priority_paths(context, required_paths)
+    omission_records = [records_by_path[path] for path in omission_reasons]
+
+    def chunk_records(items):
+        # Carry unavailable source into every model-facing manifest, plus the
+        # captured records needed to distinguish empty files from missing input.
+        labels = dict.fromkeys(label for label, _ in items)
+        return [*omission_records, *(records_by_path[label] for label in labels
+                if label in records_by_path and label not in omission_reasons)]
 
     def source_bytes(items: list[tuple[str, str]]) -> dict[str, int]:
         totals: dict[str, int] = {}
@@ -3364,6 +3402,7 @@ def build_review_chunk_prompts(
                 excluded=context["excluded"],
                 initial_caveats=chunk_caveats,
                 max_prompt_chars=max_prompt_chars,
+                file_records=chunk_records([(probe_rel, text[:size])]),
             )
             return prompt_fits(prompt, max_prompt_chars) and metadata.get("included_files") == [probe_rel]
 
@@ -3385,6 +3424,7 @@ def build_review_chunk_prompts(
             excluded=context["excluded"],
             caveats=context["caveats"],
             max_prompt_chars=max_prompt_chars,
+            omission_reasons=omission_reasons,
         )
         diff_parts = split_text_by_budget(diff, diff_budget)
         for index, diff_part in enumerate(diff_parts, start=1):
@@ -3400,6 +3440,7 @@ def build_review_chunk_prompts(
                     f"Chunked review: {label}; synthesize with other chunks before final judgment.",
                 ],
                 max_prompt_chars=max_prompt_chars,
+                file_records=chunk_records([]),
             )
             metadata["chunk_kind"] = "diff"
             metadata["chunk_label"] = label
@@ -3407,14 +3448,14 @@ def build_review_chunk_prompts(
                 metadata["diff_truncated"] = True
                 omitted_items.append(f"{label} (diff part exceeds {max_prompt_chars} chars)")
                 continue
-            metadata["included_files"] = list(context.get("paths") or [])
+            metadata["included_files"] = list(context.get("diff_paths", context.get("paths")) or [])
             append_chunk("diff", label, prompt, metadata)
 
     file_items: list[tuple[str, str]] = []
     for rel, text in context["file_texts"]:
         record = records_by_path.get(rel)
         if not text and not (record and record.get("contentStatus") == "complete"):
-            omitted_items.append(rel)
+            if rel not in omitted_items: omitted_items.append(rel)
             continue
         whole_prompt, _whole_caveats, whole_metadata = build_review_prompt(
             scope_line=f"{context['scope_line']} ({rel})",
@@ -3423,7 +3464,7 @@ def build_review_chunk_prompts(
             excluded=context["excluded"],
             initial_caveats=context["caveats"],
             max_prompt_chars=max_prompt_chars,
-            file_records=[record] if record else None,
+            file_records=chunk_records([(rel, text)]),
         )
         if prompt_fits(whole_prompt, max_prompt_chars) and whole_metadata.get("included_files") == [rel]:
             file_items.append((rel, text))
@@ -3459,8 +3500,9 @@ def build_review_chunk_prompts(
                 "Chunked review: file chunk; synthesize with other chunks before final judgment.",
             ],
             max_prompt_chars=max_prompt_chars,
+            file_records=chunk_records(trial),
         )
-        if prompt_fits(prompt, max_prompt_chars) and not metadata["omitted_files"]:
+        if prompt_fits(prompt, max_prompt_chars) and metadata['included_files'] == [path for path, _ in trial]:
             current = trial
             continue
         if current:
@@ -3474,6 +3516,7 @@ def build_review_chunk_prompts(
                     "Chunked review: file chunk; synthesize with other chunks before final judgment.",
                 ],
                 max_prompt_chars=max_prompt_chars,
+                file_records=chunk_records(current),
             )
             label = ", ".join(path for path, _item_text in current)
             current_metadata["chunk_kind"] = "files"
@@ -3497,6 +3540,7 @@ def build_review_chunk_prompts(
                 "Chunked review: file chunk; synthesize with other chunks before final judgment.",
             ],
             max_prompt_chars=max_prompt_chars,
+            file_records=chunk_records(current),
         )
         label = ", ".join(path for path, _item_text in current)
         current_metadata["chunk_kind"] = "files"
@@ -3551,6 +3595,7 @@ def build_review_chunk_prompts(
     metadata["sourceCommit"] = context.get("source_commit")
     metadata["declared_files"] = list(context.get("paths") or [])
     metadata["required_files"] = required
+    metadata["omission_reasons"] = omission_reasons
     if context.get("inventory") is not None:
         metadata["inventory"] = context["inventory"]
         metadata["excluded_paths"] = list(context.get("excluded") or [])
@@ -3571,6 +3616,7 @@ def build_chunk_synthesis_prompt(
         "included_files": chunk_metadata.get("included_files", []),
         "included_items": chunk_metadata.get("included_items", []),
         "omitted_items": chunk_metadata.get("omitted_items", []),
+        "omission_reasons": chunk_metadata.get("omission_reasons", {}),
         "chunk_labels": [chunk["label"] for chunk in chunks],
         "status": chunk_metadata.get("status", "complete"),
     }

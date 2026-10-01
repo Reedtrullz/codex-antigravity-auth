@@ -215,3 +215,80 @@ def test_repository_print_prompt_exposes_inventory_without_any_http(repo, capsys
     printed = json.loads(capsys.readouterr().out)
     assert printed['metadata']['inventory']['roots'] == ['pkg']
     assert 'new package source' in printed['prompt']
+
+
+@pytest.mark.parametrize('reason', ['file_byte_limit', 'total_byte_limit', 'missing', 'unreadable'])
+def test_read_omissions_reach_source_and_synthesis_manifests(repo, monkeypatch, reason):
+    anti, root, _ = repo
+    original = anti.review_inventory.read_file
+    def read(root, rel, budget):
+        return (None, 123, reason) if rel == 'pkg/source.py' else original(root, rel, budget)
+    monkeypatch.setattr(anti.review_inventory, 'read_file', read)
+    value = context(anti, '--scope', 'repository', '--review-root', 'pkg')
+    prompt, _, _, metadata = anti.assemble_review_prompt_from_context(value, max_prompt_chars=0)
+    assert '- status: incomplete' in prompt
+    assert '- omitted_files: pkg/source.py' in prompt
+    assert metadata['omission_reasons']['pkg/source.py'] == reason
+    chunks, chunk_metadata = anti.build_review_chunk_prompts(value, max_prompt_chars=5000, max_chunks=0)
+    assert chunks and chunk_metadata['omitted_items'] == ['pkg/source.py']
+    assert chunk_metadata['omission_reasons']['pkg/source.py'] == reason
+    assert all('- status: incomplete' in chunk['prompt'] and reason in chunk['prompt'] for chunk in chunks)
+    synthesis, _, _ = anti.build_chunk_synthesis_prompt(context=value, chunks=chunks,
+        chunk_outputs=['Synthetic finding summary.' for _ in chunks], chunk_metadata=chunk_metadata, max_chars=20000)
+    assert 'pkg/source.py' in synthesis and reason in synthesis and 'incomplete' in synthesis
+
+
+def test_partial_generation_receives_omissions_and_keeps_incomplete_outcome(repo, monkeypatch):
+    anti, root, _ = repo
+    monkeypatch.setattr(anti.review_inventory, 'MAX_FILE_BYTES', 3)
+    value = context(anti, '--scope', 'repository', '--review-root', 'pkg')
+    _, _, _, source_metadata = anti.assemble_review_prompt_from_context(value, max_prompt_chars=0)
+    args = anti.build_parser().parse_args(['review', '--scope', 'repository', '--allow-partial', '--no-progress'])
+    seen = []
+    def generate(args, **kwargs):
+        seen.append(kwargs['prompt'])
+        return 'Synthetic review: no defects in the supplied content.', kwargs['model'], {}
+    monkeypatch.setattr(anti, 'generate_with_fallback', generate)
+    _, _, metadata = anti.run_chunked_review(args=args, context=value, model='fixture',
+        base_metadata=source_metadata, max_prompt_chars=5000)
+    assert len(seen) == 2  # One source chunk and one synthesis, entirely mocked.
+    assert all('pkg/source.py' in prompt and 'file_byte_limit' in prompt for prompt in seen)
+    assert metadata['status'] == 'incomplete' and 'pkg/source.py' in metadata['omitted_files']
+
+
+@pytest.mark.parametrize('selected', [False, True])
+def test_untracked_capture_reuses_inventory_without_per_file_git_or_diff_paths(repo, monkeypatch, selected):
+    anti, root, _ = repo
+    for index in range(40): (root / f'new-{index}.py').write_text('fixture\n')
+    calls = []
+    original = subprocess.Popen
+    def popen(argv, **kwargs):
+        calls.append(list(argv))
+        return original(argv, **kwargs)
+    monkeypatch.setattr(subprocess, 'Popen', popen)
+    value = context(anti, '--include-untracked', *(['--file', 'untracked.py'] if selected else []))
+    assert 'untracked.py' in dict(value['file_texts'])
+    assert len([argv for argv in calls if 'ls-files' in argv]) == 1
+    diffs = [argv for argv in calls if 'diff' in argv]
+    assert all('untracked.py' not in argv and not any(str(arg).startswith('new-') for arg in argv) for argv in diffs)
+    chunks, _ = anti.build_review_chunk_prompts(value, max_prompt_chars=8000, max_chunks=0)
+    for chunk in chunks:
+        if chunk['kind'] == 'diff':
+            assert 'untracked.py' not in chunk['metadata']['included_files']
+
+
+@pytest.mark.parametrize('required', [False, True])
+def test_chunk_packing_preserves_captured_empty_files(repo, required):
+    anti, root, git = repo
+    (root / 'pkg/empty.py').write_bytes(b'')
+    git('add', 'pkg/empty.py')
+    value = context(anti, '--scope', 'repository', '--review-root', 'pkg',
+                    *(['--required-file', 'pkg/empty.py'] if required else []))
+    chunks, metadata = anti.build_review_chunk_prompts(value, max_prompt_chars=5000, max_chunks=0,
+                                                       required_paths=['pkg/empty.py'] if required else None)
+    assert metadata['status'] == 'complete' and not metadata['omitted_items']
+    assert 'pkg/empty.py' in metadata['included_files']
+    empty = next(row for row in metadata['coverage'] if row['path'] == 'pkg/empty.py')
+    assert empty['contentStatus'] == 'complete' and empty['bytesSent'] == empty['bytesDeclared'] == 0
+    assert empty['chunksExpected'] == empty['chunksSent'] == 1
+    assert any('### pkg/empty.py\n```text\n\n```' in chunk['prompt'] for chunk in chunks)
