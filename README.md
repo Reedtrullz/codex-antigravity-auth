@@ -432,6 +432,8 @@ And execute full unit test coverage:
 python3 -m pytest
 ```
 
+Local finding verdicts and JSON/SARIF/Markdown reports are available through `anti.py runs finding` and `runs export`. They preserve advisory findings and scope gaps without automatic suppression or publication; see the [usage examples](USAGE.md#local-finding-verdicts-and-report-export).
+
 ## Troubleshooting
 
 ### HTTP 403 VALIDATION_REQUIRED

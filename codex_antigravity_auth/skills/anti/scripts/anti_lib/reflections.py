@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .redaction import sanitize_json
+from .finding_verdicts import attach_keys, finding_key, local_adjudication, valid_adjudication, cohort_summary
 from .retention import summary_projection, summary_retention, summary_structure
 from .persistence import PersistenceError, atomic_write_json, file_lock
 
@@ -73,6 +74,8 @@ def _valid_record(row: Any) -> bool:
         if not isinstance(finding, dict):
             return False
         if not isinstance(finding.get("severity", "medium"), str):
+            return False
+        if "adjudication" in finding and not valid_adjudication(finding["adjudication"]):
             return False
         # Null file/fingerprint denotes an unmapped finding and is safely
         # skipped by readers. Containers and other scalars are malformed.
@@ -133,6 +136,7 @@ def record_review(
     run_id: str | None = None,
     verdict: str = "pending",
     save_output: str = "summary",
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Record a review's findings for future pattern analysis.
     
@@ -152,23 +156,15 @@ def record_review(
         "panel_status": panel_status,
         "run_id": run_id,
         "verdict": verdict,
-        "findings": [
-            {
-                "id": f.get("id", ""),
-                "fingerprint": f.get("fingerprint", ""),
-                "severity": f.get("severity", "medium"),
-                "file": f.get("file", ""),
-                "line": f.get("line"),
-                "claim": f.get("claim", ""),
-                "evidence": f.get("evidence", "unverified"),
-                "confidence": f.get("confidence", 0.5),
-            }
-            for f in findings if isinstance(f, dict)
-        ],
+        "context": {key: context[key] for key in (
+            "scopeStatus", "scope_status", "omitted_file_count", "omitted_chunk_count",
+            "actualModels", "actualProviders", "requestedModels", "judge_actual_model", "judge_model_used",
+            "sourceCommit", "source_commit", "omitted_files", "omitted_items", "coverage", "verification", "caveats",
+        ) if context and key in context},
+        "findings": attach_keys(findings),
         "findings_count": len(findings),
     }
     
-    record = sanitize_json(record)
     if save_output == "summary":
         structure = summary_structure(record, (
             "save_output", "timestamp", "mode", "panel_status", "run_id", "verdict", "findings_count",
@@ -176,6 +172,9 @@ def record_review(
         record = summary_projection({key: value for key, value in record.items() if key not in structure})
         record.update(structure)
         record["retention"] = summary_retention()
+    record = sanitize_json(record)
+    if not isinstance(record, dict):
+        raise PersistenceError("Reflection exceeds the structured redaction limit; no history was replaced")
     path = _reflection_path(repo_path)
     with file_lock(path):
         records = _load_records(path)
@@ -203,6 +202,26 @@ def update_verdict(repo_path: Path, run_id: str, verdict: str) -> dict[str, Any]
         if updated is not None:
             _save_records(path, records)
     return updated
+
+
+def update_finding_verdict(
+    repo_path: Path, run_id: str, key: str, *, status: str, author: str, evidence: str, source_file: str,
+) -> dict[str, Any]:
+    """Adjudicate exactly one retained finding, leaving its advisory intact."""
+    annotation = local_adjudication(repo_path, source_file, status=status, author=author, evidence=evidence)
+    path = _reflection_path(repo_path)
+    with file_lock(path):
+        records = _load_records(path)
+        matches = [(record, index, finding) for record in records if record.get("run_id") == run_id
+                   for index, finding in enumerate(record.get("findings", []))
+                   if (finding.get("findingKey") or finding_key(finding, index)) == key]
+        if len(matches) != 1:
+            raise ValueError("Finding key must match exactly one retained finding in this run")
+        record, index, finding = matches[0]
+        finding["findingKey"] = finding.get("findingKey") or finding_key(finding, index)
+        finding["adjudication"] = annotation
+        _save_records(path, records)
+        return finding
 
 
 def list_records(repo_path: Path, limit: int | None = 20) -> list[dict[str, Any]]:
@@ -252,6 +271,7 @@ def get_summary(repo_path: Path) -> dict[str, Any]:
         "severity_distribution": all_severities,
         "most_reviewed_files": sorted(file_counts.items(), key=lambda x: -x[1])[:10],
         "models_used": all_models,
+        **cohort_summary(records),
         "date_range": (
             time.strftime("%Y-%m-%d", time.localtime(records[0]["timestamp"])),
             time.strftime("%Y-%m-%d", time.localtime(records[-1]["timestamp"])),

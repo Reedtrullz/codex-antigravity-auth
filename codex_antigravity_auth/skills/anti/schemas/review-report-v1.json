@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:anti:review-report:1",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "kind",
+    "claimVerification",
+    "runs",
+    "summary"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "kind": {
+      "const": "anti-review-report"
+    },
+    "claimVerification": {
+      "const": "unverified"
+    },
+    "summary": {
+      "type": "object"
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "runId",
+          "sourceRecordHash",
+          "actualModels",
+          "actualProviders",
+          "requestedModels",
+          "scopeStatus",
+          "coverage",
+          "contentComplete",
+          "declaredFindingCount",
+          "retainedFindingCount",
+          "findings"
+        ],
+        "properties": {
+          "runId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sourceRecordHash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "actualModels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "actualProviders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requestedModels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scopeStatus": {
+            "enum": [
+              "complete",
+              "partial",
+              "unknown"
+            ]
+          },
+          "coverage": {
+            "type": "object"
+          },
+          "contentComplete": {
+            "type": "boolean"
+          },
+          "declaredFindingCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retainedFindingCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "findingKey",
+                "verdict",
+                "claimVerification",
+                "sourceHash",
+                "advisory",
+                "adjudication"
+              ],
+              "properties": {
+                "findingKey": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "verdict": {
+                  "enum": [
+                    "confirmed",
+                    "rejected",
+                    "unresolved"
+                  ]
+                },
+                "claimVerification": {
+                  "const": "unverified"
+                },
+                "sourceHash": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "advisory": {
+                  "type": "object"
+                },
+                "adjudication": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "required": [
+                    "status",
+                    "author",
+                    "evidence",
+                    "timestamp",
+                    "sourceHash",
+                    "sourceFile"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "confirmed",
+                        "rejected",
+                        "unresolved"
+                      ]
+                    },
+                    "author": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "evidence": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4000
+                    },
+                    "timestamp": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "sourceHash": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "sourceFile": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

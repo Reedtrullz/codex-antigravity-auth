@@ -243,3 +243,19 @@ When multiple Google accounts are registered, the gateway automatically rotates 
 The local server natively isolates explicit thinking blocks and stream envelopes, ensuring standard formatting:
 - **Thinking/Reasoning block**: Emits `response.reasoning_text.delta` for explicit backend thinking parts while preserving regular `thoughtSignature` text as visible output.
 - **SSE Stream**: Formats candidates, function calls, usage metadata, and completion events into Responses API SSE chunks parsed correctly by both Codex CLI and Codex Desktop.
+
+## Local finding verdicts and report export
+
+```sh
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --run-id RUN_ID --format json
+python3 ~/.codex/skills/anti/scripts/anti.py runs finding --repo . --run-id RUN_ID --finding FINDING_KEY --verdict rejected --author reviewer --source-file src/example.py --evidence-file local-evidence.txt
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --run-id RUN_ID --format sarif --output review.sarif
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --format markdown --output reviews.md
+```
+
+Use `findingKey` from the first export. Local verdicts require explicit evidence
+and record the inspected file hash; model claims and passing file checks remain
+unverified. Rejected and unresolved findings remain visible. Existing output
+files are never overwritten, and these commands never publish to GitHub. Retained
+content and provenance limits follow the
+[review export contract](codex_antigravity_auth/skills/anti/ARTIFACTS.md#finding-adjudication-and-review-exports).
