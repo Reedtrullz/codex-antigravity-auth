@@ -432,6 +432,8 @@ And execute full unit test coverage:
 python3 -m pytest
 ```
 
+Protected stores and standalone Anti use descriptor-validated process locks and owner-only file protection. Unsupported locking or Windows ACL facilities fail explicitly; see [private storage and lock files](USAGE.md#private-storage-and-lock-files).
+
 ## Troubleshooting
 
 ### HTTP 403 VALIDATION_REQUIRED
