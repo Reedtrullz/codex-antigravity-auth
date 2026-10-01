@@ -20,6 +20,7 @@
     "scripts/anti_lib/artifacts.py",
     "scripts/anti_lib/capabilities.json",
     "scripts/anti_lib/capabilities.py",
+    "scripts/anti_lib/checkpoints.py",
     "scripts/anti_lib/chunking.py",
     "scripts/anti_lib/cleanup.py",
     "scripts/anti_lib/context.py",
