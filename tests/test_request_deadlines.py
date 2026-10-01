@@ -333,13 +333,20 @@ def test_slow_close_is_bounded_and_other_owned_resources_are_attempted(monkeypat
 def test_timeout_failure_uses_observed_native_response_id_without_created(monkeypatch):
     monkeypatch.setattr(budgets, "DRAIN_SECONDS", 0.01)
     async def scenario():
-        budget = budgets.RequestBudget(Request("openai"), timeout=1, release_account=AsyncMock())
-        budget.stream_idle = 0.02
+        budget = budgets.RequestBudget(Request("openai"), timeout=5, release_account=AsyncMock())
+        budget.stream_idle = 5
         async def source():
             yield 'data: {"type":"response.output_text.delta","response_id":"resp_observed","delta":"fixture"}\n\n'
             await asyncio.Future()
-        chunks = [chunk async for chunk in budgets.stream_with_budget(source(), budget)]
+        stream = budgets.stream_with_budget(source(), budget)
+        first = await anext(stream)
+        assert json.loads(first[6:])["response_id"] == "resp_observed"
+        # Test identity preservation after an observed event. A 20ms wall-clock
+        # deadline could instead expire before observation under suite load.
+        budget.deadline = time.monotonic() - 1
+        chunks = [chunk async for chunk in stream]
         assert json.loads(chunks[-2][6:])["response"]["id"] == "resp_observed"
+        assert chunks[-1] == "data: [DONE]\n\n"
     asyncio.run(scenario())
 
 
