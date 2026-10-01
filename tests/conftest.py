@@ -41,3 +41,9 @@ def _legacy_transform_response(gemini_resp: dict, model: str) -> dict:
         model=model,
         created_at=int(time.time()),
     )
+
+
+async def byte_chunks(chunks):
+    """Expose existing synthetic wire text fixtures through HTTPX's byte API."""
+    async for chunk in chunks:
+        yield chunk.encode("utf-8") if isinstance(chunk, str) else chunk

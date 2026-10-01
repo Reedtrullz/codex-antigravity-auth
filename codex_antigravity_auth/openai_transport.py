@@ -35,74 +35,7 @@ from .transform import function_call_arguments_string, valid_function_name
 from .transform import transform_request_to_chat
 
 
-class SSELineError(RuntimeError):
-    """Raised when an SSE stream produces a malformed or truncated line."""
-
-
-async def iter_sse_data(response, *, label: str = "provider") -> AsyncIterator[str]:
-    buffer = ""
-    pending: list[str] = []
-
-    async for chunk in response.aiter_text():
-        buffer += chunk
-        while "\n" in buffer:
-            line, buffer = buffer.split("\n", 1)
-            stripped = line.strip()
-            if not stripped:
-                # SSE event boundary: flush any accumulated data lines.
-                if pending:
-                    payload = "\n".join(pending)
-                    pending = []
-                    yield payload
-                continue
-            if not stripped.startswith("data:"):
-                # Non-data metadata lines (event:, id:, retry:) are ignored;
-                # a pending frame is flushed at the next event boundary.
-                continue
-            payload = stripped[5:].strip()
-            # SSE continuation lines join with "\n". Parse-or-accumulate:
-            # a standalone line is emitted immediately, and a fragment that
-            # does not yet parse as JSON waits for its continuation lines so
-            # both blank-line-separated and bare-\n frames work.
-            if pending:
-                if payload == "[DONE]":
-                    # A [DONE] marker is never a JSON continuation: flush the
-                    # incomplete fragment (the caller reports it as malformed)
-                    # and deliver the marker on its own.
-                    yield "\n".join(pending)
-                    pending = []
-                    yield payload
-                    continue
-                candidate = "\n".join([*pending, payload])
-                try:
-                    json.loads(candidate)
-                except json.JSONDecodeError:
-                    pending.append(payload)
-                    continue
-                pending = []
-                yield candidate
-                continue
-            if payload == "[DONE]":
-                yield payload
-                continue
-            try:
-                json.loads(payload)
-            except json.JSONDecodeError:
-                pending.append(payload)
-                continue
-            yield payload
-    if buffer.strip():
-        stripped = buffer.strip()
-        if stripped.startswith("data:"):
-            payload = stripped[5:].strip()
-            if pending:
-                yield "\n".join([*pending, payload])
-            else:
-                yield payload
-        else:
-            raise SSELineError(f"The {label} stream ended with an incomplete SSE frame.")
-    elif pending:
-        yield "\n".join(pending)
+from .sse import SSEDecoder, SSELineError, iter_sse_data
 
 
 def parse_sse_payload(data: str, *, label: str = "provider") -> dict[str, Any]:
@@ -500,7 +433,7 @@ class OpenAICompatibleTransport:
                             yield event
                         return
                     try:
-                        async for data in iter_sse_data(response, label="OpenAI"):
+                        async for data in iter_sse_data(response, label="OpenAI", legacy_json_lines=True):
                             if data == "[DONE]":
                                 if provider_done:
                                     async for event in fail("duplicate_done", "The provider emitted [DONE] more than once."):
@@ -667,7 +600,7 @@ class NativeResponsesStreamAdapter:
 
     def __init__(self, *, display_model: str) -> None:
         self.display_model = display_model
-        self._buffer = ""
+        self._decoder = SSEDecoder()
         self._terminal_event: dict[str, Any] | None = None
         self._terminal_emitted = False
         self._provider_done = False
@@ -700,11 +633,8 @@ class NativeResponsesStreamAdapter:
         self._terminal_emitted = True
         return [self._terminal_event]
 
-    def _consume_line(self, line: str) -> list[dict[str, Any]]:
-        stripped = line.strip()
-        if not stripped or stripped.startswith(":") or not stripped.startswith("data:"):
-            return []
-        data = stripped[5:].strip()
+    def _consume_payload(self, data: str) -> list[dict[str, Any]]:
+        data = data.strip()
         if data == "[DONE]":
             if self._provider_done:
                 self._set_failure("duplicate_done", "The provider emitted [DONE] more than once.")
@@ -772,21 +702,21 @@ class NativeResponsesStreamAdapter:
         return [event]
 
     def consume_bytes(self, chunk: bytes) -> list[dict[str, Any]]:
-        if not isinstance(chunk, bytes):
-            self._set_failure("invalid_stream_chunk", "The provider returned a non-byte stream chunk.")
-            return []
-        self._buffer += chunk.decode("utf-8", errors="replace")
         events: list[dict[str, Any]] = []
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            events.extend(self._consume_line(line))
+        try:
+            for data in self._decoder.feed(chunk):
+                events.extend(self._consume_payload(data))
+        except SSELineError as exc:
+            self._set_failure("invalid_stream_chunk", str(exc))
         return events
 
     def finish(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        if self._buffer.strip():
-            events.extend(self._consume_line(self._buffer))
-        self._buffer = ""
+        try:
+            for data in self._decoder.finish():
+                events.extend(self._consume_payload(data))
+        except SSELineError as exc:
+            self._set_failure("invalid_stream_chunk", str(exc))
         if self._terminal_event is None:
             self._set_failure(
                 "missing_terminal_signal",

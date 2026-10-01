@@ -1,3 +1,4 @@
+from tests.conftest import byte_chunks
 import unittest
 import json
 from unittest.mock import patch
@@ -26,8 +27,11 @@ class TestOpenAIRequestTranslation(unittest.TestCase):
                     yield 'data: ,"extra":true}]}\n'
                     yield "data: [DONE]\n"
 
+                def aiter_bytes(self):
+                    return byte_chunks(self.aiter_text())
+
             events = []
-            async for data in iter_sse_data(Response(), label="OpenAI"):
+            async for data in iter_sse_data(Response(), label="OpenAI", legacy_json_lines=True):
                 events.append(data)
             return events
 
@@ -204,6 +208,9 @@ class TestOpenAIStreamingRoute(unittest.IsolatedAsyncioTestCase):
 
             def aiter_text(self):
                 return AsyncChunks()
+
+            def aiter_bytes(self):
+                return byte_chunks(self.aiter_text())
 
         class StreamContext:
             async def __aenter__(self):

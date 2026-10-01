@@ -2473,7 +2473,7 @@ async def create_openai_upstream_response(
                 detail=openai_failure_detail(display_model, f"OpenAI upstream error: {safe_error_detail(res.text)}"),
             )
         try:
-            terminal = _collect_openai_sse_terminal(res.text, display_model)
+            terminal = _collect_openai_sse_terminal(res.content, display_model)
         except Exception as exc:
             raise HTTPException(
                 status_code=502,
@@ -2520,14 +2520,16 @@ async def create_openai_upstream_response(
     return data
 
 
-def _collect_openai_sse_terminal(sse_text: str, display_model: str) -> dict | None:
+def _collect_openai_sse_terminal(sse_text: str | bytes, display_model: str) -> dict | None:
     """Extract the terminal Responses object from a buffered SSE body."""
+    from itertools import chain
+    from .sse import SSEDecoder
+
+    decoder = SSEDecoder()
+    wire = sse_text.encode("utf-8") if isinstance(sse_text, str) else sse_text
     terminal: dict | None = None
-    for raw_line in sse_text.splitlines():
-        line = raw_line.strip()
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
+    for data in chain(decoder.feed(wire), decoder.finish()):
+        data = data.strip()
         if data == "[DONE]":
             continue
         try:
@@ -2650,8 +2652,8 @@ async def openai_upstream_sse_generator(
     client, stream_context, response = stream_state
     adapter = NativeResponsesStreamAdapter(display_model=display_model)
     try:
-        async for chunk in response.aiter_text():
-            for event in adapter.consume_bytes(chunk.encode("utf-8", errors="replace")):
+        async for chunk in response.aiter_bytes():
+            for event in adapter.consume_bytes(chunk):
                 yield f"data: {json.dumps(event)}\n\n"
         for event in adapter.finish():
             yield f"data: {json.dumps(event)}\n\n"
