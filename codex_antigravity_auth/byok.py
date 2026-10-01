@@ -452,14 +452,12 @@ def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
         else:
             normalized.pop("displayName", None)
     if "baseUrl" in normalized:
-        base_url = _non_empty_string(normalized.get("baseUrl"))
-        if base_url:
-            try:
-                normalized["baseUrl"] = validate_http_base_url(base_url, label="BYOK provider baseUrl")
-            except ValueError:
-                normalized.pop("baseUrl", None)
-        else:
-            normalized.pop("baseUrl", None)
+        try:
+            normalized["baseUrl"] = validate_http_base_url(normalized["baseUrl"], label="BYOK provider baseUrl")
+        except ValueError:
+            # Keep an explicit invalid override blocked, rather than erasing it
+            # and silently sending credentials to the provider preset URL.
+            normalized["baseUrl"] = None
     if "apiKeyEnv" in normalized:
         try:
             api_key_env = validate_provider_api_key_env(normalized.get("apiKeyEnv"))

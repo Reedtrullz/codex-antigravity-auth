@@ -41,7 +41,7 @@ codex-antigravity service uninstall --port 51122
 
 The service command writes a macOS LaunchAgent, Linux systemd user unit, or Windows Scheduled Task depending on the platform. `doctor --codex-ready` and `status --json` report both the lightweight pid-file process state and the durable service state.
 
-Client endpoints require HTTPS for remote hosts. Plain HTTP is allowed for `localhost`, IPv4 loopback and IPv6 loopback; URL username/password fields, invalid ports and control characters are rejected before dispatch. Base URLs also reject query strings and fragments. CLI diagnostics/setup, OAuth requests and standalone Anti refuse all HTTP redirects, including same-origin redirects: configure a non-redirecting endpoint instead. Provider HTTPX clients explicitly disable redirect following as well. Plaintext loopback requests bypass proxies; HTTPS keeps its configured certificate environment.
+Client endpoints require HTTPS for remote hosts. Plain HTTP is allowed for `localhost`, IPv4 loopback and IPv6 loopback; URL username/password fields, invalid ports and control characters are rejected before dispatch. Base URLs also reject query strings and fragments. CLI diagnostics/setup, OAuth requests and standalone Anti refuse all HTTP redirects, including same-origin redirects: configure a non-redirecting endpoint instead. Provider HTTPX clients explicitly disable redirect following as well. Explicit invalid provider endpoint overrides remain blocked instead of falling back to a preset URL; correct or remove the override to restore the preset. Plaintext loopback requests bypass proxies; HTTPS keeps its configured certificate environment.
 
 Gateway request diagnostics are local and sanitized:
 

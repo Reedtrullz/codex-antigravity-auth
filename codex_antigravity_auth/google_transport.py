@@ -12,7 +12,7 @@ import uuid
 
 import httpx
 
-from .endpoint_policy import httpx_client_options
+from .endpoint_policy import httpx_client_options, validate_endpoint_url
 
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
 from .response_protocol import (
@@ -449,7 +449,7 @@ class GoogleTransport:
     ) -> None:
         self.timeout = timeout
         self.platform_name = platform_name or get_platform()
-        self.endpoint = endpoint.rstrip("/")
+        self.endpoint = validate_endpoint_url(endpoint, label="Google endpoint").rstrip("/")
         self.client_factory = client_factory
 
     def build_request(self, request: dict[str, Any], lease: AccountLease) -> dict[str, Any]:

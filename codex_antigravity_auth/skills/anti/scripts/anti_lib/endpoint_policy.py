@@ -23,8 +23,10 @@ def is_loopback_endpoint(host: str | None) -> bool:
 def validate_endpoint_url(value: object, *, label: str = "endpoint URL", allow_query: bool = False) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be a non-empty absolute http(s) URL")
-    value = value.strip()
-    if any(ch.isspace() or ord(ch) < 0x20 or 0x7f <= ord(ch) < 0xa0 for ch in value) or "\\" in value:
+    if any(ord(ch) < 0x20 or 0x7f <= ord(ch) < 0xa0 for ch in value):
+        raise ValueError(f"{label} must not contain whitespace or control characters or backslashes")
+    value = value.strip(" ")
+    if any(ch.isspace() for ch in value) or "\\" in value:
         raise ValueError(f"{label} must not contain whitespace or control characters or backslashes")
     try:
         parsed = urllib.parse.urlsplit(value)
@@ -49,7 +51,7 @@ def validate_endpoint_url(value: object, *, label: str = "endpoint URL", allow_q
         expected = f"[{hostname}]" + (f":{port}" if port is not None else "")
         if parsed.netloc.lower() != expected.lower():
             raise ValueError(f"{label} must be an absolute http(s) URL")
-    if parsed.fragment or (parsed.query and not allow_query):
+    if "#" in value or ("?" in value and not allow_query):
         raise ValueError(f"{label} must not include query strings or fragments")
     if parsed.scheme == "http" and not is_loopback_endpoint(hostname):
         raise ValueError(f"{label} must use https unless it points at a loopback/local host")

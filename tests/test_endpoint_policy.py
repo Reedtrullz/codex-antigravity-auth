@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 import httpx
 
-from codex_antigravity_auth import byok, cli, oauth, server
+from codex_antigravity_auth import byok, cli, oauth, server, unified
 from codex_antigravity_auth.google_transport import AccountLease, GoogleTransport
 from codex_antigravity_auth.openai_transport import OpenAICompatibleTransport, PreparedOpenAIRequest
 from codex_antigravity_auth.unified import OpenAIAuth
@@ -33,6 +33,8 @@ UNSAFE = [
     "http://192.0.2.1/v1", "https://fixture-user:fixture-password@example.invalid/v1",
     "http://@localhost/v1", "http://localhost:bad/v1", "http://localhost:0/v1",
     "http://[::1]extra/v1", "https://example.invalid/\x85bad", "https://example.invalid/a\\b",
+    "\thttps://example.invalid/v1", "\nhttps://example.invalid/v1", "\x00https://example.invalid/v1",
+    "https://example.invalid/v1\r", "https://example.invalid/v1\x7f", "https://example.invalid/v1\x85",
 ]
 SAFE = ["http://localhost:51122/v1", "http://127.0.0.1:51122/v1", "http://127.0.0.2/v1",
         "http://[::1]:51122/v1", "https://example.invalid/v1"]
@@ -77,6 +79,57 @@ def test_query_policy_and_ipv6_authority_are_explicit():
     assert cli.local_gateway_base_url("::1", 51122) == "http://[::1]:51122/v1"
     assert shared.httpx_client_options("http://localhost/v1", timeout=1)["trust_env"] is False
     assert shared.httpx_client_options("https://localhost/v1", timeout=1)["trust_env"] is True
+
+
+@pytest.mark.parametrize("url", ["https://example.invalid/v1?", "https://example.invalid/v1#"])
+def test_empty_base_delimiters_cannot_capture_an_appended_request_path(monkeypatch, url):
+    anti = load_anti()
+    transport = MagicMock(side_effect=AssertionError("network must not run"))
+    monkeypatch.setattr(cli, "open_http_request", transport)
+    with pytest.raises(ValueError):
+        byok.validate_http_base_url(url)
+    with pytest.raises(anti.AntiError):
+        anti.normalize_base_url(url)
+    with pytest.raises(RuntimeError):
+        cli.gateway_model_ids(url)
+    assert not cli.gateway_generate_probe(url, "fixture", timeout=1, token_env="")["ok"]
+    with pytest.raises(ValueError):
+        GoogleTransport(timeout=1, endpoint=url, client_factory=transport)
+    with pytest.raises(unified.OpenAIUpstreamAuthError):
+        unified.openai_responses_url(OpenAIAuth(kind="api_key", base_url=url, api_key="synthetic-token"))
+    transport.assert_not_called()
+    if url.endswith("?"):
+        assert validate_endpoint_url(url, allow_query=True) == url
+    else:
+        with pytest.raises(ValueError):
+            validate_endpoint_url(url, allow_query=True)
+
+
+@pytest.mark.parametrize("url", ["https://example.invalid/v1\r", "https://example.invalid/v1?", "http://remote.example/v1", "https://user:fixture-password@example.invalid/v1", 123])
+def test_invalid_stored_provider_endpoint_cannot_fall_back_to_a_preset(monkeypatch, url):
+    normalized = byok.normalize_provider_entry({"baseUrl": url, "apiKey": "synthetic-token"})
+    assert normalized["baseUrl"] is None
+    provider = byok.merged_provider_config("deepseek", normalized)
+    transport = MagicMock(side_effect=AssertionError("network must not run"))
+    monkeypatch.setattr(server.httpx, "AsyncClient", transport)
+    with pytest.raises(server.HTTPException) as exc:
+        asyncio.run(server.create_openai_compatible_response({"input": "fixture"}, provider, "deepseek-chat", "fixture"))
+    assert exc.value.status_code == 400
+    transport.assert_not_called()
+
+
+@pytest.mark.parametrize("url", ["\thttps://example.invalid/v1", "https://example.invalid/v1\n", "https://example.invalid/v1?", "https://example.invalid/v1#"])
+@pytest.mark.parametrize("source", ["environment", "file"])
+def test_native_auth_url_resolution_cannot_strip_invalid_input(monkeypatch, source, url):
+    if source == "environment":
+        monkeypatch.setenv("OPENAI_API_KEY", "synthetic-token")
+        monkeypatch.setenv("OPENAI_BASE_URL", url)
+    else:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setattr(unified, "_read_json_file", lambda _: {"api_key": "synthetic-token", "base_url": url})
+    with pytest.raises(unified.OpenAIUpstreamAuthError) as exc:
+        unified.resolve_openai_auth()
+    assert exc.value.status_code == 400
 
 
 def fake_chain(monkeypatch, target, *, status=302):
