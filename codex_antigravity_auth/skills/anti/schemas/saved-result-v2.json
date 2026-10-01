@@ -183,6 +183,74 @@
             "string",
             "null"
           ]
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "checkId",
+              "check",
+              "status",
+              "reason",
+              "file",
+              "fileHash",
+              "cwd",
+              "command",
+              "output",
+              "durationMs"
+            ],
+            "properties": {
+              "checkId": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{24}$"
+              },
+              "check": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "passed",
+                  "failed",
+                  "skipped",
+                  "error"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "file": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "fileHash": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "command": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "output": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "durationMs": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
         }
       }
     },

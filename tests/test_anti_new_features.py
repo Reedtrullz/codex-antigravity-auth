@@ -673,8 +673,9 @@ class VerifierTests(unittest.TestCase):
             bad = root / "bad.py"
             bad.write_text("token = '123456789'\ndef broken(:\n", encoding="utf-8")
             result = verify_finding({"file": "bad.py", "evidence": "unverified"}, root)
-            self.assertIn("python_syntax", result["evidence"])
-            self.assertIn("secrets_scan", result["evidence"])
+            self.assertEqual({check["check"] for check in result["checks"]}, {"python_syntax", "secrets_scan"})
+            self.assertTrue(all(check["status"] == "failed" for check in result["checks"]))
+            self.assertEqual(result["evidence"], "unverified")
 
     def test_verifier_existing_missing_and_no_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -684,9 +685,9 @@ class VerifierTests(unittest.TestCase):
             existing = verify_finding({"file": "good.py", "evidence": "unverified"}, root)
             self.assertEqual(existing["evidence"], "unverified")
             missing = {"file": "missing.py", "evidence": "unverified"}
-            self.assertEqual(verify_finding(missing, root), missing)
+            self.assertEqual(verify_finding(missing, root)["checks"][0]["reason"], "file_missing_or_not_regular")
             no_file = {"claim": "x"}
-            self.assertEqual(verify_finding(no_file, root), no_file)
+            self.assertEqual(verify_finding(no_file, root)["checks"][0]["reason"], "file_not_provided")
 
 
 class FreeLanePresetTests(unittest.TestCase):
