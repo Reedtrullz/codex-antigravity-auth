@@ -5,6 +5,7 @@ import os
 import secrets
 import sys
 import time
+import threading
 import httpx
 import anyio
 import email.utils
@@ -85,14 +86,24 @@ from .unified import OpenAIUpstreamAuthError
 
 @asynccontextmanager
 async def gateway_lifespan(_app: FastAPI):
-    schedule_refresh_accounts_ahead(force=True)
-    yield
+    global _refresh_ahead_owner
+    if _refresh_ahead_owner is not None:
+        raise RuntimeError("Gateway refresh lifecycle is already running")
+    owner = _RefreshAheadOwner()
+    _refresh_ahead_owner = owner
+    try:
+        owner.start()
+        yield
+    finally:
+        try:
+            await owner.close()
+        finally:
+            _refresh_ahead_owner = None
 
 
 app = FastAPI(title="Codex Antigravity Gateway", lifespan=gateway_lifespan)
 account_manager = AccountManager()
-_last_refresh_ahead_at = 0.0
-_refresh_ahead_task: asyncio.Task | None = None
+_refresh_ahead_owner: "_RefreshAheadOwner | None" = None
 REFRESH_AHEAD_THROTTLE_SECONDS = 60.0
 STREAM_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 REQUEST_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -292,27 +303,70 @@ async def record_attempt_outcome(
     )
 
 
-def schedule_refresh_accounts_ahead(*, force: bool = False) -> bool:
-    global _last_refresh_ahead_at, _refresh_ahead_task
-    now = time.monotonic()
-    if _refresh_ahead_task is not None and not _refresh_ahead_task.done():
-        return False
-    if not force and now - _last_refresh_ahead_at < REFRESH_AHEAD_THROTTLE_SECONDS:
-        return False
-    _last_refresh_ahead_at = now
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return False
+class _RefreshAheadOwner:
+    """One timer and at most one worker, owned and drained by lifespan."""
 
-    async def _refresh_runner() -> None:
+    def __init__(self) -> None:
+        self.stop = threading.Event()
+        self.wake = asyncio.Event()
+        self.worker: asyncio.Task | None = None
+        self.timer: asyncio.Task | None = None
+        self.last_started = float("-inf")
+
+    def start(self) -> None:
+        schedule_refresh_accounts_ahead(force=True)
+        self.timer = asyncio.create_task(self._periodic(), name="gateway-refresh-timer")
+
+    async def _periodic(self) -> None:
+        while not self.stop.is_set():
+            try:
+                await asyncio.wait_for(self.wake.wait(), REFRESH_AHEAD_THROTTLE_SECONDS)
+            except asyncio.TimeoutError:
+                schedule_refresh_accounts_ahead()
+
+    def schedule(self, *, force: bool = False) -> bool:
+        if self.stop.is_set() or (self.worker is not None and not self.worker.done()):
+            return False
+        now = time.monotonic()
+        if not force and now - self.last_started < REFRESH_AHEAD_THROTTLE_SECONDS:
+            return False
+        self.last_started = now
+        self.worker = asyncio.create_task(self._refresh(), name="gateway-refresh-worker")
+        return True
+
+    async def _refresh(self) -> None:
         try:
-            await run_in_threadpool(account_manager.refresh_expiring_accounts, 300)
+            await asyncio.to_thread(account_manager.refresh_expiring_accounts, 300, stop_event=self.stop)
         except Exception:
+            # A transient store/refresh failure must not kill the periodic owner.
             return
 
-    _refresh_ahead_task = loop.create_task(_refresh_runner())
-    return True
+    async def close(self) -> None:
+        self.stop.set()
+        self.wake.set()
+        cancelled = False
+        for task in (self.timer, self.worker):
+            if task is None:
+                continue
+            # Cancelling to_thread abandons its running thread. Drain the owned
+            # worker instead; it observes stop before discovery and merge.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if not task.cancelled():
+                task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+
+def schedule_refresh_accounts_ahead(*, force: bool = False) -> bool:
+    # Requests without a running lifespan may not create unowned background work.
+    owner = _refresh_ahead_owner
+    if owner is None:
+        return False
+    return owner.schedule(force=force)
 
 
 def account_health_summary() -> dict:

@@ -121,7 +121,10 @@ class TestAccounts(unittest.TestCase):
         selected = AccountManager().select_active_account("gemini-3.8-flash")
 
         self.assertEqual(selected["email"], "secondary@gmail.com")
-        self.assertEqual(results, [True])
+        # Snapshot/recheck/merge use separate store transactions; the failed
+        # refresh must still persist exactly one authoritative cooldown.
+        self.assertTrue(any(results))
+        self.assertEqual(data["accountState"]["failures"]["primary@gmail.com"]["account"], 1)
         self.assertIn("primary@gmail.com", data["accountState"]["cooldowns"])
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
