@@ -504,3 +504,39 @@ Omit probe intent and use `--dry-run --json` for local capture/format validation
 This is a private gateway extension with unverified backend listening, not generic
 Responses audio support. Read [WAV_AUDIO.md](codex_antigravity_auth/skills/anti/WAV_AUDIO.md)
 for limits, privacy, retry/fallback rules and required live acceptance controls.
+## Private storage and lock files
+
+Gateway secure stores and packaged/standalone Anti persistence share one checked
+process-lock implementation. Lock files must be regular, singly linked files
+owned by the current user. The opened descriptor is compared with the directory
+entry (native volume plus 128-bit file identity on Windows) before permissions change or the Windows lock byte is written. Symlinks,
+reparse points, hardlinks, FIFOs and unexpected path types are refused. If neither
+POSIX flock nor Windows byte-range locking is available, the operation fails;
+there is no thread-only success path.
+
+Managed leaf directories and newly created parents are protected before files
+are opened; unrelated pre-existing ancestors are not chmodded. POSIX directories
+use 0700 and files 0600, with descriptor-based permission updates. Managed leaf
+directory symlinks are refused; use the canonical directory when configuring a
+protected store. These checks do not claim protection against the same user or
+an administrator replacing every ancestor directory.
+
+Windows uses handle-based ownership and DACL checks rather than treating chmod
+as an ACL guarantee. Objects must initially belong to the current user or its
+process-default owner (for example an elevated token's default owner group).
+Protection sets the current user as owner, applies a protected current-user-only
+full-control DACL, then verifies owner, ACE type/count/access mask and inheritance
+on the opened object. Files are protected before secret bytes are written;
+private directories use an exclusive handle to avoid rewriting unrelated child
+ACLs. Each managed child is protected independently before its content is written. If required ACL,
+handle or filesystem facilities are unavailable, access fails explicitly.
+Administrators' backup/ownership privileges remain outside this boundary.
+
+The Windows implementation follows Microsoft's
+[ReOpenFile](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile),
+[GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo),
+[FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info)
+and [SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo)
+contracts. Native Windows tests inspect temporary-file ACLs independently through
+PowerShell; non-Windows runs skip that check and exercise synthetic refusal paths.
+No Windows ACL success is inferred from POSIX mode bits or mocked tests.
