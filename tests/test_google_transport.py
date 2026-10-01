@@ -2,6 +2,7 @@ from tests.conftest import byte_chunks
 import unittest
 from unittest.mock import patch
 import math
+import httpx
 
 from fastapi.testclient import TestClient
 
@@ -272,8 +273,9 @@ class TestGoogleHTTPExecution(unittest.IsolatedAsyncioTestCase):
     async def test_posts_non_streaming_request_through_transport(self):
         calls = []
 
-        class Response:
-            status_code = 200
+        class Response(httpx.Response):
+            def __init__(self):
+                super().__init__(200, json={})
 
         class Client:
             async def __aenter__(self):
@@ -330,15 +332,9 @@ class TestGoogleHTTPExecution(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(calls[0][1].endswith("/v1internal:streamGenerateContent?alt=sse"))
 
     async def test_execute_returns_result_and_typed_http_failure(self):
-        class Response:
+        class Response(httpx.Response):
             def __init__(self, status_code, payload=None):
-                self.status_code = status_code
-                self._payload = payload or {}
-                self.text = "provider detail"
-                self.headers = {}
-
-            def json(self):
-                return self._payload
+                super().__init__(status_code, json=payload or {})
 
         responses = [
             Response(200, {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "ok"}]}}]}),
@@ -373,13 +369,9 @@ class TestGoogleRouteTerminalFidelity(unittest.TestCase):
     def _post(payload: dict):
         from codex_antigravity_auth.server import app
 
-        class Response:
-            status_code = 200
-            text = ""
-            headers = {}
-
-            def json(self):
-                return payload
+        class Response(httpx.Response):
+            def __init__(self):
+                super().__init__(200, json=payload)
 
         class Client:
             def __init__(self, *args, **kwargs):

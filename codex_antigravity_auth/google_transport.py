@@ -13,7 +13,8 @@ import uuid
 import httpx
 
 from .request_budget import call_sync, owned_context
-from .sse import SSELineError, iter_sse_data
+from .resource_limits import ResourceLimitError, json_loads_limited, limited_post, response_json
+from .sse import SSELineError, SSELimitError, iter_sse_data
 
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
 from .response_protocol import (
@@ -479,9 +480,9 @@ class GoogleTransport:
     async def post(self, request: dict[str, Any], lease: AccountLease) -> httpx.Response:
         url = f"{self.endpoint}/v1internal:generateContent"
         async with owned_context(self.client_factory(timeout=self.timeout)) as client:
-            return await client.post(
-                url,
-                json=await call_sync(self.build_request, request, lease),
+            return await limited_post(
+                client, url,
+                payload=await call_sync(self.build_request, request, lease),
                 headers=await call_sync(self.build_headers, lease),
             )
 
@@ -498,7 +499,7 @@ class GoogleTransport:
         if response.status_code != 200:
             raise GoogleHTTPError(response.status_code, outcome_for_http_status(response.status_code))
         try:
-            payload = response.json()
+            payload = response_json(response)
         except Exception:
             accumulator = GoogleResponseAccumulator()
             accumulator.mark_malformed()
@@ -550,8 +551,10 @@ class GoogleTransport:
                         adapter.mark_done()
                         continue
                     try:
-                        payload = json.loads(data)
-                    except json.JSONDecodeError as exc:
+                        payload = json_loads_limited(data)
+                    except ResourceLimitError as exc:
+                        raise GoogleStreamPayloadError("provider_output_limit" if exc.status == 413 else "invalid_stream_chunk", str(exc)) from exc
+                    except (ValueError, RecursionError) as exc:
                         raise GoogleStreamPayloadError(
                             "invalid_stream_chunk", "The Google provider returned malformed stream JSON.",
                         ) from exc
@@ -559,6 +562,8 @@ class GoogleTransport:
                         payload = payload[0] if payload else {}
                     for event in adapter.consume(payload):
                         yield event
+            except SSELimitError as exc:
+                raise GoogleStreamPayloadError("provider_output_limit", str(exc)) from exc
             except SSELineError as exc:
                 raise GoogleStreamPayloadError("invalid_stream_chunk", str(exc)) from exc
         for event in adapter.finish():

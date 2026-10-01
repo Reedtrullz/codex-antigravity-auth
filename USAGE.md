@@ -249,3 +249,7 @@ The local server natively isolates explicit thinking blocks and stream envelopes
 ## Request time budgets
 
 Google, BYOK and native OpenAI requests now share a monotonic 60-second preparation/nonstream deadline. Streaming has separate 60-second event-idle and 30-minute total defaults, including preparation, with validated metadata overrides. Downstream backpressure and resource cleanup are bounded; timeouts never trigger replay after visible output. See [request deadlines and cleanup](codex_antigravity_auth/REQUEST_DEADLINES.md) for overrides, failure outcomes, cleanup grace and cancellation limits.
+
+## Resource limits and overload
+
+Generation admission defaults to 32 in-flight requests per process and 16 per backend route. Excess requests receive HTTP503 with Retry-After. Incoming bodies default to32MiB, inline attachments have separate decoded limits, and JSON/schema/SSE/provider accumulation are bounded without accepting clipped requests as complete. Set operator environment overrides for larger contexts or images; see [resource limits and admission](codex_antigravity_auth/RESOURCE_LIMITS.md) for units, ranges, failure codes and ownership.

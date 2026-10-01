@@ -19,6 +19,7 @@ from .byok import (
 )
 
 from .request_budget import owned_context
+from .resource_limits import ResourceLimitError, json_loads_limited, read_response_bytes
 from .redaction import redact_secret_text
 from .native_output import (
     MAX_ITEMS, NativeOutputError, check_json, reconcile_output,
@@ -39,13 +40,15 @@ from .transform import function_call_arguments_string, valid_function_name
 from .transform import transform_request_to_chat
 
 
-from .sse import SSEDecoder, SSELineError, iter_sse_data
+from .sse import SSEDecoder, SSELineError, SSELimitError, iter_sse_data
 
 
 def parse_sse_payload(data: str, *, label: str = "provider") -> dict[str, Any]:
     try:
-        payload = json.loads(data)
-    except json.JSONDecodeError as exc:
+        payload = json_loads_limited(data)
+    except ResourceLimitError as exc:
+        raise (SSELimitError if exc.status == 413 else SSELineError)(str(exc)) from exc
+    except (ValueError, RecursionError) as exc:
         raise SSELineError(f"The {label} stream returned malformed JSON: {exc}") from exc
     if isinstance(payload, list):
         payload = payload[0] if payload else {}
@@ -428,7 +431,7 @@ class OpenAICompatibleTransport:
                     if response.status_code != 200:
                         detail = f"Provider returned HTTP {response.status_code}."
                         try:
-                            body = (await response.aread()).decode("utf-8", errors="replace")
+                            body = (await read_response_bytes(response, limit=65536)).decode("utf-8", errors="replace")
                         except Exception:
                             body = ""
                         if body:
@@ -455,6 +458,10 @@ class OpenAICompatibleTransport:
                                 return
                             try:
                                 payload = parse_sse_payload(data, label="OpenAI")
+                            except SSELimitError as exc:
+                                async for event in fail("provider_output_limit", str(exc)):
+                                    yield event
+                                return
                             except SSELineError:
                                 async for event in fail("invalid_stream_chunk", "The provider returned malformed stream JSON."):
                                     yield event
@@ -513,6 +520,10 @@ class OpenAICompatibleTransport:
                                         fragment = function.get(field)
                                         if isinstance(fragment, str):
                                             state[field] += fragment
+                    except SSELimitError as exc:
+                        async for event in fail("provider_output_limit", str(exc)):
+                            yield event
+                        return
                     except SSELineError as exc:
                         async for event in fail("invalid_stream_chunk", str(exc)):
                             yield event
@@ -608,6 +619,22 @@ class NativeResponsesStreamAdapter:
         return self._protocol_error
 
     def _failure(self, code: str, message: str) -> dict[str, Any]:
+        output = []
+        if code == "provider_output_limit":
+            if self._terminal_event is not None:
+                output = self._terminal_event["response"].get("output", [])
+            else:
+                for index, item in sorted(self._completed_items.items()):
+                    if index != len(output):
+                        break
+                    output.append(item)
+            try:
+                output = validate_output(output)
+            except NativeOutputError:
+                # Individually valid done items can still contradict one
+                # another (for example duplicate call IDs). Error rendering
+                # must neither publish that aggregate nor fail recursively.
+                output = []
         return {
             "type": "response.failed",
             "response": {
@@ -615,7 +642,7 @@ class NativeResponsesStreamAdapter:
                 "object": "response",
                 "status": "failed",
                 "model": self.display_model,
-                "output": [],
+                "output": output,
                 "error": {"code": code, "message": message},
             },
         }
@@ -722,7 +749,10 @@ class NativeResponsesStreamAdapter:
             self._set_failure("output_after_done", "The provider emitted output after [DONE].")
             return []
         try:
-            event = json.loads(data)
+            event = json_loads_limited(data)
+        except ResourceLimitError as exc:
+            self._set_failure("provider_output_limit" if exc.status == 413 else "invalid_stream_chunk", str(exc))
+            return []
         except (ValueError, RecursionError):
             self._set_failure("invalid_stream_chunk", "The provider returned malformed stream JSON.")
             return []
@@ -801,6 +831,8 @@ class NativeResponsesStreamAdapter:
         try:
             for data in self._decoder.feed(chunk):
                 events.extend(self._consume_payload(data))
+        except SSELimitError as exc:
+            self._set_failure("provider_output_limit", str(exc))
         except SSELineError as exc:
             self._set_failure("invalid_stream_chunk", str(exc))
         return events
@@ -812,6 +844,8 @@ class NativeResponsesStreamAdapter:
         try:
             for data in self._decoder.finish():
                 events.extend(self._consume_payload(data))
+        except SSELimitError as exc:
+            self._set_failure("provider_output_limit", str(exc))
         except SSELineError as exc:
             self._set_failure("invalid_stream_chunk", str(exc))
         if self._terminal_event is None:
