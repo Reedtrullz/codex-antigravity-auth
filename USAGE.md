@@ -233,3 +233,7 @@ When multiple Google accounts are registered, the gateway automatically rotates 
 The local server natively isolates explicit thinking blocks and stream envelopes, ensuring standard formatting:
 - **Thinking/Reasoning block**: Emits `response.reasoning_text.delta` for explicit backend thinking parts while preserving regular `thoughtSignature` text as visible output.
 - **SSE Stream**: Formats candidates, function calls, usage metadata, and completion events into Responses API SSE chunks parsed correctly by both Codex CLI and Codex Desktop.
+
+## Request shape and schema diagnostics
+
+Malformed message/content/tool shapes and orphan outputs return field-specific HTTP400 errors before account work. Translated routes reject unsupported built-in tools and explicit schema weakening; Google cannot honor `strict: true`. Native Responses keeps provider-specific items/tools and continuation intact. See [request validation and translation-loss behavior](codex_antigravity_auth/design/request-shapes.md) for compatibility changes and limits.

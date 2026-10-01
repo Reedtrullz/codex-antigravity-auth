@@ -278,6 +278,8 @@ def normalize_chat_response_format(value: Any) -> dict[str, Any]:
 
 def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     """Translate standard Codex Responses API request body to Antigravity format."""
+    from .request_shapes import validate_request_shapes
+    validate_request_shapes(codex_req, route="google")
     model = codex_req.get("model", DEFAULT_GEMINI_MODEL_ID)
     from .models import native_model_capabilities
     from .input_fidelity import image_source
@@ -628,6 +630,8 @@ def transform_gemini_candidate(candidate: dict) -> dict:
 
 def transform_request_to_chat(codex_req: dict, provider_model: str, *, capabilities=None) -> dict:
     """Translate Responses API input into OpenAI-compatible Chat Completions."""
+    from .request_shapes import validate_request_shapes
+    validate_request_shapes(codex_req, route="byok")
     from .input_fidelity import validate_input, image_source
     validate_input(codex_req, {"text", "image"})
     if capabilities is not None:
