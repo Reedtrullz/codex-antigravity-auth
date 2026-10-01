@@ -111,3 +111,46 @@ def test_standalone_anti_uses_same_console_protection(tmp_path):
     assert completed.returncode == 0, completed.stderr
     assert_safe(completed.stdout)
     assert "safe\\x1b]fixture\\x07end" in completed.stdout
+
+
+@pytest.mark.parametrize("outcome", ["busy", "empty", "failure", "success"])
+def test_account_refresh_logging_escapes_labels_and_errors_without_changing_data(monkeypatch, outcome):
+    import io
+    import logging
+    from unittest.mock import MagicMock
+    from codex_antigravity_auth import accounts, oauth
+
+    captured = io.StringIO()
+    logger = logging.Logger("synthetic-account-log", level=logging.DEBUG)
+    logger.addHandler(logging.StreamHandler(captured))
+    logger.propagate = False
+    monkeypatch.setattr(accounts, "_log", logger)
+    lock = MagicMock()
+    lock.acquire.return_value = outcome != "busy"
+    monkeypatch.setattr(accounts, "_get_refresh_lock", lambda email: lock)
+    refresh = MagicMock(return_value={"access_token": "synthetic-access", "expires_in": 3600})
+    monkeypatch.setattr(accounts, "refresh_access_token", refresh)
+    discover = MagicMock(return_value=TEXT if outcome == "success" else None)
+    if outcome == "failure":
+        discover.side_effect = RuntimeError(TEXT)
+    monkeypatch.setattr(oauth, "discover_project_id", discover)
+    account = {"email": TEXT}
+    accounts._apply_token_refresh(account, "synthetic-refresh", wait=False)
+    rendered = captured.getvalue()
+    assert_safe(rendered)
+    assert "\\x1b" in rendered
+    assert account["email"] == TEXT
+    if outcome == "success":
+        assert account["projectId"] == TEXT
+    if outcome == "busy":
+        refresh.assert_not_called()
+
+
+def test_account_confirmation_prompt_is_escaped_before_input(monkeypatch):
+    prompts = []
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "n")
+    assert not cli._confirm_account_mutation(TEXT, yes=False, non_interactive_error="fixture")
+    assert len(prompts) == 1
+    assert_safe(prompts[0])
+    assert "\\x1b" in prompts[0]
