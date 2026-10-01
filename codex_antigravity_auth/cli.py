@@ -1290,6 +1290,22 @@ def main():
     parser = argparse.ArgumentParser(description="Codex Antigravity Auth CLI Utility")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    storage_parser = subparsers.add_parser("storage", help="Inspect and recover encrypted storage keys")
+    storage_sub = storage_parser.add_subparsers(dest="storage_command", required=True)
+    storage_sub.add_parser("keys", help="Read-only backend/key-identity diagnostics (never prints keys)")
+    for action in ("backup", "reencrypt", "restore"):
+        command = storage_sub.add_parser(action, help="Plan the operation; --write explicitly applies it")
+        command.add_argument("--key-env", required=True, help="Environment variable holding a valid Fernet backup/target key")
+        command.add_argument("--source-key-env", action="append", default=[], help="Additional old key variable; repeatable")
+        command.add_argument("--write", action="store_true", help="Apply the planned operation (default: dry run)")
+        if action == "backup":
+            command.add_argument("--output", required=True, help="New encrypted backup file")
+        else:
+            command.add_argument("--backend", choices=["file", "keyring"], default="file")
+            command.add_argument("--backup", required=True, help="New recovery backup for reencrypt; existing input for restore")
+        if action == "restore":
+            command.add_argument("--safety-backup", help="New encrypted backup of current state (required with --write)")
+
     # login
     login_parser = subparsers.add_parser("login", help="Authenticate Google Antigravity account(s) into the rotation pool")
     login_parser.add_argument("--count", type=positive_int, default=1, help="Number of browser login flows to run")
@@ -1588,7 +1604,27 @@ def main():
         os.environ.update(overrides)
 
 
-    if args.command == "namespace":
+    if args.command == "storage":
+        from . import storage_keys, storage_recovery
+        try:
+            if args.storage_command == "keys":
+                result = storage_keys.key_diagnostics()
+            elif args.storage_command == "backup":
+                result = storage_recovery.backup(Path(args.output), args.key_env, source_key_env=args.source_key_env, write=args.write)
+            elif args.storage_command == "reencrypt":
+                result = storage_recovery.reencrypt(args.key_env, args.backend, Path(args.backup), source_key_env=args.source_key_env, write=args.write)
+            else:
+                result = storage_recovery.restore(Path(args.backup), args.key_env, args.backend,
+                                                  Path(args.safety_backup) if args.safety_backup else None,
+                                                  source_key_env=args.source_key_env, write=args.write)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            if result.get("error_class"):
+                sys.exit(1)
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(json.dumps({"ok": False, "error_class": getattr(exc, "code", "storage_operation_failed"),
+                              "message": redact_secret_text(str(exc))}, indent=2))
+            sys.exit(1)
+    elif args.command == "namespace":
         try:
             if args.namespace_command == "show":
                 result = namespace_diagnostics()

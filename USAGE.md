@@ -314,3 +314,14 @@ starts a separate history. Log in through Codex with the selected `CODEX_HOME`
 when a new client identity is needed. Finally set `ANTIGRAVITY_STATE_HOME` to the
 new root and reinstall any service to capture the selection. Neither the copy
 command nor diagnostics changes the current environment or service automatically.
+
+## Encryption-key recovery
+
+`codex-antigravity storage keys` inspects existing backend identities without
+writing files or printing keys. `storage backup`, `storage reencrypt`, and
+`storage restore` default to dry runs and require `--write` for mutation. Supply
+Fernet keys by environment-variable name; never put key values on the command
+line. Re-encryption writes a portable encrypted backup before changing state,
+and restore requires a new safety backup. Pending transitions block normal
+store access until recovery completes. See the [format, commands and recovery
+limits](codex_antigravity_auth/STORAGE.md).

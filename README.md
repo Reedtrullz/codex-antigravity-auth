@@ -454,6 +454,8 @@ different ports for simultaneously running instances.
 Switching roots never moves files automatically. See [namespace copy and
 migration limits](USAGE.md#namespace-copy) for an explicit dry-run-first copy.
 
+Encryption keys have stable backend identities. Use `codex-antigravity storage keys` for read-only diagnosis and explicit backup-first commands for re-encryption/recovery; see the [storage recovery contract](codex_antigravity_auth/STORAGE.md).
+
 ## Troubleshooting
 
 ### HTTP 403 VALIDATION_REQUIRED
