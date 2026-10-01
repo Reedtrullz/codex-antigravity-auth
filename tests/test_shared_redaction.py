@@ -31,6 +31,7 @@ CORPUS = [
     ("https://fixture%40user:fixture%3Apass@example.invalid/v1", ["fixture%40user", "fixture%3Apass"]),
     ("provider error ya29.fixture-google-token", ["ya29.fixture-google-token"]),
     ("provider error sk-or-v1-fixtureabcdefghijklmnop", ["sk-or-v1-fixtureabcdefghijklmnop"]),
+    ("prefixsk-fixtureabcdefghijklmnop", ["sk-fixtureabcdefghijklmnop"]),
     ("first line\nX-Private-Token: fixture-header\nlast line", ["fixture-header"]),
     ('broken: {"password":"fixture-unclosed', ["fixture-unclosed"]),
     ("https://example.invalid?api_key=fixture-query", ["fixture-query"]),

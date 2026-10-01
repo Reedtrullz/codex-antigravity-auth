@@ -76,8 +76,8 @@ _FORM_SECRET_RE = re.compile(
 _HEADER_SECRET_RE = re.compile(
     r"(?im)(^|[ \t])((?:authorization|proxy-authorization|cookie|set-cookie|[\w-]*(?:api[-_]?key|api[-_]?token|token|secret|credential|password)[\w-]*)\s*:\s*)[^\r\n]+"
 )
-_PROVIDER_KEY_RE = re.compile(r"\b(?:sk-or-v1|sk)-[A-Za-z0-9][A-Za-z0-9._-]{12,}\b")
-_GOOGLE_TOKEN_RE = re.compile(r"\bya29\.[A-Za-z0-9._~-]+")
+_PROVIDER_KEY_RE = re.compile(r"(?:sk-or-v1|sk)-[A-Za-z0-9][A-Za-z0-9._-]{12,}")
+_GOOGLE_TOKEN_RE = re.compile(r"ya29\.[A-Za-z0-9._~-]+")
 _URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s?#]+@")
 _QUOTED_FIELD_RE = re.compile(r'''(?P<key>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')\s*:\s*''')
 _SINGLE_QUOTED_VALUE_RE = re.compile(r"'(?:\\.|[^'\\])*'")
