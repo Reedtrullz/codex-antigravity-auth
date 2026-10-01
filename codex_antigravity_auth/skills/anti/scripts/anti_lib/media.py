@@ -57,9 +57,12 @@ def capture(paths, *, policy=None):
     remaining = MAX_TOTAL_BYTES
     for index, path in enumerate(selected, 1):
         try:
-            resolved = path.resolve(strict=True)
-            root = policy.root if policy is not None else Path(resolved.anchor)
-            relative = resolved.relative_to(root).as_posix()
+            # Preserve every selected component for the no-follow reader. Resolving
+            # first would erase a symlinked parent before its descriptor checks.
+            # Policy already checked logical/resolved containment above; anchoring
+            # at the filesystem root also checks parents above the policy root.
+            root = Path(path.anchor)
+            relative = path.relative_to(root).as_posix()
             raw, _size, reason = read_file(root,relative,min(MAX_IMAGE_BYTES,remaining))
         except (OSError, ValueError) as exc:
             raise MediaError(f'Image {index} could not be captured as an allowed regular file') from exc

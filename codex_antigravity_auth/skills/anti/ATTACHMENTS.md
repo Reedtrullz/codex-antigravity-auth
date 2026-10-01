@@ -4,7 +4,10 @@
 consult, panel, compare, review, plan, or expanded workflow. Repeat it for up to
 four images. Each file is limited to 2 MiB and the total to 4 MiB. Images are
 captured once before generation, using bounded regular-file reads and identity
-checks. File changes after capture do not change a running request.
+checks. Symlinks in the selected file or any parent component are refused; use
+the real directory path when a convenience path is a symlink. Policy containment
+is checked before capture and does not authorize following aliases. File changes
+after capture do not change a running request.
 
 ```sh
 python scripts/anti.py consult --model YOUR_IMAGE_MODEL --no-pre-read \

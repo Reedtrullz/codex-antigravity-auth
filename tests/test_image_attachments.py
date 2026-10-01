@@ -328,3 +328,41 @@ def test_transport_retry_and_summary_both_preserve_attachment(anti,image_path,mo
     report=module.captured_media(args).report()
     assert report['gateway_attempts']==2 and all(row['stage']=='summary' for row in report['attempts'])
     assert all('data:image/png;base64,'+base64.b64encode(png()).decode() in json.dumps(request['body']) for request in seen)
+
+
+@pytest.mark.parametrize('with_policy',[False,True])
+@pytest.mark.parametrize('nested',[False,True])
+def test_symlinked_parent_refuses_before_opening_image(tmp_path,monkeypatch,with_policy,nested):
+    from codex_antigravity_auth.skills.anti.scripts.anti_lib import inventory
+    actual=tmp_path/'actual';actual.mkdir()
+    directory=actual/'nested' if nested else actual
+    directory.mkdir(exist_ok=True)
+    path=directory/'fixture.png';path.write_bytes(png())
+    linked=tmp_path/'linked';linked.symlink_to(actual,target_is_directory=True)
+    selected=linked/'nested/fixture.png' if nested else linked/'fixture.png'
+    session=policy(tmp_path) if with_policy else None
+    assert media.capture([str(path)],policy=session).images[0].size==len(png())
+    monkeypatch.setattr(inventory,'_open_file',lambda *a,**k:pytest.fail('linked image must not be opened'))
+    with pytest.raises(media.MediaError,match='symlink'):
+        media.capture([str(selected)],policy=session)
+
+
+def test_cli_symlinked_parent_refuses_before_catalog_lookup(anti,tmp_path,monkeypatch,capsys):
+    module,_=anti
+    actual=tmp_path/'actual';actual.mkdir();(actual/'fixture.png').write_bytes(png())
+    linked=tmp_path/'linked';linked.symlink_to(actual,target_is_directory=True)
+    monkeypatch.setattr(module,'request_json',lambda *a,**k:pytest.fail('no HTTP before image capture'))
+    assert module.main(argv(linked/'fixture.png'))==1
+    assert 'symlink' in capsys.readouterr().err
+
+
+def test_parent_swap_before_open_cannot_escape_capture(tmp_path,monkeypatch):
+    actual=tmp_path/'actual';actual.mkdir();(actual/'fixture.png').write_bytes(png())
+    moved=tmp_path/'moved'
+    read=media.read_file
+    def swap(root,relative,budget):
+        actual.rename(moved);actual.symlink_to(moved,target_is_directory=True)
+        return read(root,relative,budget)
+    monkeypatch.setattr(media,'read_file',swap)
+    with pytest.raises(media.MediaError,match='symlink'):
+        media.capture([str(actual/'fixture.png')])
