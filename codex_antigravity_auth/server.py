@@ -1164,11 +1164,27 @@ class OwnedStreamingResponse(StreamingResponse):
     async def __call__(self, scope, receive, send):
         disconnected = False
         expired = False
-        async def bounded_send(message):
-            # Permit a brief final failure/DONE delivery after a stream timer
-            # fires, while bounding downstream backpressure as well.
+        headers_started = False
+        async def final_send(message):
+            nonlocal headers_started
+            if message["type"] == "http.response.start":
+                headers_started = True
             deadline = max(self.budget.deadline, time.monotonic() + 0.05)
             await self.budget.run(lambda: send(message), deadline=deadline, watch_disconnect=False)
+
+        async def bounded_send(message):
+            if message["type"] == "http.response.start":
+                # Handoff and ASGI execution may be separated by scheduling.
+                # Failure-send grace must never authorize expired 200 headers.
+                self.budget.check_deadline()
+                async def send_headers():
+                    nonlocal headers_started
+                    self.budget.check_deadline()
+                    headers_started = True
+                    await send(message)
+                await self.budget.run(send_headers, deadline=self.budget.deadline, watch_disconnect=False)
+            else:
+                await final_send(message)
         try:
             with self.budget.active():
                 async with anyio.create_task_group() as group:
@@ -1178,6 +1194,12 @@ class OwnedStreamingResponse(StreamingResponse):
                             await self.stream_response(bounded_send)
                         except RequestDeadlineExceeded:
                             expired = True
+                            if not headers_started:
+                                failure = JSONResponse(status_code=504, content={"detail": "Gateway request deadline exceeded"})
+                                try:
+                                    await failure(scope, receive, final_send)
+                                except (RequestDeadlineExceeded, OSError):
+                                    pass
                         except OSError:
                             disconnected = True
                         finally:
@@ -1382,11 +1404,15 @@ async def _create_response(request: Request, budget: RequestBudget):
         budget.deadline = budget.started + google_request_timeout_from_metadata(request_metadata)
         budget.stream_idle = (request_metadata or {}).get("antigravity_stream_idle_timeout_seconds", STREAM_IDLE_TIMEOUT_SECONDS)
         budget.stream_total = (request_metadata or {}).get("antigravity_stream_total_timeout_seconds", STREAM_TOTAL_TIMEOUT_SECONDS)
+        stream = response_stream_flag(codex_req)
+        budget.context.update(stream=stream)
+        if stream:
+            budget.deadline = min(budget.deadline, budget.started + budget.stream_total)
+        budget.check_deadline()
 
         reject_unsupported_previous_response(codex_req)
         model = await budget.sync(response_model_id, codex_req)
         codex_req["model"] = model
-        stream = response_stream_flag(codex_req)
     except HTTPException as exc:
         await log_request("failed", http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
         raise
@@ -1588,7 +1614,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                             terminal_cleanup=True,
                         )
 
-            budget.deadline = budget.started + budget.stream_total
+            budget.start_stream()
             return OwnedStreamingResponse(logged_openai_stream(), media_type="text/event-stream", budget=budget)
         try:
             response = await run_bounded_operation(lambda: create_openai_upstream_response(codex_req, upstream_model, auth, model, telemetry=upstream_observation))
@@ -1755,7 +1781,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                             terminal_cleanup=True,
                         )
 
-            budget.deadline = budget.started + budget.stream_total
+            budget.start_stream()
             return OwnedStreamingResponse(
                 logged_byok_stream(),
                 media_type="text/event-stream", budget=budget,
@@ -2596,7 +2622,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                 await cleanup_stream_accounts()
 
     await log_request("stream_started", model=model, route="google", family=family, stream=True)
-    budget.deadline = budget.started + budget.stream_total
+    budget.start_stream()
     return OwnedStreamingResponse(managed_sse_generator(), media_type="text/event-stream", budget=budget)
 
 

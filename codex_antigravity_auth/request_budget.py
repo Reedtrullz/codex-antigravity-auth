@@ -136,6 +136,19 @@ class RequestBudget:
             self.accounts.append(value.get("email"))
         return value
 
+    def check_deadline(self):
+        if time.monotonic() >= self.deadline:
+            if not self.terminal_observed:
+                self.failure_code = "request_deadline_exceeded"
+            raise RequestDeadlineExceeded()
+
+    def start_stream(self):
+        # Preparation has its own cap and may already be the shorter total
+        # stream cap. Never extend an expired preparation deadline at handoff.
+        self.check_deadline()
+        self.deadline = self.started + self.stream_total
+        self.check_deadline()
+
     async def disconnected(self):
         if not self.body_read:
             return False

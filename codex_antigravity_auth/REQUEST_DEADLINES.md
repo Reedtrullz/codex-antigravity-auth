@@ -14,7 +14,10 @@ The deadline is anchored at handler entry; account rotation never resets it.
 
 The initial request-body/validation phase uses the default budget because
 metadata is not trusted until validation completes. Overrides are measured from
-handler entry, never from when they were parsed. Invalid, non-finite or boolean
+handler entry, never from when they were parsed. For streaming preparation the
+earlier of the preparation deadline and total-stream deadline applies. Expiry
+is checked again at handoff and before the first HTTP headers, so scheduling
+delay cannot turn an expired request into a 200 stream. Invalid, non-finite or boolean
 values fail request validation. These gateway metadata fields are removed before
 provider dispatch. `antigravity_backend_timeout_seconds` and existing transport
 read timeouts remain independent limits; increasing a whole-operation/stream

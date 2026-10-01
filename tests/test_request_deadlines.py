@@ -498,3 +498,116 @@ def test_late_native_connect_result_is_closed_without_being_transferred(monkeypa
             await asyncio.sleep(0.005)
         assert closed == ["client", "response"]
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("route,preparation", [("openai", "resolve_openai_auth"), ("openai_oauth", "resolve_openai_auth"),
+                                               ("byok", "all_provider_configs"), ("google", "native_model_capabilities")])
+def test_public_stream_total_expires_during_preparation_before_http_200(monkeypatch, setup_route, route, preparation):
+    state = setup_route(route, timeout=3)
+    unblock = threading.Event()
+    original = getattr(server, preparation)
+    def slow(*args, **kwargs):
+        unblock.wait(2)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(server, preparation, slow)
+    clients, contexts = stream_clients(monkeypatch, route)
+    request = Request(route, stream=True)
+    request.payload["metadata"] = {"antigravity_request_timeout_seconds": 3,
+                                   "antigravity_stream_total_timeout_seconds": 1}
+    started = time.monotonic()
+    try:
+        with pytest.raises(HTTPException) as caught:
+            asyncio.run(server.create_response(request))
+        assert caught.value.status_code == 504
+        assert time.monotonic() - started < 1.8
+    finally:
+        unblock.set()
+    assert not clients and not contexts and not state.acquire.called
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_total_expiry_after_preparation_handoff_sends_504_without_sse_headers(monkeypatch, setup_route, route):
+    state = setup_route(route, timeout=0.3)
+    clients, contexts = stream_clients(monkeypatch, route)
+    async def scenario():
+        response = await server.create_response(Request(route, stream=True))
+        response.budget.deadline = time.monotonic() - 0.001  # scheduler delay before ASGI response execution
+        sent = []
+        async def receive(): await asyncio.Future()
+        async def send(message): sent.append(message)
+        await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
+        assert [message["status"] for message in sent if message["type"] == "http.response.start"] == [504]
+        assert not any(b"data:" in message.get("body", b"") for message in sent)
+    asyncio.run(scenario())
+    assert all(client.closed == 1 for client in clients)
+    assert all(context.closed == 1 for context in contexts)
+    assert state.release.await_count == (1 if route == "google" else 0)
+    assert state.records[-1]["terminal_reason"] == "request_deadline_exceeded"
+
+
+@pytest.mark.parametrize("route", ["google", "openai", "openai_oauth"])
+def test_short_total_during_owned_preparation_releases_resources(monkeypatch, setup_route, route):
+    state = setup_route(route, timeout=0.3)
+    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 0.04)
+    clients, contexts = stream_clients(monkeypatch, route)
+    unblock = threading.Event()
+    if route == "google":
+        monkeypatch.setattr(server, "get_platform", lambda: (unblock.wait(1), "fixture")[1])
+    else:
+        monkeypatch.setattr(server, "write_request_record", lambda row: unblock.wait(1))
+    started = time.monotonic()
+    try:
+        with pytest.raises(HTTPException) as caught:
+            asyncio.run(server.create_response(Request(route, stream=True)))
+        assert caught.value.status_code == 504 and time.monotonic() - started < 0.25
+    finally: unblock.set()
+    assert all(client.closed == 1 for client in clients)
+    assert all(context.closed == 1 for context in contexts)
+    assert state.release.await_count == (1 if route == "google" else 0)
+
+
+def test_stream_handoff_never_extends_an_expired_preparation_budget():
+    budget = budgets.RequestBudget(Request("google"), timeout=1, release_account=AsyncMock())
+    budget.deadline = time.monotonic() - 0.001
+    budget.stream_total = 1800
+    with pytest.raises(budgets.RequestDeadlineExceeded): budget.start_stream()
+    assert budget.failure_code == "request_deadline_exceeded"
+
+
+def test_stream_total_override_does_not_limit_nonstream_preparation(monkeypatch, setup_route):
+    setup_route("openai", timeout=3)
+    original = server.resolve_openai_auth
+    monkeypatch.setattr(server, "resolve_openai_auth", lambda: (time.sleep(1.05), original())[1])
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, *args, **kw): return success_response("openai")
+    monkeypatch.setattr(server.httpx, "AsyncClient", lambda **kw: Client())
+    request = Request("openai")
+    request.payload["metadata"] = {"antigravity_request_timeout_seconds": 3,
+                                   "antigravity_stream_total_timeout_seconds": 1}
+    result = asyncio.run(server.create_response(request))
+    assert result["status"] == "completed"
+
+
+def test_expiry_between_header_check_and_dispatch_cannot_use_failure_grace(monkeypatch, setup_route):
+    setup_route("openai", timeout=0.3)
+    clients, contexts = stream_clients(monkeypatch, "openai")
+    async def scenario():
+        response = await server.create_response(Request("openai", stream=True))
+        original = response.budget.run
+        first = True
+        async def delayed_dispatch(factory, **kwargs):
+            nonlocal first
+            if first:
+                first = False
+                response.budget.deadline = time.monotonic() - 0.001
+            return await original(factory, **kwargs)
+        response.budget.run = delayed_dispatch
+        sent = []
+        async def receive(): await asyncio.Future()
+        async def send(message): sent.append(message)
+        await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
+        assert [message["status"] for message in sent if message["type"] == "http.response.start"] == [504]
+    asyncio.run(scenario())
+    assert clients[0].closed == contexts[0].closed == 1
