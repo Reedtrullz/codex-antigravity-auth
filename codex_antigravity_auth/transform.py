@@ -549,62 +549,26 @@ def transform_gemini_candidate(candidate: dict, *, tool_validator=None) -> dict:
     if role == "model":
         role = "assistant"
     
-    from .tool_calls import FunctionCallValidator, ToolCallError, google_arguments
+    from .tool_calls import FunctionCallValidator
+    from .google_parts import normalize_google_part
     tool_validator = tool_validator or FunctionCallValidator()
-    tool_error = None
+    tool_error = output_error = None
     partial_ids, partial_names = set(), set()
     output_parts = []
     function_calls = []
     reasoning_text = ""
-    
+
     for part in parts:
-        if not isinstance(part, dict):
-            continue
-            
-        # 1. Handle thoughts / thinking blocks
-        if part.get("thought") is True or part.get("type") == "thinking":
-            thought_text = _stream_text(part.get("text")) or _stream_text(part.get("thinking"))
-            if thought_text:
-                reasoning_text += thought_text
-            continue
+        normalized = normalize_google_part(part, tool_validator)
+        if normalized.text:
+            output_parts.append({"type":"output_text", "text":normalized.text, "annotations":[]})
+        reasoning_text += normalized.reasoning
+        if normalized.function is not None: function_calls.append(normalized.function)
+        tool_error = tool_error or normalized.tool_error
+        output_error = output_error or normalized.output_error
+        if normalized.partial_id: partial_ids.add(normalized.partial_id)
+        if normalized.partial_name: partial_names.add(normalized.partial_name)
 
-        # 2. Handle standard text
-        if "text" in part:
-            text = _stream_text(part.get("text"))
-            if text is None:
-                continue
-            output_parts.append({
-                "type": "output_text",
-                "text": text,
-                "annotations": []
-            })
-
-        # 3. Handle tool calls (independent of the text branch: a part may
-        # carry both text and a function call, and the call must not be
-        # dropped just because the text was emitted first).
-        if "functionCall" in part:
-            fc = part["functionCall"]
-            try:
-                arguments = google_arguments(fc, tool_validator)
-            except ToolCallError as exc:
-                tool_error = tool_error or exc.code
-                if isinstance(fc, dict) and exc.code == "unsupported_partial_function_call":
-                    if isinstance(fc.get("id"), str) and fc["id"]:
-                        partial_ids.add(fc["id"])
-                    elif valid_function_name(fc.get("name")):
-                        partial_names.add(fc["name"])
-                continue
-            name = fc["name"]
-            # Auto-generate a call ID if missing so Codex can execute it
-            call_id = _stream_text(fc.get("id")) or f"call_{uuid.uuid4().hex[:8]}"
-            function_calls.append({
-                "type": "function_call",
-                "id": f"fc_{uuid.uuid4().hex[:8]}",
-                "call_id": call_id,
-                "name": name,
-                "arguments": arguments,
-            })
-            
     # Assemble structured Responses API message output
     message_item = {
         "type": "message",
@@ -619,6 +583,8 @@ def transform_gemini_candidate(candidate: dict, *, tool_validator=None) -> dict:
     }
     if tool_error:
         result["tool_error"] = tool_error
+    if output_error:
+        result["output_error"] = output_error
     if partial_ids: result["partial_call_ids"] = sorted(partial_ids)
     if partial_names: result["partial_call_names"] = sorted(partial_names)
     function_calls = [item for item in function_calls if item["call_id"] not in partial_ids and item["name"] not in partial_names]

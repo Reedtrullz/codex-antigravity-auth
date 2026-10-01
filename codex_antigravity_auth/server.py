@@ -39,6 +39,7 @@ from .models import (
     NATIVE_MODELS,
     canonical_model_id,
     native_model_capabilities,
+    required_output_bridge,
     native_model_catalog,
     native_model_family,
 )
@@ -1212,6 +1213,11 @@ async def create_response(request: Request):
     stream = response_stream_flag(codex_req)
     unified_enabled = is_unified_mode_enabled()
     unified_route = classify_route(model, unified_enabled=unified_enabled)
+    if unified_route == "antigravity" and required_output_bridge(native_model_definition(model)):
+        detail = {"code":"unsupported_output_modality", "message":"Generated image output is not supported by this gateway; select a text-generation model."}
+        await log_request("failed", model=model, route="google", stream=stream, http_status=400,
+                          error_class=detail["code"], error=detail["message"])
+        raise HTTPException(status_code=400, detail=detail)
     if unified_route == "unknown":
         from .unified import unknown_model_error as _unknown_model_error
 
