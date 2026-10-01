@@ -16,6 +16,7 @@ from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
 from .response_protocol import (
     AttemptOutcome,
     ProviderResult,
+    PrimaryAlternativeSelector,
     ProviderTerminal,
     ResponseEventBuilder,
     TerminalKind,
@@ -150,6 +151,7 @@ class GoogleResponseAccumulator:
         self._safety_block: dict[str, Any] | None = None
         self._usage = normalize_usage()
         self._malformed = False
+        self._primary = PrimaryAlternativeSelector()
         self._done = False
 
     def mark_malformed(self) -> None:
@@ -181,8 +183,10 @@ class GoogleResponseAccumulator:
                 usage.get("totalTokenCount"),
             )
 
-        candidates = payload.get("candidates", [])
-        if not isinstance(candidates, list):
+        try:
+            candidates = self._primary.select(payload.get("candidates", []))
+        except ValueError:
+            self._malformed = True
             return
         for candidate in candidates:
             if not isinstance(candidate, dict):
@@ -294,6 +298,7 @@ class GoogleStreamEventAdapter:
             created_at=int(time.time()),
         )
         self.accumulator = GoogleResponseAccumulator()
+        self._primary = PrimaryAlternativeSelector()
         self.created_emitted = False
         self.visible_output_started = False
         self.text_active = False
@@ -317,6 +322,7 @@ class GoogleStreamEventAdapter:
         if self.visible_output_started:
             raise RuntimeError("cannot reset a Google stream after visible output")
         self.accumulator = GoogleResponseAccumulator()
+        self._primary = PrimaryAlternativeSelector()
 
     def consume(self, payload: object) -> list[dict[str, Any]]:
         if self.provider_done:
@@ -331,11 +337,12 @@ class GoogleStreamEventAdapter:
         if not isinstance(payload, dict):
             self.accumulator.mark_malformed()
             return []
-        self.accumulator.consume(payload)
+        try:
+            candidates = self._primary.select(payload.get("candidates", []))
+        except ValueError as exc:
+            raise GoogleStreamPayloadError("invalid_alternatives", str(exc)) from exc
+        self.accumulator.consume({**payload, "candidates": candidates})
         events: list[dict[str, Any]] = []
-        candidates = payload.get("candidates", [])
-        if not isinstance(candidates, list):
-            return events
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
@@ -624,8 +631,9 @@ class GoogleTransport:
             accumulator.mark_malformed()
             return accumulator.finalize()
 
-        candidates = unwrapped.get("candidates", [])
-        if not isinstance(candidates, list):
+        try:
+            candidates = PrimaryAlternativeSelector().select(unwrapped.get("candidates", []))
+        except ValueError:
             accumulator = GoogleResponseAccumulator()
             accumulator.mark_malformed()
             return accumulator.finalize()
