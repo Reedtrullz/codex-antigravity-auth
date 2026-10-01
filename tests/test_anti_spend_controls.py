@@ -34,7 +34,7 @@ def settings(**overrides):
 
 def profile(tmp_path, models=None, **overrides):
     day=datetime.now(timezone.utc).date()
-    data={'version':1,'currency':'USD','source':'synthetic operator ceiling; not a real provider quote',
+    data={'version':1,'currency':'USD','gateway':'http://127.0.0.1:51122/v1','source':'synthetic operator ceiling; not a real provider quote',
           'as_of':day.isoformat(),'valid_until':(day+timedelta(days=1)).isoformat(),
           'models':models or {'fixture:model':{'max_charge_per_attempt':'0.02','max_request_bytes':100000,
               'max_output_tokens':100,'includes_reasoning_and_all_fees':True,'covers_all_gateway_attempts':True}}}
@@ -49,6 +49,7 @@ def open_sequence(monkeypatch,anti,responses):
         status,payload=next(iterator)
         result=io.BytesIO(json.dumps(payload).encode());result.status=status;return result
     monkeypatch.setattr(anti.urllib.request,'urlopen',opened)
+    monkeypatch.setattr(anti.urllib.request,'build_opener',lambda *handlers:argparse.Namespace(open=opened))
     return calls
 
 
@@ -175,7 +176,7 @@ def test_expiry_after_reservation_refunds_unsent_allowances(anti,monkeypatch,tmp
     args=settings(max_calls=1,currency_budget='0.02',pricing_file=str(profile(tmp_path)))
     control=anti.run_control(args);clock=[0.0];control.clock=lambda:clock[0];control.deadline=1
     reserve=control.spend_control.reserve
-    def expire(*values):ticket=reserve(*values);clock[0]=2;return ticket
+    def expire(*values,**kwargs):ticket=reserve(*values,**kwargs);clock[0]=2;return ticket
     monkeypatch.setattr(control.spend_control,'reserve',expire)
     monkeypatch.setattr(anti.urllib.request,'urlopen',lambda *a,**k:pytest.fail('no HTTP'))
     with pytest.raises(anti.RunDeadlineExceeded):generate(anti,args)
@@ -190,9 +191,9 @@ def test_profile_rechecked_on_each_attempt_without_reloading_file(anti,tmp_path)
     day=date(2026,10,1);clock=[day]
     path=profile(tmp_path,as_of=day.isoformat(),valid_until=day.isoformat())
     policy=SpendControl(currency_budget='1',pricing_file=path,today=lambda:clock[0])
-    ticket=policy.reserve('fixture:model',100,10);policy.settle(ticket,submitted=True)
+    ticket=policy.reserve('fixture:model',100,10,gateway='http://127.0.0.1:51122/v1');policy.settle(ticket,submitted=True)
     clock[0]+=timedelta(days=1)
-    with pytest.raises(Exception,match='stale'):policy.reserve('fixture:model',100,10)
+    with pytest.raises(Exception,match='stale'):policy.reserve('fixture:model',100,10,gateway='http://127.0.0.1:51122/v1')
 
 
 def test_complete_attempt_quote_requires_reasoning_fees_and_size_bounds(anti,tmp_path):
@@ -202,8 +203,8 @@ def test_complete_attempt_quote_requires_reasoning_fees_and_size_bounds(anti,tmp
     with pytest.raises(ValueError,match='all fees'):SpendControl(currency_budget='1',pricing_file=path)
     data=json.loads(path.read_text());data['models']['fixture:model']['includes_reasoning_and_all_fees']=True;path.write_text(json.dumps(data))
     policy=SpendControl(currency_budget='1',pricing_file=path)
-    with pytest.raises(Exception,match='scope'):policy.reserve('fixture:model',101,10)
-    with pytest.raises(Exception,match='scope'):policy.reserve('fixture:model',100,11)
+    with pytest.raises(Exception,match='scope'):policy.reserve('fixture:model',101,10,gateway='http://127.0.0.1:51122/v1')
+    with pytest.raises(Exception,match='scope'):policy.reserve('fixture:model',100,11,gateway='http://127.0.0.1:51122/v1')
 
 
 def test_workflow_controls_survive_expansion_and_dry_run_has_units(anti):
@@ -276,10 +277,78 @@ def test_currency_quote_must_cover_gateway_internal_attempts(anti,tmp_path):
 
 def test_settlement_is_idempotent_and_observed_usage_never_refunds_currency(anti,tmp_path):
     policy=anti.SpendControl(max_calls=2,currency_budget='0.04',pricing_file=profile(tmp_path))
-    ticket=policy.reserve('fixture:model',100,10)
+    ticket=policy.reserve('fixture:model',100,10,gateway='http://127.0.0.1:51122/v1')
     policy.settle(ticket,submitted=True,usage={'input_tokens':0,'output_tokens':0})
     policy.settle(ticket,submitted=False)
     snapshot=policy.snapshot()
     assert snapshot['committed']['calls']==1 and snapshot['reserved']['calls']==0
     assert snapshot['currency_committed_ceiling']=='0.02'
     assert snapshot['observed_tokens']=={'input_tokens':0,'output_tokens':0}
+
+
+@pytest.mark.parametrize('destination', ['http://127.0.0.1:51123/v1','https://127.0.0.1:51122/v1','http://127.0.0.1:51122/other'])
+def test_quote_gateway_mismatch_refuses_before_transport(anti,monkeypatch,tmp_path,destination):
+    path=profile(tmp_path)
+    args=settings(currency_budget='1',pricing_file=str(path),base_url=destination)
+    calls=open_sequence(monkeypatch,anti,[])
+    with pytest.raises(anti.SpendAdmissionError,match='gateway.*pricing scope'):generate(anti,args)
+    snapshot=args._run_control.spend_control.snapshot()
+    assert calls==[] and snapshot['committed']['calls']==snapshot['reserved']['calls']==0
+    assert snapshot['currency']['gateway']=='http://127.0.0.1:51122/v1'
+
+
+def test_normalized_scope_matches_and_is_rechecked_after_gateway_change(anti,monkeypatch,tmp_path):
+    path=profile(tmp_path,gateway='HTTP://EXAMPLE.INVALID:80/v1/')
+    args=settings(currency_budget='1',pricing_file=str(path),base_url='http://example.invalid/v1')
+    calls=open_sequence(monkeypatch,anti,[(200,response())])
+    generate(anti,args)
+    assert args._run_control.spend_control.snapshot()['currency']['gateway']=='http://example.invalid/v1'
+    args.base_url='http://different.invalid/v1'
+    with pytest.raises(anti.SpendAdmissionError,match='gateway'):generate(anti,args)
+    assert len(calls)==1
+
+
+@pytest.mark.parametrize('kind,expected', [('expired','expired'),('fees','all fees'),('missing','not found'),('date','YYYY-MM-DD'),('json','valid UTF-8 JSON')])
+def test_cli_pricing_refusal_gives_safe_actionable_reason(anti,monkeypatch,tmp_path,capsys,kind,expected):
+    path=profile(tmp_path)
+    data=json.loads(path.read_text())
+    if kind=='expired':data['valid_until']='2000-01-01'
+    if kind=='fees':data['models']['fixture:model']['includes_reasoning_and_all_fees']=False
+    if kind=='date':data['as_of']='private-fixture-content'
+    path.write_text(json.dumps(data))
+    if kind=='missing':path.unlink()
+    if kind=='json':path.write_text('private-fixture-content:invalid-json')
+    monkeypatch.setattr(anti,'open_gateway_request',lambda *a,**k:pytest.fail('no transport'))
+    assert anti.main(['consult','--model','fixture:model','--prompt','fixture','--currency-budget','1',
+                      '--pricing-file',str(path),'--no-progress'])==1
+    error=capsys.readouterr().err
+    assert expected in error and 'private-fixture-content' not in error and str(path) not in error
+
+
+def test_currency_gateway_scope_does_not_follow_redirects(anti,monkeypatch,tmp_path):
+    from fake_upstream import upstream
+    from http.server import BaseHTTPRequestHandler
+    redirected=[]
+    def get(handler):
+        redirected.append(handler.path);handler.send_response(200);handler.end_headers()
+    monkeypatch.setattr(BaseHTTPRequestHandler,'do_GET',get,raising=False)
+    with upstream() as (target,target_requests):
+        with upstream((302,{'Location':target+'/responses'},b'{}')) as (source,source_requests):
+            path=profile(tmp_path,gateway=source)
+            args=settings(currency_budget='1',pricing_file=str(path),base_url=source)
+            with pytest.raises(anti.AntiError,match='HTTP 302'):generate(anti,args)
+    assert len(source_requests)==1 and target_requests==[] and redirected==[]
+    assert args._run_control.spend_control.snapshot()['committed']['calls']==1
+
+
+def test_pricing_opener_preparation_cannot_move_dispatch_past_deadline(anti,monkeypatch,tmp_path):
+    args=settings(currency_budget='1',pricing_file=str(profile(tmp_path)))
+    control=anti.run_control(args);clock=[0.0];control.clock=lambda:clock[0];control.deadline=1
+    def prepare(*handlers):
+        clock[0]=2
+        return argparse.Namespace(open=lambda *a,**k:pytest.fail('no late POST'))
+    monkeypatch.setattr(anti.urllib.request,'build_opener',prepare)
+    with pytest.raises(anti.RunDeadlineExceeded) as caught:generate(anti,args)
+    assert caught.value.submitted is False
+    assert control.snapshot()['attempts_started']==0
+    assert control.spend_control.snapshot()['reserved']['calls']==0

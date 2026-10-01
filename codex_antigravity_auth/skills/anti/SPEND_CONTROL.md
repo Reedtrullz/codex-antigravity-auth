@@ -45,8 +45,14 @@ metadata if such an overrun is observed. A previous request cannot be undone.
 Currency mode requires a local version1 JSON pricing file. It is loaded once and
 its hash is recorded; every attempt rechecks dates. Dates must include today in
 UTC, and `as_of` may be at most30 days old. Missing, stale, future, expired,
-unbounded or unpriced entries refuse admission. No online price lookup happens.
-Model keys match the actual forwarded gateway ID exactly, including fallback IDs.
+unbounded or unpriced entries refuse admission. No online price lookup happens. Refusal diagnostics identify stale dates, missing
+files and incomplete bounds without echoing pricing-file paths or content.
+The required `gateway` scope names one absolute HTTP(S) base URL. Scheme/host
+case, default ports and trailing slashes normalize; path and nondefault port
+remain part of the scope. Every reservation compares the actual request
+destination with that scope, including after an in-process gateway change.
+Currency-mode HTTP requests never follow redirects to another endpoint.
+Model keys match the actual forwarded gateway model ID exactly, including fallback IDs.
 
 This is a synthetic schema example. Replace IDs, source, dates and bounds with
 your own complete declaration:
@@ -55,6 +61,7 @@ your own complete declaration:
 {
   "version": 1,
   "currency": "USD",
+  "gateway": "http://127.0.0.1:51122/v1",
   "source": "Synthetic schema example; replace with your pricing reference",
   "as_of": "2026-10-01",
   "valid_until": "2026-10-02",
@@ -82,7 +89,7 @@ digits; there is no float conversion. A submitted request consumes its declared
 ceiling even when usage is missing or lower than expected. Unsent preparation or
 deadline failures release it. No billing refund is inferred from local counters.
 
-The report identifies `user_declared_complete_attempt_ceiling`, source/date/hash,
+The report identifies `user_declared_complete_attempt_ceiling`, gateway scope, source/date/hash,
 committed and pending ceiling totals, estimates, observed counts and missing
 usage. `provider_price_verified`, `billing_guarantee` and `token_limit_guarantee`
 remain false. The enforced currency invariant is the sum of admitted declared

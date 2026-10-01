@@ -36,7 +36,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from anti_lib.run_control import RunControl, DeadlineExceeded, CURRENT_RUN
-from anti_lib.spend_control import SpendControl, SpendRefused
+from anti_lib.spend_control import SpendControl, SpendRefused, AdmissionConfigError
 from anti_lib.capabilities import CapabilityRegistry
 from anti_lib.chunking import chunk_manifest
 from anti_lib.context import ordered_prompt
@@ -599,8 +599,10 @@ def run_control(args=None):
                         max_output_tokens=getattr(args, 'max_total_output_tokens', None),
                         currency_budget=getattr(args, 'currency_budget', None),
                         pricing_file=getattr(args, 'pricing_file', None), error_type=SpendAdmissionError)
+                except AdmissionConfigError as exc:
+                    raise AntiError('Invalid attempt admission configuration: ' + str(exc)) from exc
                 except (OSError, ValueError, TypeError, KeyError) as exc:
-                    raise AntiError('Invalid attempt admission configuration: ' + type(exc).__name__) from exc
+                    raise AntiError('Invalid attempt admission configuration: check numeric limits and pricing-file fields') from exc
     if args is not None:
         args._run_control = current
     return current
@@ -1514,7 +1516,7 @@ def _retry_after_seconds(value: object) -> float | None:
     return delay
 
 
-def transport_entry_timeout(method, timeout, *, payload=None, body=None):
+def transport_entry_timeout(method, timeout, *, payload=None, body=None, url=None):
     control = CURRENT_RUN.get()
     if control is not None:
         timeout = control.timeout(timeout)
@@ -1524,7 +1526,8 @@ def transport_entry_timeout(method, timeout, *, payload=None, body=None):
         if policy is not None and policy.enabled:
             if not isinstance(payload, dict) or not isinstance(body, bytes) or type(payload.get('max_output_tokens')) is not int:
                 raise SpendAdmissionError('admission refused: request/output reservation is unknown')
-            ticket = policy.reserve(payload.get('model'), len(body), payload['max_output_tokens'])
+            gateway = url[:-len('/responses')] if isinstance(url, str) and url.endswith('/responses') else None
+            ticket = policy.reserve(payload.get('model'), len(body), payload['max_output_tokens'], gateway=gateway)
             _SPEND_TICKET.set((policy, ticket, submitted_count))
         if control is not None:
             timeout = control.timeout(timeout)
@@ -1532,6 +1535,21 @@ def transport_entry_timeout(method, timeout, *, payload=None, body=None):
         if control is not None:
             control.mark_submitted()
     return timeout
+
+
+def open_gateway_request(request, *, timeout, payload=None, body=None):
+    control = CURRENT_RUN.get()
+    policy = getattr(control, 'spend_control', None)
+    if policy is not None and policy.pricing is not None:
+        # A quote scoped to one gateway never authorizes redirected dispatch.
+        class NoPricingRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+        opener = urllib.request.build_opener(NoPricingRedirect())
+        return opener.open(request, timeout=transport_entry_timeout(request.get_method(), timeout,
+                           payload=payload, body=body, url=request.full_url))
+    return urllib.request.urlopen(request, timeout=transport_entry_timeout(request.get_method(), timeout,
+                                  payload=payload, body=body, url=request.full_url))
 
 
 def request_json(
@@ -1560,7 +1578,7 @@ def request_json(
 
     retry_after_header: object = None
     try:
-        with urllib.request.urlopen(req, timeout=transport_entry_timeout(method, timeout, payload=payload, body=body)) as res:
+        with open_gateway_request(req, timeout=timeout, payload=payload, body=body) as res:
             raw = read_response_body(res, timeout)
             status = int(res.status)
     except urllib.error.HTTPError as exc:
