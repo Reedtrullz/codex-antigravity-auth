@@ -44,7 +44,7 @@ def main():
             (suite / "scripts").mkdir()
             shutil.copy2(ROOT / "scripts/run_tests.py", suite / "scripts/run_tests.py")
             (suite / "tests").mkdir()
-            for test in ("conftest.py", "test_hermetic_replay.py", "test_installed_contract.py", "test_service_manager.py"):
+            for test in ("conftest.py", "test_hermetic_replay.py", "test_installed_contract.py", "test_service_manager.py", "test_model_observations.py"):
                 shutil.copy2(ROOT / "tests" / test, suite / "tests" / test)
             # An explicit external root and cwd prevent pytest from finding the
             # checkout's conftest, pythonpath config, or editable source imports.

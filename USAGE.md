@@ -239,3 +239,12 @@ When multiple Google accounts are registered, the gateway automatically rotates 
 The local server natively isolates explicit thinking blocks and stream envelopes, ensuring standard formatting:
 - **Thinking/Reasoning block**: Emits `response.reasoning_text.delta` for explicit backend thinking parts while preserving regular `thoughtSignature` text as visible output.
 - **SSE Stream**: Formats candidates, function calls, usage metadata, and completion events into Responses API SSE chunks parsed correctly by both Codex CLI and Codex Desktop.
+
+## Model discovery and recent readiness
+
+`provider discover NAME` reads cached evidence; `--network` explicitly fetches a
+bounded optional catalog. `models explain ID --json` stays offline, while
+`models probe ID --network` records one expiring text-generation check. Imports
+are preview-first and require `--write --accept-digest` to save. See the
+[discovery and readiness contract](codex_antigravity_auth/design/model-discovery.md)
+for supported pagination, limits, cache semantics and configuration diagnostics.
