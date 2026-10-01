@@ -253,3 +253,5 @@ Google, BYOK and native OpenAI requests now share a monotonic 60-second preparat
 ## Resource limits and overload
 
 Generation admission defaults to 32 in-flight requests per process and 16 per backend route. Excess requests receive HTTP503 with Retry-After. Incoming bodies default to32MiB, inline attachments have separate decoded limits, and JSON/schema/SSE/provider accumulation are bounded without accepting clipped requests as complete. Set operator environment overrides for larger contexts or images; see [resource limits and admission](codex_antigravity_auth/RESOURCE_LIMITS.md) for units, ranges, failure codes and ownership.
+
+The running gateway reuses bounded HTTP connections for generation across Google, native OpenAI and BYOK. Credentials and timeouts remain per request; shared cookie storage is disabled. See [HTTP client ownership and synthetic measurements](codex_antigravity_auth/HTTP_CLIENTS.md).
