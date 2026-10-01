@@ -1,4 +1,4 @@
-from .console import console_print as print
+from .console import console_print as print, safe_terminal_text
 import logging
 import copy
 import math
@@ -68,7 +68,7 @@ def _apply_token_refresh(account: dict, refresh_token: str, *, wait: bool = True
         # on a background refresh here: fail closed and let selection rotate.
         acquired = lock.acquire(blocking=False)
     if not acquired:
-        _log.warning("Refresh lock busy for %s; refusing stale-token selection", email)
+        _log.warning("Refresh lock busy for %s; refusing stale-token selection", safe_terminal_text(str(email)))
         return False
     try:
         refreshed = refresh_access_token(refresh_token)
@@ -84,11 +84,11 @@ def _apply_token_refresh(account: dict, refresh_token: str, *, wait: bool = True
                 project_id = discover_project_id(refreshed["access_token"])
                 if project_id:
                     account["projectId"] = project_id
-                    _log.info("Discovered project ID %s for %s", project_id, email)
+                    _log.info("Discovered project ID %s for %s", safe_terminal_text(str(project_id)), safe_terminal_text(str(email)))
                 else:
-                    _log.warning("Project discovery returned empty for %s", email)
+                    _log.warning("Project discovery returned empty for %s", safe_terminal_text(str(email)))
             except Exception as exc:
-                _log.warning("Project discovery failed for %s: %s", email, exc)
+                _log.warning("Project discovery failed for %s: %s", safe_terminal_text(str(email)), safe_terminal_text(redact_secret_text(str(exc))))
         return True
     finally:
         lock.release()
@@ -440,7 +440,7 @@ class AccountManager:
                                 from .oauth import discover_project_id
                                 discovered_project = discover_project_id(new_access_token)
                             except Exception:
-                                _log.warning("Project discovery failed for %s during refresh", email)
+                                _log.warning("Project discovery failed for %s during refresh", safe_terminal_text(str(email)))
 
                         merged = False
                         with self._lock:

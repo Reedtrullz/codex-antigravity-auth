@@ -380,7 +380,7 @@ def _confirm_account_mutation(prompt: str, *, yes: bool, non_interactive_error: 
         return True
     if not sys.stdin.isatty():
         raise SystemExit(non_interactive_error)
-    answer = input(f"{prompt} [y/N] ").strip().lower()
+    answer = input(safe_terminal_text(f"{prompt} [y/N] ")).strip().lower()
     return answer in {"y", "yes"}
 
 
