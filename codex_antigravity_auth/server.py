@@ -1,3 +1,4 @@
+import logging
 import json
 import asyncio
 import math
@@ -1817,11 +1818,7 @@ async def create_response(request: Request):
             # Transport failures are expected; anything else is a bug that must
             # surface as a 500 (not be silently masked as an account-rotation
             # trigger and turned into a misleading 502).
-            print(
-                f"[gateway] request_backend unexpected error: "
-                f"{type(exc).__name__}: {redact_secret_text(str(exc))[:300]}",
-                file=sys.stderr,
-            )
+            logging.getLogger(__name__).error("request_backend unexpected error: %s", type(exc).__name__)
             raise
 
     async def request_backend_with_boundary(selected_account: dict) -> httpx.Response | None:

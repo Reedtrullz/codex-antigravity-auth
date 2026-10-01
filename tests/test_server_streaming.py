@@ -147,14 +147,14 @@ class TestServerStreaming(unittest.TestCase):
                     with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
                         with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
                             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
-                                with patch("codex_antigravity_auth.server.sys.stderr") as mock_stderr:
+                                with self.assertLogs("codex_antigravity_auth.server", level="ERROR") as captured_logs:
                                     response = TestClient(app, raise_server_exceptions=False).post(
                                         "/v1/responses",
                                         json={"model": "gemini-3.5-flash-high", "input": "hello"},
                                     )
 
         self.assertEqual(response.status_code, 500)
-        stderr_text = "".join(call.args[0] for call in mock_stderr.write.call_args_list)
+        stderr_text = "\n".join(captured_logs.output)
         self.assertIn("request_backend unexpected error", stderr_text)
         self.assertIn("KeyError", stderr_text)
 

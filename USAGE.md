@@ -337,3 +337,13 @@ Use `setup --plan` for JSON stages/prerequisites without credential resolution o
 ## Versioned command JSON and support bundles
 
 Operational `--json` commands now return a version-1 envelope with command data under `data`, warnings separate from blocking failures, and explicit exit codes. Migrate consumers of the previous root-level JSON fields. `support-bundle` previews bounded allowlisted offline evidence; only `--output PATH --write` creates a private local export, and existing files are preserved. See [the JSON and support contract](codex_antigravity_auth/CLI_JSON.md) for supported commands, schemas, limits and privacy details.
+### Gateway process-log privacy and retention
+
+`start`, `start --background` and newly installed services write bounded,
+sanitized process logs separately from structured request telemetry. Per port,
+retain at most 2 MiB active plus two 2 MiB backups. `status --json` and
+`service status --json` report both log kinds without including their contents.
+Legacy gateway/service log files are left untouched; reinstall an existing
+service to stop its old append-only output routing. Account references in runtime
+messages are opaque and change on restart; explicit account-management commands
+still show local account identity. See [the process-log contract](codex_antigravity_auth/PROCESS_LOGS.md).

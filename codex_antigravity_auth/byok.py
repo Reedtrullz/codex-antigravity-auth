@@ -1,7 +1,7 @@
+import logging
 import os
 import re
 import math
-import sys
 from pathlib import Path
 from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory
 
@@ -488,10 +488,8 @@ def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
             provider_label = normalized.get("displayName") or normalized.get("id") or "unknown"
             if provider_label not in _warned_invalid_provider_keys:
                 _warned_invalid_provider_keys.add(provider_label)
-                print(
-                    f"[gateway] BYOK provider {provider_label}: stored apiKey failed validation "
-                    "and was dropped (control characters or non-ASCII); fix the provider config",
-                    file=sys.stderr,
+                logging.getLogger(__name__).warning(
+                    "BYOK provider stored apiKey failed validation and was dropped; fix the provider config"
                 )
     aliases = normalized.get("apiKeyEnvAliases")
     if "apiKeyEnvAliases" in normalized:

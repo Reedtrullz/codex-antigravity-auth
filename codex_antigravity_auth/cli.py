@@ -104,7 +104,7 @@ DEFAULT_CODEX_SKILLS_DIR = "~/.codex/skills"
 BUNDLED_CODEX_SKILL_NAME = "anti"
 CODEX_PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 GATEWAY_PID_TEMPLATE = "antigravity-gateway-{port}.pid"
-GATEWAY_LOG_TEMPLATE = "antigravity-gateway-{port}.log"
+GATEWAY_LOG_TEMPLATE = "antigravity-process-logs/gateway-{port}.log"
 GATEWAY_READY_TIMEOUT_SECONDS = 10.0
 GATEWAY_READY_RETRY_INTERVAL_SECONDS = 0.25
 VERSION_CACHE_FILE = "antigravity-version-check.json"
@@ -1507,6 +1507,8 @@ def main():
         action="store_true",
         help="Allow non-loopback clients when ANTIGRAVITY_GATEWAY_TOKEN is set to at least 32 visible ASCII characters",
     )
+    start_parser.add_argument("--process-log", help=argparse.SUPPRESS)
+    start_parser.add_argument("--quiet-runtime-console", action="store_true", help=argparse.SUPPRESS)
     start_parser.add_argument("--background", action="store_true", help="Start the gateway as a background process with pid/log files")
     start_parser.add_argument(
         "--op-env-file",
@@ -1698,12 +1700,10 @@ def main():
         else:
             if getattr(args, "op_env_file", None) or getattr(args, "op_environment", None):
                 raise SystemExit("1Password gateway options require `codex-antigravity start --background`.")
-            import uvicorn
+            from .process_logs import run_gateway
             require_safe_gateway_host(args.host, args.allow_remote)
-            if is_unified_model_picker_arg(args):
-                print("[*] Unified model picker enabled: OpenAI + Antigravity + BYOK via one provider.")
-            print(f"[*] Starting local Responses API compatible gateway server on {args.host}:{args.port}...")
-            uvicorn.run("codex_antigravity_auth.server:app", host=args.host, port=args.port, log_level="info")
+            process_path = Path(args.process_log) if args.process_log else gateway_runtime_paths(args.port)[1]
+            run_gateway(args.host, args.port, path=process_path, console=not args.quiet_runtime_console)
     elif args.command == "stop":
         stop_gateway(args)
     elif args.command == "status":

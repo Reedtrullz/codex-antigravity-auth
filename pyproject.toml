@@ -55,6 +55,7 @@ codex_antigravity_auth = [
   "CLI_JSON.md",
   "schemas/*.json",
   "SETUP.md",
+  "PROCESS_LOGS.md",
   "skills/anti/SKILL.md",
   "skills/anti/agents/*.yaml",
   "skills/anti/scripts/*.py",
