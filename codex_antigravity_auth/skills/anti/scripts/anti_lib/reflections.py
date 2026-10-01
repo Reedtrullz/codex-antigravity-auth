@@ -12,13 +12,14 @@ import math
 import time
 from pathlib import Path
 from typing import Any
+from .namespaces import gateway_home
 
 from .redaction import sanitize_json
 from .retention import summary_projection, summary_retention, summary_structure
 from .persistence import PersistenceError, atomic_write_json, file_lock
 from .file_protection import ensure_private_directory, protect_existing_file
 
-REFLECTIONS_DIR = Path.home() / ".codex" / "anti-runs" / "reflections"
+REFLECTIONS_DIR = gateway_home() / "anti-runs" / "reflections"
 MAX_ENTRIES_PER_REPO = 500
 TTL_DAYS = 90
 

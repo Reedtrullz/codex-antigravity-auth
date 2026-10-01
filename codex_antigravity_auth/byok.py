@@ -4,6 +4,8 @@ import math
 import sys
 from pathlib import Path
 from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory
+
+from .namespaces import gateway_file
 from typing import Any
 from urllib.parse import urlparse
 
@@ -131,7 +133,7 @@ def get_providers_json_path() -> Path:
 
 
 def providers_json_path_read_only() -> Path:
-    return Path(os.path.expanduser(PROVIDERS_FILE))
+    return gateway_file(PROVIDERS_FILE, "antigravity-providers.json")
 
 
 def default_provider_config() -> dict[str, Any]:
