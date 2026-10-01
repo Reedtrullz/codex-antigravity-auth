@@ -5280,6 +5280,17 @@ def build_panel_synthesis_prompt(
             safe_structured = diagnostics.get("safe_structured")
             if isinstance(safe_structured, dict):
                 material["structuredOutput"] = safe_structured
+                # Keep full corroboration in the final contract, but do not
+                # repeat every duplicate's evidence twice beside the raw lane.
+                projection = []
+                for finding in findings:
+                    item = dict(finding)
+                    corroboration = item.pop("corroboration", None)
+                    if corroboration:
+                        item["corroboration_count"] = len(corroboration)
+                        item["evidence"] = "See structuredOutput.findings for all corroborating evidence and checks."
+                    projection.append(item)
+                material["findings"] = projection
             findings_dropped = int(parsed.get("findings_dropped") or 0)
             findings_truncated = int(parsed.get("findings_truncated") or 0)
             if findings_dropped or findings_truncated:
