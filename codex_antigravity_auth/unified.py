@@ -170,18 +170,20 @@ def is_antigravity_model(model: object) -> bool:
         return False
 
 
-def is_byok_model(model: object) -> bool:
+def is_byok_model(model: object, *, read_only: bool = False) -> bool:
     """True when the id carries an explicit BYOK provider prefix."""
     from .byok import split_provider_model
 
     try:
-        provider_id, _ = split_provider_model(str(model))
+        provider_id, _ = split_provider_model(str(model), read_only=True) if read_only else split_provider_model(str(model))
     except Exception:
+        if read_only:
+            raise
         return False
     return provider_id is not None
 
 
-def classify_route(model: object, *, unified_enabled: bool | None = None) -> str:
+def classify_route(model: object, *, unified_enabled: bool | None = None, read_only: bool = False) -> str:
     """Central router: ``byok`` | ``openai`` | ``antigravity`` | ``unknown``.
 
     ``openai-disabled`` is returned when an OpenAI id is requested while
@@ -202,7 +204,7 @@ def classify_route(model: object, *, unified_enabled: bool | None = None) -> str
         if antigravity_stripped:
             return "antigravity"
         return "unknown" if unified_enabled else "antigravity"
-    if is_byok_model(text):
+    if (is_byok_model(text, read_only=True) if read_only else is_byok_model(text)):
         return "byok"
     # Registry-based, no startswith cascade. Antigravity wins on overlap
     # (e.g. an overlay shadowing an OpenAI id) and is documented as such.
