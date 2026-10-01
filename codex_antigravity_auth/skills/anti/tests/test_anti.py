@@ -2844,7 +2844,7 @@ class AntiHelperTests(unittest.TestCase):
         contract = json.loads(contract_output.getvalue())
         self.assertEqual(
             set(contract),
-            {"caveats", "coverage", "disagreements", "findings", "findings_dropped", "findings_total", "panelStatus", "parse_warning", "recommended_next_actions", "runStatus", "schemaVersion", "scopeStatus", "summary", "unverifiable", "verification"},
+            {"caveats", "coverage", "disagreements", "findings", "findings_dropped", "findings_total", "findings_invalid", "findings_merged", "findings_truncated", "confidence_kind", "finding_errors", "finding_errors_omitted", "panelStatus", "parse_warning", "recommended_next_actions", "runStatus", "schemaVersion", "scopeStatus", "summary", "unverifiable", "verification"},
         )
 
     def test_panel_errors_are_redacted_in_json_output(self) -> None:

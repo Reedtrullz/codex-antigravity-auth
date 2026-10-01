@@ -4721,8 +4721,48 @@ def strip_fenced_json_blocks(text: str) -> str:
     )
 
 
-def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
+_FINDING_STRING_LIMITS = {
+    "claim": 1600, "verify": 1200, "severity": 40, "id": 80,
+    "file": 500, "evidence": 2000, "sourceCommit": 128,
+    "chunkId": 160, "laneId": 160, "excerptSha256": 64, "scopeStatus": 40,
+}
+
+
+def finding_validation_error(value: Any) -> str | None:
     if not isinstance(value, dict):
+        return "finding must be an object"
+    for field in _FINDING_STRING_LIMITS:
+        raw = value.get(field)
+        if raw is not None and not isinstance(raw, str):
+            return f"{field} must be a string"
+    if not str(value.get("claim") or "").strip() or not str(value.get("verify") or "").strip():
+        return "claim and verify must be nonempty strings"
+    confidence = value.get("confidence", 0.5)
+    if type(confidence) not in (int, float):
+        return "confidence must be a finite number"
+    try:
+        if not math.isfinite(float(confidence)):
+            return "confidence must be a finite number"
+    except (ValueError, OverflowError):
+        return "confidence must be a finite number"
+    line = value.get("line")
+    if line is not None and (type(line) is not int or not 1 <= line <= 2_147_483_647):
+        return "line must be a positive integer at most 2147483647, or null"
+    lanes = value.get("lanes")
+    if lanes is not None and (not isinstance(lanes, list) or any(not isinstance(lane, str) for lane in lanes)):
+        return "lanes must be a list of strings"
+    return None
+
+
+def finding_was_truncated(value: dict[str, Any]) -> bool:
+    if any(len(redact_sensitive_text(value.get(field) or "").strip()) > limit for field, limit in _FINDING_STRING_LIMITS.items()):
+        return True
+    lanes = value.get("lanes") or []
+    return len(lanes) > 12 or any(len(redact_sensitive_text(lane).strip()) > 120 for lane in lanes)
+
+
+def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
+    if finding_validation_error(value):
         return None
     claim = clean_string(value.get("claim"), max_chars=1600)
     verify = clean_string(value.get("verify"), max_chars=1200)
@@ -4731,21 +4771,12 @@ def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
     severity = clean_string(value.get("severity"), max_chars=40).lower()
     if severity not in {"critical", "high", "medium", "low", "info"}:
         severity = "medium"
-    finding_id = clean_string(value.get("id"), max_chars=80) or f"F{index:03d}"
-    finding_id = re.sub(r"[^A-Za-z0-9_.:-]+", "-", finding_id).strip("-._:") or f"F{index:03d}"
-    lanes = clean_string_list(value.get("lanes"), max_items=12, max_chars=120)
-    # Phase 1: enriched findings schema
-    try:
-        confidence = float(value.get("confidence", 0.5))
-    except (TypeError, ValueError):
-        confidence = 0.5
-    confidence = max(0.0, min(1.0, confidence))
+    finding_id = clean_string(value.get("id"), max_chars=80)
+    finding_id = re.sub(r"[^A-Za-z0-9_.:-]+", "-", finding_id).strip("-._:")
+    lanes = sorted(set(clean_string_list(value.get("lanes"), max_items=12, max_chars=120)))
+    confidence = max(0.0, min(1.0, float(value.get("confidence", 0.5))))
     file_path = clean_string(value.get("file"), max_chars=500) or None
     line = value.get("line")
-    if isinstance(line, (int, float)) and line > 0:
-        line = int(line)
-    else:
-        line = None
     evidence = clean_string(value.get("evidence"), max_chars=2000) or "unverified"
     # Model-supplied verification labels are untrusted; only the local
     # verifier may upgrade this field after attaching tool evidence.
@@ -4754,10 +4785,12 @@ def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
     if excerpt_sha256 and not re.fullmatch(r"[0-9a-f]{64}", excerpt_sha256):
         excerpt_sha256 = None
     # Build fingerprint for cross-lane dedup
-    fp_key = f"{file_path or ''}:{line or ''}:{claim.lower().strip()}"
+    full_file = redact_sensitive_text(value.get("file") or "").strip()
+    full_claim = redact_sensitive_text(value["claim"]).lower().strip()
+    fp_key = f"{full_file}:{line or ''}:{full_claim}"
     fingerprint = "sha256:" + hashlib.sha256(fp_key.encode("utf-8")).hexdigest()[:16]
     return {
-        "id": finding_id,
+        "id": finding_id or "F-" + fingerprint.split(":", 1)[1],
         "claim": claim,
         "severity": severity,
         "lanes": lanes,
@@ -4812,37 +4845,42 @@ def parse_panel_findings(text: str) -> tuple[dict[str, Any] | None, str | None, 
     diagnostics["safe_structured"] = sanitize_json(parsed)
 
     findings: list[dict[str, Any]] = []
-    dropped = 0
+    invalid = 0
+    truncated = 0
+    diagnostics["finding_errors"] = []
     for index, item in enumerate(raw_findings, start=1):
-        normalized = normalize_finding_item(item, index)
+        error = finding_validation_error(item)
+        normalized = None if error else normalize_finding_item(item, index)
         if normalized is None:
-            dropped += 1
+            invalid += 1
+            if len(diagnostics["finding_errors"]) < 20:
+                diagnostics["finding_errors"].append({"index": index, "reason": error or "no usable claim or verification"})
         else:
+            truncated += int(finding_was_truncated(item))
             findings.append(normalized)
-    # Phase 1: dedup by fingerprint — merge lanes, keep highest severity, average confidence
-    if findings:
-        SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
-        deduped: dict[str, dict[str, Any]] = {}
-        for f in findings:
-            fp = f.get("fingerprint", "")
-            if fp in deduped:
-                existing = deduped[fp]
-                # merge lanes
-                for lane in f.get("lanes", []):
-                    if lane not in existing["lanes"]:
-                        existing["lanes"].append(lane)
-                # keep highest severity
-                if SEVERITY_ORDER.get(f["severity"], 0) > SEVERITY_ORDER.get(existing["severity"], 0):
-                    existing["severity"] = f["severity"]
-                # average confidence
-                existing["confidence"] = round((existing["confidence"] + f["confidence"]) / 2, 2)
-                # prefer non-default evidence
-                if f.get("evidence", "unverified") != "unverified":
-                    existing["evidence"] = f["evidence"]
-                dropped += 1
-            else:
-                deduped[fp] = f
-        findings = list(deduped.values())
+    diagnostics["finding_errors_omitted"] = invalid - len(diagnostics["finding_errors"])
+    # Merge each group once, with stable representative fields and a true mean.
+    # Confidence is model-reported, not a calibrated probability.
+    severity_order = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for finding in findings:
+        groups.setdefault(finding["fingerprint"], []).append(finding)
+    merged = len(findings) - len(groups)
+    findings = []
+    for fingerprint in sorted(groups):
+        group = sorted(groups[fingerprint], key=lambda item: json.dumps(item, sort_keys=True))
+        finding = dict(group[0])
+        finding["lanes"] = sorted({lane for item in group for lane in item["lanes"]})
+        finding["severity"] = max((item["severity"] for item in group), key=severity_order.get)
+        finding["confidence"] = round(math.fsum(item["confidence"] for item in group) / len(group), 2)
+        evidence = sorted({item["evidence"] for item in group if item["evidence"] != "unverified"})
+        finding["evidence"] = "\n".join(evidence) or "unverified"
+        if len(group) > 1:
+            # Retain distinct model-reported evidence/checks without claiming verification.
+            fields = ("evidence", "verify", "confidence", "lanes", "verificationStatus")
+            contributions = {json.dumps({field: item[field] for field in fields}, sort_keys=True) for item in group}
+            finding["corroboration"] = [json.loads(item) for item in sorted(contributions)]
+        findings.append(finding)
     parse_warning = None
     if diagnostics["repaired"]:
         parse_warning = (
@@ -4862,7 +4900,13 @@ def parse_panel_findings(text: str) -> tuple[dict[str, Any] | None, str | None, 
         "caveats": clean_string_list(parsed.get("caveats") or parsed.get("verification_caveats"), max_items=20, max_chars=700),
         "parse_warning": parse_warning,
         "findings_total": len(raw_findings),
-        "findings_dropped": dropped,
+        "findings_dropped": invalid,
+        "findings_invalid": invalid,
+        "findings_merged": merged,
+        "findings_truncated": truncated,
+        "confidence_kind": "model_reported",
+        "finding_errors": diagnostics["finding_errors"],
+        "finding_errors_omitted": diagnostics["finding_errors_omitted"],
     }
     return sanitize_json(contract), None, diagnostics
 
@@ -4982,6 +5026,12 @@ def fallback_findings_contract(
             "parse_warning": parse_warning,
             "findings_total": 0,
             "findings_dropped": 0,
+            "findings_invalid": 0,
+            "findings_merged": 0,
+            "findings_truncated": 0,
+            "confidence_kind": "model_reported",
+            "finding_errors": [],
+            "finding_errors_omitted": 0,
         }
     )
 
@@ -5230,9 +5280,11 @@ def build_panel_synthesis_prompt(
             if isinstance(safe_structured, dict):
                 material["structuredOutput"] = safe_structured
             findings_dropped = int(parsed.get("findings_dropped") or 0)
-            if findings_dropped:
+            findings_truncated = int(parsed.get("findings_truncated") or 0)
+            if findings_dropped or findings_truncated:
                 normalization_warning = (
-                    f"{findings_dropped} finding item(s) were normalized out of Anti's final findings list; "
+                    f"{findings_dropped} invalid finding item(s) were normalized out and "
+                    f"{findings_truncated} finding item(s) were truncated in Anti's final findings list; "
                     "the complete redacted structured lane payload is preserved for judging."
                 )
                 material["structuredNormalizationWarnings"] = [normalization_warning]
@@ -5350,7 +5402,7 @@ def build_panel_synthesis_prompt(
                     "and never describe repeated fallback output as agreement."
                 ),
                 "Return one JSON object and no surrounding prose. The object must contain: summary (string), disagreements (array of strings), findings (array of objects), unverifiable (array of strings), recommended_next_actions (array of strings), and caveats (array of strings).",
-                "Each findings item must contain: id (stable short string), claim (specific claim), severity (critical|high|medium|low|info), lanes (array of model ids that support it), verify (a concrete local check Codex should run before acting), confidence (float 0.0-1.0 indicating how certain you are), file (path to the file if applicable), line (line number if applicable), and evidence (any concrete evidence like test output or type error, or 'unverified').",
+                "Each findings item must contain: id (stable short string), claim (specific claim), severity (critical|high|medium|low|info), lanes (array of model ids that support it), verify (a concrete local check Codex should run before acting), confidence (model-reported float 0.0-1.0, not a calibrated probability), file (path to the file if applicable), line (line number if applicable), and evidence (any concrete evidence like test output or type error, or 'unverified').",
                 "Put speculative or externally dependent observations in unverifiable, not findings. Do not include secrets, credentials, raw account identifiers, or provider keys.",
                 "## Panel Manifest\n```json\n" + json.dumps(manifest, indent=2, sort_keys=True) + "\n```",
                 "## Source Prompt / Context\n" + source.strip(),
@@ -6756,10 +6808,10 @@ def command_panel(args: argparse.Namespace) -> int:
         parse_diagnostics.get("repaired")
         or parse_diagnostics.get("parse_error")
         or findings_caveat
-        or (isinstance(findings, dict) and findings.get("findings_dropped", 0))
+        or (isinstance(findings, dict) and (findings.get("findings_dropped", 0) or findings.get("findings_truncated", 0)))
     ):
         metadata["judge_input_status"] = "partial"
-        metadata["judge_input_loss_reason"] = "judge output was repaired, unparsable, or dropped findings"
+        metadata["judge_input_loss_reason"] = "judge output was repaired, unparsable, or lost finding content"
     metadata["judge_truncated"] = judge_truncated
     metadata["estimated_total"] = estimated_total
     metadata["estimated_cost"] = running_cost
