@@ -152,6 +152,10 @@ class GoogleResponseAccumulator:
         self._malformed = False
         self._done = False
 
+    @property
+    def usage(self) -> dict[str, int]:
+        return dict(self._usage)
+
     def mark_malformed(self) -> None:
         self._malformed = True
 
