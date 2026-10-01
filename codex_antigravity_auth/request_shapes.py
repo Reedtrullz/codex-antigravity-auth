@@ -81,6 +81,9 @@ def _schema(schema, path, *, google=False):
             required = node['required']
             if not isinstance(required, list) or any(not isinstance(name, str) for name in required):
                 reject(where + '.required', 'expected an array of property names')
+            if google and '' in required:
+                index = required.index('')
+                reject(f'{where}.required[{index}]', 'translation_loss: Google schema translation would remove this required property')
             if len(set(required)) != len(required):
                 reject(where + '.required', 'property names must be unique')
         if 'enum' in node and (not isinstance(node['enum'], list) or not node['enum']):
@@ -182,8 +185,17 @@ def validate_request_shapes(request, *, route=None):
     choice = request.get('tool_choice')
     if isinstance(choice, dict) and 'name' in choice and 'function' in choice:
         reject('tool_choice', 'conflicting flat and nested function choices')
-    if isinstance(choice, dict) and translated and choice.get('type') != 'function':
-        reject('tool_choice.type', 'this route implements function choices only')
+    if isinstance(choice, dict) and translated:
+        if choice.get('type') != 'function':
+            reject('tool_choice.type', 'this route implements function choices only')
+        if 'function' in choice:
+            if set(choice) != {'type', 'function'}:
+                reject('tool_choice', 'nested function choice has unsupported fields')
+            function = choice['function']
+            if not isinstance(function, dict) or set(function) != {'name'}:
+                reject('tool_choice.function', 'expected only the function name')
+        elif set(choice) != {'type', 'name'}:
+            reject('tool_choice', 'expected only type and function name')
 
     if translated and request.get('previous_response_id'):
         reject('previous_response_id', 'translated routes require the full conversation in input')

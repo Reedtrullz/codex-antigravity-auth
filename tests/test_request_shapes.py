@@ -198,3 +198,51 @@ def test_native_optional_function_fields_are_carried_without_translation():
     before = deepcopy(request)
     validate_request_shapes(request, route='native')
     assert request == before
+
+
+@pytest.mark.parametrize('nested', [False, True])
+def test_google_empty_name_requirement_is_not_dropped_before_dispatch(monkeypatch, nested):
+    schema = {'type':'object','properties':{'':{'type':'string'}},'required':['']}
+    if nested:
+        schema = {'type':'object','properties':{'outer':schema},'required':['outer']}
+    request = {'model':'gemini-3.8-flash','input':'fixture','tools':[
+        {'type':'function','name':'fixture','parameters':schema}]}
+    guard = Mock(side_effect=AssertionError('no account work'))
+    monkeypatch.setattr(server.account_manager, 'acquire_account', guard)
+    response = TestClient(server.app).post('/v1/responses', json=request)
+    assert response.status_code == 400 and 'required[0]: translation_loss' in response.json()['detail']
+    if nested:
+        assert 'properties["outer"]' in response.json()['detail']
+    guard.assert_not_called()
+    for route in ('native','byok'):
+        before = deepcopy(request)
+        validate_request_shapes(request, route=route)
+        assert request == before
+
+
+@pytest.mark.parametrize('model', ['gemini-3.8-flash', 'fixture:model'])
+@pytest.mark.parametrize('choice,path', [
+    ({'type':'function','function':{'name':'lookup','extra':'fixture'}}, 'tool_choice.function'),
+    ({'type':'function','function':{'name':'lookup'},'extra':'fixture'}, 'tool_choice'),
+    ({'type':'function','name':'lookup','extra':'fixture'}, 'tool_choice'),
+])
+def test_translated_tool_choices_cannot_drop_extra_fields_before_account_work(monkeypatch, model, choice, path):
+    guard = Mock(side_effect=AssertionError('no account/config work'))
+    monkeypatch.setattr(server.account_manager, 'acquire_account', guard)
+    monkeypatch.setattr(server, 'all_provider_configs', guard)
+    request = {'model':model,'input':'fixture','tools':[{'type':'function','name':'lookup'}],'tool_choice':choice}
+    response = TestClient(server.app).post('/v1/responses', json=request)
+    assert response.status_code == 400 and path in response.json()['detail']
+    guard.assert_not_called()
+    before = deepcopy(request)
+    validate_request_shapes(request, route='native')
+    assert request == before
+
+
+@pytest.mark.parametrize('choice', [{'type':'function','name':'lookup'}, {'type':'function','function':{'name':'lookup'}}])
+def test_supported_flat_and_nested_choices_still_translate(choice):
+    request = {'model':'gemini-3.8-flash','input':'fixture','tools':[{'type':'function','name':'lookup'}],'tool_choice':choice}
+    google = transform_request(request)['request']['toolConfig']['functionCallingConfig']
+    chat = transform_request_to_chat(request, 'fixture')['tool_choice']
+    assert google['allowedFunctionNames'] == ['lookup']
+    assert chat == {'type':'function','function':{'name':'lookup'}}

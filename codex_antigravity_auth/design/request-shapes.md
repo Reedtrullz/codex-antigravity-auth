@@ -28,14 +28,17 @@ call names and correlation IDs.
 remain supported, with no conflicting spellings. Descriptions, strict flags,
 parameter/schema containers and common schema child shapes are checked. Translated
 routes accept only the function tool/choice forms they implement; built-in and
-custom tools cannot disappear in conversion.
+custom tools cannot disappear in conversion. A translated function choice accepts
+only `type`/`name` or `type` plus a nested `function` containing only `name`; extra
+choice fields fail instead of disappearing. Native choices remain intact.
 
 ## Schema behavior
 
 Google's existing cleaner removes constructs including `$ref`/definitions,
 `const`, `additionalProperties`, string/array constraints and `format`. Requests
 using those constructs now fail at the relevant schema field with
-`translation_loss`, before account work. Boolean schemas are also refused there.
+`translation_loss`, before account work. Boolean schemas and required empty-name properties (which the cleaner would
+omit) are also refused there.
 `strict: true` is rejected on Google because that guarantee is not implemented.
 There is no implicit constraint-dropping compatibility mode.
 
