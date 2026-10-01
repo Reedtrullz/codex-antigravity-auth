@@ -244,7 +244,7 @@ class ChatResponseAccumulator:
             finish_reason = choice.get("finish_reason")
             if finish_reason is not None and not isinstance(finish_reason, str):
                 self._malformed = True
-            if isinstance(finish_reason, str) and finish_reason:
+            if isinstance(finish_reason, str):
                 self._finish_reason = finish_reason
                 if finish_reason.strip().lower() in POLICY_FINISH_REASONS:
                     self._blocked = True
@@ -441,7 +441,7 @@ class OpenAICompatibleTransport:
             reason = choice.get("finish_reason")
             if reason is not None and not isinstance(reason, str):
                 malformed = True
-            if isinstance(reason, str) and reason:
+            if isinstance(reason, str):
                 finish_reason = reason
                 blocked = blocked or reason.strip().lower() in POLICY_FINISH_REASONS
             message = choice.get("message")

@@ -238,6 +238,12 @@ def classify_terminal(
         )
 
     normalized_reason = finish_reason.strip().lower() if isinstance(finish_reason, str) else ""
+    if isinstance(finish_reason, str) and not normalized_reason:
+        return ProviderTerminal(
+            TerminalKind.FAILED, "missing_terminal_signal",
+            error_code="missing_terminal_signal",
+            error_message="The provider ended without a nonblank finish reason.",
+        )
     if normalized_reason in {"max_tokens", "max_output_tokens", "length"}:
         return ProviderTerminal(
             TerminalKind.INCOMPLETE,

@@ -189,7 +189,7 @@ def test_generic_policy_metadata_stays_sanitized_while_explicit_refusal_is_verba
     assert terminal.kind is TerminalKind.COMPLETED
 
 
-@pytest.mark.parametrize("reason", [True, 123, {}, []])
+@pytest.mark.parametrize("reason", [True, 123, {}, [], "", " \t\n"])
 def test_invalid_finish_scalar_is_not_treated_as_an_absent_legacy_reason(reason):
     payload = {"choices": [{"message": {"content": "prefix"}, "finish_reason": reason}]}
     chat = OpenAICompatibleTransport(timeout=1).parse_chat_response(payload)
@@ -206,3 +206,38 @@ def test_invalid_finish_scalar_is_not_treated_as_an_absent_legacy_reason(reason)
     for result in (streamed, google_streamed):
         assert result["status"] == "failed"
         assert semantic_output(result["output"])["text"] == ["prefix"]
+
+
+@pytest.mark.parametrize("reasons,expected", [(["", "stop"], "completed"), ([" \t", "stop"], "completed"), (["stop", ""], "failed")])
+def test_a_blank_interim_finish_requires_a_subsequent_valid_terminal(reasons, expected):
+    chat_payloads = [{"choices": [{"delta": {"content": "prefix" if index == 0 else ""}, "finish_reason": reason}]}
+                     for index, reason in enumerate(reasons)]
+    chat, _ = chat_stream(chat_payloads)
+    adapter = GoogleStreamEventAdapter(response_id="fixture", display_model="fixture")
+    adapter.created()
+    for index, reason in enumerate(reasons):
+        adapter.consume({"candidates": [{"content": {"parts": [{"text": "prefix" if index == 0 else ""}]}, "finishReason": reason.upper()}]})
+    adapter.mark_done()
+    google = next(event["response"] for event in adapter.finish() if isinstance(event, dict) and event.get("type") in {"response.completed", "response.failed"})
+    for result in (chat, google):
+        assert result["status"] == expected
+        assert semantic_output(result["output"])["text"] == ["prefix"]
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_absent_and_null_legacy_finishes_keep_their_existing_end_behavior(explicit_null):
+    chat_choice = {"message": {"content": "answer"}}
+    google_candidate = {"content": {"parts": [{"text": "answer"}]}}
+    if explicit_null:
+        chat_choice["finish_reason"] = None
+        google_candidate["finishReason"] = None
+    chat = OpenAICompatibleTransport(timeout=1).parse_chat_response({"choices": [chat_choice]})
+    google = GoogleTransport(timeout=1).parse_response({"candidates": [google_candidate]})
+    streamed, _ = chat_stream([{"choices": [{"delta": chat_choice["message"], **({"finish_reason": None} if explicit_null else {})}]}])
+    adapter = GoogleStreamEventAdapter(response_id="fixture", display_model="fixture")
+    adapter.created()
+    adapter.consume({"candidates": [google_candidate]})
+    adapter.mark_done()
+    google_streamed = next(event["response"] for event in adapter.finish() if isinstance(event, dict) and event.get("type") == "response.completed")
+    assert chat.terminal.kind is google.terminal.kind is TerminalKind.COMPLETED
+    assert streamed["status"] == google_streamed["status"] == "completed"
