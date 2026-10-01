@@ -55,6 +55,8 @@ The request JSONL log is capped and rotated at `10 MiB`. It records request ids,
 
 `codex-antigravity doctor --codex-ready --json` includes read-only account/provider store format and migration status, account-state schema version, observed service state, and provider capability mismatches under `diagnostics`. These checks do not migrate stores or rewrite config. See `docs/refactor-migration.md` before upgrading or rolling back a store used by an older package.
 
+OAuth refresh timeouts, connection/DNS failures, server errors, throttling, and malformed responses cool the account down without adding credential strikes. Only a structured `invalid_grant` token rejection adds strikes; session-policy reauthentication and OAuth client configuration errors remain recoverable. Refresh attempts respect persisted account cooldowns and disabled state, including concurrent/background callers. Existing disabled accounts still require explicit recovery. See [Google’s refresh-token and session-policy guidance](https://developers.google.com/identity/protocols/oauth2) for `invalid_grant` versus `invalid_rapt`.
+
 Google account selection is sticky for sequential requests but load-aware for concurrent ones. `AccountState` owns family/account cooldowns, process-local leases, attempt counters, and persisted schema-version `2` state; request handlers release every lease when non-streaming responses finish or streaming responses end/disconnect.
 
 To expose a local model definition in Codex's model picker, add an overlay entry:
