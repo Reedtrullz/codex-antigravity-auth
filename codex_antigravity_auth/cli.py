@@ -18,6 +18,7 @@ import urllib.request
 from importlib import metadata as importlib_metadata
 from importlib.resources import as_file, files
 from pathlib import Path
+from .namespaces import client_config_path, client_skills_path, namespace_diagnostics, root_path
 from urllib.parse import parse_qs, urlparse
 from .byok import (
     PROVIDER_PRESETS,
@@ -350,7 +351,7 @@ def verify_codex_skill(skill_path: Path) -> bool:
 def run_install_skill(args) -> None:
     try:
         action, destination, backup_path = install_codex_skill(
-            Path(os.path.expanduser(args.skill_dir)),
+            client_skills_path(args.skill_dir),
             force=args.force,
             dry_run=args.dry_run,
         )
@@ -1230,7 +1231,7 @@ def gateway_start_command(base_url: str, *, unified: bool = False) -> str:
 
 
 def run_configure_codex(args) -> None:
-    config_path = Path(os.path.expanduser(args.config))
+    config_path = client_config_path(args.config)
     activate = bool(getattr(args, "activate", False))
     provider_id, provider_name = unified_provider_defaults(args)
     # Keep argparse namespace coherent for the write-command echo.
@@ -1533,8 +1534,18 @@ def main():
     provider_remove = provider_sub.add_parser("remove", help="Remove a stored BYOK provider config")
     provider_remove.add_argument("provider")
 
+    namespace_parser = subparsers.add_parser("namespace", help="Inspect client/gateway roots without credential access")
+    namespace_sub = namespace_parser.add_subparsers(dest="namespace_command", required=True)
+    namespace_sub.add_parser("show", help="Print read-only namespace relationship as JSON")
+    copy_state = namespace_sub.add_parser("copy-state", help="Plan or copy gateway configuration to an unused root")
+    copy_state.add_argument("--source", required=True, help="Existing absolute gateway state root")
+    copy_state.add_argument("--destination", required=True, help="New absolute gateway state root")
+    copy_state.add_argument("--write", action="store_true", help="Publish the copy; stop state writers first (default is dry run)")
+
     # start
     start_parser = subparsers.add_parser("start", help="Start the local Responses API gateway server")
+    start_parser.add_argument("--client-home", help="Explicit client config/auth root (CODEX_HOME)")
+    start_parser.add_argument("--state-home", help="Explicit gateway state root (ANTIGRAVITY_STATE_HOME)")
     start_parser.add_argument("--port", type=int, default=51122, help="Gateway server port (default: 51122)")
     start_parser.add_argument("--host", default="127.0.0.1", help="Gateway server host (default: 127.0.0.1)")
     start_parser.add_argument(
@@ -1565,8 +1576,30 @@ def main():
     status_parser.add_argument("--json", action="store_true", help="Print status as JSON")
 
     args = parser.parse_args()
+    if args.command == "start":
+        overrides = {}
+        for option, name in (("client_home", "CODEX_HOME"), ("state_home", "ANTIGRAVITY_STATE_HOME")):
+            value = getattr(args, option, None)
+            if value is not None:
+                try:
+                    overrides[name] = str(root_path(value, label=name))
+                except ValueError as exc:
+                    parser.error(str(exc))
+        os.environ.update(overrides)
 
-    if args.command == "login":
+
+    if args.command == "namespace":
+        try:
+            if args.namespace_command == "show":
+                result = namespace_diagnostics()
+            else:
+                from .namespace_migration import copy_gateway_state
+                result = copy_gateway_state(args.source, args.destination, write=args.write)
+            print(json.dumps(result, indent=2))
+        except (ValueError, RuntimeError, OSError) as exc:
+            print(f"[FAIL] {redact_secret_text(str(exc))}")
+            sys.exit(1)
+    elif args.command == "login":
         run_login(args)
     elif args.command == "setup":
         run_setup(args)

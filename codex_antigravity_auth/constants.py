@@ -5,6 +5,7 @@ import stat
 import ipaddress
 import tempfile
 from pathlib import Path
+from .namespaces import gateway_home, gateway_file
 
 # Defaults
 DEFAULT_CLIENT_ID = None
@@ -55,7 +56,8 @@ def validate_gateway_token_strength(token: str | None) -> str:
 
 
 def get_codex_home() -> Path:
-    p = Path(os.path.expanduser("~/.codex"))
+    """Legacy gateway-state helper; client config/auth use client_home instead."""
+    p = gateway_home()
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -77,7 +79,7 @@ def save_oauth_credentials(client_id: str, client_secret: str) -> Path:
     """Persist Google OAuth desktop-client credentials with private file mode."""
     client_id = _validate_oauth_credential_value(client_id, label="OAuth client id")
     client_secret = _validate_oauth_credential_value(client_secret, label="OAuth client secret")
-    cred_path = Path(os.path.expanduser(CREDENTIALS_FILE))
+    cred_path = gateway_file(CREDENTIALS_FILE, "antigravity-credentials.json")
     if cred_path.is_symlink():
         raise RuntimeError(f"Refusing to write OAuth credentials through symlink: {cred_path}")
     cred_path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +94,7 @@ def save_oauth_credentials(client_id: str, client_secret: str) -> Path:
 
 
 def _load_file_credentials() -> tuple[str | None, str | None]:
-    cred_path = Path(os.path.expanduser(CREDENTIALS_FILE))
+    cred_path = gateway_file(CREDENTIALS_FILE, "antigravity-credentials.json")
     fd = None
     try:
         flags = os.O_RDONLY

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import get_codex_home
+from .namespaces import client_home, gateway_home, namespace_diagnostics
 from .onepassword import wrap_with_onepassword
 from .redaction import redact_secret_text
 from .service_manager import observed_service_result
@@ -19,7 +20,7 @@ _DEFAULT_GET_CODEX_HOME = get_codex_home
 def _codex_home_read_only() -> Path:
     if get_codex_home is not _DEFAULT_GET_CODEX_HOME:
         return get_codex_home()
-    return _service_home() / ".codex"
+    return gateway_home(home=_service_home())
 
 
 def _service_home() -> Path:
@@ -52,7 +53,7 @@ def _service_result(
         commands=commands,
         error=error,
     ).to_dict()
-    return {**info, **result}
+    return {**info, **result, "namespaces": namespace_diagnostics(home=_service_home())}
 
 
 def _command_evidence(result: subprocess.CompletedProcess) -> dict[str, Any]:
@@ -121,6 +122,8 @@ def service_command(
         str(int(port)),
         "--host",
         str(host),
+        "--client-home", str(client_home(home=_service_home())),
+        "--state-home", str(_codex_home_read_only()),
     ]
     if unified_model_picker:
         command.append("--unified-model-picker")

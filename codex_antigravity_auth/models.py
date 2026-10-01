@@ -8,6 +8,7 @@ import re
 import threading
 import warnings
 from pathlib import Path
+from .namespaces import gateway_file
 from typing import Any
 from .response_protocol import ProviderCapabilities
 from .secure_store import SecureStore
@@ -210,7 +211,7 @@ def _slug_variants(value: str) -> set[str]:
 
 
 def model_overlay_path() -> Path:
-    return Path(os.path.expanduser(MODEL_OVERLAY_FILE))
+    return gateway_file(MODEL_OVERLAY_FILE, "antigravity-models.toml")
 
 
 def _validate_model_text(value: Any, label: str) -> str:

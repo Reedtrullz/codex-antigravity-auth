@@ -14,6 +14,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from .namespaces import gateway_home
 try:
     from codex_antigravity_auth.secure_store import file_lock
 except ImportError:  # standalone copied skill
@@ -42,7 +43,7 @@ except ImportError:  # standalone copied skill
                     fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
 
-REFLECTIONS_DIR = Path.home() / ".codex" / "anti-runs" / "reflections"
+REFLECTIONS_DIR = gateway_home() / "anti-runs" / "reflections"
 MAX_ENTRIES_PER_REPO = 500
 TTL_DAYS = 90
 
