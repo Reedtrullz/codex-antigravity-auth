@@ -59,7 +59,7 @@ def mock_response(monkeypatch, payload, *, raw=None):
     response.read.return_value = raw if raw is not None else json.dumps(payload).encode()
     response.__enter__.return_value = response
     urlopen = MagicMock(return_value=response)
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("codex_antigravity_auth.cli.open_http_request", urlopen)
     return urlopen
 
 
