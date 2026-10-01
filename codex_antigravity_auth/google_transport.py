@@ -154,6 +154,10 @@ class GoogleResponseAccumulator:
         self._primary = PrimaryAlternativeSelector()
         self._done = False
 
+    @property
+    def usage(self) -> dict[str, int]:
+        return dict(self._usage)
+
     def mark_malformed(self) -> None:
         self._malformed = True
 
@@ -340,6 +344,7 @@ class GoogleStreamEventAdapter:
         try:
             candidates = self._primary.select(payload.get("candidates", []))
         except ValueError as exc:
+            self.accumulator.consume({**payload, "candidates": []})
             raise GoogleStreamPayloadError("invalid_alternatives", str(exc)) from exc
         self.accumulator.consume({**payload, "candidates": candidates})
         events: list[dict[str, Any]] = []
@@ -428,7 +433,7 @@ class GoogleStreamEventAdapter:
             events.extend(self.builder.finish_text())
         result = ProviderResult(
             output=(),
-            usage=normalize_usage(),
+            usage=self.accumulator.usage,
             terminal=ProviderTerminal(
                 TerminalKind.FAILED,
                 code,
@@ -635,6 +640,7 @@ class GoogleTransport:
             candidates = PrimaryAlternativeSelector().select(unwrapped.get("candidates", []))
         except ValueError:
             accumulator = GoogleResponseAccumulator()
+            accumulator.consume({**unwrapped, "candidates": []})
             accumulator.mark_malformed()
             return accumulator.finalize()
 
