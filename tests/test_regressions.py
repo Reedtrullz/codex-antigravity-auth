@@ -1009,7 +1009,7 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertIsNone(get_pkce_verifier("expired_state"))
 
     @patch("codex_antigravity_auth.oauth.require_credentials", return_value=("client-id", "client-secret"))
-    @patch("urllib.request.urlopen")
+    @patch("codex_antigravity_auth.oauth.open_http_request")
     def test_oauth_exchange_and_refresh_use_timeout(self, mock_urlopen, mock_creds):
         mock_resp = MagicMock()
         mock_resp.status = 200
@@ -1159,12 +1159,15 @@ class TestRegressionFixes(unittest.TestCase):
         captured = {}
         records = []
 
-        async def fake_create_openai_compatible_response(codex_req, provider, provider_model, display_model):
+        async def fake_create_openai_compatible_response(codex_req, provider, provider_model, display_model, *, telemetry=None):
             captured["codex_req"] = dict(codex_req)
+            if telemetry is not None:
+                telemetry["http_status"] = 200
             return {
                 "id": "resp_mock",
                 "object": "response",
                 "created_at": 123,
+                "status": "completed",
                 "model": display_model,
                 "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
                 "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
@@ -1183,7 +1186,10 @@ class TestRegressionFixes(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(records[-1]["run_id"], "anti-run_123")
+        self.assertEqual(records[-1]["status"], "success")
+        self.assertTrue(records[-1]["provider_accepted"])
         self.assertNotIn("metadata", captured["codex_req"])
+        self.assertNotIn("telemetry", captured["codex_req"])
 
     def test_responses_endpoint_rejects_invalid_run_id_before_routing(self):
         client = TestClient(app)
@@ -1363,7 +1369,7 @@ class TestRegressionFixes(unittest.TestCase):
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
-    @patch("urllib.request.urlopen")
+    @patch("codex_antigravity_auth.cli.open_http_request")
     def test_doctor_treats_auth_http_error_as_online(self, mock_urlopen, mock_load, mock_creds):
         mock_creds.return_value = ("client_id_val", "client_secret_val")
         mock_load.return_value = {"accounts": []}

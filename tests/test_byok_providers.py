@@ -505,7 +505,7 @@ class TestBYOKProviders(unittest.TestCase):
         deepseek = normalized["providers"]["deepseek"]
         self.assertEqual(deepseek["kind"], "openai_chat")
         self.assertEqual(deepseek["displayName"], "DeepSeek Custom")
-        self.assertNotIn("baseUrl", deepseek)
+        self.assertIsNone(deepseek["baseUrl"])
         self.assertEqual(deepseek["models"], ["deepseek-chat"])
         self.assertNotIn("headers", deepseek)
         self.assertEqual(deepseek["apiKeyEnvAliases"], ["DEEPSEEK_ALT_KEY"])
@@ -569,7 +569,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         with patch("codex_antigravity_auth.byok.load_provider_config", return_value=normalized):
             providers = all_provider_configs(include_env_enabled=False)
-            self.assertEqual(providers["deepseek"]["baseUrl"], PROVIDER_PRESETS["deepseek"]["baseUrl"])
+            self.assertIsNone(providers["deepseek"]["baseUrl"])
             self.assertEqual(providers["deepseek"]["models"], ["deepseek-chat"])
             self.assertEqual(providers["custom-one"]["kind"], "openai_chat")
 

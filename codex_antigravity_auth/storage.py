@@ -1,17 +1,18 @@
 import json
 import os
-import stat
 import threading
 import keyring
 import base64
 import hashlib
 import time
 from pathlib import Path
+from .namespaces import gateway_home, gateway_file
 from typing import Any, Callable
 from cryptography.fernet import Fernet, InvalidToken
 from .constants import ANTIGRAVITY_ACCOUNTS_FILE, get_codex_home
 from .account_state import SCHEMA_VERSION, migrate_account_state
 from .secure_store import SecureStore, file_lock as _exclusive_file_lock
+from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory, protect_descriptor, protect_existing_file
 
 _accounts_lock = threading.RLock()
 _DEFAULT_GET_CODEX_HOME = get_codex_home
@@ -20,7 +21,7 @@ _DEFAULT_GET_CODEX_HOME = get_codex_home
 def _codex_home_read_only() -> Path:
     if get_codex_home is not _DEFAULT_GET_CODEX_HOME:
         return get_codex_home()
-    return Path(os.path.expanduser("~/.codex"))
+    return gateway_home()
 
 # Stable service name for OS Keyring integration
 KEYRING_SERVICE_NAME = "codex-antigravity-auth"
@@ -71,9 +72,7 @@ def _ensure_private_file(path: Path) -> None:
     if path.is_symlink():
         raise RuntimeError(f"Refusing to use symlinked secret file: {path}")
     if path.exists():
-        mode = stat.S_IMODE(path.stat().st_mode)
-        if mode & 0o077:
-            os.chmod(path, 0o600)
+        protect_existing_file(path)
 
 
 def _normalize_fernet_key(secret: str) -> str:
@@ -96,8 +95,13 @@ def _get_file_fallback_key() -> str:
     except FileExistsError:
         _ensure_private_file(path)
         return path.read_text(encoding="utf-8").strip()
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(key)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            protect_descriptor(f.fileno(), path=path)
+            f.write(key)
+    except Exception:
+        path.unlink(missing_ok=True)  # We exclusively created this empty key file.
+        raise
     return key
 
 def _get_encryption_key() -> str:
@@ -143,7 +147,7 @@ def _peek_encryption_key() -> str | None:
 
 def account_store_diagnostics() -> dict[str, Any]:
     """Inspect account-store format and schema without migrating or writing it."""
-    path = Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    path = gateway_file(ANTIGRAVITY_ACCOUNTS_FILE, "antigravity-accounts.json")
     report: dict[str, Any] = {
         "path": str(path),
         "exists": path.is_file(),
@@ -260,12 +264,12 @@ def decrypt_payload(encrypted_bytes: bytes) -> str:
 
 def get_accounts_json_path() -> Path:
     p = accounts_json_path_read_only()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(p.parent, enforce_existing=True)
     return p
 
 
 def accounts_json_path_read_only() -> Path:
-    return Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    return gateway_file(ANTIGRAVITY_ACCOUNTS_FILE, "antigravity-accounts.json")
 
 
 def _load_secure_json_unlocked(

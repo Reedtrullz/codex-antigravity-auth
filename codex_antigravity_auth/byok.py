@@ -3,9 +3,13 @@ import re
 import math
 import sys
 from pathlib import Path
+from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory
+
+from .namespaces import gateway_file
 from typing import Any
 from urllib.parse import urlparse
 
+from .endpoint_policy import validate_endpoint_url
 from .constants import is_loopback_host
 from .response_protocol import ProviderCapabilities
 from .storage import (
@@ -125,12 +129,12 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
 
 def get_providers_json_path() -> Path:
     p = providers_json_path_read_only()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(p.parent, enforce_existing=True)
     return p
 
 
 def providers_json_path_read_only() -> Path:
-    return Path(os.path.expanduser(PROVIDERS_FILE))
+    return gateway_file(PROVIDERS_FILE, "antigravity-providers.json")
 
 
 def default_provider_config() -> dict[str, Any]:
@@ -148,34 +152,7 @@ def validate_provider_id(provider_id: str) -> str:
 
 
 def validate_http_base_url(base_url: Any, *, label: str = "base URL") -> str:
-    value = _non_empty_string(base_url)
-    if not value:
-        raise ValueError(f"{label} must be a non-empty absolute http(s) URL")
-    value = value.rstrip("/")
-    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
-        raise ValueError(f"{label} must not contain whitespace or control characters")
-    try:
-        parsed = urlparse(value)
-        hostname = parsed.hostname
-    except ValueError as e:
-        raise ValueError(f"{label} must be an absolute http(s) URL") from e
-    try:
-        port = parsed.port
-    except ValueError as e:
-        raise ValueError(f"{label} must include a valid port if a port is specified") from e
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not hostname:
-        raise ValueError(f"{label} must be an absolute http(s) URL")
-    if ":" in hostname:
-        valid_ipv6_netloc = f"[{hostname}]" + (f":{port}" if port is not None else "")
-        if parsed.netloc.lower() != valid_ipv6_netloc.lower():
-            raise ValueError(f"{label} must be an absolute http(s) URL")
-    if parsed.username or parsed.password:
-        raise ValueError(f"{label} must not include username or password")
-    if parsed.query or parsed.fragment:
-        raise ValueError(f"{label} must not include query strings or fragments")
-    if parsed.scheme == "http" and not is_loopback_host(hostname):
-        raise ValueError(f"{label} must use https unless it points at a loopback/local host")
-    return value
+    return validate_endpoint_url(base_url, label=label).rstrip("/")
 
 
 def _non_empty_string(value: Any) -> str | None:
@@ -478,14 +455,12 @@ def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
         else:
             normalized.pop("displayName", None)
     if "baseUrl" in normalized:
-        base_url = _non_empty_string(normalized.get("baseUrl"))
-        if base_url:
-            try:
-                normalized["baseUrl"] = validate_http_base_url(base_url, label="BYOK provider baseUrl")
-            except ValueError:
-                normalized.pop("baseUrl", None)
-        else:
-            normalized.pop("baseUrl", None)
+        try:
+            normalized["baseUrl"] = validate_http_base_url(normalized["baseUrl"], label="BYOK provider baseUrl")
+        except ValueError:
+            # Keep an explicit invalid override blocked, rather than erasing it
+            # and silently sending credentials to the provider preset URL.
+            normalized["baseUrl"] = None
     if "apiKeyEnv" in normalized:
         try:
             api_key_env = validate_provider_api_key_env(normalized.get("apiKeyEnv"))

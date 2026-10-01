@@ -11,6 +11,8 @@ import uuid
 
 import httpx
 
+from .endpoint_policy import httpx_client_options
+
 from .byok import (
     resolve_api_key,
     validate_http_base_url,
@@ -447,6 +449,7 @@ class OpenAICompatibleTransport:
         *,
         response_id: str,
         display_model: str,
+        telemetry: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any] | str]:
         """Execute and normalize one Chat Completions SSE request."""
 
@@ -478,13 +481,15 @@ class OpenAICompatibleTransport:
             yield builder.done_marker()
 
         try:
-            async with self.client_factory(timeout=prepared.timeout) as client:
+            async with self.client_factory(**httpx_client_options(prepared.url, timeout=prepared.timeout)) as client:
                 async with client.stream(
                     "POST",
                     prepared.url,
                     json=prepared.payload,
                     headers=prepared.headers,
                 ) as response:
+                    if telemetry is not None:
+                        telemetry["http_status"] = response.status_code
                     if response.status_code != 200:
                         detail = f"Provider returned HTTP {response.status_code}."
                         try:

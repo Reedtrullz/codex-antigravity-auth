@@ -12,6 +12,8 @@ import uuid
 
 import httpx
 
+from .endpoint_policy import httpx_client_options, validate_endpoint_url
+
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
 from .response_protocol import (
     AttemptOutcome,
@@ -151,6 +153,10 @@ class GoogleResponseAccumulator:
         self._usage = normalize_usage()
         self._malformed = False
         self._done = False
+
+    @property
+    def usage(self) -> dict[str, int]:
+        return dict(self._usage)
 
     def mark_malformed(self) -> None:
         self._malformed = True
@@ -447,7 +453,7 @@ class GoogleTransport:
     ) -> None:
         self.timeout = timeout
         self.platform_name = platform_name or get_platform()
-        self.endpoint = endpoint.rstrip("/")
+        self.endpoint = validate_endpoint_url(endpoint, label="Google endpoint").rstrip("/")
         self.client_factory = client_factory
 
     def build_request(self, request: dict[str, Any], lease: AccountLease) -> dict[str, Any]:
@@ -471,7 +477,7 @@ class GoogleTransport:
 
     async def post(self, request: dict[str, Any], lease: AccountLease) -> httpx.Response:
         url = f"{self.endpoint}/v1internal:generateContent"
-        async with self.client_factory(timeout=self.timeout) as client:
+        async with self.client_factory(**httpx_client_options(url, timeout=self.timeout)) as client:
             return await client.post(
                 url,
                 json=self.build_request(request, lease),
@@ -501,7 +507,7 @@ class GoogleTransport:
     @asynccontextmanager
     async def stream(self, request: dict[str, Any], lease: AccountLease):
         url = f"{self.endpoint}/v1internal:streamGenerateContent?alt=sse"
-        async with self.client_factory(timeout=self.timeout) as client:
+        async with self.client_factory(**httpx_client_options(url, timeout=self.timeout)) as client:
             async with client.stream(
                 "POST",
                 url,
@@ -518,12 +524,15 @@ class GoogleTransport:
         response_id: str,
         display_model: str,
         adapter: GoogleStreamEventAdapter | None = None,
+        telemetry: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any] | str]:
         adapter = adapter or GoogleStreamEventAdapter(
             response_id=response_id,
             display_model=display_model,
         )
         async with self.stream(request, lease) as response:
+            if telemetry is not None:
+                telemetry["http_status"] = response.status_code
             if response.status_code != 200:
                 raise GoogleHTTPError(
                     response.status_code,
