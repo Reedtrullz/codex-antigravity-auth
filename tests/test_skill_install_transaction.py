@@ -109,6 +109,28 @@ def test_failed_restore_reports_exact_recovery_paths(monkeypatch, trees):
     assert not destination.exists()
 
 
+def test_cleanup_failure_cannot_hide_failed_restore_recovery_paths(monkeypatch, trees):
+    _, skills, destination, old = trees
+    rename = Path.rename
+    cleanup = cli.tempfile.TemporaryDirectory.cleanup
+    def fail_rename(source, target):
+        if source.name == "payload" or ".backup-" in source.name:
+            raise OSError("synthetic publication/restore failure")
+        return rename(source, target)
+    def fail_cleanup(self):
+        cleanup(self)
+        raise OSError("synthetic cleanup failure")
+    monkeypatch.setattr(Path, "rename", fail_rename)
+    monkeypatch.setattr(cli.tempfile.TemporaryDirectory, "cleanup", fail_cleanup)
+    with pytest.raises(RuntimeError, match="automatic restore failed") as exc:
+        cli.install_codex_skill(skills, force=True)
+    backup = next(cli._skill_backup_root(skills).iterdir())
+    assert cli._path_tree_manifest(backup) == old
+    assert "cleanup also failed" in str(exc.value)
+    assert str(backup) in str(exc.value) and str(destination) in str(exc.value)
+    assert not destination.exists()
+
+
 def test_cleanup_failure_reports_successful_install_and_retained_backup(monkeypatch, trees):
     bundle, skills, destination, old = trees
     original = cli.tempfile.TemporaryDirectory.cleanup

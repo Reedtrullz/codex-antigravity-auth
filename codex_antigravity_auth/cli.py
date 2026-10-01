@@ -323,6 +323,7 @@ def install_codex_skill(
         if action == "unchanged":
             return action, destination, backup_path
         published_and_validated = False
+        recovery_error: RuntimeError | None = None
         try:
             with tempfile.TemporaryDirectory(prefix=f".{destination.name}.stage-", dir=destination.parent) as temporary:
                 staging_root = Path(temporary)
@@ -355,9 +356,14 @@ def install_codex_skill(
                             f"then rename {backup_path} to {destination}."
                             if moved_previous else f"Inspect {destination} and move any incomplete installation aside before retrying."
                         )
-                        raise RuntimeError(f"Skill replacement failed and automatic restore failed. {recovery}") from restore_exc
+                        recovery_error = RuntimeError(f"Skill replacement failed and automatic restore failed. {recovery}")
+                        raise recovery_error from restore_exc
                     raise
-        except Exception as exc:
+        except BaseException as exc:
+            if recovery_error is not None and exc is not recovery_error:
+                raise RuntimeError(
+                    f"{recovery_error} Staging cleanup also failed at {temporary}: {exc}"
+                ) from exc
             if published_and_validated:
                 raise RuntimeError(
                     f"Skill is installed at {destination}, but staging cleanup failed at {temporary}. "
