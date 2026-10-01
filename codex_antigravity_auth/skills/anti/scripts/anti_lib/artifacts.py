@@ -172,6 +172,12 @@ def _result_shape(result: dict[str, Any], run_id: str, record: dict[str, Any], *
             _require(len(check["output"]) <= 2000, "File check output exceeds preview limit")
             _require(type(check.get("durationMs")) is int and check["durationMs"] >= 0, "Invalid file check duration")
             _require(isinstance(check.get("command"), list) and all(isinstance(arg, str) for arg in check["command"]), "Invalid file check command identity")
+            if check["check"] == "eslint":
+                identity = check.get("identityContext")
+                _require(isinstance(identity, dict) and identity.get("scope") == "invocation"
+                         and identity.get("effectiveTool") == "unknown" and identity.get("effectiveConfig") == "unknown"
+                         and isinstance(identity.get("observationId"), str) and bool(re.fullmatch(r"[0-9a-f]{32}", identity["observationId"]))
+                         and check.get("comparableAcrossRuns") is False, "ESLint identity must disclose its invocation-scoped uncertainty")
     _require(not current or "lanes" in result, "Result lane collection is missing")
     lanes = result.get("lanes", [])
     _require(isinstance(lanes, list) and all(isinstance(lane, dict) for lane in lanes), "Invalid result lanes")

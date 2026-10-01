@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from typing import Any
 
 from .redaction import redact_sensitive_text
@@ -40,11 +41,15 @@ def _result(check: str, status: str, reason: str, *, path: str | None, digest: s
     identity_command = list(command)
     if "--cache-location" in identity_command:
         identity_command[identity_command.index("--cache-location") + 1] = "<temporary-cache>"
-    identity = json.dumps([check, path, digest, str(cwd), identity_command], separators=(",", ":"))
+    identity_context = ({"scope": "invocation", "observationId": uuid.uuid4().hex,
+                         "effectiveTool": "unknown", "effectiveConfig": "unknown"}
+                        if check == "eslint" else {"scope": "builtin", "effectiveConfig": "not_applicable"})
+    identity = json.dumps([check, path, digest, str(cwd), identity_command, identity_context], separators=(",", ":"))
     return {
         "checkId": hashlib.sha256(identity.encode()).hexdigest()[:24], "check": check,
         "status": status, "reason": reason, "file": path, "fileHash": digest,
-        "cwd": str(cwd), "command": command,
+        "cwd": str(cwd), "command": command, "identityContext": identity_context,
+        "comparableAcrossRuns": check != "eslint",
         "output": redact_sensitive_text(output)[:MAX_OUTPUT_CHARS],
         "durationMs": max(0, round((time.monotonic() - started) * 1000)) if started is not None else 0,
         "returnCode": return_code, **details,
@@ -69,18 +74,71 @@ def _find_eslint(workspace: Path) -> str | list[str] | None:
     return tool
 
 
+_WINDOWS_WRAPPER = r"""
+import json, subprocess, sys
+payload = sys.stdin.buffer.read(int(sys.argv[2]) + 2)
+if not payload.startswith(b"1") or len(payload) > int(sys.argv[2]) + 1:
+    raise SystemExit(125)
+try:
+    completed = subprocess.run(json.loads(sys.argv[1]), input=payload[1:], shell=False)
+except OSError:
+    raise SystemExit(126)
+raise SystemExit(completed.returncode)
+"""
+
+
+def _create_windows_job():
+    from .windows_job import WindowsJob
+    return WindowsJob()
+
+
 def _run_check(command: list[str], source: bytes, cwd: Path) -> dict[str, Any]:
-    """Drain output with bounded storage and a bounded process wait."""
+    """Drain bounded output; Windows tool code starts only after job assignment."""
     captured = bytearray()
     truncated = False
     read_error = False
+    feed_error = False
     started = time.monotonic()
+    process = reader = feeder = job = None
+
+    def stop():
+        if job is not None:
+            job.close()  # Kernel terminates the assigned wrapper and descendants.
+        elif process is not None and process.poll() is None:
+            try:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+
     try:
+        if WINDOWS:
+            try:
+                job = _create_windows_job()
+            except OSError:
+                return {"status": "error", "reason": "process_control_unavailable", "output": "Cannot establish checker process-tree control; checker was not started.", "started": started}
         with tempfile.TemporaryFile() as stdin:
             stdin.write(source)
             stdin.seek(0)
-            process = subprocess.Popen(command, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            launch = ([sys.executable, "-I", "-S", "-c", _WINDOWS_WRAPPER, json.dumps(command), str(MAX_FILE_BYTES)]
+                      if WINDOWS else command)
+            process = subprocess.Popen(launch, stdin=subprocess.PIPE if WINDOWS else stdin,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        cwd=str(cwd), shell=False, start_new_session=os.name == "posix")
+            if job is not None:
+                try:
+                    job.assign(process)
+                except OSError:
+                    # The isolated stdlib wrapper is still blocked on input; no
+                    # project tool/config has run, so direct termination is safe.
+                    process.kill()
+                    process.wait(timeout=2)
+                    process.stdin.close()
+                    process.stdout.close()
+                    return {"status": "error", "reason": "process_control_unavailable", "output": "Cannot assign checker process-tree control; checker was not started.", "started": started}
+
             def drain():
                 nonlocal truncated, read_error
                 try:
@@ -92,33 +150,52 @@ def _run_check(command: list[str], source: bytes, cwd: Path) -> dict[str, Any]:
                     read_error = True
                 finally:
                     process.stdout.close()
+
             reader = threading.Thread(target=drain, daemon=True)
             reader.start()
+            if WINDOWS:
+                def feed():
+                    nonlocal feed_error
+                    try:
+                        process.stdin.write(b"1" + source)
+                    except (BrokenPipeError, OSError):
+                        feed_error = True
+                    finally:
+                        try:
+                            process.stdin.close()
+                        except OSError:
+                            feed_error = True
+                # Starting the feeder is the gate release, after assignment.
+                feeder = threading.Thread(target=feed, daemon=True)
+                feeder.start()
             timed_out = False
             try:
                 code = process.wait(timeout=CHECK_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                try:
-                    if os.name == "posix":
-                        os.killpg(process.pid, signal.SIGKILL)
-                    else:
-                        process.kill()
-                except ProcessLookupError:
-                    pass
+                stop()
                 code = process.wait(timeout=2)
+            finally:
+                if job is not None:
+                    job.close()  # Also stop stragglers after a normal checker exit.
             reader.join(timeout=1)
-            if reader.is_alive() or read_error:
+            if feeder is not None:
+                feeder.join(timeout=1)
+            if reader.is_alive() or (feeder is not None and feeder.is_alive()) or read_error:
                 return {"status": "error", "reason": "output_capture_incomplete", "output": "Check output could not be fully captured.", "return_code": code, "started": started}
             output = "[output omitted: capture limit exceeded]" if truncated else captured.decode("utf-8", errors="replace")
             if timed_out:
                 status, reason = "error", "tool_timeout"
+            elif feed_error:
+                status, reason = "error", "input_delivery_failed"
             elif truncated:
                 status, reason = "error", "output_limit"
             elif code == 0:
                 status, reason = "passed", "tool_passed"
             elif code == 1:
                 status, reason = "failed", "lint_errors"
+            elif code == 126:
+                status, reason = "error", "tool_execution_error"
             else:
                 status, reason = "error", "configuration_or_tool_error"
             return {"status": status, "reason": reason, "output": output, "return_code": code,
@@ -127,6 +204,13 @@ def _run_check(command: list[str], source: bytes, cwd: Path) -> dict[str, Any]:
         return {"status": "skipped", "reason": "tool_missing", "output": "Installed checker was not found.", "started": started}
     except (OSError, subprocess.SubprocessError) as exc:
         return {"status": "error", "reason": "tool_execution_error", "output": str(exc), "started": started}
+    finally:
+        stop()
+        if process is not None and process.poll() is None:
+            process.wait(timeout=2)
+        for thread in (feeder, reader):
+            if thread is not None:
+                thread.join(timeout=1)
 
 
 def _checks(path: Path, content: bytes, workspace: Path, profiles: frozenset[str]) -> list[dict[str, Any]]:
@@ -180,7 +264,7 @@ def _checks(path: Path, content: bytes, workspace: Path, profiles: frozenset[str
                     except (ValueError, TypeError):
                         outcome.update(status="error", reason="invalid_tool_report")
                 results.append(_result("eslint", command=command, **common, **outcome,
-                                       configSource="project-auto-discovery", effectiveConfigHash=None,
+                                       configSource="project-auto-discovery", effectiveConfigHash=None, effectiveToolFingerprint=None,
                                        profile="eslint", operatorOptIn=True))
     if not results:
         results.append(_result("file_checks", "skipped", "unsupported_file_type", command=[], **common))

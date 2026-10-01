@@ -255,3 +255,146 @@ def test_summary_retains_check_counts_without_malformed_clipped_details(checks):
     assert "checks" not in result["verification"]
     assert all("checks" not in finding for finding in result["findings"])
     assert len(verification["checks"]) == 40  # The live result was not mutated.
+
+
+def test_eslint_identity_is_invocation_scoped_when_tool_or_config_changes(checks, monkeypatch):
+    _, verifier, root = checks
+    (root / "fixture.js").write_text("let value = 1;")
+    config = root / "eslint.config.js"
+    tool = root / "synthetic-eslint"
+    config.write_text("synthetic config one")
+    tool.write_text("synthetic tool one")
+    monkeypatch.setattr(verifier, "_find_eslint", lambda _: str(tool))
+    calls = []
+    def run(*a):
+        calls.append(a)
+        return {"status": "passed", "reason": "tool_passed", "output": '[{"messages":[]}]'}
+    monkeypatch.setattr(verifier, "_run_check", run)
+    first = verifier.verify_findings([{"file": "fixture.js"}, {"file": "fixture.js"}], root, profiles=["eslint"])
+    a = first[0]["checks"][-1]
+    assert first[1]["checks"][-1]["checkId"] == a["checkId"]
+    assert len(calls) == 1
+    config.write_text("synthetic config two")
+    tool.write_text("synthetic tool two")
+    b = verifier.verify_finding({"file": "fixture.js"}, root, profiles=["eslint"])["checks"][-1]
+    assert a["fileHash"] == b["fileHash"]
+    assert a["checkId"] != b["checkId"]
+    for result in (a, b):
+        assert result["identityContext"]["scope"] == "invocation"
+        assert result["identityContext"]["effectiveTool"] == "unknown"
+        assert result["identityContext"]["effectiveConfig"] == "unknown"
+        assert result["effectiveToolFingerprint"] is None
+        assert result["effectiveConfigHash"] is None
+        assert result["comparableAcrossRuns"] is False
+
+
+def test_windows_job_creation_failure_never_starts_a_process(checks, monkeypatch):
+    _, verifier, root = checks
+    monkeypatch.setattr(verifier, "WINDOWS", True)
+    def unavailable():
+        raise OSError("synthetic job unavailable")
+    monkeypatch.setattr(verifier, "_create_windows_job", unavailable)
+    monkeypatch.setattr(verifier.subprocess, "Popen", Mock(side_effect=AssertionError("must not launch")))
+    outcome = verifier._run_check(["synthetic-eslint"], b"fixture", root)
+    assert outcome["reason"] == "process_control_unavailable"
+
+
+def test_windows_job_assignment_failure_keeps_gate_closed(checks, monkeypatch):
+    _, verifier, root = checks
+    monkeypatch.setattr(verifier, "WINDOWS", True)
+    marker = root / "must-not-run"
+    state = {"closed": False}
+    class Job:
+        def assign(self, process):
+            assert not marker.exists()
+            raise OSError("synthetic assignment failure")
+        def close(self):
+            state["closed"] = True
+    monkeypatch.setattr(verifier, "_create_windows_job", Job)
+    command = [sys.executable, "-I", "-S", "-c", "from pathlib import Path; Path('must-not-run').write_text('bad')"]
+    outcome = verifier._run_check(command, b"fixture", root)
+    assert outcome["reason"] == "process_control_unavailable"
+    assert state["closed"] and not marker.exists()
+
+
+def test_windows_gated_wrapper_starts_only_after_assignment(checks, monkeypatch):
+    _, verifier, root = checks
+    monkeypatch.setattr(verifier, "WINDOWS", True)
+    state = {"assigned": False, "closed": False}
+    marker = root / "checker-started"
+    class Job:
+        def assign(self, process):
+            assert not marker.exists()
+            assert process.poll() is None
+            state["assigned"] = True
+        def close(self):
+            state["closed"] = True
+    monkeypatch.setattr(verifier, "_create_windows_job", Job)
+    command = [sys.executable, "-I", "-S", "-c", "from pathlib import Path; import sys; Path('checker-started').write_text(sys.stdin.buffer.read().decode()); print('synthetic result')"]
+    outcome = verifier._run_check(command, b"synthetic captured bytes", root)
+    assert outcome["status"] == "passed"
+    assert state == {"assigned": True, "closed": True}
+    assert marker.read_text() == "synthetic captured bytes"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX emulation of the Windows job adapter; native Windows uses the job backend")
+def test_windows_job_adapter_terminates_synthetic_descendants_on_timeout(checks, monkeypatch):
+    import os
+    import signal
+    _, verifier, root = checks
+    monkeypatch.setattr(verifier, "WINDOWS", True)
+    monkeypatch.setattr(verifier, "CHECK_TIMEOUT_SECONDS", 0.8)
+    state = {"assigned": False, "closed": False}
+    class Job:
+        pid = None
+        def assign(self, process):
+            self.pid = process.pid
+            state["assigned"] = True
+        def close(self):
+            if self.pid is not None:
+                try:
+                    os.killpg(self.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.pid = None
+            state["closed"] = True
+    monkeypatch.setattr(verifier, "_create_windows_job", Job)
+    code = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-I','-S','-c','import time; time.sleep(20)']); print('synthetic-child-started',flush=True); time.sleep(20)"
+    outcome = verifier._run_check([sys.executable, "-I", "-S", "-c", code], b"", root)
+    assert outcome["reason"] == "tool_timeout"
+    assert "synthetic-child-started" in outcome["output"]
+    assert state == {"assigned": True, "closed": True}
+
+
+def test_windows_job_uses_kill_on_close_and_required_assignment_rights(monkeypatch):
+    import ctypes
+    from types import SimpleNamespace
+    import anti_lib.windows_job as jobs
+    calls = []
+    class Function:
+        def __init__(self, name, implementation):
+            self.name, self.implementation = name, implementation
+        def __call__(self, *args):
+            calls.append((self.name, args))
+            return self.implementation(*args)
+    def limits(handle, kind, pointer, size):
+        assert handle == 101 and kind == 9
+        assert pointer._obj.BasicLimitInformation.LimitFlags == 0x2000
+        assert size == ctypes.sizeof(jobs._ExtendedLimits)
+        return 1
+    api = SimpleNamespace(
+        CreateJobObjectW=Function("create", lambda *args: 101),
+        SetInformationJobObject=Function("limits", limits),
+        OpenProcess=Function("open", lambda *args: 202),
+        AssignProcessToJobObject=Function("assign", lambda *args: 1),
+        CloseHandle=Function("close", lambda *args: 1),
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **kw: api, raising=False)
+    job = jobs.WindowsJob()
+    job.assign(SimpleNamespace(pid=777))
+    job.close()
+    job.close()
+    assert ("create", (None, None)) in calls
+    assert ("open", (0x0101, False, 777)) in calls
+    assert ("assign", (101, 202)) in calls
+    assert [args for name, args in calls if name == "close"] == [(202,), (101,)]

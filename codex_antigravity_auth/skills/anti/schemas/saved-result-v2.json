@@ -248,8 +248,76 @@
               "durationMs": {
                 "type": "integer",
                 "minimum": 0
+              },
+              "comparableAcrossRuns": {
+                "type": "boolean"
+              },
+              "identityContext": {
+                "type": "object",
+                "required": [
+                  "scope"
+                ],
+                "properties": {
+                  "scope": {
+                    "enum": [
+                      "builtin",
+                      "invocation"
+                    ]
+                  },
+                  "observationId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  "effectiveTool": {
+                    "type": "string"
+                  },
+                  "effectiveConfig": {
+                    "type": "string"
+                  }
+                }
               }
-            }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "check": {
+                      "const": "eslint"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "identityContext",
+                    "comparableAcrossRuns"
+                  ],
+                  "properties": {
+                    "comparableAcrossRuns": {
+                      "const": false
+                    },
+                    "identityContext": {
+                      "required": [
+                        "scope",
+                        "observationId",
+                        "effectiveTool",
+                        "effectiveConfig"
+                      ],
+                      "properties": {
+                        "scope": {
+                          "const": "invocation"
+                        },
+                        "effectiveTool": {
+                          "const": "unknown"
+                        },
+                        "effectiveConfig": {
+                          "const": "unknown"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
           }
         }
       }
