@@ -70,11 +70,12 @@ def test_general_iterator_and_native_reader_agree_on_multiline_unicode_bytes():
 
 def test_buffered_collection_uses_the_same_unicode_multiline_event_boundaries():
     wire = ('\ufeffdata: {"type":"response.completed",\r\n'
-            'data: "response":{"status":"completed","output_text":"café 💡"}}\r\n\r\n').encode()
+            'data: "response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"café 💡"}]}]}}\r\n\r\n').encode()
     result = _collect_openai_sse_terminal(wire, "fixture")
-    assert result["output_text"] == "café 💡" and result["model"] == "fixture"
-    with pytest.raises(sse.SSELineError, match="incomplete"):
-        _collect_openai_sse_terminal(wire[:-4], "fixture")
+    assert result["output"][0]["content"][0]["text"] == "café 💡" and result["model"] == "fixture"
+    incomplete = _collect_openai_sse_terminal(wire[:-4], "fixture")
+    assert incomplete["status"] == "failed"
+    assert incomplete["error"]["code"] == "invalid_stream_chunk"
 
 
 @pytest.mark.parametrize("ending", [b"\n", b"\r", b"\r\n"])
