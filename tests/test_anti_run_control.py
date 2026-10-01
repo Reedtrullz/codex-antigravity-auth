@@ -284,18 +284,29 @@ def test_terminal_failures_preserve_submitted_attempt_evidence(anti,monkeypatch,
     assert settings._run_control.snapshot()['permits_released']==1
 
 
-@pytest.mark.parametrize('preparation', ['json','request'])
+@pytest.mark.parametrize('preparation', ['context','json','request'])
 def test_preparation_expiry_never_enters_transport_or_marks_submitted(anti,monkeypatch,preparation):
     settings=args(anti, fallback_model=None, budget=1)
     clock=[0.0]
     settings._run_control=anti.RunControl(1,caps={},clock=lambda:clock[0],error_type=anti.RunDeadlineExceeded)
-    if preparation=='json':
+    if preparation=='context':
+        assess=anti.assess_context
+        def expire(*values,**kwargs):
+            result=assess(*values,**kwargs);clock[0]=2;return result
+        monkeypatch.setattr(anti,'assess_context',expire)
+    elif preparation=='json':
         encode=anti.json.dumps
         def expire(value,*values,**kwargs):
             result=encode(value,*values,**kwargs)
             if isinstance(value,dict) and value.get('input')=='fixture':clock[0]=2
             return result
-        monkeypatch.setattr(anti.json,'dumps',expire)
+        request_json=anti.request_json
+        def encoding_at_transport(*values,**kwargs):
+            # Expire while encoding the submitted body, after context assessment.
+            with monkeypatch.context() as scope:
+                scope.setattr(anti.json,'dumps',expire)
+                return request_json(*values,**kwargs)
+        monkeypatch.setattr(anti,'request_json',encoding_at_transport)
     else:
         request=anti.urllib.request.Request
         def expire(*values,**kwargs):
@@ -306,11 +317,16 @@ def test_preparation_expiry_never_enters_transport_or_marks_submitted(anti,monke
         anti.generate_with_fallback(settings,model='claude-sonnet-4-6',prompt='fixture',max_output_tokens=32,
                                     purpose='preparation',model_ids={'claude-sonnet-4-6'})
     assert caught.value.submitted is False and caught.value.generation_metadata['submitted'] is False
-    assert settings._run_control.snapshot()['attempts_started']==0
-    assert settings._run_control.snapshot()['permits_released']==1
+    snapshot=settings._run_control.snapshot()
+    assert snapshot['attempts_started']==0
+    assert snapshot['permits_acquired']==snapshot['permits_released']==(0 if preparation=='context' else 1)
     state=anti.budget_metadata(settings)
-    assert state['budget_reserved']==state['budget_committed']==0
-    assert state['budget_attempts'][-1]['status']=='not_sent'
+    if preparation=='context':
+        assert not hasattr(settings,'_anti_budget_state')
+        assert 'budget_attempts' not in state
+    else:
+        assert state['budget_reserved']==state['budget_committed']==0
+        assert state['budget_attempts'][-1]['status']=='not_sent'
 
 
 def test_transport_timeout_is_rechecked_after_preparation(anti,monkeypatch):
