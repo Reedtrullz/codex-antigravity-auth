@@ -36,6 +36,7 @@ dev = [
   "pytest>=8.0",
   "pyyaml>=6.0",
   "tomli>=2.0; python_version < '3.11'",
+  "jsonschema>=4.18",
 ]
 
 [project.scripts]
@@ -55,6 +56,9 @@ codex_antigravity_auth = [
   "design/request-shapes.md",
   "design/capabilities.md",
   "skills/anti/SKILL.md",
+  "skills/anti/ARTIFACTS.md",
+  "skills/anti/DATA_POLICY.md",
+  "skills/anti/schemas/*.json",
   "skills/anti/agents/*.yaml",
   "skills/anti/scripts/*.py",
   "skills/anti/scripts/anti_lib/*.py",

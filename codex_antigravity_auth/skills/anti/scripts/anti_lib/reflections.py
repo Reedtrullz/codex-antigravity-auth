@@ -8,39 +8,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
-import threading
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-try:
-    from codex_antigravity_auth.secure_store import file_lock
-except ImportError:  # standalone copied skill
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - Windows uses the package lock.
-        fcntl = None
-    _locks: dict[str, threading.RLock] = {}
-    _locks_guard = threading.Lock()
 
-    @contextmanager
-    def file_lock(path: Path):
-        key = str(path.resolve())
-        with _locks_guard:
-            lock = _locks.setdefault(key, threading.RLock())
-        with lock:
-            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            lock_path = path.with_name(f".{path.name}.lock")
-            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-            try:
-                if fcntl is not None:
-                    fcntl.flock(descriptor, fcntl.LOCK_EX)
-                yield
-            finally:
-                if fcntl is not None:
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
-                os.close(descriptor)
+from .redaction import sanitize_json
+from .finding_verdicts import attach_keys, finding_key, local_adjudication, valid_adjudication, cohort_summary
+from .retention import summary_projection, summary_retention, summary_structure
+from .persistence import PersistenceError, atomic_write_json, file_lock
 
 REFLECTIONS_DIR = Path.home() / ".codex" / "anti-runs" / "reflections"
 MAX_ENTRIES_PER_REPO = 500
@@ -64,46 +41,104 @@ def _ensure_permissions(directory: Path | None = None) -> None:
         return
     os.chmod(directory, 0o700)
     for path in directory.rglob("*.json"):
-        if path.is_file():
+        if not path.is_symlink() and path.is_file():
             current_mode = path.stat().st_mode & 0o777
             if current_mode != 0o600:
                 os.chmod(path, 0o600)
 
 
-def _load_records(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
+def _valid_record(row: Any) -> bool:
+    """Validate reader inputs without normalizing or discarding extension fields."""
+    if not isinstance(row, dict):
+        return False
+    timestamp = row.get("timestamp")
+    if type(timestamp) not in (int, float) or not 0 <= timestamp <= 2**63 - 1 or not math.isfinite(timestamp):
+        return False
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, OSError):
+        time.strftime("%Y-%m-%d %H:%M", time.localtime(timestamp))
+    except (ValueError, OverflowError, OSError):
+        return False
+    count = row.get("findings_count", 0)
+    if type(count) is not int or not 0 <= count <= 2**63 - 1:
+        return False
+    for key in ("parser_findings_total", "parser_findings_dropped"):
+        value = row.get(key)
+        if value is not None and (type(value) is not int or not 0 <= value <= 2**63 - 1):
+            return False
+    models = row.get("models", [])
+    if not isinstance(models, list) or any(not isinstance(model, str) for model in models):
+        return False
+    for key in ("mode", "panel_status", "run_id", "verdict", "repo", "scope", "save_output"):
+        if key in row and row[key] is not None and not isinstance(row[key], str):
+            return False
+    findings = row.get("findings", [])
+    if not isinstance(findings, list):
+        return False
+    for finding in findings:
+        if not isinstance(finding, dict):
+            return False
+        if not isinstance(finding.get("severity", "medium"), str):
+            return False
+        if "adjudication" in finding and not valid_adjudication(finding["adjudication"]):
+            return False
+        # Null file/fingerprint denotes an unmapped finding and is safely
+        # skipped by readers. Containers and other scalars are malformed.
+        for key in ("fingerprint", "file"):
+            if key in finding and finding[key] is not None and not isinstance(finding[key], str):
+                return False
+    return True
+
+
+def _validate_records(path: Path, records: Any) -> None:
+    if not isinstance(records, list) or any(not _valid_record(row) for row in records):
+        raise PersistenceError(
+            f"Invalid reflection history shape at {path}. Preserve this file and make a backup "
+            "before manual recovery; no history was replaced."
+        )
+
+
+def _load_records(path: Path) -> list[dict[str, Any]]:
+    guidance = "Preserve this file and make a backup before manual recovery; no history was replaced."
+    if path.is_symlink() or path.parent.is_symlink():
+        raise PersistenceError(f"Refusing symlinked reflection history. {guidance}")
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return []
+    except UnicodeError as exc:
+        raise PersistenceError(f"Corrupt reflection history at {path}. {guidance}") from exc
+    except OSError as exc:
+        raise PersistenceError(f"Unreadable reflection history at {path}. {guidance}") from exc
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise PersistenceError(f"Corrupt reflection history at {path}. {guidance}") from exc
+    _validate_records(path, data)
+    return data
 
 
 def _save_records(path: Path, records: list[dict[str, Any]]) -> None:
+    _validate_records(path, records)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(path.parent, 0o700)
-    if path.is_symlink():
-        raise RuntimeError(f"Refusing to write symlinked reflection file: {path}")
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    if temporary.exists() or temporary.is_symlink():
-        temporary.unlink()
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(records, indent=2, sort_keys=True))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    atomic_write_json(path, records)
 
 
 def _prune_old(records: list[dict[str, Any]], ttl_days: int = TTL_DAYS) -> list[dict[str, Any]]:
     cutoff = time.time() - (ttl_days * 86400)
     return [r for r in records if r.get("timestamp", 0) > cutoff]
+
+
+def _parser_counts(context: dict[str, Any] | None) -> tuple[int | None, int | None]:
+    """Keep parser loss separate from retained normalized findings, including unknowns."""
+    context = context if isinstance(context, dict) else {}
+    contract = context.get("findings")
+    source = contract if isinstance(contract, dict) else context
+    values = []
+    for key in ("findings_total", "findings_dropped"):
+        value = source.get(key)
+        values.append(value if type(value) is int and 0 <= value <= 2**63 - 1 else None)
+    return values[0], values[1]
 
 
 def record_review(
@@ -116,12 +151,22 @@ def record_review(
     scope: str = "",
     run_id: str | None = None,
     verdict: str = "pending",
-) -> dict[str, Any]:
+    save_output: str = "summary",
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Record a review's findings for future pattern analysis.
     
     Returns the record that was saved.
     """
+    if save_output not in {"never", "summary", "full"}:
+        raise ValueError("unsupported reflection retention mode")
+    if save_output == "never":
+        return None
+    parser_total, parser_dropped = _parser_counts(context)
     record = {
+        "save_output": save_output,
+        "parser_findings_total": parser_total,
+        "parser_findings_dropped": parser_dropped,
         "timestamp": int(time.time()),
         "repo": str(repo_path.resolve()),
         "mode": mode,
@@ -130,26 +175,30 @@ def record_review(
         "panel_status": panel_status,
         "run_id": run_id,
         "verdict": verdict,
-        "findings": [
-            {
-                "id": f.get("id", ""),
-                "fingerprint": f.get("fingerprint", ""),
-                "severity": f.get("severity", "medium"),
-                "file": f.get("file", ""),
-                "line": f.get("line"),
-                "claim": f.get("claim", "")[:200],
-                "evidence": f.get("evidence", "unverified")[:200],
-                "confidence": f.get("confidence", 0.5),
-            }
-            for f in findings if isinstance(f, dict)
-        ],
+        "context": {key: context[key] for key in (
+            "scopeStatus", "scope_status", "omitted_file_count", "omitted_chunk_count",
+            "actualModels", "actualProviders", "requestedModels", "judge_actual_model", "judge_model_used",
+            "sourceCommit", "source_commit", "omitted_files", "omitted_items", "coverage", "verification", "caveats",
+        ) if context and key in context},
+        "findings": attach_keys(findings),
         "findings_count": len(findings),
     }
     
+    if save_output == "summary":
+        structure = summary_structure(record, (
+            "save_output", "timestamp", "mode", "panel_status", "run_id", "verdict", "findings_count",
+            "parser_findings_total", "parser_findings_dropped",
+        ))
+        record = summary_projection({key: value for key, value in record.items() if key not in structure})
+        record.update(structure)
+        record["retention"] = summary_retention()
+    record = sanitize_json(record)
+    if not isinstance(record, dict):
+        raise PersistenceError("Reflection exceeds the structured redaction limit; no history was replaced")
     path = _reflection_path(repo_path)
-    _ensure_permissions()
     with file_lock(path):
         records = _load_records(path)
+        _ensure_permissions()
         records.append(record)
         records = _prune_old(records)
         # Keep bounded
@@ -173,6 +222,26 @@ def update_verdict(repo_path: Path, run_id: str, verdict: str) -> dict[str, Any]
         if updated is not None:
             _save_records(path, records)
     return updated
+
+
+def update_finding_verdict(
+    repo_path: Path, run_id: str, key: str, *, status: str, author: str, evidence: str, source_file: str,
+) -> dict[str, Any]:
+    """Adjudicate exactly one retained finding, leaving its advisory intact."""
+    annotation = local_adjudication(repo_path, source_file, status=status, author=author, evidence=evidence)
+    path = _reflection_path(repo_path)
+    with file_lock(path):
+        records = _load_records(path)
+        matches = [(record, index, finding) for record in records if record.get("run_id") == run_id
+                   for index, finding in enumerate(record.get("findings", []))
+                   if (finding.get("findingKey") or finding_key(finding, index)) == key]
+        if len(matches) != 1:
+            raise ValueError("Finding key must match exactly one retained finding in this run")
+        record, index, finding = matches[0]
+        finding["findingKey"] = finding.get("findingKey") or finding_key(finding, index)
+        finding["adjudication"] = annotation
+        _save_records(path, records)
+        return finding
 
 
 def list_records(repo_path: Path, limit: int | None = 20) -> list[dict[str, Any]]:
@@ -222,6 +291,7 @@ def get_summary(repo_path: Path) -> dict[str, Any]:
         "severity_distribution": all_severities,
         "most_reviewed_files": sorted(file_counts.items(), key=lambda x: -x[1])[:10],
         "models_used": all_models,
+        **cohort_summary(records),
         "date_range": (
             time.strftime("%Y-%m-%d", time.localtime(records[0]["timestamp"])),
             time.strftime("%Y-%m-%d", time.localtime(records[-1]["timestamp"])),

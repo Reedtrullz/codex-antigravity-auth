@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import contextvars
 import concurrent.futures
 from collections import deque
 import email.utils
@@ -33,19 +34,28 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+from anti_lib.artifacts import (
+    ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
+    file_reference, read_record, validate_record, coverage_has_loss,
+)
 from anti_lib.chunking import chunk_manifest
+from anti_lib.cleanup import RUN_ID_RE, assert_not_deleted, clean_runs
 from anti_lib.context import ordered_prompt
+from anti_lib.data_policy import DataPolicy, PolicyError
 from anti_lib.ledger import execution_entry, prompts_as_text
+from anti_lib.endpoint_policy import open_http_request, validate_endpoint_url
 from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
+from anti_lib.persistence import PersistenceError, atomic_write_json, file_lock, fsync_directory
+from anti_lib.retention import lifecycle_metadata, summary_projection, summary_retention, summary_structure
 from anti_lib.runner import presentable_result
 from anti_lib.verifier import verify_findings
 from anti_lib.reflections import (
     record_review,
     update_verdict,
+    update_finding_verdict,
     get_summary,
     list_records,
     clear_records,
-    prune_reflections_older_than,
 )
 
 
@@ -578,7 +588,6 @@ EXCLUDED_PATTERNS = [
     "*apikey*",
     "*api-key*",
 ]
-RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 CHUNK_PART_SUFFIX_RE = re.compile(r" part \d+/\d+$")
 FAILURE_OUTPUT_PREVIEW_CHARS = 1600
 REVIEW_SYNTHESIS_OVERFLOW_SENTINEL = "ANTI_SYNTHESIS_STATUS: OVERFLOW"
@@ -586,6 +595,62 @@ REVIEW_SYNTHESIS_OVERFLOW_SENTINEL = "ANTI_SYNTHESIS_STATUS: OVERFLOW"
 
 class AntiError(Exception):
     pass
+
+
+_POLICY_STAGE = contextvars.ContextVar("anti_data_policy_stage", default="primary")
+
+
+def data_policy(args):
+    if args is None:
+        return None
+    if hasattr(args, "_data_policy_session"):
+        return args._data_policy_session
+    path = getattr(args, "data_policy", None)
+    acknowledgements = getattr(args, "acknowledge_secret_hash", None) or []
+    if acknowledgements and not path:
+        raise PolicyError("Secret acknowledgements require --data-policy")
+    session = DataPolicy(Path(path).expanduser(), root=find_repo_root(Path.cwd()) or Path.cwd(), acknowledgements=acknowledgements) if path else None
+    args._data_policy_session = session
+    return session
+
+
+def policy_paths(args, root, paths):
+    session = data_policy(args)
+    if session:
+        session.check_paths(paths, root=root)
+
+
+def policy_submit(args, *, model, prompt, base_url, fallback=False):
+    session = data_policy(args)
+    if session:
+        session.check(model=model, prompt=prompt, base_url=base_url, stage=_POLICY_STAGE.get())
+        if fallback:
+            session.check(model=model, prompt=prompt, base_url=base_url, stage="fallback")
+
+
+def policy_generate(args, *, stage, **kwargs):
+    token = _POLICY_STAGE.set(stage)
+    try:
+        return generate_with_fallback(args, **kwargs)
+    finally:
+        _POLICY_STAGE.reset(token)
+
+
+def policy_preflight(args, prompt, routes):
+    session = data_policy(args)
+    if session is None:
+        return False
+    fallback = getattr(args, "fallback_model", None)
+    for model, stage in routes:
+        session.check(model=model, prompt=prompt, base_url=args.base_url, stage=stage)
+        if fallback and getattr(args, "fallback_policy", "never") != "never":
+            resolved = resolve_model(fallback, default=fallback)
+            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage=stage)
+            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage="fallback")
+    if getattr(args, "dry_run", False):
+        print(json.dumps({"dryRun": True, "dataPolicy": session.audit(), "noContentSubmitted": True}, indent=2))
+        return True
+    return False
 
 
 def eprint(message: str) -> None:
@@ -731,7 +796,80 @@ def write_preflight_record(
     )
 
 
-def write_run_record(
+def check_record_retention(record_id: str, output_mode: str) -> None:
+    """Do not silently mix policies or delete older artifacts when reusing an ID."""
+    if not RUN_ID_RE.fullmatch(record_id):
+        raise AntiError("run id must contain only letters, numbers, '_' or '-'")
+    if RUNS_DIR.is_symlink():
+        raise AntiError("refusing to write Anti run record through symlinked directory")
+    assert_not_deleted(RUNS_DIR, record_id)
+    path = RUNS_DIR / f"{record_id}.json"
+    if path.is_symlink():
+        raise AntiError("refusing to overwrite symlinked run record")
+    if path.exists():
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            raise AntiError("cannot inspect existing run retention; choose a new run id") from exc
+        if not isinstance(previous, dict) or previous.get("save_output") != output_mode:
+            raise AntiError("run id already exists with another retention policy; choose a new run id")
+    artifact_dir = RUNS_DIR / record_id
+    if artifact_dir.is_symlink():
+        raise AntiError("refusing to write result artifact through symlink")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    if not path.exists() and (artifact_dir.exists() or temporary.exists() or temporary.is_symlink()):
+        raise AntiError("run id has orphan artifacts with unknown retention policy; choose a new run id")
+    if (output_mode == "never" and artifact_dir.exists()) or (
+        output_mode == "summary" and artifact_dir.exists() and any(artifact_dir.glob("lane-*.json"))
+    ):
+        raise AntiError("run id has artifacts incompatible with retention policy; choose a new run id")
+
+
+_RECORD_WRITES = threading.local()
+
+
+def write_run_record(args: argparse.Namespace, **kwargs: Any) -> Path | None:
+    """Serialize one invocation's run; a terminal record never regresses."""
+    output_mode = save_output_mode(args)
+    record_id = getattr(args, "run_id", None)
+    if not record_id and output_mode == "never":
+        return None
+    record_id = str(record_id or new_run_id())
+    if not RUN_ID_RE.fullmatch(record_id):
+        raise AntiError("run id must contain only letters, numbers, '_' or '-'")
+    args.run_id = record_id
+    check_record_retention(record_id, output_mode)
+    if not getattr(args, "_anti_writer_id", None):
+        args._anti_writer_id = uuid.uuid4().hex
+    if RUNS_DIR.is_symlink():
+        raise AntiError("refusing to write Anti run record through symlinked directory")
+    RUNS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(RUNS_DIR, 0o700)
+    path = RUNS_DIR / f"{record_id}.json"
+    _RECORD_WRITES.depth = getattr(_RECORD_WRITES, "depth", 0) + 1
+    try:
+        with file_lock(path):
+            check_record_retention(record_id, output_mode)
+            if path.exists():
+                previous = read_record(path)
+                if previous.get("id") != record_id or previous.get("writerId") != args._anti_writer_id:
+                    raise AntiError("run id belongs to another writer or legacy record; choose a new run id")
+                if previous.get("status") not in {"running", "success", "partial", "failed", "error", "interrupted"}:
+                    raise AntiError("unknown saved run state; preserve the record and choose a new run id")
+                if previous["status"] != "running":
+                    args.run_record_written = True
+                    return path
+            return _write_run_record_unlocked(args, **kwargs)
+    finally:
+        _RECORD_WRITES.depth -= 1
+        if not _RECORD_WRITES.depth:
+            pending = getattr(_RECORD_WRITES, "pending_signal", None)
+            _RECORD_WRITES.pending_signal = None
+            if pending is not None:
+                _handle_run_signal(*pending)
+
+
+def _write_run_record_unlocked(
     args: argparse.Namespace,
     *,
     mode: str,
@@ -747,6 +885,11 @@ def write_run_record(
     force_full_output: bool = False,
 ) -> Path | None:
     output_mode = save_output_mode(args)
+    record_id = getattr(args, "run_id", None)
+    if not record_id and output_mode != "never":
+        record_id = new_run_id()
+    if record_id:
+        check_record_retention(str(record_id), output_mode)
     if output_mode == "never":
         # Minimal lifecycle record: correlation survives even when prompt and
         # output retention are disabled (bug report root cause 2).
@@ -762,47 +905,37 @@ def write_run_record(
             os.chmod(RUNS_DIR, 0o700)
         except OSError:
             pass
+        commands = {"consult", "review", "plan", "panel", "moa", "fusion", "workflow", "compare"}
+        statuses = {"running", "success", "partial", "error", "interrupted", "failed"}
+        command = getattr(args, "command", mode)
         record: dict[str, Any] = {
             "id": str(record_id),
             "created_at": utc_timestamp(),
-            "command": getattr(args, "command", mode),
-            "workflow": getattr(args, "workflow_name", None),
-            "run_label": getattr(args, "run_label", None),
-            "mode": mode,
-            "status": status,
-            "gateway": base_url,
-            "models": models or [],
+            "command": command if command in commands else "unknown",
+            "mode": mode if mode in commands else "unknown",
+            "status": status if status in statuses else "unknown",
             "save_output": output_mode,
-            "helper": helper_identity(),
-            "runStatus": "failed" if status == "error" else status,
+            "runStatus": "failed" if status == "error" else status if status in statuses else "unknown",
             "metadata": {
-                **(metadata or {}),
+                **lifecycle_metadata(metadata),
                 "request_log_correlation_id": str(record_id),
             },
         }
         if error:
-            record["error"] = error
+            record["error"] = "interrupted" if status == "interrupted" else "run_failed"
         record = sanitize_json(record)
         record["id"] = str(record_id)
         record["metadata"]["request_log_correlation_id"] = str(record_id)
         record_path = RUNS_DIR / f"{record['id']}.json"
         if record_path.exists() and record_path.is_symlink():
             raise AntiError(f"refusing to overwrite symlinked run record: {record_path}")
-        tmp_path = record_path.with_suffix(record_path.suffix + ".tmp")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        try:
-            fd = os.open(tmp_path, flags, 0o600)
-        except FileExistsError:
-            if tmp_path.is_symlink():
-                raise
-            tmp_path.unlink()
-            fd = os.open(tmp_path, flags, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+        record["writerId"] = args._anti_writer_id
+        record["recordSchemaVersion"] = RECORD_SCHEMA_VERSION
+        if getattr(args, "_data_policy_session", None):
+            record["metadata"]["dataPolicy"] = args._data_policy_session.audit()
+        validate_record(record, record_path)
+        atomic_write_json(record_path, record)
         args.run_record_written = status != "running"
-        os.replace(tmp_path, record_path)
         return record_path
 
     if RUNS_DIR.is_symlink():
@@ -815,7 +948,6 @@ def write_run_record(
 
     output_chars = len(output_text or "")
     prompt_chars = len(prompt_text or "")
-    record_id = getattr(args, "run_id", None) or new_run_id()
     if not RUN_ID_RE.fullmatch(str(record_id)):
         raise AntiError("run id must contain only letters, numbers, '_' or '-'")
 
@@ -863,9 +995,7 @@ def write_run_record(
     if error:
         record["error"] = error
     if output_mode == "summary" and output_text:
-        record["output_preview"] = output_text[:RUN_OUTPUT_PREVIEW_CHARS]
-        if force_full_output:
-            record["output_text"] = output_text
+        record["output_preview"] = redact_sensitive_text(output_text)[:RUN_OUTPUT_PREVIEW_CHARS]
     elif output_mode == "full":
         if prompt_text is not None:
             record["prompt_sha256"] = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
@@ -875,42 +1005,54 @@ def write_run_record(
         if execution_ledger is not None:
             record["execution_ledger"] = execution_ledger
 
-    record = sanitize_json(record)
+    if output_mode == "summary":
+        # Tool check descriptors are typed records, not strings to clip midway.
+        # Summary retains their counts; live JSON and full mode retain details.
+        summary_metadata = dict(record["metadata"])
+        verification = summary_metadata.get("verification")
+        if isinstance(verification, dict) and "checks" in verification:
+            summary_metadata["verification"] = {key: value for key, value in verification.items() if key != "checks"}
+            summary_metadata["verification"]["checksRetained"] = False
+        contract = summary_metadata.get("findings")
+        if isinstance(contract, dict) and isinstance(contract.get("findings"), list):
+            contract = dict(contract)
+            contract["findings"] = [
+                {key: value for key, value in finding.items() if key != "checks"}
+                if isinstance(finding, dict) else finding for finding in contract["findings"]
+            ]
+            summary_metadata["findings"] = contract
+        record["metadata"] = summary_metadata
+    # Summary projection already bounds and redacts content. Apply it before
+    # the shared redactor's whole-object budget, preserving structural counts.
+    if output_mode != "summary":
+        record = sanitize_json(record)
+        if not isinstance(record, dict):
+            raise AntiError("Full run record exceeds the structured redaction limit")
     # The record id is generated by us or validated by RUN_ID_RE; never let
     # value redaction mangle it (e.g. a run id shaped like user_12345678).
     record["id"] = str(record_id)
     if record.get("metadata", {}).get("request_log_correlation_id") is not None:
         record["metadata"]["request_log_correlation_id"] = str(record_id)
     run_record_path = RUNS_DIR / f"{record['id']}.json"
-    artifact_dir = RUNS_DIR / str(record_id)
-    if artifact_dir.exists() and artifact_dir.is_symlink():
-        raise AntiError(f"refusing to write result artifact through symlink: {artifact_dir}")
-    artifact_dir.mkdir(mode=0o700, exist_ok=True)
-    try:
-        os.chmod(artifact_dir, 0o700)
-    except OSError:
-        pass
+    run_dir = RUNS_DIR / str(record_id)
+    revisions_dir = run_dir / "revisions"
+    for directory in (run_dir, revisions_dir):
+        if directory.is_symlink():
+            raise AntiError("refusing to publish artifacts through a symlink")
+        directory.mkdir(mode=0o700, exist_ok=True)
+    revision_id = uuid.uuid4().hex
+    artifact_dir = revisions_dir / revision_id
+    artifact_dir.mkdir(mode=0o700)  # Never overwrite an existing revision.
     artifact_path = artifact_dir / "result.json"
-    if artifact_path.exists() and artifact_path.is_symlink():
-        raise AntiError(f"refusing to overwrite symlinked result artifact: {artifact_path}")
     raw_lane_paths: list[str] = []
     if output_mode == "full" and execution_ledger:
         for index, entry in enumerate(execution_ledger, start=1):
             lane_path = artifact_dir / f"lane-{index:04d}.json"
-            lane_tmp = lane_path.with_suffix(lane_path.suffix + ".tmp")
-            lane_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            if hasattr(os, "O_NOFOLLOW"):
-                lane_flags |= os.O_NOFOLLOW
-            try:
-                lane_fd = os.open(lane_tmp, lane_flags, 0o600)
-            except FileExistsError:
-                if lane_tmp.is_symlink():
-                    raise
-                lane_tmp.unlink()
-                lane_fd = os.open(lane_tmp, lane_flags, 0o600)
-            with os.fdopen(lane_fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(sanitize_json(entry), indent=2, sort_keys=True) + "\n")
-            os.replace(lane_tmp, lane_path)
+            lane = sanitize_json(entry)
+            if not isinstance(lane, dict):
+                raise AntiError("Raw lane exceeds the structured redaction limit")
+            lane.update({"laneSchemaVersion": LANE_SCHEMA_VERSION, "runId": str(record_id), "revisionId": revision_id})
+            atomic_write_json(lane_path, lane)
             raw_lane_paths.append(str(lane_path))
     artifact_scope_status = record.get("scopeStatus") or ("complete" if status == "success" else "partial")
     artifact_metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
@@ -918,9 +1060,8 @@ def write_run_record(
     finding_contract = artifact_metadata.get("findings")
     if not isinstance(finding_contract, dict):
         finding_contract = {}
-    artifact = sanitize_json(
-        {
-            "schemaVersion": RESULT_SCHEMA_VERSION,
+    artifact = {
+            "schemaVersion": SAVED_RESULT_SCHEMA_VERSION,
             "runId": str(record_id),
             "createdAt": record["created_at"],
             "sourceCommit": artifact_metadata.get("sourceCommit") or artifact_metadata.get("source_commit"),
@@ -958,43 +1099,93 @@ def write_run_record(
                 "rawLanePaths": raw_lane_paths,
             },
             "resultPath": str(artifact_path),
-        }
-    )
-    artifact_tmp = artifact_path.with_suffix(artifact_path.suffix + ".tmp")
-    artifact_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        artifact_flags |= os.O_NOFOLLOW
-    try:
-        artifact_fd = os.open(artifact_tmp, artifact_flags, 0o600)
-    except FileExistsError:
-        if artifact_tmp.is_symlink():
-            raise
-        artifact_tmp.unlink()
-        artifact_fd = os.open(artifact_tmp, artifact_flags, 0o600)
-    with os.fdopen(artifact_fd, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
-    os.replace(artifact_tmp, artifact_path)
+    }
+    if output_mode != "summary":
+        artifact = sanitize_json(artifact)
+        if not isinstance(artifact, dict):
+            raise AntiError("Full result exceeds the structured redaction limit")
+
+    if coverage_has_loss(artifact["coverage"]):
+        artifact["coverage"]["status"] = "partial"
+    if artifact["coverage"]["status"] == "partial" or record.get("omittedFileCount", 0) or record.get("omittedChunkCount", 0):
+        record["scopeStatus"] = artifact["scopeStatus"] = "partial"
+    if output_mode == "summary":
+        artifact.pop("output_text", None)
+        artifact["output_preview"] = redact_sensitive_text(output_text or "")[:RUN_OUTPUT_PREVIEW_CHARS]
+        artifact["output_chars"] = output_chars
+        # Fixed-size structural fields survive exhaustion of the content budget.
+        structure = summary_structure(artifact, (
+            "schemaVersion", "runId", "createdAt", "mode", "runStatus", "scopeStatus", "panelStatus", "output_chars",
+        ))
+        coverage = artifact["coverage"]
+        coverage_structure = summary_structure(coverage, (
+            "status", "chunksExpected", "chunksCompleted", "chunksFailed", "chunksOmitted", "chunksNotSent",
+        ))
+        verification = artifact.get("verification")
+        verification = verification if isinstance(verification, dict) else {"status": "unknown"}
+        verification_structure = summary_structure(verification, ("status", "performedBy", "evidenceCount"))
+        pointers = artifact["artifacts"]
+        # Give verification and the primary answer first access to content space.
+        ordered_artifact = {key: artifact[key] for key in ("verification", "output_preview")}
+        ordered_artifact.update({key: value for key, value in artifact.items() if key not in structure and key not in {"artifacts", "resultPath"}})
+        artifact = summary_projection(ordered_artifact)
+        artifact.update(structure)
+        artifact["runId"] = str(record_id)
+        artifact["coverage"] = {**artifact.get("coverage", {}), **coverage_structure}
+        artifact["verification"] = {**artifact.get("verification", {}), **verification_structure}
+        artifact["artifacts"] = pointers
+        artifact["resultPath"] = str(artifact_path)
+        artifact["retention"] = summary_retention()
+        artifact = sanitize_json(artifact)
+        # Reserve lifecycle/count fields before metadata consumes the preview budget.
+        content_keys = {"metadata", "caveats", "error", "output_preview"}
+        ordered = {key: value for key, value in record.items() if key not in content_keys}
+        ordered.update({key: record[key] for key in ("output_preview", "error", "caveats", "metadata") if key in record})
+        if isinstance(ordered.get("metadata"), dict):
+            metadata = ordered["metadata"]
+            priority = ("request_log_correlation_id", "runStatus", "scopeStatus", "scope_status", "panel_status", "panel_results", "findings", "failure_diagnostics")
+            ordered["metadata"] = {key: metadata[key] for key in priority if key in metadata}
+            ordered["metadata"].update(metadata)
+        structure = summary_structure(record, (
+            "id", "created_at", "command", "mode", "status", "runStatus", "scopeStatus", "save_output",
+            "prompt_chars", "output_chars", "omittedFileCount", "omittedChunkCount",
+        ))
+        record = summary_projection({key: value for key, value in ordered.items() if key not in structure})
+        record.update(structure)
+        record["retention"] = summary_retention()
+        record = sanitize_json(record)
+        # Preserve validated correlation after projection, as in full mode.
+        record["id"] = str(record_id)
+        if "metadata" in record:
+            record["metadata"]["request_log_correlation_id"] = str(record_id)
+    if output_mode == "full":
+        artifact["retention"] = record["retention"] = {"mode": "full", "contentComplete": True}
+    artifact["writerId"] = args._anti_writer_id
+    artifact["runId"] = str(record_id)
+    artifact["revisionId"] = revision_id
+    artifact.setdefault("lanes", [])
+    # Preview clipping must not redact trusted publication identity/path aliases.
+    artifact["artifacts"] = {"runRecordPath": str(run_record_path), "resultPath": str(artifact_path), "rawLanePaths": raw_lane_paths}
+    artifact["resultPath"] = str(artifact_path)
+    atomic_write_json(artifact_path, artifact)
     record["resultPath"] = str(artifact_path)
+    record["writerId"] = args._anti_writer_id
+    record["recordSchemaVersion"] = RECORD_SCHEMA_VERSION
+    record["publication"] = {
+        "revision": revision_id,
+        "result": file_reference(RUNS_DIR, artifact_path),
+        "lanes": [file_reference(RUNS_DIR, Path(path)) for path in raw_lane_paths],
+    }
     path = run_record_path
-    if path.exists() and path.is_symlink():
-        raise AntiError(f"refusing to overwrite symlinked run record: {path}")
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        fd = os.open(tmp_path, flags, 0o600)
-    except FileExistsError:
-        if tmp_path.is_symlink():
-            raise
-        tmp_path.unlink()
-        fd = os.open(tmp_path, flags, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
-    # A 'running' placeholder is not a final record; lifecycle handlers may
-    # still overwrite it with interrupted/error/failed status.
+    if getattr(args, "_data_policy_session", None):
+        record.setdefault("metadata", {})["dataPolicy"] = args._data_policy_session.audit()
+    validate_record(record, path)
+    fsync_directory(revisions_dir)
+    fsync_directory(run_dir)
+    # This is the publication commit. Earlier immutable files alone grant no
+    # terminal authority; an interrupted replacement leaves the old index valid.
+    atomic_write_json(path, record)
     args.run_record_written = status != "running"
-    os.replace(tmp_path, path)
     progress(args, f"saved sanitized run record: {path}")
     return path
 
@@ -1161,21 +1352,10 @@ def add_claude_guardrail_caveat(caveats: list[str], *, prompt_budget: int) -> No
 
 
 def normalize_base_url(value: str) -> str:
-    value = str(value).strip()
-    if not value:
-        raise AntiError("base URL must be non-empty")
-    if any(ord(char) <= 0x20 for char in value):
-        raise AntiError("base URL must not contain whitespace or control characters")
-    parsed = urllib.parse.urlsplit(value)
-    if parsed.username or parsed.password:
-        raise AntiError("base URL must not contain username or password")
-    if parsed.query or parsed.fragment:
-        raise AntiError("base URL must not contain query strings or fragments")
-    if parsed.scheme not in {"http", "https"}:
-        raise AntiError(f"base URL scheme must be http or https, not {parsed.scheme!r}")
-    if not parsed.netloc:
-        raise AntiError("base URL must include a host")
-    return value.rstrip("/")
+    try:
+        return validate_endpoint_url(value, label="base URL").rstrip("/")
+    except ValueError as exc:
+        raise AntiError(str(exc)) from exc
 
 
 def resolve_model(value: str | None, *, default: str) -> str:
@@ -1403,6 +1583,10 @@ def request_json(
     timeout: float = 10.0,
     token_env: str = DEFAULT_TOKEN_ENV,
 ) -> tuple[int, dict[str, Any]]:
+    try:
+        url = validate_endpoint_url(url, allow_query=True)
+    except ValueError as exc:
+        raise AntiError(str(exc)) from exc
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {"Accept": "application/json"}
     if body is not None:
@@ -1418,7 +1602,7 @@ def request_json(
 
     retry_after_header: object = None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as res:
+        with open_http_request(req, timeout=timeout) as res:
             raw = res.read()
             status = int(res.status)
     except urllib.error.HTTPError as exc:
@@ -1697,7 +1881,9 @@ def post_response(
     run_id: str | None = None,
     budget_args: argparse.Namespace | None = None,
     budget_purpose: str | None = None,
+    policy_fallback: bool = False,
 ) -> ResponseText:
+    policy_submit(budget_args, model=model, prompt=prompt, base_url=base_url, fallback=policy_fallback)
     requested_model = model
     available_model_ids = model_ids
     if available_model_ids is None:
@@ -1711,8 +1897,10 @@ def post_response(
         suggestions = closest_catalog_models(model, available_model_ids)
         suggestion_note = f" Closest advertised: {', '.join(suggestions)}." if suggestions else ""
         raise AntiError(f"model {model!r} is not advertised by /v1/models.{suggestion_note} Available sample: {sample}")
+    policy_submit(budget_args, model=matched_model, prompt=prompt, base_url=base_url, fallback=policy_fallback)
     if matched_model != model:
-        eprint(f"[anti] model alias {model!r} matched catalog id {matched_model!r}; forwarding the catalog id")
+        if not data_policy(budget_args):
+            eprint(f"[anti] model alias {model!r} matched catalog id {matched_model!r}; forwarding the catalog id")
         model = matched_model
     payload = {
         "model": model,
@@ -2038,6 +2226,7 @@ def generate_with_fallback(
                     run_id=getattr(args, "run_id", None),
                     budget_args=args,
                     budget_purpose=f"{purpose} fallback",
+                    **({"policy_fallback": True} if data_policy(args) else {}),
                 )
         except AntiError as fallback_exc:
             fallback_error = redact_sensitive_text(str(fallback_exc))
@@ -2212,6 +2401,8 @@ def validate_path_list_item(value: str, *, source: str) -> None:
 def selected_paths_from_args(args: argparse.Namespace) -> list[str]:
     paths = list(getattr(args, "file", None) or [])
     for spec in getattr(args, "files_from", None) or []:
+        if spec != "-":
+            policy_paths(args, Path.cwd(), [spec])
         paths.extend(read_paths_file(spec))
     return paths
 
@@ -2251,7 +2442,7 @@ def changed_paths(
         raise AntiError(f"unsupported review scope: {scope}")
     raw = run_git_bytes(
         root,
-        [*diff_args, "--name-status", "--diff-filter=ACMRTD", "-z"],
+        [*diff_args, "--no-ext-diff", "--no-textconv", "--name-status", "--diff-filter=ACMRTD", "-z"],
     )
     fields = raw.split(b"\0")
     names: list[str] = []
@@ -2277,13 +2468,13 @@ def diff_for_paths(root: Path, scope: str, paths: list[str], *, rev_range: str |
     if not paths or scope == "files":
         return ""
     if scope == "staged":
-        return run_git(root, ["-c", "core.quotePath=false", "diff", "--cached", "--no-ext-diff", "--", *paths], check=False)
+        return run_git(root, ["-c", "core.quotePath=false", "diff", "--cached", "--no-ext-diff", "--no-textconv", "--", *paths])
     if scope == "diff":
         if not rev_range:
             raise AntiError("--scope diff requires --base or --changed-files")
         rev_range = validate_git_rev_range(rev_range, source="revision range")
-        return run_git(root, ["-c", "core.quotePath=false", "diff", "--no-ext-diff", rev_range, "--", *paths], check=False)
-    return run_git(root, ["-c", "core.quotePath=false", "diff", "HEAD", "--no-ext-diff", "--", *paths], check=False)
+        return run_git(root, ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", rev_range, "--", *paths])
+    return run_git(root, ["-c", "core.quotePath=false", "diff", "HEAD", "--no-ext-diff", "--no-textconv", "--", *paths])
 
 
 def file_is_tracked(root: Path, rel_path: str) -> bool:
@@ -2298,6 +2489,8 @@ def file_is_tracked(root: Path, rel_path: str) -> bool:
         )
     except subprocess.TimeoutExpired:
         raise AntiError(f"git ls-files timed out after 60s")
+    if proc.returncode not in (0, 1):
+        raise AntiError(proc.stderr.strip() or "git ls-files failed")
     return proc.returncode == 0
 
 
@@ -2667,6 +2860,7 @@ def extract_file_paths_from_prompt(prompt: str) -> list[str]:
 def build_consult_file_context(
     prompt: str,
     max_prompt_chars: int,
+    *, policy_args=None,
 ) -> tuple[str, list[str], list[str]]:
     """Read files mentioned in the prompt, inject contents to prevent hallucination."""
     file_paths = extract_file_paths_from_prompt(prompt)
@@ -2679,6 +2873,7 @@ def build_consult_file_context(
     
     workspace_root = find_repo_root(Path.cwd()) or Path.cwd().resolve()
     for file_path_str in file_paths:
+        policy_paths(policy_args, Path.cwd(), [file_path_str])
         raw_path = Path(file_path_str).expanduser()
         if raw_path.is_symlink():
             caveats.append(f"Skipped symlink: {file_path_str}")
@@ -2834,6 +3029,7 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
     selected = selected_paths_from_args(args)
     rev_range = review_rev_range(args)
     paths, excluded = changed_paths(root, args.scope, selected, rev_range=rev_range)
+    policy_paths(args, root, [*paths, *excluded])
     diff = diff_for_paths(root, args.scope, paths, rev_range=rev_range)
     notes: list[str] = []
     file_texts: list[tuple[str, str]] = []
@@ -3732,8 +3928,9 @@ def run_chunked_review(
     ]
     caveats.extend(synthesis_caveats)
     try:
-        synthesis, synthesis_model, synthesis_generation = generate_with_fallback(
+        synthesis, synthesis_model, synthesis_generation = policy_generate(
             args,
+            stage="summary",
             model=model,
             prompt=synthesis_prompt,
             max_output_tokens=args.max_output_tokens,
@@ -3876,6 +4073,7 @@ def assemble_plan_prompt(args: argparse.Namespace, *, apply_limit: bool = True) 
             root = Path.cwd().resolve()
 
         paths, excluded = changed_paths(root, args.scope, args.file or [])
+        policy_paths(args, root, [*paths, *excluded])
         diff = diff_for_paths(root, args.scope, paths)
         notes: list[str] = []
         file_blocks: list[str] = []
@@ -3896,7 +4094,7 @@ def assemble_plan_prompt(args: argparse.Namespace, *, apply_limit: bool = True) 
                 scope_line += f", ... ({len(paths)} files total)"
 
         context_parts = [f"Planning context scope: {scope_line}."]
-        repo_profile = detect_repo_profile(root)
+        repo_profile = "" if data_policy(args) else detect_repo_profile(root)
         if repo_profile:
             context_parts.insert(1, f"## Repository Profile\n{repo_profile}")
         if diff.strip():
@@ -4076,8 +4274,9 @@ def run_chunked_plan(
         raise failure
     caveats = [*caveats, *synthesis_caveats]
     try:
-        text, synthesis_model, synthesis_generation = generate_with_fallback(
+        text, synthesis_model, synthesis_generation = policy_generate(
             args,
+            stage="summary",
             model=model,
             prompt=synthesis_prompt,
             max_output_tokens=args.max_output_tokens,
@@ -4143,6 +4342,7 @@ def read_prompt(args: argparse.Namespace) -> str:
     pieces: list[str] = []
     if args.prompt_file:
         path = Path(args.prompt_file).expanduser()
+        policy_paths(args, Path.cwd(), [path])
         raw = path.read_bytes()
         if b"\0" in raw:
             raise AntiError("prompt file looks binary")
@@ -4978,8 +5178,8 @@ def fallback_findings_contract(
             "recommended_next_actions": [],
             "caveats": caveats,
             "parse_warning": parse_warning,
-            "findings_total": 0,
-            "findings_dropped": 0,
+            "findings_total": None,
+            "findings_dropped": None,
         }
     )
 
@@ -6129,15 +6329,20 @@ def maybe_summarize_panel_review(
     summary_model = panel_review_summary_model(panel_models)
     prompt_budget = prompt_budget_for_model(args, summary_model)
     progress(args, f"panel review: summarizing broad review context with {summary_model} before fan-out")
-    summary_text, summary_caveats, summary_metadata = run_chunked_review(
-        args=args,
-        context=context,
-        model=summary_model,
-        base_metadata=metadata,
-        max_prompt_chars=prompt_budget,
-        chunks=pre_chunks,
-        chunk_metadata=pre_chunk_metadata,
-    )
+    policy_token = _POLICY_STAGE.set("summary")
+    try:
+        summary_text, summary_caveats, summary_metadata = run_chunked_review(
+            args=args,
+            context=context,
+            model=summary_model,
+            base_metadata=metadata,
+            max_prompt_chars=prompt_budget,
+            chunks=pre_chunks,
+            chunk_metadata=pre_chunk_metadata,
+        )
+    finally:
+        _POLICY_STAGE.reset(policy_token)
+
     instruction_prefix = prompt.split("\n## Review Manifest", 1)[0].rstrip()
     if not instruction_prefix:
         instruction_prefix = "\n\n".join(
@@ -6290,6 +6495,8 @@ def command_panel(args: argparse.Namespace) -> int:
         panel_models=panel_models,
         judge_model=judge_model,
     )
+    if policy_preflight(args, prompt, [(model, "primary") for model in panel_models] + [(judge_model, "judge")]):
+        return 0
     if args.dry_run:
         print(format_dry_run(mode=f"panel {args.mode}", model=panel_models[0],
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
@@ -6649,8 +6856,9 @@ def command_panel(args: argparse.Namespace) -> int:
     judge_call_outputs: list[str] = []
 
     def run_judge(prompt: str, max_output_tokens: int) -> tuple[str, str, dict[str, Any]]:
-        result = generate_with_fallback(
+        result = policy_generate(
             args,
+            stage="judge",
             model=judge_model,
             prompt=prompt,
             max_output_tokens=max_output_tokens,
@@ -6834,17 +7042,24 @@ def command_panel(args: argparse.Namespace) -> int:
         workspace = Path((review_context or {}).get("workspace_root") or Path.cwd())
         raw_findings = findings.get("findings", [])
         if isinstance(raw_findings, list):
-            verified = verify_findings(raw_findings, workspace)
+            verified = verify_findings(raw_findings, workspace, profiles=getattr(args, "check_profile", []))
             findings["findings"] = verified
-            verified_count = sum(1 for f in verified if f.get("evidence", "unverified") != "unverified")
+            checks = {check["checkId"]: check for finding in verified for check in finding.get("checks", [])}
+            counts = {state: sum(check["status"] == state for check in checks.values())
+                      for state in ("passed", "failed", "skipped", "error")}
             metadata["verification"] = {
-                "status": "completed_no_evidence" if not verified_count else "tool_checks",
+                "status": "tool_checks" if counts["passed"] + counts["failed"] else "completed_no_evidence",
                 "performedBy": "anti",
                 "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
-                "evidenceCount": verified_count,
+                "evidenceCount": counts["passed"] + counts["failed"],
+                "checkCounts": counts,
+                "checks": list(checks.values()),
+                "claimVerdict": "unverified",
             }
-            if verified_count:
-                caveats.append(f"Verification: {verified_count}/{len(verified)} findings received tool-backed evidence")
+            caveats.append(
+                f"File checks: {counts['passed']} passed, {counts['failed']} failed, "
+                f"{counts['skipped']} skipped, {counts['error']} errors; finding claims remain unverified."
+            )
     if metadata.get("findings_status") == "parsed" and isinstance(findings, dict):
         display_text = render_panel_findings(findings, [])
 
@@ -6918,13 +7133,15 @@ def command_panel(args: argparse.Namespace) -> int:
             repo_path=workspace,
             findings=findings.get("findings", []) if isinstance(findings, dict) else [],
             models=list(dict.fromkeys([*panel_models, str(judge_model)])),
+            context={**metadata, "caveats": caveats},
             panel_status=panel_status,
             mode=args.mode,
             scope=metadata.get("scope", ""),
             run_id=getattr(args, "run_id", None),
+            save_output=save_output_mode(args),
         )
-    except Exception:
-        pass  # Reflection recording is best-effort
+    except Exception as exc:
+        eprint("[anti] Reflection history was not updated: " + redact_sensitive_text(str(exc)))
     print_panel_result(
         panel_mode=args.mode,
         base_url=args.base_url,
@@ -6960,7 +7177,7 @@ def command_consult(args: argparse.Namespace) -> int:
     read_files: list[str] = []
     if not getattr(args, "no_pre_read", False):
         prompt, file_caveats, read_files = build_consult_file_context(
-            prompt, args.max_prompt_chars
+            prompt, args.max_prompt_chars, **({"policy_args": args} if data_policy(args) else {})
         )
         caveats.extend(file_caveats)
     else:
@@ -6970,6 +7187,8 @@ def command_consult(args: argparse.Namespace) -> int:
     
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
     estimated_cost = estimate_call_cost(model, len(prompt), args.max_output_tokens)
+    if policy_preflight(args, prompt, [(model, "primary")]):
+        return 0
     if args.dry_run:
         print(format_dry_run(mode="consult", model=model,
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
@@ -7127,6 +7346,8 @@ def command_review(args: argparse.Namespace) -> int:
         metadata.setdefault("privacy_disclosures", []).append(disclosure)
         if not args.print_prompt:
             eprint(f"[anti] {redact_sensitive_text(disclosure)}")
+    if policy_preflight(args, prompt, [(model, "primary")]):
+        return 0
     if args.dry_run:
         stage_plan = [{"name": "review", "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 1}]
         if chunked_review:
@@ -7305,14 +7526,17 @@ def command_review(args: argparse.Namespace) -> int:
         record_review(
             repo_path=workspace,
             findings=[],  # Reviews don't produce structured findings
+            context={**metadata, "actualModels": [str(model_used)],
+                     "actualProviders": [provider_for_model(str(model_used)) or "unknown"], "caveats": caveats},
             models=[str(model_used)],
             panel_status="single_model",
             mode="review",
             scope=scope_line,
             run_id=getattr(args, "run_id", None),
+            save_output=save_output_mode(args),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        eprint("[anti] Reflection history was not updated: " + redact_sensitive_text(str(exc)))
     print_result(
         mode="review",
         model=str(model_used),
@@ -7345,6 +7569,8 @@ def command_plan(args: argparse.Namespace) -> int:
         if not args.print_prompt:
             eprint(f"[anti] {redact_sensitive_text(disclosure)}")
     recorded_prompt = prompt
+    if policy_preflight(args, prompt, [(model, "primary")]):
+        return 0
     if args.dry_run:
         stage_plan = [{"name": "plan", "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 1}]
         if should_chunk_plan(args, prompt, max_prompt_chars=prompt_budget):
@@ -7728,6 +7954,10 @@ def command_smoke(args: argparse.Namespace) -> int:
 
 def command_compare(args: argparse.Namespace) -> int:
     """Send one bounded prompt through each requested model and report the outcomes."""
+    if data_policy(args):
+        policy_prompt = read_prompt(args)
+        if policy_preflight(args, policy_prompt, [(resolve_model(value, default=value), "primary") for value in args.model]):
+            return 0
     if args.dry_run:
         print(format_dry_run(
             mode="compare",
@@ -7925,27 +8155,31 @@ def command_doctor(args: argparse.Namespace) -> int:
     return run_cli(cli_args)
 
 
+def _handle_run_signal(args: argparse.Namespace, signum: int) -> None:
+    # A Python signal can interrupt us while we own a non-reentrant OS lock.
+    # Finish/unwind the current atomic publication, then record interruption.
+    if getattr(_RECORD_WRITES, "depth", 0):
+        _RECORD_WRITES.pending_signal = (args, signum)
+        return
+    if not getattr(args, "run_record_written", False):
+        try:
+            write_run_record(
+                args, mode=getattr(args, "command", "unknown"), status="interrupted",
+                models=[], base_url=getattr(args, "base_url", None),
+                metadata={"request_log_correlation_id": getattr(args, "run_id", None)},
+                error=f"terminated by signal {signum}",
+            )
+        except Exception:
+            pass
+    raise SystemExit(128 + signum)
+
+
 def _install_run_signal_handlers(args: argparse.Namespace) -> None:
-    """Write an interrupted record (over the running placeholder) on SIGTERM/SIGHUP."""
+    """Persist interruption without recursively acquiring a held record lock."""
     if not hasattr(args, "save_output"):
         return
-
     def handler(signum: int, _frame: Any) -> None:
-        if not getattr(args, "run_record_written", False):
-            try:
-                write_run_record(
-                    args,
-                    mode=getattr(args, "command", "unknown"),
-                    status="interrupted",
-                    models=[],
-                    base_url=getattr(args, "base_url", None),
-                    metadata={"request_log_correlation_id": getattr(args, "run_id", None)},
-                    error=f"terminated by signal {signum}",
-                )
-            except Exception:
-                pass
-        raise SystemExit(128 + signum)
-
+        _handle_run_signal(args, signum)
     for signum in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
         if signum is None:
             continue
@@ -8024,6 +8258,8 @@ def _panel_argv(
         argv.append("--no-anonymize")
     if getattr(args, "no_verify", False):
         argv.append("--no-verify")
+    for profile in getattr(args, "check_profile", []) or []:
+        argv.extend(["--check-profile", profile])
     return argv
 
 
@@ -8044,6 +8280,10 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         "--save-output",
         args.save_output,
     ]
+    if getattr(args, "data_policy", None):
+        common.extend(["--data-policy", args.data_policy])
+    for acknowledgement in getattr(args, "acknowledge_secret_hash", None) or []:
+        common.extend(["--acknowledge-secret-hash", acknowledgement])
     if args.budget is not None:
         common.extend(["--budget", str(args.budget)])
     if args.max_output_tokens is not None:
@@ -8262,7 +8502,12 @@ def command_workflow(args: argparse.Namespace) -> int:
     progress(args, "workflow expands to: " + workflow_command_for_progress(expanded))
     parser = build_parser()
     expanded_args = parser.parse_args(expanded)
+    expanded_args.data_policy = getattr(args, "data_policy", None)
+    expanded_args.acknowledge_secret_hash = getattr(args, "acknowledge_secret_hash", None)
+    expanded_args._data_policy_session = data_policy(args)
     expanded_args.workflow_name = args.name
+    if getattr(args, "_anti_writer_id", None):
+        expanded_args._anti_writer_id = args._anti_writer_id
     if not getattr(expanded_args, "run_label", None):
         expanded_args.run_label = args.run_label or args.name
     if hasattr(expanded_args, "base_url") and expanded_args.base_url is not None:
@@ -8276,6 +8521,8 @@ def command_workflow(args: argparse.Namespace) -> int:
     finally:
         # Propagate the inner run id so lifecycle handlers on the outer args
         # overwrite the same placeholder instead of orphaning it (B5).
+        if getattr(expanded_args, "_anti_writer_id", None):
+            args._anti_writer_id = expanded_args._anti_writer_id
         if getattr(expanded_args, "run_id", None):
             args.run_id = expanded_args.run_id
         if getattr(expanded_args, "run_record_written", False):
@@ -8299,13 +8546,7 @@ def iter_run_records() -> list[Path]:
 
 
 def load_run_record(path: Path) -> dict[str, Any]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise AntiError(f"could not read run record {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise AntiError(f"run record {path} is not a JSON object")
-    return data
+    return read_record(path)
 
 
 def resolve_run_record_path(run_id: str) -> Path:
@@ -8323,14 +8564,18 @@ def resolve_run_record_path(run_id: str) -> Path:
         if len(matches) == 1:
             path = matches[0]
     if not path.exists():
+        if (RUNS_DIR / run_id).exists():
+            raise ArtifactError("incomplete_publication", "Run artifacts exist without a committed index")
         raise AntiError(f"run record not found: {run_id}")
+    if path.is_symlink():
+        raise ArtifactError("invalid_reference", "Run index is a symlink")
 
     resolved = path.resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:
         raise AntiError(f"run record path escaped Anti run directory: {run_id}") from exc
-    return resolved
+    return path
 
 
 def command_runs(args: argparse.Namespace) -> int:
@@ -8356,13 +8601,14 @@ def command_runs(args: argparse.Namespace) -> int:
                 continue
             try:
                 data = load_run_record(path)
-            except AntiError:
+            except (AntiError, ArtifactError) as exc:
                 rows.append(
                     {
                         "id": path.stem,
                         "created_at": None,
                         "mode": None,
                         "status": "corrupt",
+                        "publicationStatus": getattr(exc, "code", "invalid_artifact"),
                         "workflow": None,
                         "models": [],
                         "run_label": None,
@@ -8377,6 +8623,7 @@ def command_runs(args: argparse.Namespace) -> int:
                     "created_at": data.get("created_at"),
                     "mode": data.get("mode"),
                     "status": data.get("status"),
+                    "publicationStatus": data.get("publicationStatus"),
                     "workflow": data.get("workflow"),
                     "models": data.get("models", []),
                     "run_label": data.get("run_label"),
@@ -8407,30 +8654,56 @@ def command_runs(args: argparse.Namespace) -> int:
         return 0
     if args.runs_command == "clean":
         cutoff = time.time() - (args.older_than * 86400)
-        removed = 0
-        for path in iter_run_records():
-            if path.stat().st_mtime < cutoff:
-                if args.dry_run:
-                    print(f"[*] Would remove {path.name}")
-                else:
-                    path.unlink()
-                    artifact_dir = RUNS_DIR / path.stem
-                    if artifact_dir.is_dir() and not artifact_dir.is_symlink():
-                        shutil.rmtree(artifact_dir)
-                removed += 1
-        if RUNS_DIR.exists():
-            for path in RUNS_DIR.glob("*.json.tmp"):
-                if path.stat().st_mtime < cutoff:
-                    if args.dry_run:
-                        print(f"[*] Would remove {path.name}")
-                    else:
-                        path.unlink()
-                    removed += 1
-        reflection_removed = prune_reflections_older_than(cutoff, dry_run=args.dry_run)
-        verb = "Would remove" if args.dry_run else "Removed"
-        print(f"[+] {verb} {removed} Anti run record(s) older than {args.older_than} day(s)")
-        print(f"[+] {verb} {reflection_removed} reflection record file(s) older than {args.older_than} day(s)")
-        return 0
+        report = clean_runs(RUNS_DIR, cutoff, dry_run=args.dry_run, resume=args.resume_cleanup)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            for row in report["rows"]:
+                label = json.dumps(row["id"], ensure_ascii=True)
+                print(f"[*] {row['action']}: {label} ({row['reason']})")
+                if row.get("recovery"):
+                    print("    " + row["recovery"])
+                    print("    Retained paths: " + json.dumps([row["recordPath"], row["artifactPath"], row["markerPath"]]))
+            removed = sum(row["action"] in {"remove", "resume", "removed"} for row in report["rows"])
+            verb = "Would remove" if args.dry_run else "Removed"
+            print(f"[+] {verb} {removed} Anti run record(s) older than {args.older_than} day(s)")
+            print("[*] Reflection history and unowned temporary files retained.")
+        return 1 if report["errors"] else 0
+    if args.runs_command in {"finding", "export"}:
+        try:
+            from anti_lib.reports import build_report, to_markdown, to_sarif, write_export
+            repo = Path(args.repo).resolve()
+            if args.runs_command == "finding":
+                evidence = args.evidence
+                if args.evidence_file:
+                    path = Path(args.evidence_file).expanduser()
+                    if not path.is_file() or path.stat().st_size > 16000:
+                        raise AntiError("Evidence file must be regular and at most 16000 bytes")
+                    with path.open("rb") as handle:
+                        raw = handle.read(16001)
+                    if len(raw) > 16000:
+                        raise AntiError("Evidence file exceeds the limit")
+                    evidence = raw.decode("utf-8")
+                updated = update_finding_verdict(repo, args.run_id, args.finding, status=args.verdict,
+                                                 author=args.author, evidence=evidence, source_file=args.source_file)
+                print(json.dumps(updated, indent=2, sort_keys=True))
+                return 0
+            records = list_records(repo, limit=None)
+            if args.run_id:
+                records = [record for record in records if record.get("run_id") == args.run_id]
+                if not records:
+                    raise AntiError("No retained reflection record matches this run")
+            report = build_report(records, repo)
+            text = (to_markdown(report) if args.format == "markdown" else
+                    json.dumps(to_sarif(report) if args.format == "sarif" else report, indent=2, sort_keys=True))
+            if args.output:
+                destination = Path(args.output).expanduser()
+                write_export(destination, text)
+            else:
+                print(text)
+            return 0
+        except (ValueError, OSError) as exc:
+            raise AntiError(str(exc)) from exc
     if args.runs_command == "reflections":
         repo = Path(args.repo).resolve()
         verify_verdict = getattr(args, "verify_verdict", None)
@@ -8449,6 +8722,7 @@ def command_runs(args: argparse.Namespace) -> int:
         print(f"- Records: {summary['records']}")
         print(f"- Total findings: {summary['total_findings']}")
         print(f"- Recurring fingerprints: {summary['recurring_fingerprints']}")
+        print(f"- Per-finding verdict cohorts: {summary.get('verdictCohorts', {})}")
         if summary.get("date_range"):
             print(f"- Date range: {summary['date_range'][0]} to {summary['date_range'][1]}")
         if summary.get("top_recurring"):
@@ -8504,6 +8778,8 @@ def add_generation_control_args(
     *,
     default_save_output: str = "never",
 ) -> None:
+    parser.add_argument("--data-policy", help="Explicit path to a version 1 restrictive repository submission policy")
+    parser.add_argument("--acknowledge-secret-hash", action="append", help="Explicitly acknowledge this exact assembled prompt SHA-256; repeatable")
     parser.add_argument("--auto-route", action="store_true", help="Automatically pick the cheapest adequate model based on diff size and risk")
     parser.add_argument("--fallback-model", help="Fallback model alias/id for retryable or timeout failures")
     parser.add_argument(
@@ -8520,7 +8796,7 @@ def add_generation_control_args(
         "--save-output",
         choices=sorted(SAVE_OUTPUT_MODES),
         default=default_save_output,
-        help="Save sanitized run metadata under ~/.codex/anti-runs",
+        help="Retention under ~/.codex/anti-runs: never = content-free lifecycle only; summary = bounded previews; full = redacted detailed output",
     )
 
 
@@ -8599,7 +8875,9 @@ def build_parser() -> argparse.ArgumentParser:
     panel.add_argument("--print-prompt", action="store_true", help="Print assembled source prompt without contacting gateway")
     panel.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
     panel.add_argument("--no-anonymize", action="store_true", help="Do not anonymize lane labels before judge synthesis")
-    panel.add_argument("--no-verify", action="store_true", help="Skip evidence-linked verification of findings")
+    panel_checks = panel.add_mutually_exclusive_group()
+    panel_checks.add_argument("--no-verify", action="store_true", help="Skip all finding file checks")
+    panel_checks.add_argument("--check-profile", choices=["eslint"], action="append", default=[], help="Opt into an installed trusted checker and project config (no fixes or installs)")
     panel.add_argument("prompt_parts", nargs="*", help="Positional ask/planning prompt text")
     panel.set_defaults(func=command_panel)
 
@@ -8721,7 +8999,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workflow.add_argument("--panel-mode", choices=["review", "plan", "ask"], default="review", help="Panel mode for collaboration workflows")
     workflow.add_argument("--no-anonymize", action="store_true", help="Do not anonymize lane labels before judge synthesis")
-    workflow.add_argument("--no-verify", action="store_true", help="Skip evidence-linked verification of findings")
+    workflow_checks = workflow.add_mutually_exclusive_group()
+    workflow_checks.add_argument("--no-verify", action="store_true", help="Skip all finding file checks")
+    workflow_checks.add_argument("--check-profile", choices=["eslint"], action="append", default=[], help="Opt into an installed trusted checker and project config (no fixes or installs)")
     workflow.add_argument("--model", action="append", help="Model alias/id for the workflow; repeatable for panels")
     workflow.add_argument(
         "--model-free",
@@ -8778,8 +9058,25 @@ def build_parser() -> argparse.ArgumentParser:
     runs_show = runs_sub.add_parser("show")
     runs_show.add_argument("id")
     runs_clean = runs_sub.add_parser("clean")
-    runs_clean.add_argument("--older-than", type=positive_int, required=True, help="Delete records older than N days")
-    runs_clean.add_argument("--dry-run", action="store_true", help="List records that would be removed without deleting")
+    runs_clean.add_argument("--older-than", type=positive_int, required=True, help="Delete terminal records older than N days; retain running and uncertain state")
+    runs_clean.add_argument("--dry-run", action="store_true", help="Plan cleanup without changing any files")
+    runs_clean.add_argument("--resume-cleanup", action="store_true", help="Retry a previously interrupted terminal cleanup after revalidation")
+    runs_clean.add_argument("--json", action="store_true", help="Print the cleanup plan or result as JSON")
+    runs_finding = runs_sub.add_parser("finding", help="Record local evidence for one retained advisory finding")
+    runs_finding.add_argument("--repo", default=".")
+    runs_finding.add_argument("--run-id", required=True)
+    runs_finding.add_argument("--finding", required=True, help="findingKey from runs export")
+    runs_finding.add_argument("--verdict", required=True, choices=["confirmed", "rejected", "unresolved"])
+    runs_finding.add_argument("--author", required=True, help="Explicit local author label")
+    runs_finding.add_argument("--source-file", required=True, help="Inspected source within --repo; its SHA-256 is recorded")
+    evidence = runs_finding.add_mutually_exclusive_group(required=True)
+    evidence.add_argument("--evidence", help="Explicit local evidence (up to 4000 characters)")
+    evidence.add_argument("--evidence-file", help="UTF-8 file containing explicit local evidence")
+    runs_export = runs_sub.add_parser("export", help="Export local JSON/SARIF/Markdown without publishing")
+    runs_export.add_argument("--repo", default=".")
+    runs_export.add_argument("--run-id")
+    runs_export.add_argument("--format", choices=["json", "sarif", "markdown"], default="json")
+    runs_export.add_argument("--output", help="New local output file (default: stdout; refuses existing files)")
     runs_reflections = runs_sub.add_parser("reflections", help="Show repo-level reflection history")
     runs_reflections.add_argument("--repo", default=".", help="Repository path (default: cwd)")
     runs_reflections.add_argument("--limit", type=positive_int, default=10)
@@ -8895,9 +9192,10 @@ def main(argv: list[str] | None = None) -> int:
         _install_run_signal_handlers(args)
         if hasattr(args, "base_url") and args.base_url is not None:
             args.base_url = normalize_base_url(args.base_url)
+        data_policy(args)
         return int(args.func(args))
     except KeyboardInterrupt:
-        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False):
+        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False) and not (getattr(args, "dry_run", False) or getattr(args, "print_prompt", False)):
             try:
                 run_id = getattr(args, "run_id", None)
                 correlation = {"request_log_correlation_id": run_id} if run_id else {}
@@ -8914,8 +9212,10 @@ def main(argv: list[str] | None = None) -> int:
                 pass
         eprint("Interrupted")
         return 130
-    except AntiError as exc:
-        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False):
+    except (AntiError, PersistenceError, PolicyError) as exc:
+        if isinstance(exc, PolicyError) and getattr(args, "_data_policy_session", None) and not (getattr(args, "dry_run", False) or getattr(args, "print_prompt", False)):
+            args.run_id = getattr(args, "run_id", None) or new_run_id()
+        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False) and not (getattr(args, "dry_run", False) or getattr(args, "print_prompt", False)):
             try:
                 run_id = getattr(args, "run_id", None)
                 correlation = {"request_log_correlation_id": run_id} if run_id else {}

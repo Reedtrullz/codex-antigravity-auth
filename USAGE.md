@@ -41,7 +41,11 @@ codex-antigravity service uninstall --port 51122
 
 The service command writes a macOS LaunchAgent, Linux systemd user unit, or Windows Scheduled Task depending on the platform. `doctor --codex-ready` and `status --json` report both the lightweight pid-file process state and the durable service state.
 
+Client endpoints require HTTPS for remote hosts. Plain HTTP is allowed for `localhost`, IPv4 loopback and IPv6 loopback; URL username/password fields, invalid ports and control characters are rejected before dispatch. Base URLs also reject query strings and fragments. CLI diagnostics/setup, OAuth requests and standalone Anti refuse all HTTP redirects, including same-origin redirects: configure a non-redirecting endpoint instead. Provider HTTPX clients explicitly disable redirect following as well. Explicit invalid provider endpoint overrides remain blocked instead of falling back to a preset URL; correct or remove the override to restore the preset. Plaintext loopback requests bypass proxies; HTTPS keeps its configured certificate environment.
+
 Gateway request diagnostics are local and sanitized:
+
+Gateway and standalone Anti share credential-redaction rules for structured fields, nested JSON error strings, authorization headers, URL user information, and known token formats. Anti additionally masks provider identifiers; gateway request IDs remain available for telemetry correlation. Redaction bounds diagnostic text to 512 KiB, structured depth to 32, and visited items to 10,000; over-limit content becomes an explicit redacted marker. This policy recognizes credential fields and formats, rather than guaranteeing detection of every arbitrary secret.
 
 ```bash
 codex-antigravity logs --tail 50
@@ -102,6 +106,8 @@ Panel mode validates requested judge/fallback models against `/v1/models` before
 
 The panel judge returns a structured findings contract with `id`, `claim`, `severity`, `lanes`, and `verify`. Default prose output renders disagreements first, then findings, unverifiable observations, and caveats. `--output findings` emits just the sanitized findings JSON, while `--json` includes panel results, usage/latency metadata, caveats, findings, and the rendered output. Broad `panel --mode review` scopes reuse the review chunking path to create one bounded summary before fan-out rather than silently truncating full context for every lane.
 
+Default Anti diff inspection disables Git external-diff drivers and textconv converters. Review and planning context use raw diffs and binary-file descriptors; Git inspection failures stop collection instead of becoming empty successful scope. Repository-configured preprocessing is not run implicitly.
+
 Panel lanes are selected explicitly from the native Sonnet/Opus defaults or from models advertised by the running gateway. BYOK examples include `openrouter:...`, `deepseek:...`, `xai:...`, `kimi:...`, `ollama:...`, and `opencode:...`; they require the corresponding API key or a key-optional local provider. When a BYOK lane receives repository, diff, or file context, the helper prints and records a disclosure naming the provider lane. Virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` remain helper aliases rather than gateway-side fan-out. The current xAI preset is API-key based and uses `XAI_API_KEY`; a catalog entry is not proof that a live generation will succeed.
 
 Repository context leaves the Google Antigravity lane only after explicit selection and the existing BYOK disclosure. Opus remains the default judge; native Codex remains the acting agent and must verify advisory output locally.
@@ -119,7 +125,15 @@ python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
 ```
 
-Workflow presets save sanitized summaries under `~/.codex/anti-runs` by default. Primitive commands default to `--save-output never`; opt into `summary` or redacted `full` records when useful. Saved runs include a run id; Anti sends it to the gateway as `metadata.run_id`, and the sanitized request JSONL log records it for correlation without forwarding it to Google or BYOK providers. With `--chunked auto`, Opus/Sonnet plan and review calls use a conservative Claude safety budget and split broad context into bounded chunk calls before synthesis; use `--chunked off` only when you intentionally want one large request, including when `--max-prompt-chars 0` would otherwise mean unlimited. Use `--fallback-model sonnet --fallback-policy on-retryable` for long Opus calls that should degrade after retryable backend failures, and `--progress` to print model/chunk progress to stderr.
+Workflow presets save sanitized summaries under `~/.codex/anti-runs` by default. Primitive commands default to `--save-output never`: only a content-free lifecycle/correlation record is retained, with no findings or reflection history. Opt into `summary` for bounded previews across all saved payloads, or redacted `full` for detailed results and lane files. Summary artifacts are explicitly marked `retention.contentComplete=false`; they are not complete saved answers. See the bundled [recording policy](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks) for bounds. Saved runs include a run id; Anti sends it to the gateway as `metadata.run_id`, and the sanitized request JSONL log records it for correlation without forwarding it to Google or BYOK providers. With `--chunked auto`, Opus/Sonnet plan and review calls use a conservative Claude safety budget and split broad context into bounded chunk calls before synthesis; use `--chunked off` only when you intentionally want one large request, including when `--max-prompt-chars 0` would otherwise mean unlimited. Use `--fallback-model sonnet --fallback-policy on-retryable` for long Opus calls that should degrade after retryable backend failures, and `--progress` to print model/chunk progress to stderr.
+
+Finding checks default to in-memory Python syntax and credential-pattern checks, with structured outcomes and no project writes. Opt into trusted project ESLint with `panel --check-profile eslint` (also forwarded by workflow commands), or skip all checks with `--no-verify`. These checks never execute model-supplied `verify` text or establish a finding's semantic truth. Detailed check records appear in live JSON/full retention; summaries keep counts. See the bundled [check policy](codex_antigravity_auth/skills/anti/SKILL.md#new-flags).
+
+Saved results use immutable revisions referenced by the run index; `anti.py runs show <id>` validates checksums and status consistency before returning `resultPath`. Legacy records are explicitly unverified. See the [artifact contract](codex_antigravity_auth/skills/anti/ARTIFACTS.md).
+
+Each run ID has one writer; use a new ID for a new invocation or when a previous record's ownership is unknown. Corrupt or unreadable reflection files are preserved, with backup/recovery guidance instead of silently replacing history. See the bundled [persistence contract](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks).
+
+Preview retention cleanup with `anti.py runs clean --older-than 30 --dry-run --json`. Only old terminal records are eligible; running, uncertain and temporary state is kept regardless of age. Cleanup retains reflection history and a small permanent ID reservation. Incomplete deletion exits nonzero and lists retained paths; inspect them before retrying with `--resume-cleanup`. See the bundled [cleanup policy](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks).
 
 For the older Google-only OAuth setup, use:
 
@@ -190,6 +204,8 @@ codex-antigravity doctor --codex-ready --live --live-model claude-sonnet-4-6
 
 `doctor --live` currently supports Google Antigravity models only. It also performs a once-daily cached package-version check against PyPI and warns when an upgrade is available. Set `CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1` to disable that external metadata lookup.
 
+Live readiness requires a completed response with usable text in a completed assistant message. HTTP success alone, failed or incomplete responses (including token-cap exhaustion), refusals, empty output, and malformed responses do not pass. The live probe in `doctor --codex-ready --json` separates `transport_ok` from `generation_ok` and reports `terminal_kind`, `terminal_reason`, and a redacted `error`; `ok` reflects generation success. The check sends one request with the existing token budget and does not retry automatically.
+
 ## 1. Supported Models & Aliases
 You can use standard, developer-friendly names in your `~/.codex/config.toml` that the gateway automatically translates to the official Google Antigravity backend model definitions:
 
@@ -237,3 +253,27 @@ The local server natively isolates explicit thinking blocks and stream envelopes
 ## Request shape and schema diagnostics
 
 Malformed message/content/tool shapes and orphan outputs return field-specific HTTP400 errors before account work. Translated routes reject unsupported built-in tools and explicit schema weakening; Google cannot honor `strict: true`. Native Responses keeps provider-specific items/tools and continuation intact. See [request validation and translation-loss behavior](codex_antigravity_auth/design/request-shapes.md) for compatibility changes and limits.
+## Local finding verdicts and report export
+
+```sh
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --run-id RUN_ID --format json
+python3 ~/.codex/skills/anti/scripts/anti.py runs finding --repo . --run-id RUN_ID --finding FINDING_KEY --verdict rejected --author reviewer --source-file src/example.py --evidence-file local-evidence.txt
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --run-id RUN_ID --format sarif --output review.sarif
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --format markdown --output reviews.md
+```
+
+Use `findingKey` from the first export. Local verdicts require explicit evidence
+and record the inspected file hash; model claims and passing file checks remain
+unverified. Rejected and unresolved findings remain visible. Existing output
+files are never overwritten, and these commands never publish to GitHub. Retained
+content and provenance limits follow the
+[review export contract](codex_antigravity_auth/skills/anti/ARTIFACTS.md#finding-adjudication-and-review-exports).
+
+### Anti repository submission policies
+
+`consult`, `review`, `plan`, `compare`, `panel` and `workflow` accept opt-in
+`--data-policy PATH`. Exact gateway/model/stage allowlists and forbidden source
+paths restrict the chosen run. Bounded secret-pattern checks stop a submission
+until resolved or explicitly acknowledged for its exact prompt hash. Policy
+dry runs write nothing and report hashes instead of source. See the bundled
+[policy contract](codex_antigravity_auth/skills/anti/DATA_POLICY.md).

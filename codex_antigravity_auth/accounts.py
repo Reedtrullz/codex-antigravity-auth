@@ -87,7 +87,7 @@ def _apply_token_refresh(account: dict, refresh_token: str, *, wait: bool = True
                 else:
                     _log.warning("Project discovery returned empty for %s", email)
             except Exception as exc:
-                _log.warning("Project discovery failed for %s: %s", email, exc)
+                _log.warning("Project discovery failed for %s: %s", email, redact_secret_text(str(exc)))
         return True
     finally:
         lock.release()
