@@ -3,6 +3,7 @@
   "files": [
     "RUN_CONTROL.md",
     "SKILL.md",
+    "SPEND_CONTROL.md",
     "agents/openai.yaml",
     "scripts/anti.py",
     "scripts/anti_lib/__init__.py",
@@ -15,6 +16,7 @@
     "scripts/anti_lib/reflections.py",
     "scripts/anti_lib/run_control.py",
     "scripts/anti_lib/runner.py",
+    "scripts/anti_lib/spend_control.py",
     "scripts/anti_lib/verifier.py",
     "tests/fixtures/v5-lane-opus.json",
     "tests/fixtures/v5-lane-sonnet.json",

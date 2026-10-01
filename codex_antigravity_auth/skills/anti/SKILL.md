@@ -61,7 +61,7 @@ DeepSeek and OpenRouter rows are optional BYOK routes and are expected to be abs
 
 The helper tracks per-model capabilities and cost tiers to make cost-aware decisions. When Opus/Sonnet quota is limited, prefer free models for simple tasks.
 
-| Model | Alias | Cost tier | Quality heuristic |
+| Model | Alias | Heuristic tier (pricing unverified) | Quality heuristic |
 |---|---|---|---|
 | `claude-opus-4-6-thinking` | `opus` | quota | 100 |
 | `gemini-3.1-pro` | `gemini-pro` | quota | 90 |
@@ -241,7 +241,8 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 
 - `--model-free` — Expand the explicit free-lane preset (`nemotron-ultra`, `poolside`, `gemma-4`, `nemotron-super`) as the panel/workflow lane list. Shell convenience only: requested identities stay visible in logs and run manifests, no automatic routing, and combining it with `--model` fails closed.
 - `--auto-route` — Automatically pick the cheapest adequate model based on diff size and file risk. Small diffs use flash-3.8, medium use sonnet, large or high-risk files use opus. Only activates when `--model` is not explicitly passed.
-- `--budget <cost>` — Maximum estimated cost for a run. Admission happens before each chunk/synthesis/lane/judge call; refused work is marked not-sent. Cost is in arbitrary units (not real USD), with estimated ceilings, observed usage, and unknown-usage markers kept separate.
+- `--budget <units>` — Compatibility heuristic-unit allowance, never USD or provider billing. Unknown heuristic tiers refuse this mode.
+- Independent `--max-calls`, `--max-total-input-tokens` (estimated) and `--max-total-output-tokens` allowances cover retries/fallback/judge calls. Currency admission requires `--currency-budget` plus explicit dated complete-attempt bounds in `--pricing-file`; static free labels and observed tokens never become currency prices. See [spend-control assumptions, units and schema](SPEND_CONTROL.md).
 - `--no-verify` — Skip evidence-linked verification of findings (syntax, secrets, eslint checks on referenced files).
 - `--no-anonymize` — Preserve original model names and lane order in judge synthesis (default: anonymize and shuffle).
 - `--required-file <path>` — Require every chunk for these paths to be sent; repeatable and fail-closed when the cap cannot cover them.
