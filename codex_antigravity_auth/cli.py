@@ -1,3 +1,5 @@
+from .console import console_print as print
+from .console import ConsoleArgumentParser, safe_terminal_text
 import sys
 import os
 import argparse
@@ -1290,9 +1292,9 @@ def run_configure_codex(args) -> None:
     print("[*] Optional sidecar skill: codex-antigravity install-skill")
 
 
-def main():
+def _main():
     _ensure_split_modules()
-    parser = argparse.ArgumentParser(description="Codex Antigravity Auth CLI Utility")
+    parser = ConsoleArgumentParser(description="Codex Antigravity Auth CLI Utility")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # login
@@ -1712,6 +1714,15 @@ def main():
         stop_gateway(args)
     elif args.command == "status":
         run_gateway_status(args)
+
+
+def main():
+    try:
+        return _main()
+    except SystemExit as exc:
+        if isinstance(exc.code, str):
+            raise SystemExit(safe_terminal_text(exc.code)) from None
+        raise
 
 
 # The cli_* modules below import `cli` themselves (`from . import cli as _cli`),
