@@ -77,7 +77,7 @@ annotation per retained finding; it does not enlarge or restore automatic model
 previews. The summary `content_preview` budget applies to captured model content,
 while explicit manual evidence has the separate 4000-character limit above.
 Unretained findings cannot be adjudicated or reconstructed. Exports disclose
-retained versus declared counts and `contentComplete=false` for summaries;
+retained versus declared normalized counts and `contentComplete=false` for summaries;
 missing provenance remains unknown. If a combined report exceeds the shared
 structured-redaction budget, export an individual `--run-id` instead of silently
 truncating the result.
@@ -96,3 +96,11 @@ credentials, omit the workspace root from their envelope, and use relative
 owned locations. Explicit author/evidence labels are still user-authored content;
 inspect reports before sharing. There is no automatic false-positive suppression,
 routing change or GitHub publication.
+
+Parser normalization loss has separate `parserFindingTotal`,
+`parserFindingsDropped` and `parserLossStatus` fields in every export format.
+These count rows before normalization and rows removed by normalization or
+deduplication; they do not redefine `contentComplete`, which only describes
+retention of normalized findings. Legacy missing parser counters are `null` and
+`unknown`, never invented zeros. Markdown includes run timestamps, source-record
+hashes and the same verdict/content-identity cohort summaries as JSON and SARIF.

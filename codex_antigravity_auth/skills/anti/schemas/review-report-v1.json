@@ -37,7 +37,11 @@
           "contentComplete",
           "declaredFindingCount",
           "retainedFindingCount",
-          "findings"
+          "findings",
+          "timestamp",
+          "parserFindingTotal",
+          "parserFindingsDropped",
+          "parserLossStatus"
         ],
         "properties": {
           "runId": {
@@ -174,6 +178,31 @@
                 }
               }
             }
+          },
+          "timestamp": {
+            "type": "number",
+            "minimum": 0
+          },
+          "parserFindingTotal": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "parserFindingsDropped": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "parserLossStatus": {
+            "enum": [
+              "loss",
+              "none",
+              "unknown"
+            ]
           }
         }
       }

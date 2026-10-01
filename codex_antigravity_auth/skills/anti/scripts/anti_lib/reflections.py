@@ -61,6 +61,10 @@ def _valid_record(row: Any) -> bool:
     count = row.get("findings_count", 0)
     if type(count) is not int or not 0 <= count <= 2**63 - 1:
         return False
+    for key in ("parser_findings_total", "parser_findings_dropped"):
+        value = row.get(key)
+        if value is not None and (type(value) is not int or not 0 <= value <= 2**63 - 1):
+            return False
     models = row.get("models", [])
     if not isinstance(models, list) or any(not isinstance(model, str) for model in models):
         return False
@@ -125,6 +129,18 @@ def _prune_old(records: list[dict[str, Any]], ttl_days: int = TTL_DAYS) -> list[
     return [r for r in records if r.get("timestamp", 0) > cutoff]
 
 
+def _parser_counts(context: dict[str, Any] | None) -> tuple[int | None, int | None]:
+    """Keep parser loss separate from retained normalized findings, including unknowns."""
+    context = context if isinstance(context, dict) else {}
+    contract = context.get("findings")
+    source = contract if isinstance(contract, dict) else context
+    values = []
+    for key in ("findings_total", "findings_dropped"):
+        value = source.get(key)
+        values.append(value if type(value) is int and 0 <= value <= 2**63 - 1 else None)
+    return values[0], values[1]
+
+
 def record_review(
     *,
     repo_path: Path,
@@ -146,8 +162,11 @@ def record_review(
         raise ValueError("unsupported reflection retention mode")
     if save_output == "never":
         return None
+    parser_total, parser_dropped = _parser_counts(context)
     record = {
         "save_output": save_output,
+        "parser_findings_total": parser_total,
+        "parser_findings_dropped": parser_dropped,
         "timestamp": int(time.time()),
         "repo": str(repo_path.resolve()),
         "mode": mode,
@@ -168,6 +187,7 @@ def record_review(
     if save_output == "summary":
         structure = summary_structure(record, (
             "save_output", "timestamp", "mode", "panel_status", "run_id", "verdict", "findings_count",
+            "parser_findings_total", "parser_findings_dropped",
         ))
         record = summary_projection({key: value for key, value in record.items() if key not in structure})
         record.update(structure)

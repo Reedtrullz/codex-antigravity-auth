@@ -80,6 +80,10 @@ def build_report(records: list[dict], repo: Path) -> dict:
             "scopeStatus": scope, "coverage": _export_value(context, repo),
             "contentComplete": record.get("save_output") == "full" and record.get("findings_count") == len(findings),
             "declaredFindingCount": record.get("findings_count", 0), "retainedFindingCount": len(findings),
+            "parserFindingTotal": record.get("parser_findings_total"),
+            "parserFindingsDropped": record.get("parser_findings_dropped"),
+            "parserLossStatus": ("unknown" if record.get("parser_findings_dropped") is None else
+                                 "loss" if record["parser_findings_dropped"] > 0 else "none"),
             "retention": record.get("save_output") or "legacy_unknown", "findings": findings,
         })
     result = sanitize_json({"$schema": REPORT_SCHEMA, "schemaVersion": 1, "kind": "anti-review-report",
@@ -100,6 +104,12 @@ def validate_report(report: dict) -> None:
                 or not isinstance(run.get("findings"), list)
                 or run.get("retainedFindingCount") != len(run["findings"])):
             raise ValueError("Invalid review report run")
+        for field in ("parserFindingTotal", "parserFindingsDropped"):
+            value = run.get(field)
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError("Invalid parser finding counter")
+        if run.get("parserLossStatus") not in {"loss", "none", "unknown"}:
+            raise ValueError("Invalid parser loss status")
         for finding in run["findings"]:
             if (not isinstance(finding.get("findingKey"), str)
                     or finding.get("verdict") not in {"confirmed", "rejected", "unresolved"}
@@ -147,8 +157,19 @@ def _markdown(value) -> str:
 def to_markdown(report: dict) -> str:
     validate_report(report)
     lines = ["# Anti review report", "", "Model claims remain unverified. Local adjudication is recorded separately.", ""]
+    summary = report["summary"]
+    lines += ["## Verdict cohorts", "", _markdown(json.dumps(summary["verdictCohorts"], sort_keys=True)),
+              "File identity basis: " + _markdown(summary["fileIdentityBasis"]), ""]
+    for group in summary["recurringFindings"]:
+        lines += ["### Recurring " + _markdown(group["identity"]), "",
+                  "Source hash: " + _markdown(group["sourceHash"] or "unknown"),
+                  "Cohorts: " + _markdown(json.dumps(group["cohorts"], sort_keys=True)),
+                  "Occurrences/evidence: " + _markdown(json.dumps(group["occurrences"], sort_keys=True)), ""]
     for run in report["runs"]:
         lines += [f"## Run {_markdown(run['runId'] or 'legacy')}", "",
+                  f"Recorded timestamp (UTC epoch): {_markdown(run['timestamp'])}.",
+                  "Source record SHA-256: " + _markdown(run["sourceRecordHash"]),
+                  f"Parser findings: {_markdown(run['parserFindingTotal'] if run['parserFindingTotal'] is not None else 'unknown')} total; {_markdown(run['parserFindingsDropped'] if run['parserFindingsDropped'] is not None else 'unknown')} dropped; loss status: {_markdown(run['parserLossStatus'])}.",
                   f"Actual models: {_markdown(', '.join(run['actualModels']) or 'unknown')}. Actual providers: {_markdown(', '.join(run['actualProviders']) or 'unknown')}.",
                   f"Scope: {_markdown(run['scopeStatus'])}. Retained findings: {run['retainedFindingCount']}/{run['declaredFindingCount']}. Complete content retained: {run['contentComplete']}.",
                   "Coverage/provenance: " + _markdown(json.dumps(run["coverage"], sort_keys=True)), ""]

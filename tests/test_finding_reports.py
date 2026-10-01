@@ -232,3 +232,56 @@ def test_summary_manual_annotation_has_separate_bounded_evidence(review):
     assert len(finding["adjudication"]["evidence"]) == 4000
     assert finding["verdict"] == "unresolved"
     assert report["runs"][0]["contentComplete"] is False
+
+
+@pytest.mark.parametrize("mode", ["full", "summary"])
+def test_parser_loss_survives_reflection_and_every_export_format(review, mode):
+    anti, reflections, reports, _, repo = review
+    parsed, _warning, _diagnostics = anti.parse_panel_findings(json.dumps({
+        "findings": [{"id": "F1", "claim": "Synthetic valid claim", "file": "before.py", "line": 1,
+                      "severity": "medium", "confidence": 0.5, "evidence": "fixture", "verify": "Inspect synthetic fixture"}, "invalid row", 42],
+    }))
+    assert parsed["findings_total"] == 3 and parsed["findings_dropped"] == 2
+    capture(review, save_output=mode, findings=parsed["findings"],
+            context={"scopeStatus": "complete", "findings": parsed})
+    stored = reflections.list_records(repo)[0]
+    assert stored["parser_findings_total"] == 3 and stored["parser_findings_dropped"] == 2
+    report = reports.build_report([stored], repo)
+    run = report["runs"][0]
+    assert run["declaredFindingCount"] == run["retainedFindingCount"] == 1
+    assert run["parserFindingTotal"] == 3 and run["parserFindingsDropped"] == 2 and run["parserLossStatus"] == "loss"
+    assert run["contentComplete"] is (mode == "full")
+    sarif = reports.to_sarif(report)
+    assert sarif["runs"][0]["properties"]["parserFindingsDropped"] == 2
+    assert "3 total; 2 dropped; loss status: loss" in reports.to_markdown(report)
+    jsonschema.Draft202012Validator(json.loads((SCRIPT.parent.parent / "schemas/review-report-v1.json").read_text())).validate(report)
+
+
+def test_parser_counts_survive_exhausted_summary_budget_and_legacy_stays_unknown(review):
+    _, reflections, reports, _, repo = review
+    capture(review, save_output="summary", models=["x" * 10000] * 50,
+            context={"findings_total": 80, "findings_dropped": 78}, findings=[{"claim": "a"}, {"claim": "b"}])
+    stored = reflections.list_records(repo)[0]
+    assert stored["parser_findings_total"] == 80 and stored["parser_findings_dropped"] == 78
+    run = reports.build_report([stored], repo)["runs"][0]
+    assert run["parserFindingsDropped"] == 78
+    stored.pop("parser_findings_total")
+    stored.pop("parser_findings_dropped")
+    run = reports.build_report([stored], repo)["runs"][0]
+    assert run["parserFindingTotal"] is None and run["parserFindingsDropped"] is None
+    assert run["parserLossStatus"] == "unknown"
+
+
+def test_markdown_keeps_record_audit_and_mixed_cohort_occurrences(review):
+    _, reflections, reports, _, repo = review
+    first = capture(review)
+    annotate(review, first["findings"][0]["findingKey"], status="rejected", evidence="Synthetic cohort evidence")
+    capture(review, run="run-2")
+    report = reports.build_report(reflections.list_records(repo), repo)
+    markdown = reports.to_markdown(report)
+    for run in report["runs"]:
+        assert str(run["timestamp"]) in markdown and run["sourceRecordHash"] in markdown
+    assert "Verdict cohorts" in markdown and "rejected" in markdown and "unresolved" in markdown
+    group = next(item for item in report["summary"]["recurringFindings"] if item["sourceHash"])
+    assert group["identity"] in markdown and group["sourceHash"] in markdown
+    assert "Synthetic cohort evidence" in markdown and "Original model evidence" in markdown
