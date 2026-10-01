@@ -276,3 +276,57 @@ def test_start_arguments_capture_service_namespace_without_starting_server(roots
     cli.main()
     assert calls == [(client, state)]
     assert not client.exists() and not state.exists()
+
+
+@pytest.mark.parametrize("name", ["CODEX_HOME", "ANTIGRAVITY_STATE_HOME"])
+@pytest.mark.parametrize("kind", ["file", "file_parent", "broken_symlink"])
+def test_existing_non_directory_root_is_rejected_without_writes(roots, monkeypatch, tmp_path, name, kind):
+    value = tmp_path / "invalid-root"
+    if kind == "broken_symlink":
+        value.symlink_to(tmp_path / "missing-target")
+    else:
+        value.write_bytes(b"fixture-preserved")
+    selected = value / "child" if kind == "file_parent" else value
+    monkeypatch.setenv(name, str(selected))
+    with pytest.raises(ValueError, match="directory"):
+        namespace_diagnostics()
+    if kind != "broken_symlink":
+        assert value.read_bytes() == b"fixture-preserved"
+    assert not any(path.exists() for path in roots)
+
+
+def test_default_root_regular_file_is_rejected(roots):
+    default, _client, _state = roots
+    default.write_bytes(b"fixture-preserved")
+    with pytest.raises(ValueError, match="directory"):
+        namespace_diagnostics()
+    assert default.read_bytes() == b"fixture-preserved"
+
+
+def test_namespace_show_and_start_reject_file_roots_before_dispatch(roots, monkeypatch, tmp_path):
+    value = tmp_path / "file-root"
+    value.write_bytes(b"fixture-preserved")
+    monkeypatch.setenv("CODEX_HOME", str(value))
+    monkeypatch.setattr(sys, "argv", ["codex-antigravity", "namespace", "show"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    monkeypatch.delenv("CODEX_HOME")
+    monkeypatch.setattr(sys, "argv", ["codex-antigravity", "start", "--state-home", str(value)])
+    monkeypatch.setattr("uvicorn.run", lambda *a, **k: pytest.fail("invalid root started a server"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 2
+    assert value.read_bytes() == b"fixture-preserved"
+
+
+def test_nonexistent_and_directory_symlink_roots_remain_supported(roots, monkeypatch, tmp_path):
+    _default, client, state = roots
+    monkeypatch.setenv("CODEX_HOME", str(client / "future"))
+    state.mkdir()
+    alias = tmp_path / "state-link"
+    alias.symlink_to(state, target_is_directory=True)
+    monkeypatch.setenv("ANTIGRAVITY_STATE_HOME", str(alias))
+    assert client_home() == client / "future"
+    assert gateway_home() == alias
+    assert not client.exists()

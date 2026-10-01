@@ -14,13 +14,18 @@ def root_path(value: str, *, label: str) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
         raise ValueError(f"{label} must be an absolute directory path")
+    # An absent leaf is a valid future root; existing components must be
+    # directories. Broken symlinks are not usable future directories either.
+    for component in (path, *path.parents):
+        if (component.exists() or component.is_symlink()) and not component.is_dir():
+            raise ValueError(f"{label} must select a directory, not an existing non-directory path")
     return path
 
 
 def _root(name: str, home: Path | None = None) -> Path:
     if name in os.environ:
         return root_path(os.environ[name], label=name)
-    return (home if home is not None else Path.home()) / ".codex"
+    return root_path(str((home if home is not None else Path.home()) / ".codex"), label=f"default {name}")
 
 
 def client_home(*, home: Path | None = None) -> Path:
