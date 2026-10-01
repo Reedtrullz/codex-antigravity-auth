@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from contextvars import ContextVar
 import concurrent.futures
 from collections import deque
 import email.utils
 import fnmatch
+import functools
 import json
 import math
 import os
@@ -33,6 +35,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+from anti_lib.run_control import RunControl, DeadlineExceeded, CURRENT_RUN
 from anti_lib.capabilities import CapabilityRegistry
 from anti_lib.chunking import chunk_manifest
 from anti_lib.context import ordered_prompt
@@ -560,6 +563,97 @@ class AntiError(Exception):
     pass
 
 
+class RunDeadlineExceeded(DeadlineExceeded, AntiError):
+    pass
+
+
+def run_control(args=None):
+    if args is not None and hasattr(args, 'timeout'):
+        if not math.isfinite(float(args.timeout)) or float(args.timeout) <= 0:
+            raise AntiError('HTTP timeout must be finite and greater than zero')
+    current = getattr(args, '_run_control', None) if args is not None else None
+    current = current or CURRENT_RUN.get()
+    if current is None:
+        try:
+            current = RunControl(getattr(args, 'run_timeout', 1800), caps={'unknown-route':1, **PROVIDER_PARALLEL_CAPS},
+                                 default_cap=getattr(args, 'max_parallel', 2), error_type=RunDeadlineExceeded)
+        except (ValueError, TypeError) as exc:
+            raise AntiError(str(exc)) from exc
+    if args is not None:
+        args._run_control = current
+    return current
+
+
+def controlled_command(function):
+    @functools.wraps(function)
+    def wrapped(args, *values, **kwargs):
+        with run_control(args).bind():
+            return function(args, *values, **kwargs)
+    return wrapped
+
+
+_CALL_SUBMITTED = ContextVar('anti_call_submitted', default=False)
+
+
+def controlled_post(function):
+    @functools.wraps(function)
+    def wrapped(**kwargs):
+        token = _CALL_SUBMITTED.set(False)
+        try:
+            with run_control(kwargs.get('budget_args')).bind():
+                return function(**kwargs)
+        except AntiError as exc:
+            exc.submitted = bool(getattr(exc, 'submitted', False) or _CALL_SUBMITTED.get())
+            raise
+        finally:
+            _CALL_SUBMITTED.reset(token)
+    return wrapped
+
+
+def scheduling_metadata(metadata=None, control=None):
+    metadata = dict(metadata or {})
+    control = control or CURRENT_RUN.get()
+    if control is not None:
+        snapshot = control.snapshot()
+        metadata['run_control'] = snapshot
+        if snapshot['deferred_calls']:
+            metadata.update(scopeStatus='partial', scope_status='partial')
+            if metadata.get('runStatus') not in {'failed', 'error', 'interrupted'}:
+                metadata['runStatus'] = 'partial'
+    return metadata
+
+
+def destination_for_model(model):
+    key = str(model).lower()
+    caps = CAPABILITY_REGISTRY.entries.get(key) or CAPABILITY_REGISTRY.entries.get(CAPABILITY_REGISTRY.canonical(key)) or {}
+    route = caps.get('route')
+    if route == 'antigravity': return 'google-antigravity'
+    if route == 'openai': return 'openai'
+    if route == 'byok' and isinstance(caps.get('family'), str) and caps['family']:
+        return caps['family']
+    # Old catalogs cannot resolve slash/native aliases reliably. Share one
+    # conservative bucket instead of creating unbounded name-derived permits.
+    if ':' in key: return key.partition(':')[0]
+    return 'unknown-route'
+
+
+def read_response_body(response, timeout):
+    control = CURRENT_RUN.get()
+    if control is None:
+        return response.read()
+    fragments = []
+    while True:
+        remaining = control.timeout(timeout)
+        sock = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+        if sock is not None:
+            sock.settimeout(remaining)
+        block = response.read1(65536)
+        control.check(submitted=True)
+        if not block: break
+        fragments.append(block)
+    return b''.join(fragments)
+
+
 def eprint(message: str) -> None:
     print(message, file=sys.stderr)
 
@@ -718,6 +812,9 @@ def write_run_record(
     execution_ledger: list[dict[str, Any]] | None = None,
     force_full_output: bool = False,
 ) -> Path | None:
+    metadata = scheduling_metadata(metadata, getattr(args, '_run_control', None))
+    if metadata.get('run_control', {}).get('deferred_calls') and status == 'success':
+        status = 'partial'
     output_mode = save_output_mode(args)
     if output_mode == "never":
         # Minimal lifecycle record: correlation survives even when prompt and
@@ -1376,6 +1473,9 @@ def request_json(
     timeout: float = 10.0,
     token_env: str = DEFAULT_TOKEN_ENV,
 ) -> tuple[int, dict[str, Any]]:
+    control = CURRENT_RUN.get()
+    if control is not None:
+        timeout = control.timeout(timeout)
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {"Accept": "application/json"}
     if body is not None:
@@ -1392,12 +1492,15 @@ def request_json(
     retry_after_header: object = None
     try:
         with urllib.request.urlopen(req, timeout=timeout) as res:
-            raw = res.read()
+            raw = read_response_body(res, timeout)
             status = int(res.status)
     except urllib.error.HTTPError as exc:
-        raw = exc.read()
+        with exc:
+            raw = read_response_body(exc, timeout)
         status = int(exc.code)
         retry_after_header = exc.headers.get("Retry-After")
+    except DeadlineExceeded:
+        raise
     except Exception as exc:
         raise AntiError(f"request to {url} failed: {exc}") from exc
 
@@ -1660,6 +1763,7 @@ def sum_usage(*values: Any) -> dict[str, int]:
     return totals if any_usage else {}
 
 
+@controlled_post
 def post_response(
     *,
     base_url: str,
@@ -1674,6 +1778,7 @@ def post_response(
     budget_args: argparse.Namespace | None = None,
     budget_purpose: str | None = None,
 ) -> ResponseText:
+    control = run_control(budget_args)
     requested_model = model
     available_model_ids = model_ids
     if available_model_ids is None:
@@ -1716,25 +1821,32 @@ def post_response(
     response_url = f"{normalize_base_url(base_url)}/responses"
     started = time.monotonic()
     for attempt in range(1, attempts + 1):
+        control.check()
         retry_reservation = None
-        if budget_args is not None:
-            retry_reservation = reserve_budget_call(
-                budget_args,
-                model=model,
-                prompt_chars=len(prompt),
-                max_output_tokens=max_output_tokens,
-                purpose=f"{budget_purpose or model} retry {attempt - 1}",
-            )
+        submitted = False
         try:
-            status, decoded = request_json(
-                "POST",
-                response_url,
-                payload=payload,
-                timeout=timeout,
-                token_env=token_env,
-            )
+            with control.attempt(normalize_base_url(base_url), destination_for_model(model)):
+                if budget_args is not None:
+                    retry_reservation = reserve_budget_call(
+                        budget_args, model=model, prompt_chars=len(prompt), max_output_tokens=max_output_tokens,
+                        purpose=f"{budget_purpose or model} retry {attempt - 1}",
+                    )
+                attempt_timeout = control.timeout(timeout)
+                attempt_metadata = dict(payload.get('metadata') or {})
+                for key, value in ((BACKEND_TIMEOUT_METADATA_KEY, backend_timeout_hint(attempt_timeout)),
+                                   (REQUEST_TIMEOUT_METADATA_KEY, request_timeout_hint(attempt_timeout))):
+                    if value is not None: attempt_metadata[key] = value
+                    else: attempt_metadata.pop(key, None)
+                payload['metadata'] = attempt_metadata
+                submitted = True
+                _CALL_SUBMITTED.set(True)
+                control.mark_submitted()
+                status, decoded = request_json(
+                    "POST", response_url, payload=payload, timeout=attempt_timeout, token_env=token_env,
+                )
+                control.check(submitted=True)
         except AntiError as exc:
-            exc.submitted = True  # type: ignore[attr-defined]
+            exc.submitted = submitted  # type: ignore[attr-defined]
             settle_budget_call(
                 retry_reservation,
                 model=model,
@@ -1743,8 +1855,10 @@ def post_response(
                 max_output_tokens=max_output_tokens,
             )
             last_error = str(exc)
+            if isinstance(exc, DeadlineExceeded) or not submitted:
+                raise
             if attempt < attempts:
-                time.sleep(min(4.0, 0.75 * attempt))
+                control.sleep(min(4.0, 0.75 * attempt))
                 continue
             raise AntiError(
                 "request failed after "
@@ -1806,6 +1920,7 @@ def post_response(
             response_model = extract_response_model(decoded)
             if response_model:
                 response_metadata["backend_model"] = response_model
+            control.check(submitted=True)
             return ResponseText(
                 text,
                 usage=extract_usage(decoded),
@@ -1825,12 +1940,14 @@ def post_response(
         )
         last_error = f"HTTP {status}: {detail}"
         if status in retryable_statuses and attempt < attempts:
+            if retry_after_hint is not None and retry_after_hint >= control.remaining():
+                control.stop('retry_deferred_by_run_deadline')
             if retry_after_unsupported or retry_after_hint is not None and retry_after_hint > MAX_RETRY_AFTER_SECONDS:
                 raise AntiError(
                     f"retry deferred after HTTP {status}; Retry-After exceeds the local "
                     f"{MAX_RETRY_AFTER_SECONDS:.0f}s retry cap or is unsupported"
                 )
-            time.sleep(retry_after_hint if retry_after_hint is not None else min(4.0, 0.75 * attempt))
+            control.sleep(retry_after_hint if retry_after_hint is not None else min(4.0, 0.75 * attempt))
             continue
         raise AntiError(
             f"/v1/responses returned {last_error} after {attempt} attempt(s). Diagnostics: "
@@ -1869,6 +1986,7 @@ def _pre_flight_cost_suggestion(
     )
 
 
+@controlled_command
 def generate_with_fallback(
     args: argparse.Namespace,
     *,
@@ -1889,7 +2007,7 @@ def generate_with_fallback(
         raise AntiError(f"unsupported fallback policy: {fallback_policy}")
 
     _pre_flight_cost_suggestion(args, model, model_ids, prompt)
-    failures: list[dict[str, str]] = []
+    failures: list[dict[str, Any]] = []
 
     @contextlib.contextmanager
     def elapsed_ticker(label: str):
@@ -1954,7 +2072,9 @@ def generate_with_fallback(
         # Preserve structured failure details even though this API historically
         # raises AntiError for failed generations.  run_panel_call consumes the
         # attribute when it records an error lane.
-        error = AntiError(message)
+        error = RunDeadlineExceeded(message) if isinstance(cause, DeadlineExceeded) else AntiError(message)
+        error.submitted = bool(getattr(cause, 'submitted', False) or any(item.get('submitted') for item in failures))
+        metadata.update(deferred=isinstance(cause, DeadlineExceeded), submitted=error.submitted)
         error.generation_metadata = metadata  # type: ignore[attr-defined]
         raise error from cause
 
@@ -1990,8 +2110,8 @@ def generate_with_fallback(
         return text, actual_model, metadata
     except AntiError as exc:
         error = redact_sensitive_text(str(exc))
-        failures.append({"model": model, "error": error})
-        if not fallback_model or fallback_model == model or not should_use_fallback(error, fallback_policy):
+        failures.append({"model": model, "error": error, "submitted": bool(getattr(exc, "submitted", False))})
+        if isinstance(exc, DeadlineExceeded) or not fallback_model or fallback_model == model or not should_use_fallback(error, fallback_policy):
             failure_metadata = identity_metadata(
                 actual_model=None,
                 fallback_used=False,
@@ -2017,7 +2137,7 @@ def generate_with_fallback(
                 )
         except AntiError as fallback_exc:
             fallback_error = redact_sensitive_text(str(fallback_exc))
-            failures.append({"model": fallback_model, "error": fallback_error})
+            failures.append({"model": fallback_model, "error": fallback_error, "submitted": bool(getattr(fallback_exc, "submitted", False))})
             enriched_fallback_error = enrich_generation_error(args, fallback_error)
             failure_metadata = identity_metadata(
                 actual_model=None,
@@ -2494,6 +2614,7 @@ def coverage_summary(metadata: dict[str, Any] | None) -> dict[str, Any]:
         or metadata_status in {"incomplete", "partial"}
         or metadata.get("diff_truncated")
         or metadata.get("assembly_over_budget")
+        or bool((metadata.get("run_control") or {}).get("deferred_calls"))
     )
     result = {
         "status": "partial" if incomplete else "complete",
@@ -3496,8 +3617,8 @@ def run_chunked_review(
 
     def update_chunk_coverage() -> None:
         completed = sum(1 for item in chunk_generation if item.get("status") == "success")
-        failed = sum(1 for item in chunk_generation if item.get("status") != "success")
-        attempted = completed + failed
+        failed = sum(1 for item in chunk_generation if item.get("status") != "success" and item.get("submitted") is True)
+        attempted = sum(1 for item in chunk_generation if item.get("submitted") is True)
         for record in chunk_metadata.get("coverage", []):
             path = str(record.get("path") or "")
             if not path:
@@ -3514,7 +3635,7 @@ def run_chunked_review(
             failed_for_file = sum(
                 1
                 for item, planned_chunk in zip(chunk_generation, chunks)
-                if item.get("status") != "success"
+                if item.get("status") != "success" and item.get("submitted") is True
                 and any(
                     CHUNK_PART_SUFFIX_RE.sub("", str(included)) == path
                     for included in planned_chunk.get("metadata", {}).get("included_files", [])
@@ -3524,7 +3645,7 @@ def run_chunked_review(
             attempted_chunks = [
                 planned_chunk
                 for index, planned_chunk in enumerate(chunks)
-                if index < len(chunk_generation)
+                if index < len(chunk_generation) and chunk_generation[index].get("submitted") is True
                 and any(
                     CHUNK_PART_SUFFIX_RE.sub("", str(included)) == path
                     for included in planned_chunk.get("metadata", {}).get("included_files", [])
@@ -3600,7 +3721,7 @@ def run_chunked_review(
                     "index": index,
                     "id": chunk.get("id"),
                     "model_used": model,
-                    "status": "failed",
+                    "status": "failed" if getattr(exc, "submitted", False) else "not_sent",
                     "submitted": bool(getattr(exc, "submitted", False)),
                     "error": str(exc),
                 }
@@ -3964,6 +4085,7 @@ def run_chunked_plan(
         error: str,
         *,
         failed_chunk: int | None = None,
+        failed_chunk_submitted: bool = False,
         synthesis_status: str | None = None,
     ) -> dict[str, Any]:
         return {
@@ -3973,7 +4095,7 @@ def run_chunked_plan(
                 1 for item in chunk_generation if item.get("status") == "success"
             ),
             "failed_chunk_count": len(incomplete_chunks),
-            "not_sent_chunk_count": max(0, planned_chunk_count - len(chunk_generation) - (1 if failed_chunk else 0)),
+            "not_sent_chunk_count": max(0, planned_chunk_count - len(chunk_generation) - (1 if failed_chunk_submitted else 0)),
             "chunk_generation": chunk_generation,
             "synthesis_status": synthesis_status,
             "failed_chunk": failed_chunk,
@@ -4008,7 +4130,7 @@ def run_chunked_plan(
             )
         except AntiError as exc:
             incomplete_chunks.append(index)
-            exc.run_metadata = plan_failure_metadata(str(exc), failed_chunk=index)  # type: ignore[attr-defined]
+            exc.run_metadata = plan_failure_metadata(str(exc), failed_chunk=index, failed_chunk_submitted=bool(getattr(exc, 'submitted', False)))  # type: ignore[attr-defined]
             raise
         chunk_status = lane_output_status(
             text,
@@ -4363,6 +4485,7 @@ def print_result(
     output_json: bool = False,
     metadata: dict[str, Any] | None = None,
 ) -> None:
+    metadata = scheduling_metadata(metadata)
     safe_gateway = redact_sensitive_text(base_url)
     model = redact_sensitive_text(model)
     text, caveats, metadata = presentable_result(
@@ -5505,7 +5628,8 @@ def run_panel_call(
                 failure_generation_metadata = dict(failure_metadata)
             attempt_record: dict[str, Any] = {
                 "attempt": attempt,
-                "status": "error",
+                "status": "deferred" if isinstance(exc, DeadlineExceeded) else "error",
+                "submitted": bool(getattr(exc, 'submitted', False)),
                 "error": error,
                 "requested_model": model,
                 "requested_provider": provider_for_model(model),
@@ -5598,7 +5722,7 @@ def run_panel_call(
         "requested_provider": provider_for_model(model),
         "actual_model": failure_metadata.get("actual_model"),
         "provider": failure_metadata.get("provider"),
-        "status": "error",
+        "status": "deferred" if failure_metadata.get("status") == "deferred" else "error",
         "error": redact_sensitive_text(str(last_error)),
         "fallback_chain": failure_metadata.get("fallback_chain", [model]),
         "primary_error": failure_metadata.get("primary_error"),
@@ -5907,6 +6031,7 @@ def print_panel_result(
     output_mode: str = "prose",
     findings: dict[str, Any] | None = None,
 ) -> None:
+    metadata = scheduling_metadata(metadata)
     safe_gateway = redact_sensitive_text(base_url)
     judge_model = redact_sensitive_text(judge_model)
     panel_models = [redact_sensitive_text(model) for model in panel_models]
@@ -6191,6 +6316,7 @@ def maybe_summarize_panel_review(
     return prompt, merged_caveats, metadata
 
 
+@controlled_command
 def command_panel(args: argparse.Namespace) -> int:
     if args.output not in PANEL_OUTPUT_MODES:
         raise AntiError(f"unsupported panel output mode: {args.output}")
@@ -6383,7 +6509,7 @@ def command_panel(args: argparse.Namespace) -> int:
             """Submit one queued lane for provider while under its parallel cap."""
             nonlocal estimated_total
             queue = provider_queues.get(provider)
-            if not queue:
+            if not queue or run_control(args).expired():
                 return False
             if provider_in_flight.get(provider, 0) >= PROVIDER_PARALLEL_CAPS.get(provider, args.max_parallel):
                 return False
@@ -6416,6 +6542,12 @@ def command_panel(args: argparse.Namespace) -> int:
             for provider in provider_queues:
                 while _maybe_submit(provider):
                     pass
+    for queue in provider_queues.values():
+        for index, model in queue:
+            run_control(args).note_deferred('queued_lane_deadline')
+            panel_results[index] = {'model':model, 'requested_model':model, 'status':'deferred',
+                                    'submitted':False, 'error':'run deadline reached before lane submission'}
+    metadata.update(scheduling_metadata(metadata))
     metadata["estimated_total"] = estimated_total
     metadata["estimated_cost"] = running_cost
     metadata["budget_exceeded"] = budget_exceeded
@@ -6625,14 +6757,20 @@ def command_panel(args: argparse.Namespace) -> int:
     judge_call_outputs: list[str] = []
 
     def run_judge(prompt: str, max_output_tokens: int) -> tuple[str, str, dict[str, Any]]:
-        result = generate_with_fallback(
-            args,
-            model=judge_model,
-            prompt=prompt,
-            max_output_tokens=max_output_tokens,
-            model_ids=model_ids,
-            purpose="panel judge",
-        )
+        try:
+            result = generate_with_fallback(
+                args, model=judge_model, prompt=prompt, max_output_tokens=max_output_tokens,
+                model_ids=model_ids, purpose="panel judge",
+            )
+        except AntiError as exc:
+            exc.run_metadata = scheduling_metadata({**metadata, 'scope_status':'partial',
+                'panel_results':[{key:value for key,value in row.items() if key != 'output_preview'}
+                                 for row in panel_results_for_record(panel_results)],
+                'synthesis_status':'not_sent' if not getattr(exc,'submitted',True) else 'failed',
+                '_execution_ledger':[execution_entry(stage=f'panel_lane_{index}', prompt=prompt,
+                    output=str(row.get('output_text') or ''), model=str(row.get('actual_model') or row.get('model')),
+                    generation=row.get('generation') or {}) for index,row in enumerate(panel_results,1)]})
+            raise
         judge_call_prompts.append(prompt)
         judge_call_outputs.append(result[0])
         return result
@@ -6920,6 +7058,7 @@ def command_panel(args: argparse.Namespace) -> int:
     return 0 if run_status == "success" else 1
 
 
+@controlled_command
 def command_consult(args: argparse.Namespace) -> int:
     progress(args, f"consult: querying model {getattr(args, 'model', 'sonnet')}")
     auto_route_model = None
@@ -7062,6 +7201,7 @@ def command_consult(args: argparse.Namespace) -> int:
     return 0 if output_status == "success" else 1
 
 
+@controlled_command
 def command_review(args: argparse.Namespace) -> int:
     progress(args, f"review: analyzing scope '{getattr(args, 'scope', 'working-tree')}' with {getattr(args, 'model', 'opus')}")
     auto_route_model = None
@@ -7301,6 +7441,7 @@ def command_review(args: argparse.Namespace) -> int:
     return 0 if run_status == "success" else 1
 
 
+@controlled_command
 def command_plan(args: argparse.Namespace) -> int:
     progress(args, f"plan: generating plan for scope '{getattr(args, 'scope', 'none')}' with {getattr(args, 'model', 'opus')}")
     model = resolve_model(args.model, default=DEFAULT_PLAN_MODEL)
@@ -7430,6 +7571,7 @@ def command_plan(args: argparse.Namespace) -> int:
     return 0 if run_status == "success" else 1
 
 
+@controlled_command
 def command_smoke(args: argparse.Namespace) -> int:
     ok = True
     statuses: dict[str, Any] = {
@@ -7702,6 +7844,7 @@ def command_smoke(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+@controlled_command
 def command_compare(args: argparse.Namespace) -> int:
     """Send one bounded prompt through each requested model and report the outcomes."""
     if args.dry_run:
@@ -8229,6 +8372,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
     return argv
 
 
+@controlled_command
 def command_workflow(args: argparse.Namespace) -> int:
     args.workflow_name = args.name
     apply_free_lane_preset(args)
@@ -8238,6 +8382,8 @@ def command_workflow(args: argparse.Namespace) -> int:
     progress(args, "workflow expands to: " + workflow_command_for_progress(expanded))
     parser = build_parser()
     expanded_args = parser.parse_args(expanded)
+    expanded_args._run_control = run_control(args)
+    expanded_args.run_timeout = expanded_args._run_control.limit
     expanded_args.workflow_name = args.name
     if not getattr(expanded_args, "run_label", None):
         expanded_args.run_label = args.run_label or args.name
@@ -8480,6 +8626,7 @@ def add_generation_control_args(
     *,
     default_save_output: str = "never",
 ) -> None:
+    parser.add_argument("--run-timeout", type=float, default=1800.0, help="Whole-run provider deadline in seconds (default: 1800; maximum: 86400)")
     parser.add_argument("--auto-route", action="store_true", help="Automatically pick the cheapest adequate model based on diff size and risk")
     parser.add_argument("--fallback-model", help="Fallback model alias/id for retryable or timeout failures")
     parser.add_argument(
@@ -8770,6 +8917,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     smoke = sub.add_parser("smoke", help="Check CLI, gateway, models, and doctor readiness")
     add_gateway_args(smoke)
+    smoke.add_argument("--run-timeout", type=float, default=1800.0, help="Whole-run provider deadline in seconds")
     add_codex_config_args(smoke)
     smoke.add_argument(
         "--mode",
@@ -8910,7 +9058,7 @@ def main(argv: list[str] | None = None) -> int:
                     caveats=[],
                     metadata={
                         **(
-                            {key: value for key, value in run_metadata.items() if key != "_review_context"}
+                            {key: value for key, value in run_metadata.items() if key not in {"_review_context", "_execution_ledger"}}
                             if isinstance(run_metadata, dict)
                             else {}
                         ),
@@ -8924,6 +9072,7 @@ def main(argv: list[str] | None = None) -> int:
                         "runStatus": "failed",
                     },
                     error=str(exc),
+                    execution_ledger=run_metadata.get('_execution_ledger') if isinstance(run_metadata, dict) else None,
                 )
             except Exception:
                 pass

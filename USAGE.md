@@ -259,3 +259,12 @@ Google generated-media parts produce an explicit failure while retaining support
 ## Request time budgets
 
 Google, BYOK and native OpenAI requests now share a monotonic 60-second preparation/nonstream deadline. Streaming has separate 60-second event-idle and 30-minute total defaults, including preparation, with validated metadata overrides. Downstream backpressure and resource cleanup are bounded; timeouts never trigger replay after visible output. See [request deadlines and cleanup](codex_antigravity_auth/REQUEST_DEADLINES.md) for overrides, failure outcomes, cleanup grace and cancellation limits.
+
+
+## Anti whole-run deadlines
+
+Anti generation commands accept `--run-timeout` (default1800 seconds). This budget
+is shared by chunks, retries, fallback and judge calls; each actual destination
+acquires a process-local permit for each attempt. Deadline-deferred work is saved
+as partial coverage under the selected retention mode. See [run controls and
+cooperative timeout limits](codex_antigravity_auth/skills/anti/RUN_CONTROL.md).

@@ -4971,7 +4971,9 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                         calls.append(prompt)
                         attempts["count"] += 1
                         if cap == 1000 and attempts["count"] == 2:
-                            raise anti.AntiError("provider broke at chunk 2")
+                            failure = anti.AntiError("provider broke at chunk 2")
+                            failure.submitted = True
+                            raise failure
                         return (
                             "synthesis" if "Chunked Review Manifest" in prompt else "chunk",
                             model,
@@ -5038,7 +5040,9 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 def generate(*args, **kwargs):
                     calls["count"] += 1
                     if calls["count"] == 2:
-                        raise anti.AntiError("provider broke")
+                        failure = anti.AntiError("provider broke")
+                        failure.submitted = True
+                        raise failure
                     return "chunk result", "claude-sonnet-4-6", {
                         "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
                     }
