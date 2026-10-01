@@ -28,6 +28,7 @@
         "additionalProperties": false,
         "required": [
           "armId",
+          "armIdentitySha256",
           "caseId",
           "findingId",
           "findingSha256",
@@ -112,6 +113,10 @@
                 "const": true
               }
             }
+          },
+          "armIdentitySha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
           }
         }
       }

@@ -173,6 +173,11 @@ def validate_replay(value):
                 string(finding['claim'],2000);require(isinstance(finding['severity'],str) and finding['severity'] in SEVERITIES)
 
 
+def arm_identity(arm):
+    """Local verdicts belong to one model/provider/effort/budget identity."""
+    return digest({key:arm[key] for key in ('id','model','provider','settings')})
+
+
 def adjudications(value, replay, data):
     object_fields(value,('schemaVersion','kind','corpusSha256','records'))
     require(type(value['schemaVersion']) is int and value['schemaVersion']==1 and value['kind']=='anti-benchmark-adjudications')
@@ -180,10 +185,11 @@ def adjudications(value, replay, data):
     require(isinstance(value['records'],list) and len(value['records'])<=MAX_ARMS*32*MAX_FINDINGS)
     arms={arm['id']:arm for arm in replay['arms']};cases={case['id']:case for case in data['cases']};out={}
     for item in value['records']:
-        object_fields(item,('armId','caseId','findingId','findingSha256','sourceSha256','verdict','defectId','reviewer','evidence'))
+        object_fields(item,('armId','armIdentitySha256','caseId','findingId','findingSha256','sourceSha256','verdict','defectId','reviewer','evidence'))
         for key in ('armId','caseId','findingId'):identifier(item[key])
         key=(item['armId'],item['caseId'],item['findingId']);require(key not in out,'Duplicate local adjudication')
         arm=arms.get(key[0]);case=cases.get(key[1]);require(arm is not None and case is not None,'Unknown adjudication target')
+        require(item['armIdentitySha256']==arm_identity(arm),'Adjudication arm identity mismatch')
         row=next((row for row in arm['cases'] if row['caseId']==key[1]),None)
         finding=next((f for f in row['findings'] if f['id']==key[2]),None) if row else None
         require(finding is not None,'Unknown adjudicated finding')
@@ -206,20 +212,32 @@ def _sum(values):
 
 
 def metrics(rows):
-    valid=[row for row in rows if row['status']=='scored']
-    return {'scoredCases':len(valid),'inconclusiveCases':sum(row['status']=='inconclusive' for row in rows),
-            'verifiedDetections':sum(row['detections'] for row in valid),'expectedDefects':sum(row['expectedDefects'] for row in valid),
-            'falseNegatives':sum(row['expectedDefects']-row['detections'] for row in valid),
-            'verifiedFalsePositives':sum(row['falsePositives'] for row in valid),
-            'noDefectControls':sum(row['expectedDefects']==0 for row in valid),
-            'cleanControls':sum(row['expectedDefects']==0 and row['falsePositives']==0 for row in valid),
-            'duplicateDetections':sum(row['duplicateDetections'] for row in valid),
-            'verifiedSeverity':dict(sum((Counter(row['verifiedSeverity']) for row in valid),Counter())),
+    scored=[row for row in rows if row['status']=='scored']
+    partial=[row for row in rows if row['status']=='inconclusive']
+    assessed=scored+partial
+    measured=[row for row in rows if row['status'] in {'scored','inconclusive','failed'} and row.get('submittedCalls',0)>0]
+
+    def evidence(values):
+        return {'verifiedDetections':sum(row['detections'] for row in values),
+                'verifiedFalsePositives':sum(row['falsePositives'] for row in values),
+                'duplicateDetections':sum(row['duplicateDetections'] for row in values),
+                'verifiedSeverity':dict(sum((Counter(row['verifiedSeverity']) for row in values),Counter()))}
+
+    return {'scoredCases':len(scored),'inconclusiveCases':len(partial),
+            # These are all known verified findings, including partial evidence.
+            # Fully adjudicated denominators stay inside scoredCaseMetrics.
+            **evidence(assessed),'partialVerifiedEvidence':evidence(partial),
+            'scoredCaseMetrics':{**evidence(scored),'expectedDefects':sum(row['expectedDefects'] for row in scored),
+                'falseNegatives':sum(row['expectedDefects']-row['detections'] for row in scored),
+                'noDefectControls':sum(row['expectedDefects']==0 for row in scored),
+                'cleanControls':sum(row['expectedDefects']==0 and row['falsePositives']==0 for row in scored)},
             'unresolvedFindings':sum(row.get('unresolvedFindings',0) for row in rows),
-            'latencyMs':_sum([row['latencyMs'] for row in valid]),
-            'estimatedInputTokens':_sum([row['estimatedInputTokens'] for row in valid]),
-            'observedInputTokens':_sum([row['observedInputTokens'] for row in valid]),
-            'observedOutputTokens':_sum([row['observedOutputTokens'] for row in valid])}
+            'measurementCases':len(measured),
+            'measurementBasis':'valid submitted cases including failed/inconclusive; pairwise reports use only their matched subset',
+            'latencyMs':_sum([row['latencyMs'] for row in measured]),
+            'estimatedInputTokens':_sum([row['estimatedInputTokens'] for row in measured]),
+            'observedInputTokens':_sum([row['observedInputTokens'] for row in measured]),
+            'observedOutputTokens':_sum([row['observedOutputTokens'] for row in measured])}
 
 
 def evaluate(replay, local, data=None):
@@ -247,7 +265,9 @@ def evaluate(replay, local, data=None):
                 reasons.append('input_estimate_budget_exceeded')
             if row['status']=='completed' and (row['submittedCalls']<1 or row['requestedOutputTokens']<1 or row['estimatedInputTokens'] is None):
                 reasons.append('missing_completed_attempt_evidence')
-            if row['status']=='unavailable' and (row['submittedCalls'] or row['findings']):reasons.append('unavailable_has_execution')
+            if row['status']=='unavailable' and (row['submittedCalls'] or row['requestedOutputTokens'] or row['findings']
+                    or any(row[key] is not None for key in ('latencyMs','estimatedInputTokens','observedInputTokens','observedOutputTokens'))):
+                reasons.append('unavailable_has_execution')
             if any(f['file']!=case['file'] or f['line']>len(case['after'].splitlines()) for f in row['findings']):
                 reasons.append('finding_outside_scope')
             result={'caseId':case_id,'split':case['split'],'sourceSha256':case['sourceSha256'],'promptSha256':case['promptSha256'],
@@ -279,7 +299,7 @@ def evaluate(replay, local, data=None):
         status=('invalid' if any(row['status']=='invalid' for row in rows) else
                 'unavailable' if all(row['status']=='unavailable' for row in rows) else
                 'scored' if all(row['status']=='scored' for row in rows) else 'inconclusive')
-        arms.append({'id':arm['id'],'model':redact_sensitive_text(arm['model']),'provider':redact_sensitive_text(arm['provider']),
+        arms.append({'id':arm['id'],'identitySha256':arm_identity(arm),'model':redact_sensitive_text(arm['model']),'provider':redact_sensitive_text(arm['provider']),
                      'status':status,'settings':deepcopy(arm['settings']),'cases':rows,
                      'development':metrics([r for r in rows if r['split']=='development']),
                      'publicHoldout':metrics([r for r in rows if r['split']=='holdout'])})

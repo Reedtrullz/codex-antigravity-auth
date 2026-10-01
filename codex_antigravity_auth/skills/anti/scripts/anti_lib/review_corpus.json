@@ -7,7 +7,7 @@
     {
       "id": "expiry-boundary",
       "split": "development",
-      "contract": "A session is expired exactly when now is greater than or equal to expires.",
+      "contract": "Inputs now and expires are finite Python int/float timestamps: no NaN, infinities or custom comparison types. A session is expired exactly when now is greater than or equal to expires.",
       "function": "expired",
       "before": "def expired(now, expires):\n    return now >= expires\n",
       "after": "def expired(now, expires):\n    return now > expires\n",
@@ -30,6 +30,27 @@
             10
           ],
           "expected": false
+        },
+        {
+          "args": [
+            -1.5,
+            0.5
+          ],
+          "expected": false
+        },
+        {
+          "args": [
+            0.5,
+            0.5
+          ],
+          "expected": true
+        },
+        {
+          "args": [
+            1.5,
+            0.5
+          ],
+          "expected": true
         }
       ]
     },
@@ -94,7 +115,7 @@
     {
       "id": "expiry-equivalent",
       "split": "development",
-      "contract": "A session is expired exactly when now is greater than or equal to expires.",
+      "contract": "Inputs now and expires are finite Python int/float timestamps: no NaN, infinities or custom comparison types. A session is expired exactly when now is greater than or equal to expires.",
       "function": "expired",
       "before": "def expired(now, expires):\n    return now >= expires\n",
       "after": "def expired(now, expires):\n    return not now < expires\n",
@@ -118,6 +139,27 @@
           "args": [
             11,
             10
+          ],
+          "expected": true
+        },
+        {
+          "args": [
+            -1.5,
+            0.5
+          ],
+          "expected": false
+        },
+        {
+          "args": [
+            0.5,
+            0.5
+          ],
+          "expected": true
+        },
+        {
+          "args": [
+            1.5,
+            0.5
           ],
           "expected": true
         }

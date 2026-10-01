@@ -36,7 +36,7 @@ def add_finding(replay,arm=0,case=0,identifier='finding-a'):
 def annotate(data,replay,local,*,arm=0,case=0,finding=0,verdict='confirmed',defect=None):
     row=replay['arms'][arm]['cases'][case];item=row['findings'][finding];label=data['cases'][case]
     detail='Independent fixture inspection: boundary behavior checked against the pinned contract and behavioral oracle.'
-    value={'armId':replay['arms'][arm]['id'],'caseId':row['caseId'],'findingId':item['id'],
+    value={'armId':replay['arms'][arm]['id'],'armIdentitySha256':b.arm_identity(replay['arms'][arm]),'caseId':row['caseId'],'findingId':item['id'],
            'findingSha256':b.digest(item),'sourceSha256':label['sourceSha256'],'verdict':verdict,
            'defectId':defect or (label['defect']['id'] if label['defect'] and verdict=='confirmed' else None),
            'reviewer':'synthetic-local-reviewer','evidence':{'kind':'reproduction','detail':detail,'sha256':b.digest(detail),'independent':True}}
@@ -46,7 +46,7 @@ def annotate(data,replay,local,*,arm=0,case=0,finding=0,verdict='confirmed',defe
 def test_corpus_labels_have_independent_behavioral_assertions(data):
     # Execute only our shipped, source-controlled synthetic fixture code, never
     # a replay/user file. These independent assertions establish the labels.
-    expected={'expiry-boundary':1,'utf8-budget':1,'false-default':1,'expiry-equivalent':0,'utf8-equivalent':0}
+    expected={'expiry-boundary':2,'utf8-budget':1,'false-default':1,'expiry-equivalent':0,'utf8-equivalent':0}
     assert {case['id'] for case in data['cases']}==set(expected)
     for case in data['cases']:
         before={};after={}
@@ -88,12 +88,12 @@ def test_verified_detection_false_positive_and_holdout_are_separate(data):
     report=b.evaluate(replay,local,data)
     assert report['status']=='scored'
     dev=report['arms'][0]['development'];holdout=report['arms'][0]['publicHoldout']
-    assert (dev['verifiedDetections'],dev['expectedDefects'],dev['falseNegatives'],dev['verifiedFalsePositives'])==(1,2,1,1)
+    assert (dev['verifiedDetections'],dev['scoredCaseMetrics']['expectedDefects'],dev['scoredCaseMetrics']['falseNegatives'],dev['verifiedFalsePositives'])==(1,2,1,1)
     assert dev['verifiedSeverity']=={'high':1}  # model's critical claim is not ground truth
-    assert holdout['verifiedDetections']==1 and holdout['cleanControls']==1
+    assert holdout['verifiedDetections']==1 and holdout['scoredCaseMetrics']['cleanControls']==1
     assert len(report['comparisons'][0]['matchedCases'])==5
     assert any(a['kind']=='arm_disagreement' for a in report['audits'])
-    assert report['arms'][1]['development']['falseNegatives']==2
+    assert report['arms'][1]['development']['scoredCaseMetrics']['falseNegatives']==2
     assert not report['routingChanged'] and not report['billingObserved']
 
 
@@ -111,7 +111,7 @@ def test_unadjudicated_claim_is_inconclusive_not_false_positive_or_miss(data):
     row=report['arms'][0]['cases'][0]
     assert row['status']=='inconclusive' and row['unresolvedFindings']==1 and row['falsePositives']==0
     assert data['cases'][0]['id'] in report['comparisons'][0]['excludedCases']
-    assert report['arms'][0]['development']['expectedDefects']==1
+    assert report['arms'][0]['development']['scoredCaseMetrics']['expectedDefects']==1
 
 
 def test_conflict_with_no_defect_control_requires_label_audit(data):
@@ -282,3 +282,55 @@ def test_installed_standalone_replay_needs_no_package_or_site_packages(tmp_path,
     assert result.returncode==0,result.stderr
     report=json.loads(result.stdout)
     assert report['status']=='scored' and report['corpusSha256']==data['corpusSha256']
+
+
+@pytest.mark.parametrize('change',['model','provider','effort','budget','id'])
+def test_adjudications_are_bound_to_arm_identity(data,change):
+    replay=complete(data);local=empty_annotations(data)
+    add_finding(replay);annotate(data,replay,local)
+    arm=replay['arms'][0]
+    if change in ('model','provider'):arm[change]='another-fixture-'+change
+    elif change=='effort':arm['settings']['effort']='high'
+    elif change=='budget':arm['settings']['maxCalls']=2
+    else:
+        arm['id']='renamed-arm';local['records'][0]['armId']='renamed-arm'
+    with pytest.raises(b.BenchmarkError,match='arm identity'):
+        b.evaluate(replay,local,data)
+
+
+def test_mixed_verdicts_preserve_partial_evidence_without_scoring_its_case(data):
+    replay=complete(data);local=empty_annotations(data)
+    add_finding(replay,identifier='confirmed');annotate(data,replay,local)
+    add_finding(replay,identifier='rejected');annotate(data,replay,local,finding=1,verdict='rejected')
+    add_finding(replay,identifier='unresolved')
+    report=b.evaluate(replay,local,data);metrics=report['arms'][0]['development']
+    assert metrics['verifiedDetections']==1 and metrics['verifiedFalsePositives']==1
+    assert metrics['verifiedSeverity']=={'high':1} and metrics['unresolvedFindings']==1
+    assert metrics['partialVerifiedEvidence']=={'verifiedDetections':1,'verifiedFalsePositives':1,
+        'duplicateDetections':0,'verifiedSeverity':{'high':1}}
+    assert metrics['scoredCaseMetrics']['verifiedDetections']==0
+    assert metrics['scoredCaseMetrics']['expectedDefects']==1
+    assert metrics['measurementCases']==3 and metrics['latencyMs']['knownTotal']==60
+    assert metrics['observedInputTokens']['knownTotal']==750
+    assert data['cases'][0]['id'] in report['comparisons'][0]['excludedCases']
+    assert report['comparisons'][0]['results']['arm-a']['development']['verifiedDetections']==0
+
+
+@pytest.mark.parametrize('field,value',[('requestedOutputTokens',1),('latencyMs',0),('latencyMs',1),
+    ('estimatedInputTokens',0),('estimatedInputTokens',1),('observedInputTokens',0),('observedInputTokens',1),
+    ('observedOutputTokens',0),('observedOutputTokens',1)])
+def test_unavailable_rows_refuse_execution_measurements(data,field,value):
+    replay=b.template(data);replay['arms'][0]['cases'][0][field]=value
+    report=b.evaluate(replay,empty_annotations(data),data)
+    assert report['status']=='invalid'
+    assert 'unavailable_has_execution' in report['arms'][0]['cases'][0]['reasons']
+    assert report['comparisons'][0]['matchedCases']==[]
+
+
+def test_expiry_control_domain_is_explicit_and_fractional_boundary_is_covered(data):
+    import math
+    for case in data['cases']:
+        if not case['id'].startswith('expiry-'):continue
+        assert 'finite Python int/float' in case['contract'] and 'no NaN, infinities or custom comparison types' in case['prompt']
+        assert any(probe['args']==[0.5,0.5] and probe['expected'] is True for probe in case['probes'])
+        assert all(type(v) in (int,float) and math.isfinite(v) for probe in case['probes'] for v in probe['args'])

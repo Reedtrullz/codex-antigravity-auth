@@ -33,6 +33,10 @@ defect candidates fail designated probes; controls retain the tested behavior.
 These checks do not run during replay. A no-defect control is limited to its stated
 contract/probes, not a proof about every possible input.
 
+Expiry fixtures restrict timestamps to finite built-in Python int/float values;
+NaN, infinities and custom comparison types are outside that declared domain.
+Integer and fractional boundary probes verify the labels within that domain.
+
 Development and holdout partitions are reported separately. The holdout is
 public: it enables partition/disagreement auditing, not a blind test or a claim
 that a model never encountered the fixture. This small corpus cannot establish
@@ -52,7 +56,8 @@ Each case must match the corpus's source, prompt and scope hashes, complete file
 coverage and omitted-file list. Replay rows include outcome (`completed`, `failed`,
 `unavailable`), submitted-call count, sum of requested output caps, latency,
 estimated input tokens and nullable observed input/output tokens. Missing usage
-stays unknown, never zero. Completed cases need a submitted attempt, output cap
+stays unknown, never zero. An unavailable row must have zero submitted calls and
+requested output caps, no findings, and null latency/estimated/observed measurements. Completed cases need a submitted attempt, output cap
 and input estimate. Exceeded recorded allowances, mismatched effort/budgets,
 missing/unknown cases, findings outside the candidate scope or changed hashes
 make the arm invalid. Failed/unavailable cases remain explicit and unscored.
@@ -73,6 +78,7 @@ are supplied separately by an operator who inspected source or reproduced a case
 | Field | Meaning |
 | --- | --- |
 | `armId`, `caseId`, `findingId` | Exact replay target |
+| `armIdentitySha256` | Hash of the arm object containing only `id`, `model`, `provider`, `settings`; rejects stale evidence after identity/effort/budget changes |
 | `findingSha256` | SHA-256 of canonical finding JSON |
 | `sourceSha256` | Pinned case source identity |
 | `verdict` | `confirmed`, `rejected` or `unresolved` |
@@ -86,6 +92,16 @@ diff; prompt/scope hashes are emitted by the corpus command. Inspect evidence
 before writing an adjudication. These are attributed local attestations, not
 signatures or proof that someone ran a command; copying a model's judgement into
 that file is not independent verification.
+
+Aggregate `verifiedDetections`, `verifiedFalsePositives` and severity counters
+preserve all verified findings from valid completed cases, including mixed-verdict
+cases; `partialVerifiedEvidence` identifies that partial contribution.
+`scoredCaseMetrics` contains only fully adjudicated cases and their defect/control
+denominators and false negatives. Never divide all-evidence detections by those
+subset denominators. Latency/usage summaries include valid submitted failed or
+inconclusive cases and state their measurement count/basis. Pairwise reports still
+use only the fully adjudicated matched subset; partial findings are not silently
+promoted into a comparable quality score.
 
 A known confirmed defect counts once; duplicate confirmations are reported without
 inflating detection. Severity comes from the verified corpus label, not model
