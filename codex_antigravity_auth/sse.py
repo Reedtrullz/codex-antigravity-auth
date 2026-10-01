@@ -56,6 +56,42 @@ class SSEDecoder:
         self._data_chars = 0
         self._skip_lf = False
         self._closed = False
+        self._reset_legacy_scan()
+
+    def _reset_legacy_scan(self):
+        self._legacy_depth = 0
+        self._legacy_string = False
+        self._legacy_escape = False
+        self._legacy_seen = False
+        self._legacy_invalid = False
+
+    def _legacy_maybe_complete(self, value):
+        if self._legacy_invalid:
+            return False
+        # Only scan the new suffix. A balanced invalid JSON root cannot be
+        # repaired by appending another newline-delimited value.
+        suffix = ("\n" if len(self._data) > 1 else "") + value
+        for character in suffix:
+            if self._legacy_string:
+                if self._legacy_escape:
+                    self._legacy_escape = False
+                elif character == "\\":
+                    self._legacy_escape = True
+                elif character == '"':
+                    self._legacy_string = False
+                continue
+            if character.isspace():
+                continue
+            self._legacy_seen = True
+            if character == '"':
+                self._legacy_string = True
+            elif character in "[{":
+                self._legacy_depth += 1
+                if self._legacy_depth > self._resource_limits.json_depth:
+                    raise SSELimitError("The provider stream exceeded the JSON depth limit.")
+            elif character in "]}":
+                self._legacy_depth -= 1
+        return self._legacy_seen and not self._legacy_string and self._legacy_depth <= 0
 
     @property
     def buffered_chars(self) -> int:
@@ -70,6 +106,7 @@ class SSEDecoder:
             payload = "\n".join(self._data)
             self._data = []
             self._data_chars = 0
+            self._reset_legacy_scan()
             yield payload
 
     def _consume_line(self, line: str) -> Iterator[str]:
@@ -94,8 +131,11 @@ class SSEDecoder:
             raise SSELimitError("The provider stream exceeded the SSE data-line limit.")
         self._data.append(value)
         self._data_chars += len(value) + 1
-        if self._legacy and _complete_legacy_payload("\n".join(self._data), self._resource_limits):
-            yield from self._flush()
+        if self._legacy and self._legacy_maybe_complete(value):
+            if _complete_legacy_payload("\n".join(self._data), self._resource_limits):
+                yield from self._flush()
+            else:
+                self._legacy_invalid = True
 
     def _feed_text(self, text: str) -> Iterator[str]:
         if not text:

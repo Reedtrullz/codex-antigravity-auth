@@ -443,3 +443,140 @@ def test_native_limit_failure_survives_conflicting_complete_item_aggregate(polic
     assert len(result) == 1 and result[0]["type"] == "response.failed"
     assert result[0]["response"]["error"]["code"] == "provider_output_limit"
     assert result[0]["response"]["output"] == []
+
+
+class AppendOnlyDelta(str):
+    def __add__(self, other):
+        raise AssertionError("delta assembly copied a growing string prefix")
+    def __radd__(self, other):
+        raise AssertionError("delta assembly copied a growing string prefix")
+
+
+def test_event_builder_tiny_deltas_are_deferred_without_prefix_copying():
+    from codex_antigravity_auth.response_protocol import ResponseEventBuilder
+    with pytest.raises(AssertionError):
+        _ = "" + AppendOnlyDelta("x")  # Calibrate the non-timing complexity guard.
+    builder = ResponseEventBuilder(response_id="fixture", model="fixture", created_at=1)
+    builder.created()
+    for _ in range(2000):
+        builder.add_text_delta(AppendOnlyDelta("é"))
+        builder.add_reasoning_delta(AppendOnlyDelta("r"))
+    text = builder.finish_text()
+    reasoning = builder.finish_reasoning()
+    assert text[0]["text"] == "é" * 2000
+    assert reasoning[0]["text"] == "r" * 2000
+    assert text[-1]["item"]["content"][0]["text"] == "é" * 2000
+
+
+@pytest.mark.parametrize("provider", ["google", "chat"])
+def test_provider_accumulators_do_not_copy_prefixes_for_tiny_deltas(provider):
+    from codex_antigravity_auth.google_transport import GoogleResponseAccumulator
+    from codex_antigravity_auth.openai_transport import ChatResponseAccumulator
+    accumulator = GoogleResponseAccumulator() if provider == "google" else ChatResponseAccumulator()
+    for index in range(2000):
+        if provider == "google":
+            accumulator.consume({"candidates": [{"content": {"parts": [
+                {"text": AppendOnlyDelta("x")}, {"thought": True, "text": AppendOnlyDelta("r")}]} }]})
+        else:
+            accumulator.consume({"choices": [{"delta": {"content": AppendOnlyDelta("x"), "reasoning_content": AppendOnlyDelta("r"),
+                "tool_calls": [{"index": 0, "function": {"name": AppendOnlyDelta("lookup") if index == 0 else "",
+                                                         "arguments": AppendOnlyDelta("x")}}]}}]})
+    accumulator.mark_done()
+    result = accumulator.finalize()
+    text = next(item for item in result.output if item["type"] == "message")
+    reasoning = next(item for item in result.output if item["type"] == "reasoning")
+    assert text["content"][0]["text"] == "x" * 2000
+    assert reasoning["step_by_step_summary"] == "r" * 2000
+    if provider == "chat":
+        call = next(item for item in result.output if item["type"] == "function_call")
+        assert call["name"] == "lookup" and call["arguments"] == "x" * 2000
+
+
+@pytest.mark.parametrize("provider", ["google", "chat"])
+def test_empty_fragments_still_produce_no_output(provider):
+    from codex_antigravity_auth.google_transport import GoogleResponseAccumulator
+    from codex_antigravity_auth.openai_transport import ChatResponseAccumulator
+    accumulator = GoogleResponseAccumulator() if provider == "google" else ChatResponseAccumulator()
+    payload = {"candidates": [{"content": {"parts": [{"text": ""}, {"thought": True, "text": ""}]}}]} if provider == "google" else {
+        "choices": [{"delta": {"content": "", "reasoning_content": "", "tool_calls": [{"index": 0, "function": {"name": "", "arguments": ""}}]}}]}
+    accumulator.consume(payload)
+    accumulator.mark_done()
+    assert accumulator.finalize().output == ()
+
+
+def test_byok_stream_tool_assembly_avoids_prefix_copying(monkeypatch):
+    from codex_antigravity_auth import openai_transport as transport_module
+    original = transport_module.parse_sse_payload
+    def guarded(data, **kwargs):
+        payload = original(data, **kwargs)
+        for choice in payload.get("choices", []):
+            delta = choice.get("delta", {})
+            for field in ("content", "reasoning_content"):
+                if isinstance(delta.get(field), str): delta[field] = AppendOnlyDelta(delta[field])
+            for call in delta.get("tool_calls", []):
+                function = call.get("function", {})
+                for field in ("name", "arguments"):
+                    if isinstance(function.get(field), str): function[field] = AppendOnlyDelta(function[field])
+        return payload
+    monkeypatch.setattr(transport_module, "parse_sse_payload", guarded)
+    class Response:
+        status_code = 200
+        headers = {}
+        async def aiter_bytes(self):
+            yield wire({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_fixture", "function": {"name": "lookup", "arguments": '{"x":"'}}]}}]})
+            for _ in range(2000):
+                yield wire({"choices": [{"delta": {"content": "x", "reasoning_content": "r", "tool_calls": [{"index": 0, "function": {"arguments": "x"}}]}}]})
+            yield wire({"choices": [{"finish_reason": "tool_calls", "delta": {"tool_calls": [{"index": 0, "function": {"arguments": '"}'}}]}}]})
+            yield b"data: [DONE]\n\n"
+    class Context:
+        async def __aenter__(self): return Response()
+        async def __aexit__(self, *args): pass
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def stream(self, *args, **kwargs): return Context()
+    transport = transport_module.OpenAICompatibleTransport(timeout=1, client_factory=lambda **kw: Client())
+    prepared = transport_module.PreparedOpenAIRequest({}, "https://example.invalid", {}, 1)
+    async def scenario():
+        return [event async for event in transport.stream_chat_events(prepared, response_id="fixture", display_model="fixture")]
+    events = asyncio.run(scenario())
+    final = next(event["response"] for event in events if isinstance(event, dict) and event.get("type") == "response.completed")
+    call = next(item for item in final["output"] if item["type"] == "function_call")
+    assert call["arguments"] == '{"x":"' + 'x' * 2000 + '"}'
+    assert call["call_id"] == "call_fixture"
+
+
+def test_legacy_multiline_framing_parses_a_complete_root_once(monkeypatch):
+    from codex_antigravity_auth import sse
+    original = sse._complete_legacy_payload
+    calls = []
+    def counted(value, limits=None):
+        calls.append(len(value))
+        return original(value, limits)
+    monkeypatch.setattr(sse, "_complete_legacy_payload", counted)
+    decoder = SSEDecoder(legacy_json_lines=True)
+    wire_bytes = b'data: {"fixture":\n' + b'data:  \n' * 2000 + b'data: 1}\n'
+    output = [value for byte in wire_bytes for value in decoder.feed(bytes([byte]))]
+    assert len(output) == 1 and json.loads(output[0]) == {"fixture": 1}
+    assert len(calls) == 1
+
+
+def test_legacy_invalid_balanced_prefix_is_not_reparsed_for_each_line(monkeypatch):
+    from codex_antigravity_auth import sse
+    original = sse._complete_legacy_payload
+    calls = []
+    def counted(value, limits=None):
+        calls.append(1)
+        return original(value, limits)
+    monkeypatch.setattr(sse, "_complete_legacy_payload", counted)
+    decoder = SSEDecoder(legacy_json_lines=True)
+    output = list(decoder.feed(b'data: invalid\n' * 2000 + b'\n'))
+    assert len(output) == 1 and len(calls) == 1
+    with pytest.raises(json.JSONDecodeError): json.loads(output[0])
+
+
+def test_legacy_lexical_scan_ignores_string_braces_and_resets_between_roots():
+    decoder = SSEDecoder(legacy_json_lines=True)
+    values = [{"text": 'braces }[ and escaped " quote \\'}, {"next": [1, 2]}]
+    output = list(decoder.feed(b''.join(b'data: ' + json.dumps(value).encode() + b'\n' for value in values)))
+    assert list(map(json.loads, output)) == values

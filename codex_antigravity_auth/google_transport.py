@@ -147,8 +147,8 @@ def _safe_client_metadata(value: object) -> dict[str, Any]:
 
 class GoogleResponseAccumulator:
     def __init__(self) -> None:
-        self._text = ""
-        self._reasoning = ""
+        self._text: list[str] = []
+        self._reasoning: list[str] = []
         self._function_calls: list[dict[str, Any]] = []
         self._finish_reason: str | None = None
         self._safety_block: dict[str, Any] | None = None
@@ -211,13 +211,13 @@ class GoogleResponseAccumulator:
                     continue
                 if part.get("thought") is True or part.get("type") == "thinking":
                     thought = part.get("text") or part.get("thinking")
-                    if isinstance(thought, str):
-                        self._reasoning += thought
+                    if isinstance(thought, str) and thought:
+                        self._reasoning.append(thought)
                     continue
                 if "text" in part:
                     text = part.get("text")
-                    if isinstance(text, str):
-                        self._text += text
+                    if isinstance(text, str) and text:
+                        self._text.append(text)
                     continue
                 if "functionCall" in part:
                     function_call = part.get("functionCall")
@@ -247,7 +247,7 @@ class GoogleResponseAccumulator:
                     "type": "reasoning",
                     "id": f"rs_{uuid.uuid4().hex[:8]}",
                     "encrypted_content": "",
-                    "step_by_step_summary": self._reasoning,
+                    "step_by_step_summary": "".join(self._reasoning),
                 }
             )
         if self._text:
@@ -257,7 +257,7 @@ class GoogleResponseAccumulator:
                     "id": f"msg_{uuid.uuid4().hex[:8]}",
                     "status": "completed",
                     "role": "assistant",
-                    "content": [{"type": "output_text", "text": self._text, "annotations": []}],
+                    "content": [{"type": "output_text", "text": "".join(self._text), "annotations": []}],
                 }
             )
         output.extend(self._function_calls)

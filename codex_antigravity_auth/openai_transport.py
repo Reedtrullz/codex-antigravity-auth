@@ -129,14 +129,14 @@ def _message_output(message: object) -> list[dict[str, Any]]:
 
 class ChatResponseAccumulator:
     def __init__(self) -> None:
-        self._text = ""
-        self._reasoning = ""
+        self._text: list[str] = []
+        self._reasoning: list[str] = []
         self._finish_reason: str | None = None
         self._usage = normalize_usage()
         self._done = False
         self._refusal = False
-        self._tool_names: dict[int, str] = {}
-        self._tool_arguments: dict[int, str] = {}
+        self._tool_names: dict[int, list[str]] = {}
+        self._tool_arguments: dict[int, list[str]] = {}
 
     def mark_done(self) -> None:
         self._done = True
@@ -166,11 +166,11 @@ class ChatResponseAccumulator:
             if not isinstance(delta, dict):
                 continue
             content = delta.get("content")
-            if isinstance(content, str):
-                self._text += content
+            if isinstance(content, str) and content:
+                self._text.append(content)
             reasoning = delta.get("reasoning_content")
-            if isinstance(reasoning, str):
-                self._reasoning += reasoning
+            if isinstance(reasoning, str) and reasoning:
+                self._reasoning.append(reasoning)
             if isinstance(delta.get("refusal"), str) and delta["refusal"]:
                 self._refusal = True
             tool_calls = delta.get("tool_calls")
@@ -185,11 +185,11 @@ class ChatResponseAccumulator:
                     if not isinstance(function, dict):
                         continue
                     name = function.get("name")
-                    if isinstance(name, str):
-                        self._tool_names[index] = self._tool_names.get(index, "") + name
+                    if isinstance(name, str) and name:
+                        self._tool_names.setdefault(index, []).append(name)
                     arguments = function.get("arguments")
-                    if isinstance(arguments, str):
-                        self._tool_arguments[index] = self._tool_arguments.get(index, "") + arguments
+                    if isinstance(arguments, str) and arguments:
+                        self._tool_arguments.setdefault(index, []).append(arguments)
 
     def finalize(self) -> ProviderResult:
         output: list[dict[str, Any]] = []
@@ -199,7 +199,7 @@ class ChatResponseAccumulator:
                     "type": "reasoning",
                     "id": f"rs_{uuid.uuid4().hex[:8]}",
                     "encrypted_content": "",
-                    "step_by_step_summary": self._reasoning,
+                    "step_by_step_summary": "".join(self._reasoning),
                 }
             )
         if self._text:
@@ -209,15 +209,15 @@ class ChatResponseAccumulator:
                     "id": f"msg_{uuid.uuid4().hex[:8]}",
                     "status": "completed",
                     "role": "assistant",
-                    "content": [{"type": "output_text", "text": self._text, "annotations": []}],
+                    "content": [{"type": "output_text", "text": "".join(self._text), "annotations": []}],
                 }
             )
         if self._refusal and not output:
             output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
         for index in sorted(self._tool_names):
-            name = self._tool_names[index]
+            name = "".join(self._tool_names[index])
             if valid_function_name(name):
-                arguments = self._tool_arguments.get(index, "")
+                arguments = "".join(self._tool_arguments.get(index, []))
                 output.append(
                     {
                         "type": "function_call",
@@ -397,7 +397,7 @@ class OpenAICompatibleTransport:
             created_at=int(time.time()),
         )
         accumulator = ChatResponseAccumulator()
-        tool_calls: dict[int, dict[str, str]] = {}
+        tool_calls: dict[int, dict[str, Any]] = {}
         tool_seen_order: list[int] = []
         text_active = False
         reasoning_active = False
@@ -509,7 +509,7 @@ class OpenAICompatibleTransport:
                                         continue
                                     if index not in tool_calls:
                                         tool_seen_order.append(index)
-                                    state = tool_calls.setdefault(index, {"call_id": "", "name": "", "arguments": ""})
+                                    state = tool_calls.setdefault(index, {"call_id": "", "name": [], "arguments": []})
                                     call_id = raw_call.get("id")
                                     if isinstance(call_id, str) and call_id:
                                         state["call_id"] = call_id
@@ -518,8 +518,8 @@ class OpenAICompatibleTransport:
                                         continue
                                     for field in ("name", "arguments"):
                                         fragment = function.get(field)
-                                        if isinstance(fragment, str):
-                                            state[field] += fragment
+                                        if isinstance(fragment, str) and fragment:
+                                            state[field].append(fragment)
                     except SSELimitError as exc:
                         async for event in fail("provider_output_limit", str(exc)):
                             yield event
@@ -558,10 +558,11 @@ class OpenAICompatibleTransport:
                 yield event
         for index in tool_seen_order:
             state = tool_calls[index]
-            if valid_function_name(state["name"]):
+            name = "".join(state["name"])
+            if valid_function_name(name):
                 for event in builder.add_function_call(
-                    state["name"],
-                    function_call_arguments_string(state["arguments"]),
+                    name,
+                    function_call_arguments_string("".join(state["arguments"])),
                     call_id=state["call_id"] or None,
                 ):
                     yield event

@@ -60,7 +60,11 @@ Incremental SSE keeps the existing frame/data-line rules. The cumulative cap
 counts decoded UTF-8 event/framing bytes, including comments, before further
 accumulation. Completed events preceding a limit remain ordered regardless of
 transport chunk boundaries. Pending line storage is coalesced, so one-byte
-chunks do not create an unbounded list of fragments. Oversized/incomplete input
+chunks do not create an unbounded list of fragments. Output text, reasoning and
+tool argument/name assembly appends fragments and joins at item/terminal
+completion, avoiding repeated copies of an ever-growing string. Legacy multiline
+JSON tracks lexical state incrementally and parses a potentially complete root
+once, rather than repeatedly reparsing every growing prefix. Oversized/incomplete input
 never becomes a successful clipped event.
 
 Stream limits produce `response.failed` with `provider_output_limit` when the
