@@ -11,6 +11,8 @@ import math
 import re
 import shlex
 import socketserver
+import socket
+import threading
 import subprocess
 import time
 import json
@@ -109,6 +111,29 @@ PYPI_PROJECT_JSON_URL = "https://pypi.org/pypi/codex-antigravity-auth/json"
 
 
 class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
+    def handle(self):
+        # TCPServer.timeout only bounds accept(). Bound a connected client's
+        # whole request too, including partial headers or a slow byte stream.
+        deadline = getattr(self.server, "callback_deadline", None)
+        remaining = deadline - time.monotonic() if deadline is not None else 1.0
+        timeout = max(0.001, min(1.0, remaining))
+        self.connection.settimeout(timeout)
+
+        def stop_request():
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        timer = threading.Timer(timeout, stop_request)
+        timer.daemon = True
+        timer.start()
+        try:
+            super().handle()
+        finally:
+            timer.cancel()
+            timer.join()
+
     def log_message(self, format, *args):
         # Suppress logging of HTTP requests to keep CLI clean
         pass

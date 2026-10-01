@@ -184,3 +184,39 @@ def test_code_callback_still_validates_pkce_and_closes_on_exchange_failure(flow,
         cli.run_local_oauth_flow(no_browser=True)
     exchange.assert_called_once_with("synthetic-code", "synthetic-verifier")
     assert server.closed and "synthetic-state" not in oauth._pkce_verifier_store
+
+
+@pytest.mark.parametrize("drip", [False, True])
+def test_partial_connected_request_cannot_outlive_callback_deadline(drip):
+    import socket
+    server = cli.OAuthServer(("127.0.0.1", 0), cli.OAuthCallbackHandler)
+    server.expected_state_id = "synthetic-state"
+    server.timeout = 0.2
+    server.callback_deadline = time.monotonic() + 0.15
+    finished = threading.Event()
+
+    def handle():
+        try:
+            server.handle_request()
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=handle)
+    worker.start()
+    try:
+        with socket.create_connection(server.server_address, timeout=1) as client:
+            client.sendall(b"GET /oauth-callback HTTP/1.1\r\nHost: ")
+            if drip:
+                for _ in range(40):
+                    if finished.wait(0.01):
+                        break
+                    try:
+                        client.sendall(b"x")
+                    except OSError:
+                        break
+            assert finished.wait(1), "accepted partial request bypassed the deadline"
+            assert server.auth_code is server.auth_error is None
+    finally:
+        server.server_close()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
