@@ -65,6 +65,30 @@ def summary_projection(value: Any) -> Any:
     return visit(value, 0)
 
 
+def summary_structure(value: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    """Reserve caller-allowlisted scalars independently of content previews.
+
+    The fixed field lists bound this envelope; arbitrary nested values cannot
+    acquire structural status and bypass the content budget.
+    """
+    result = {}
+    for key in fields:
+        if key not in value:
+            continue
+        item = value[key]
+        if isinstance(item, str):
+            result[key] = redact_sensitive_text(item)[:160]
+        elif item is None or isinstance(item, bool):
+            result[key] = item
+        elif isinstance(item, int) and abs(item) <= 2**63 - 1:
+            result[key] = item
+        elif isinstance(item, float) and math.isfinite(item):
+            result[key] = item
+        else:
+            result[key] = None
+    return result
+
+
 def summary_retention() -> dict[str, Any]:
     return {
         "mode": "summary", "contentComplete": False, "budgetScope": "content_preview",

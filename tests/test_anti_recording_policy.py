@@ -179,7 +179,7 @@ def test_summary_refuses_orphan_lane_artifacts_without_deleting_them(isolated_an
     directory.mkdir(parents=True)
     (directory / "lane-0001.json").write_text(LONG)
     before = all_files(root)
-    with pytest.raises(anti.AntiError, match="incompatible"):
+    with pytest.raises(anti.AntiError, match="unknown retention policy"):
         write(anti, "summary")
     assert all_files(root) == before
 
@@ -192,3 +192,66 @@ def test_standalone_copy_uses_same_retention_without_installed_package(isolated_
     shutil.copytree(SCRIPT.parent, copied, ignore=shutil.ignore_patterns("__pycache__"))
     probe = "from anti_lib.retention import summary_projection; assert len(summary_projection('x'*4000)) == 1600"
     subprocess.run([sys.executable, "-S", "-c", probe], cwd=copied, check=True)
+
+
+@pytest.mark.parametrize("retention", ["never", "summary", "full"])
+def test_interrupted_full_publication_preserves_orphan_artifacts(isolated_anti, monkeypatch, retention):
+    anti, _, root = isolated_anti
+    replace = anti.os.replace
+    def interrupt_record(source, destination):
+        if Path(destination) == anti.RUNS_DIR / "fixture-run.json":
+            raise OSError("synthetic interrupted publication")
+        return replace(source, destination)
+    with monkeypatch.context() as patch:
+        patch.setattr(anti.os, "replace", interrupt_record)
+        with pytest.raises(OSError, match="interrupted publication"):
+            write(anti, "full", execution_ledger=None)
+    assert (anti.RUNS_DIR / "fixture-run/result.json").exists()
+    assert not (anti.RUNS_DIR / "fixture-run.json").exists()
+    before = all_files(root)
+    with pytest.raises(anti.AntiError, match="unknown retention policy"):
+        write(anti, retention)
+    assert all_files(root) == before
+
+
+def test_orphan_temporary_record_is_preserved(isolated_anti):
+    anti, _, root = isolated_anti
+    anti.RUNS_DIR.mkdir()
+    (anti.RUNS_DIR / "fixture-run.json.tmp").write_text(LONG)
+    before = all_files(root)
+    with pytest.raises(anti.AntiError, match="unknown retention policy"):
+        write(anti, "never")
+    assert all_files(root) == before
+
+
+def test_exhausted_preview_budget_preserves_result_structure_and_reflection_counts(isolated_anti):
+    anti, reflections, root = isolated_anti
+    findings = [{"claim": LONG, "evidence": LONG, "file": LONG}] * 80
+    metadata = {
+        "panel_results": [{"output_text": LONG}] * 80,
+        "findings": {"findings": findings},
+        "scope_status": "partial",
+        "planned_chunk_count": 75, "completed_chunk_count": 3,
+        "coverage": [{"path": LONG, "contentStatus": "partial"}] * 80,
+        "verification": {"status": "tool_checks", "performedBy": "anti", "evidenceCount": 2, "evidence": [LONG] * 80},
+    }
+    path = write(anti, "summary", metadata=metadata)
+    record = json.loads(path.read_text())
+    artifact = json.loads(Path(record["resultPath"]).read_text())
+    assert artifact["output_chars"] == len(LONG)
+    assert artifact["runId"] == "fixture-run"
+    assert artifact["runStatus"] == "failed"
+    assert artifact["scopeStatus"] == "partial"
+    assert artifact["resultPath"] == record["resultPath"]
+    assert artifact["artifacts"]["resultPath"] == record["resultPath"]
+    assert artifact["verification"]["status"] == "tool_checks"
+    assert artifact["verification"]["evidenceCount"] == 2
+    assert artifact["coverage"]["chunksExpected"] == 75
+    assert artifact["coverage"]["chunksCompleted"] == 3
+    saved = reflections.record_review(repo_path=root, findings=findings, models=[LONG] * 80,
+                                      panel_status="complete", mode="panel", save_output="summary")
+    assert saved["findings_count"] == 80
+    assert saved["panel_status"] == "complete"
+    assert saved["save_output"] == "summary"
+    assert reflections.get_summary(root)["total_findings"] == 80
+    assert all(LONG not in text for text in all_files(root).values())

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .redaction import sanitize_json
-from .retention import summary_projection, summary_retention
+from .retention import summary_projection, summary_retention, summary_structure
 try:
     from codex_antigravity_auth.secure_store import file_lock
 except ImportError:  # standalone copied skill
@@ -157,7 +157,11 @@ def record_review(
     
     record = sanitize_json(record)
     if save_output == "summary":
-        record = summary_projection(record)
+        structure = summary_structure(record, (
+            "save_output", "timestamp", "mode", "panel_status", "run_id", "verdict", "findings_count",
+        ))
+        record = summary_projection({key: value for key, value in record.items() if key not in structure})
+        record.update(structure)
         record["retention"] = summary_retention()
     path = _reflection_path(repo_path)
     _ensure_permissions()

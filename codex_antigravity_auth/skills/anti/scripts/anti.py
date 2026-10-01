@@ -37,7 +37,7 @@ from anti_lib.chunking import chunk_manifest
 from anti_lib.context import ordered_prompt
 from anti_lib.ledger import execution_entry, prompts_as_text
 from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
-from anti_lib.retention import lifecycle_metadata, summary_projection, summary_retention
+from anti_lib.retention import lifecycle_metadata, summary_projection, summary_retention, summary_structure
 from anti_lib.runner import presentable_result
 from anti_lib.verifier import verify_findings
 from anti_lib.reflections import (
@@ -751,6 +751,9 @@ def check_record_retention(record_id: str, output_mode: str) -> None:
     artifact_dir = RUNS_DIR / record_id
     if artifact_dir.is_symlink():
         raise AntiError("refusing to write result artifact through symlink")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    if not path.exists() and (artifact_dir.exists() or temporary.exists() or temporary.is_symlink()):
+        raise AntiError("run id has orphan artifacts with unknown retention policy; choose a new run id")
     if (output_mode == "never" and artifact_dir.exists()) or (
         output_mode == "summary" and artifact_dir.exists() and any(artifact_dir.glob("lane-*.json"))
     ):
@@ -773,8 +776,11 @@ def write_run_record(
     force_full_output: bool = False,
 ) -> Path | None:
     output_mode = save_output_mode(args)
-    if getattr(args, "run_id", None):
-        check_record_retention(str(args.run_id), output_mode)
+    record_id = getattr(args, "run_id", None)
+    if not record_id and output_mode != "never":
+        record_id = new_run_id()
+    if record_id:
+        check_record_retention(str(record_id), output_mode)
     if output_mode == "never":
         # Minimal lifecycle record: correlation survives even when prompt and
         # output retention are disabled (bug report root cause 2).
@@ -841,7 +847,6 @@ def write_run_record(
 
     output_chars = len(output_text or "")
     prompt_chars = len(prompt_text or "")
-    record_id = getattr(args, "run_id", None) or new_run_id()
     if not RUN_ID_RE.fullmatch(str(record_id)):
         raise AntiError("run id must contain only letters, numbers, '_' or '-'")
 
@@ -988,7 +993,28 @@ def write_run_record(
         artifact.pop("output_text", None)
         artifact["output_preview"] = redact_sensitive_text(output_text or "")[:RUN_OUTPUT_PREVIEW_CHARS]
         artifact["output_chars"] = output_chars
-        artifact = summary_projection(artifact)
+        # Fixed-size structural fields survive exhaustion of the content budget.
+        structure = summary_structure(artifact, (
+            "schemaVersion", "runId", "createdAt", "mode", "runStatus", "scopeStatus", "panelStatus", "output_chars",
+        ))
+        coverage = artifact["coverage"]
+        coverage_structure = summary_structure(coverage, (
+            "status", "chunksExpected", "chunksCompleted", "chunksFailed", "chunksOmitted", "chunksNotSent",
+        ))
+        verification = artifact.get("verification")
+        verification = verification if isinstance(verification, dict) else {"status": "unknown"}
+        verification_structure = summary_structure(verification, ("status", "performedBy", "evidenceCount"))
+        pointers = artifact["artifacts"]
+        # Give verification and the primary answer first access to content space.
+        ordered_artifact = {key: artifact[key] for key in ("verification", "output_preview")}
+        ordered_artifact.update({key: value for key, value in artifact.items() if key not in structure and key not in {"artifacts", "resultPath"}})
+        artifact = summary_projection(ordered_artifact)
+        artifact.update(structure)
+        artifact["runId"] = str(record_id)
+        artifact["coverage"] = {**artifact.get("coverage", {}), **coverage_structure}
+        artifact["verification"] = {**artifact.get("verification", {}), **verification_structure}
+        artifact["artifacts"] = pointers
+        artifact["resultPath"] = str(artifact_path)
         artifact["retention"] = summary_retention()
         # Reserve lifecycle/count fields before metadata consumes the preview budget.
         content_keys = {"metadata", "caveats", "error", "output_preview"}
@@ -999,7 +1025,12 @@ def write_run_record(
             priority = ("request_log_correlation_id", "runStatus", "scopeStatus", "scope_status", "panel_status", "panel_results", "findings", "failure_diagnostics")
             ordered["metadata"] = {key: metadata[key] for key in priority if key in metadata}
             ordered["metadata"].update(metadata)
-        record = summary_projection(ordered)
+        structure = summary_structure(record, (
+            "id", "created_at", "command", "mode", "status", "runStatus", "scopeStatus", "save_output",
+            "prompt_chars", "output_chars", "omittedFileCount", "omittedChunkCount",
+        ))
+        record = summary_projection({key: value for key, value in ordered.items() if key not in structure})
+        record.update(structure)
         record["retention"] = summary_retention()
         # Preserve validated correlation after projection, as in full mode.
         record["id"] = str(record_id)
