@@ -410,6 +410,10 @@ def run_logs_command(args) -> None:
                         f"{item['error_class']} ({item['count']})" for item in group["top_error_classes"]
                     )
                     print(f"  errors: {errors}")
+        if summary.get("requested_window_incomplete"):
+            print(f"[WARN] Retained logs do not establish the full requested window; earliest retained timestamp: {summary.get('earliest_retained_timestamp')}")
+        if summary.get("omitted_records"):
+            print(f"[WARN] {summary['omitted_records']} oversized request-log record(s) were omitted.")
         if summary["malformed_records"]:
             print(f"[WARN] Ignored {summary['malformed_records']} malformed request-log entry/entries.")
         return

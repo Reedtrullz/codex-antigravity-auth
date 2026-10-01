@@ -4,12 +4,15 @@ import json
 import os
 import re
 import time
+import stat
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 from .constants import get_codex_home
 from .redaction import redact_secret_text, redact_secrets
+from .secure_store import file_lock
 
 _DEFAULT_GET_CODEX_HOME = get_codex_home
 
@@ -21,6 +24,8 @@ def _codex_home_read_only() -> Path:
 
 REQUEST_LOG_FILE = "antigravity-requests.jsonl"
 REQUEST_LOG_MAX_BYTES = 10 * 1024 * 1024
+REQUEST_LOG_BACKUP_COUNT = 1
+REQUEST_LOG_MAX_RECORD_BYTES = 64 * 1024
 REQUEST_LOG_SECRET_KEYS = {
     "authorization",
     "api_key",
@@ -48,15 +53,66 @@ def request_log_path() -> Path:
     return _codex_home_read_only() / REQUEST_LOG_FILE
 
 
+def _retention_settings(max_bytes: int | None = None, backup_count: int | None = None) -> tuple[int, int, list[str]]:
+    warnings = []
+    values = []
+    for explicit, name, default, lower, upper in (
+        (max_bytes, "ANTIGRAVITY_REQUEST_LOG_MAX_BYTES", REQUEST_LOG_MAX_BYTES, 1024, REQUEST_LOG_MAX_BYTES),
+        (backup_count, "ANTIGRAVITY_REQUEST_LOG_BACKUP_COUNT", REQUEST_LOG_BACKUP_COUNT, 0, 5),
+    ):
+        raw = explicit if explicit is not None else os.environ.get(name, default)
+        try:
+            value = int(raw)
+            if type(raw) not in (str, int) or not lower <= value <= upper:
+                raise ValueError
+        except (ValueError, TypeError, OverflowError):
+            value = default
+            warnings.append(f"{name} must be an integer from {lower} to {upper}; using default {default}")
+        values.append(value)
+    return values[0], values[1], warnings
+
+
+def _archive_paths(path: Path) -> list[tuple[int, Path]]:
+    archives = []
+    for candidate in path.parent.glob(path.name + ".*"):
+        suffix = candidate.name[len(path.name) + 1:]
+        if suffix.isascii() and suffix.isdecimal() and int(suffix) > 0 and str(int(suffix)) == suffix:
+            archives.append((int(suffix), candidate))
+    return sorted(archives, key=lambda item: item[0], reverse=True)
+
+
+def _retained_paths(path: Path) -> list[Path]:
+    return [candidate for candidate in [*(item[1] for item in _archive_paths(path)), path] if not candidate.is_symlink() and candidate.is_file()]
+
+
+@contextmanager
+def _log_lock(path: Path):
+    lock_path = path.with_name(f".{path.name}.lock")
+    if lock_path.is_symlink() or (lock_path.exists() and not lock_path.is_file()):
+        raise OSError("unsafe request-log lock path")
+    with file_lock(path):
+        yield
+
+
 def request_log_info() -> dict[str, Any]:
     path = request_log_path()
-    rotated = path.with_suffix(path.suffix + ".1")
+    maximum, backups, warnings = _retention_settings()
+    segments = []
+    for segment in _retained_paths(path):
+        try:
+            segments.append({"path": str(segment), "size_bytes": segment.stat().st_size})
+        except OSError:
+            pass
     return {
         "path": str(path),
-        "exists": path.is_file(),
-        "size_bytes": path.stat().st_size if path.is_file() else 0,
-        "rotated_path": str(rotated),
-        "max_bytes": REQUEST_LOG_MAX_BYTES,
+        "exists": not path.is_symlink() and path.is_file(),
+        "size_bytes": next((item["size_bytes"] for item in segments if item["path"] == str(path)), 0),
+        "rotated_path": str(path.with_suffix(path.suffix + ".1")),
+        "max_bytes": maximum,
+        "backup_count": backups,
+        "max_record_bytes": min(maximum, REQUEST_LOG_MAX_RECORD_BYTES),
+        "retained_segments": segments,
+        "configuration_warnings": warnings,
     }
 
 
@@ -95,67 +151,118 @@ def sanitize_request_record(record: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
-def _rotate_log_if_needed(path: Path, max_bytes: int) -> None:
-    if max_bytes <= 0 or not path.exists():
+def _rotate_log_if_needed(path: Path, max_bytes: int, *, incoming_bytes: int = 0, backup_count: int = 1) -> None:
+    # Caller holds the path-scoped cross-process lock across rotation and append.
+    archives = _archive_paths(path)
+    for candidate in [path, *(item[1] for item in archives)]:
+        if candidate.is_symlink() or (candidate.exists() and not candidate.is_file()):
+            raise OSError("unsafe request-log segment")
+    for index, archive in archives:
+        if index > backup_count:
+            archive.unlink()
+        else:
+            os.chmod(archive, 0o600)
+    if not path.exists():
         return
-    try:
-        if path.stat().st_size < max_bytes:
-            return
-    except OSError:
+    os.chmod(path, 0o600)
+    size = path.stat().st_size
+    if not size or size + incoming_bytes <= max_bytes:
         return
-    rotated = path.with_suffix(path.suffix + ".1")
-    try:
-        if rotated.exists():
-            rotated.unlink()
-        path.replace(rotated)
-    except OSError:
-        # Logging must never break gateway responses.
-        return
+    for index in range(backup_count, 0, -1):
+        archive = path.with_name(f"{path.name}.{index}")
+        if archive.exists():
+            if index == backup_count:
+                archive.unlink()
+            else:
+                archive.replace(path.with_name(f"{path.name}.{index + 1}"))
+    if backup_count:
+        path.replace(path.with_name(f"{path.name}.1"))
+    else:
+        path.unlink()
 
 
-def write_request_record(record: dict[str, Any], *, max_bytes: int = REQUEST_LOG_MAX_BYTES) -> None:
+def write_request_record(record: dict[str, Any], *, max_bytes: int | None = None, backup_count: int | None = None) -> None:
     path = request_log_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _rotate_log_if_needed(path, max_bytes)
-        payload = json.dumps(sanitize_request_record(record), sort_keys=True, separators=(",", ":")) + "\n"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(path, flags, 0o600)
-        try:
-            os.write(fd, payload.encode("utf-8"))
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, 0o600)
-            else:
-                os.chmod(path, 0o600)
-        finally:
-            os.close(fd)
+        maximum, backups, _warnings = _retention_settings(max_bytes, backup_count)
+        payload = (json.dumps(sanitize_request_record(record), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(payload) > min(maximum, REQUEST_LOG_MAX_RECORD_BYTES):
+            # Preserve an explicit coverage gap, never fabricate a provider failure.
+            payload = (json.dumps({
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "status": "log_gap", "error_class": "oversized_log_record",
+                "error": "An oversized request-log record was omitted",
+            }, sort_keys=True) + "\n").encode("utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with _log_lock(path):
+            _rotate_log_if_needed(path, maximum, incoming_bytes=len(payload), backup_count=backups)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(path, flags, 0o600)
+            previous_size = None
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise OSError("request log is not a regular file")
+                previous_size = info.st_size
+                remaining = memoryview(payload)
+                while remaining:
+                    written = os.write(fd, remaining)
+                    if written <= 0:
+                        raise OSError("short request-log write")
+                    remaining = remaining[written:]
+                if hasattr(os, "fchmod"):
+                    os.fchmod(fd, 0o600)
+                else:
+                    os.chmod(path, 0o600)
+            except BaseException:
+                if previous_size is not None:
+                    os.ftruncate(fd, previous_size)
+                raise
+            finally:
+                os.close(fd)
     except Exception:
+        # Diagnostic I/O must not break a gateway response.
         return
 
 
 def iter_request_records(*, tail: int | None = None) -> Iterable[dict[str, Any]]:
     path = request_log_path()
-    if not path.is_file() or path.is_symlink():
+    if tail == 0 or not _retained_paths(path):
         return []
+    lines: list[bytes] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        with _log_lock(path):
+            for segment in _retained_paths(path):
+                flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                fd = os.open(segment, flags)
+                with os.fdopen(fd, "rb") as handle:
+                    if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                        raise OSError("request-log segment is not regular")
+                    lines.extend(handle.read().splitlines())
     except Exception:
-        return []
-    if tail is not None and tail >= 0:
-        lines = lines[-tail:]
+        return [{"status": "malformed", "error": "request-log history could not be read consistently"}]
     records = []
+    seen = set()
     for line in lines:
         if not line.strip():
             continue
         try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
+            parsed = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
             records.append({"status": "malformed", "error": "malformed JSONL request-log entry"})
             continue
-        records.append(redact_secrets(parsed if isinstance(parsed, dict) else {"value": parsed}))
-    return records
+        if not isinstance(parsed, dict):
+            records.append({"status": "malformed", "error": "request-log entry is not an object"})
+            continue
+        # Only identified exact event duplicates are safe to remove. Distinct
+        # terminal updates and legacy ID-less requests remain independent rows.
+        if isinstance(parsed.get("request_id"), str) and parsed["request_id"]:
+            identity = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+            if identity in seen:
+                continue
+            seen.add(identity)
+        records.append(redact_secrets(parsed))
+    return records[-tail:] if tail is not None and tail > 0 else records
 
 
 def _parse_since_seconds(value: str | None) -> float | None:
@@ -223,9 +330,14 @@ def request_log_summary(*, since: str | None = "24h", now: float | None = None) 
     records = list(iter_request_records())
     groups: dict[str, dict[str, Any]] = {}
     malformed_records = 0
+    omitted_records = 0
     excluded_by_time = 0
+    retained_times = [value for record in records if (value := _timestamp_epoch(record.get("timestamp"))) is not None]
     logical: dict[tuple[str, object], list[dict[str, Any]]] = {}
     for index, record in enumerate(records):
+        if record.get("status") == "log_gap":
+            omitted_records += 1
+            continue
         if record.get("status") == "malformed":
             malformed_records += 1
             continue
@@ -331,17 +443,30 @@ def request_log_summary(*, since: str | None = "24h", now: float | None = None) 
         "included_records": sum(group["request_count"] for group in rendered_groups.values()),
         "included_event_records": included_events,
         "excluded_by_time": excluded_by_time, "malformed_records": malformed_records,
+        "omitted_records": omitted_records,
+        "earliest_retained_timestamp": datetime.fromtimestamp(min(retained_times), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if retained_times else None,
+        "latest_retained_timestamp": datetime.fromtimestamp(max(retained_times), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if retained_times else None,
+        "requested_window_incomplete": (
+            bool(malformed_records or omitted_records or min(retained_times) > cutoff)
+            if cutoff is not None and retained_times else None
+        ),
         "groups": rendered_groups,
     }
 
 
 def clean_request_logs() -> list[str]:
+    path = request_log_path()
+    if not _retained_paths(path):
+        return []
     removed = []
-    for path in (request_log_path(), request_log_path().with_suffix(request_log_path().suffix + ".1")):
-        try:
-            if path.exists() and not path.is_symlink():
-                path.unlink()
-                removed.append(str(path))
-        except OSError:
-            pass
+    try:
+        with _log_lock(path):
+            for segment in _retained_paths(path):
+                try:
+                    segment.unlink()
+                    removed.append(str(segment))
+                except OSError:
+                    pass
+    except OSError:
+        pass
     return removed
