@@ -130,6 +130,10 @@ codex-antigravity start
 
 This first verifies that Google OAuth client credentials are configured, then runs the browser OAuth login before writing Codex config so a login startup failure does not leave Codex pointed at an unusable gateway setup. It forces Google's account chooser when adding multiple accounts, stores every successful login in the encrypted rotation pool, clears stale cooldown state on re-authentication, prints the active Gemini/Claude rotation status, writes the Codex provider block, and runs the active-provider doctor only when `--activate` is also passed. To add more accounts later, run `codex-antigravity login --count 2`; to inspect rotation state, run `codex-antigravity accounts`. Use `codex-antigravity accounts reset <email>` to clear persisted cooldown/failure state, `accounts reset --all --yes` for the whole pool, and `accounts remove <email> --yes` to remove a revoked account without hand-editing encrypted storage.
 
+Use `codex-antigravity login --no-browser` to print the authorization URL without launching a browser; `setup --write` and `setup-google` also accept `--no-browser`. Browser-launch failure leaves the URL available for manual opening. Consent denial and Ctrl-C terminate the attempt promptly; timeout uses a monotonic ten-minute deadline. Only a matching-state callback at `/oauth-callback` is accepted, once. The browser reports authorization received; the terminal reports the result after token exchange and account setup.
+
+For remote/headless login, establish `ssh -N -L 127.0.0.1:51121:127.0.0.1:51121 user@remote-host` from your local machine, then run `login --no-browser` on that remote host and open its printed URL locally. Keep both tunnel endpoints on loopback and keep the registered `http://localhost:51121/oauth-callback` redirect unchanged. No token pasting or public callback listener is needed.
+
 For BYOK-only use, replace `codex-antigravity login` with a provider setup command such as:
 
 ```bash

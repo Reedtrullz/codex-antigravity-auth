@@ -3,6 +3,7 @@ import os
 import argparse
 import getpass
 import http.server
+from html import escape as html_escape
 import hashlib
 import math
 import re
@@ -114,57 +115,52 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _page(self, status: int, title: str, message: str) -> None:
+        body = (
+            '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<title>{html_escape(title)}</title></head><body>'
+            f'<h1>{html_escape(title)}</h1><p>{html_escape(message)}</p></body></html>'
+        )
+        self._write_html(status, body.encode("utf-8"))
+
     def do_GET(self):
         parsed = urlparse(self.path)
-        query = parse_qs(parsed.query)
-
-        if "code" in query:
-            code = query["code"][0]
-            state = query.get("state", [None])[0]
-            expected_state_id = getattr(self.server, "expected_state_id", None)
-            if expected_state_id:
-                try:
-                    returned_state = decode_state(state or "")
-                except Exception:
-                    returned_state = {}
-                if returned_state.get("id") != expected_state_id:
-                    self._write_html(400, b"""
-                    <html>
-                    <head><style>body { font-family: sans-serif; text-align: center; margin-top: 50px; background-color: #f4f7f6; }</style></head>
-                    <body>
-                        <h1 style="color: #f44336;">Authentication Failed</h1>
-                        <p>The OAuth callback state did not match the active login attempt.</p>
-                    </body>
-                    </html>
-                    """)
-                    return
-            # Store globally on server to be grabbed by parent thread
-            self.server.auth_code = code
+        if parsed.path != "/oauth-callback":
+            self._page(404, "Not found", "Use the registered OAuth callback path.")
+            return
+        if self.server.auth_code is not None or self.server.auth_error is not None:
+            self._page(409, "Callback already received", "Return to the terminal for the login result.")
+            return
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        state_values = query.get("state", [])
+        state = state_values[0] if len(state_values) == 1 else ""
+        try:
+            returned_state = decode_state(state)
+        except Exception:
+            returned_state = {}
+        expected = self.server.expected_state_id
+        if not expected or returned_state.get("id") != expected:
+            self._page(400, "Authorization rejected", "The callback state did not match this login attempt.")
+            return
+        codes, errors = query.get("code", []), query.get("error", [])
+        if errors and not codes and len(errors) == 1 and errors[0]:
+            self.server.auth_error = errors[0][:200]
             self.server.auth_state = state
-            self._write_html(200, b"""
-            <html>
-            <head><style>body { font-family: sans-serif; text-align: center; margin-top: 50px; background-color: #f4f7f6; }</style></head>
-            <body>
-                <h1 style="color: #4caf50;">Authentication Successful!</h1>
-                <p>You can close this tab and return to the terminal.</p>
-            </body>
-            </html>
-            """)
-        else:
-            self._write_html(400, b"""
-            <html>
-            <head><style>body { font-family: sans-serif; text-align: center; margin-top: 50px; background-color: #f4f7f6; }</style></head>
-            <body>
-                <h1 style="color: #f44336;">Authentication Failed</h1>
-                <p>Could not retrieve authorization code.</p>
-            </body>
-            </html>
-            """)
+            self._page(200, "Authorization declined", "Login was not completed. Return to the terminal to retry.")
+            return
+        if len(codes) != 1 or not codes[0] or errors:
+            self._page(400, "Authorization rejected", "The callback must contain one authorization code or provider error.")
+            return
+        self.server.auth_code = codes[0]
+        self.server.auth_state = state
+        self._page(200, "Authorization received", "Return to the terminal. Sign-in completes after token exchange and account setup.")
 
 class OAuthServer(socketserver.TCPServer):
     allow_reuse_address = True
     auth_code = None
     auth_state = None
+    auth_error = None
     expected_state_id = None
 
 def normalize_epoch_seconds(value):
@@ -1291,6 +1287,7 @@ def main():
 
     # login
     login_parser = subparsers.add_parser("login", help="Authenticate Google Antigravity account(s) into the rotation pool")
+    login_parser.add_argument("--no-browser", action="store_true", help="Print the OAuth URL without opening a browser")
     login_parser.add_argument("--count", type=positive_int, default=1, help="Number of browser login flows to run")
     login_parser.add_argument("--select-account", action="store_true", help="Force Google's account chooser during login")
 
@@ -1298,6 +1295,7 @@ def main():
         "setup",
         help="Primary guided setup for using Antigravity Claude from Codex",
     )
+    setup_parser.add_argument("--no-browser", action="store_true", help="Print the OAuth URL without opening a browser")
     setup_parser.add_argument("--check", action="store_true", help="Run read-only setup and Codex readiness checks")
     setup_parser.add_argument("--json", action="store_true", help="Print setup/readiness status as JSON")
     setup_parser.add_argument("--write", action="store_true", help="Run login and write the Codex provider block")
@@ -1353,6 +1351,7 @@ def main():
         "setup-google",
         help="Write Codex config and sign Google Antigravity account(s) into rotation",
     )
+    setup_google_parser.add_argument("--no-browser", action="store_true", help="Print the OAuth URL without opening a browser")
     setup_google_parser.add_argument("--accounts", type=positive_int, default=1, help="Number of browser login flows to run")
     setup_google_parser.add_argument("--skip-codex-config", action="store_true", help="Do not write ~/.codex/config.toml")
     setup_google_parser.add_argument(
