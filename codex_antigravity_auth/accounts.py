@@ -6,8 +6,8 @@ import threading
 import time
 from typing import Any, Callable
 
-from .account_state import AccountState
-from .oauth import refresh_access_token, token_expires_in_seconds
+from .account_state import AccountState, scoped_cooldown_expiry
+from .oauth import OAuthRefreshError, refresh_access_token, token_expires_in_seconds
 from .redaction import redact_secret_text
 from .response_protocol import AttemptOutcome
 from .storage import (
@@ -53,6 +53,27 @@ def _get_refresh_lock(email: str) -> threading.Lock:
         if email not in _refresh_locks:
             _refresh_locks[email] = threading.Lock()
         return _refresh_locks[email]
+
+
+def _refresh_failure_outcome(exc: Exception) -> AttemptOutcome:
+    if isinstance(exc, OAuthRefreshError):
+        if exc.kind == "credential_rejected":
+            return AttemptOutcome(scope="account", category="auth")
+        if exc.kind == "reauth_required":
+            return AttemptOutcome(scope="account", category="auth", curable_auth=True)
+        if exc.kind == "throttle":
+            return AttemptOutcome(scope="account", category="rate_limit")
+        if exc.kind == "client_configuration":
+            return AttemptOutcome(scope="account", category="invalid_request")
+    # An untyped failure is never proof that a stored credential is invalid.
+    return AttemptOutcome(scope="account", category="transport")
+
+
+def _refresh_blocked(data: dict[str, Any], email: str) -> bool:
+    state = data.get("accountState") or {}
+    return bool(state.get("disabled", {}).get(email)) or scoped_cooldown_expiry(
+        state.get("cooldowns", {}).get(email, {}), "account",
+    ) > time.time()
 
 
 def _apply_token_refresh(account: dict, refresh_token: str, *, wait: bool = True) -> bool:
@@ -236,7 +257,7 @@ class AccountManager:
                             self._state_owner.apply_cooldown(
                                 email,
                                 family,
-                                AttemptOutcome(scope="account", category="auth"),
+                                _refresh_failure_outcome(exc),
                             )
                             dirty = True
                             print(
@@ -249,7 +270,7 @@ class AccountManager:
 
                     try:
                         if not refresh_token:
-                            raise RuntimeError("Token expired and no refresh token is available")
+                            raise OAuthRefreshError("reauth_required", "Token expired and no refresh token is available; run login again")
                         if not _apply_token_refresh(account, refresh_token, wait=False):
                             raise _RefreshBusy("refresh already in progress")
                         selected = account
@@ -265,7 +286,7 @@ class AccountManager:
                         self._state_owner.apply_cooldown(
                             email,
                             family,
-                            AttemptOutcome(scope="account", category="auth"),
+                            _refresh_failure_outcome(exc),
                         )
                         dirty = True
                         print(
@@ -415,6 +436,8 @@ class AccountManager:
                     # Re-check after waiting for a concurrent refresh.  This
                     # avoids duplicate refreshes and stale same-token writes.
                     latest = load_accounts()
+                    if _refresh_blocked(latest, email):
+                        continue
                     latest_account = next(
                         (item for item in latest.get("accounts", [])
                          if isinstance(item, dict) and str(item.get("email")) == email),
@@ -473,10 +496,12 @@ class AccountManager:
                             update_accounts(merge)
                         if merged:
                             summary["refreshed"] += 1
-                    except Exception:
+                    except Exception as exc:
                         with self._lock:
                             def mark_failed(data: dict[str, Any]) -> bool:
                                 self._sync_state_from_storage(data)
+                                if _refresh_blocked(data, email):
+                                    return False
                                 account = next(
                                     (
                                         item for item in data.get("accounts", [])
@@ -494,7 +519,7 @@ class AccountManager:
                                 self._state_owner.apply_cooldown(
                                     email,
                                     "gemini",
-                                    AttemptOutcome(scope="account", category="auth"),
+                                    _refresh_failure_outcome(exc),
                                 )
                                 return True
 
