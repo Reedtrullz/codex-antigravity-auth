@@ -544,3 +544,7 @@ No Windows ACL success is inferred from POSIX mode bits or mocked tests.
 ## Setup plans and profiles
 
 Use `setup --plan` for JSON stages/prerequisites without credential resolution or network. `profiles create/apply` default to no-write plans; `setup-history restore` requires explicit config/skill selection and refuses drift. Credentials and services are not rolled back. See [the setup contract](codex_antigravity_auth/SETUP.md) for commands, retention and recovery limits.
+
+## Versioned command JSON and support bundles
+
+Operational `--json` commands now return a version-1 envelope with command data under `data`, warnings separate from blocking failures, and explicit exit codes. Migrate consumers of the previous root-level JSON fields. `support-bundle` previews bounded allowlisted offline evidence; only `--output PATH --write` creates a private local export, and existing files are preserved. See [the JSON and support contract](codex_antigravity_auth/CLI_JSON.md) for supported commands, schemas, limits and privacy details.

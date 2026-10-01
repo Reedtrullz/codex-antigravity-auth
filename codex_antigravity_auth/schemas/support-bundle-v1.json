@@ -1,0 +1,420 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "createdAt",
+    "versions",
+    "config",
+    "stores",
+    "history",
+    "warnings"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "kind": {
+      "const": "support_bundle"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "package",
+        "python",
+        "platform"
+      ],
+      "properties": {
+        "package": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "python": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "platform": {
+          "enum": [
+            "darwin",
+            "linux",
+            "win32",
+            "other"
+          ]
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "modelSelected",
+        "providerSelected",
+        "providerTableCount",
+        "selectedProviderPresent",
+        "wireApi",
+        "endpoint",
+        "liveProbe"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "missing",
+            "parsed",
+            "too_large",
+            "unavailable"
+          ]
+        },
+        "modelSelected": {
+          "type": "boolean"
+        },
+        "providerSelected": {
+          "type": "boolean"
+        },
+        "providerTableCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "selectedProviderPresent": {
+          "type": "boolean"
+        },
+        "wireApi": {
+          "enum": [
+            "unknown",
+            "responses",
+            "missing",
+            "other"
+          ]
+        },
+        "endpoint": {
+          "enum": [
+            "unknown",
+            "https",
+            "loopback_http",
+            "other",
+            "invalid"
+          ]
+        },
+        "liveProbe": {
+          "const": "not_run"
+        }
+      }
+    },
+    "stores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accounts",
+        "providers"
+      ],
+      "properties": {
+        "accounts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "decryption"
+          ],
+          "properties": {
+            "state": {
+              "enum": [
+                "missing",
+                "unavailable",
+                "readable"
+              ]
+            },
+            "decryption": {
+              "const": "not_attempted"
+            }
+          }
+        },
+        "providers": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "decryption"
+          ],
+          "properties": {
+            "state": {
+              "enum": [
+                "missing",
+                "unavailable",
+                "readable"
+              ]
+            },
+            "decryption": {
+              "const": "not_attempted"
+            }
+          }
+        }
+      }
+    },
+    "history": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "windowSeconds",
+        "requestedWindowIncomplete",
+        "earliestRetainedTimestamp",
+        "latestRetainedTimestamp",
+        "malformedRecords",
+        "omittedRecords",
+        "counts",
+        "selectedRequestCount",
+        "matchedRequestCount",
+        "records",
+        "limits"
+      ],
+      "properties": {
+        "windowSeconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "requestedWindowIncomplete": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "earliestRetainedTimestamp": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "latestRetainedTimestamp": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "malformedRecords": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "omittedRecords": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_count",
+            "closed_request_count",
+            "open_count",
+            "success_count",
+            "failure_count",
+            "incomplete_count",
+            "cancellation_count",
+            "rate_limit_count",
+            "attempt_count",
+            "rotation_count"
+          ],
+          "properties": {
+            "request_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "closed_request_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "open_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "success_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "failure_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "incomplete_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "cancellation_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "rate_limit_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "attempt_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "rotation_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "selectedRequestCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "matchedRequestCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "records": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "requestRef",
+              "selectedInputIndex",
+              "timestamp",
+              "route",
+              "phase",
+              "status",
+              "httpStatus",
+              "latencyMs",
+              "providerAccepted"
+            ],
+            "properties": {
+              "requestRef": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{24}$"
+              },
+              "selectedInputIndex": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 19
+              },
+              "timestamp": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "route": {
+                "enum": [
+                  "google",
+                  "openai",
+                  "byok",
+                  "antigravity",
+                  "unknown"
+                ]
+              },
+              "phase": {
+                "enum": [
+                  "started",
+                  "terminal",
+                  "unknown"
+                ]
+              },
+              "status": {
+                "enum": [
+                  "completed",
+                  "incomplete",
+                  "failed",
+                  "cancelled",
+                  "started",
+                  "success",
+                  "error",
+                  "unknown"
+                ]
+              },
+              "httpStatus": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "latencyMs": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "providerAccepted": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "bytes",
+            "records",
+            "selectedRecords"
+          ],
+          "properties": {
+            "bytes": {
+              "const": 2097152
+            },
+            "records": {
+              "const": 2000
+            },
+            "selectedRecords": {
+              "const": 100
+            }
+          }
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "config_unavailable",
+          "store_unavailable",
+          "history_coverage_unknown",
+          "history_incomplete",
+          "request_selection_not_fully_observed",
+          "selected_records_capped",
+          "aggregate_counts_limited"
+        ]
+      },
+      "maxItems": 7
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Allowlisted local support bundle version 1"
+}

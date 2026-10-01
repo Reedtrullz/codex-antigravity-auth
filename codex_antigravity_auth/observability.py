@@ -235,11 +235,13 @@ def write_request_record(record: dict[str, Any], *, max_bytes: int | None = None
         return
 
 
-def iter_request_records(*, tail: int | None = None) -> Iterable[dict[str, Any]]:
+def iter_request_records(*, tail: int | None = None, max_bytes: int | None = None, max_records: int | None = None) -> Iterable[dict[str, Any]]:
     path = request_log_path()
     if tail == 0:
         return []
     lines: list[bytes] = []
+    remaining = max_bytes
+    bounded_gap = False
     try:
         with _log_lock(path, existing_only=True) as available:
             if not available:
@@ -250,17 +252,27 @@ def iter_request_records(*, tail: int | None = None) -> Iterable[dict[str, Any]]
                 with os.fdopen(fd, "rb") as handle:
                     if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                         raise OSError("request-log segment is not regular")
-                    lines.extend(handle.read().splitlines())
+                    raw = handle.read() if remaining is None else handle.read(remaining + 1)
+                    if remaining is not None:
+                        if len(raw) > remaining:
+                            bounded_gap = True
+                            break
+                        remaining -= len(raw)
+                    lines.extend(raw.splitlines())
+                    if max_records is not None and len(lines) > max_records:
+                        lines = lines[:max_records]
+                        bounded_gap = True
+                        break
     except Exception:
         return [{"status": "malformed", "error": "request-log history could not be read consistently"}]
-    records = []
+    records = ([{"status": "log_gap", "error": "bounded diagnostic history omitted data"}] if bounded_gap else [])
     seen = set()
     for line in lines:
         if not line.strip():
             continue
         try:
             parsed = json.loads(line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
             records.append({"status": "malformed", "error": "malformed JSONL request-log entry"})
             continue
         if not isinstance(parsed, dict):
@@ -269,12 +281,23 @@ def iter_request_records(*, tail: int | None = None) -> Iterable[dict[str, Any]]
         # Only identified exact event duplicates are safe to remove. Distinct
         # terminal updates and legacy ID-less requests remain independent rows.
         if isinstance(parsed.get("request_id"), str) and parsed["request_id"]:
-            identity = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+            try:
+                identity = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+            except (ValueError, RecursionError):
+                records.append({"status": "malformed", "error": "request-log entry exceeds parsing limits"})
+                continue
             if identity in seen:
                 continue
             seen.add(identity)
-        records.append(redact_secrets(parsed))
-    return records[-tail:] if tail is not None and tail > 0 else records
+        sanitized = redact_secrets(parsed)
+        records.append(sanitized if isinstance(sanitized, dict) else
+                       {"status": "malformed", "error": "request-log entry exceeds redaction limits"})
+    if tail is not None and tail > 0:
+        selected = records[-tail:]
+        if bounded_gap and not any(row.get("status") == "log_gap" for row in selected):
+            selected.insert(0, records[0])
+        return selected
+    return records
 
 
 def _parse_since_seconds(value: str | None) -> float | None:
@@ -335,11 +358,12 @@ def _nonnegative_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def request_log_summary(*, since: str | None = "24h", now: float | None = None) -> dict[str, Any]:
+def request_log_summary(*, since: str | None = "24h", now: float | None = None,
+                        records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     window_seconds = _parse_since_seconds(since)
     now_value = time.time() if now is None else float(now)
     cutoff = None if window_seconds is None else now_value - window_seconds
-    records = list(iter_request_records())
+    records = list(iter_request_records()) if records is None else records
     groups: dict[str, dict[str, Any]] = {}
     malformed_records = 0
     omitted_records = 0
