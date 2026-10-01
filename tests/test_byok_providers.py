@@ -513,7 +513,7 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertNotIn("apiKeyOptional", deepseek)
 
         custom = normalized["providers"]["custom-one"]
-        self.assertNotIn("kind", custom)
+        self.assertIsNone(custom["kind"])
         self.assertNotIn("displayName", custom)
         self.assertEqual(custom["baseUrl"], "http://localhost:9999/v1")
         self.assertEqual(
@@ -529,7 +529,7 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertNotIn("timeout", custom)
 
         custom_two = normalized["providers"]["custom-two"]
-        self.assertNotIn("kind", custom_two)
+        self.assertEqual(custom_two["kind"], "unknown")
         self.assertNotIn("displayName", custom_two)
         self.assertEqual(custom_two["models"], [{"id": "ok"}])
         self.assertNotIn("apiKeyEnv", custom_two)
@@ -571,7 +571,7 @@ class TestBYOKProviders(unittest.TestCase):
             providers = all_provider_configs(include_env_enabled=False)
             self.assertIsNone(providers["deepseek"]["baseUrl"])
             self.assertEqual(providers["deepseek"]["models"], ["deepseek-chat"])
-            self.assertEqual(providers["custom-one"]["kind"], "openai_chat")
+            self.assertIsNone(providers["custom-one"]["kind"])
 
     def test_single_string_legacy_models_are_not_split_into_characters(self):
         normalized = normalize_provider_entry({"models": "abc"})
