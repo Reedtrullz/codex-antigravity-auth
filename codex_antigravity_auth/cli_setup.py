@@ -157,7 +157,7 @@ def run_setup_v2(args) -> None:
     print("=" * 60)
 
 
-def run_local_oauth_flow(*, select_account: bool = False) -> dict:
+def run_local_oauth_flow(*, select_account: bool = False, no_browser: bool = False) -> dict:
     # Verify environment credentials or credentials file exists
     cid, csec = _cli.resolve_oauth_credentials()
     if not cid or not csec:
@@ -167,30 +167,42 @@ def run_local_oauth_flow(*, select_account: bool = False) -> dict:
         sys.exit(1)
 
     print("[*] Initiating Google Antigravity OAuth login...")
+    from .oauth import get_pkce_verifier
     auth_info = _cli.authorize_antigravity(select_account=select_account)
     url = auth_info["url"]
 
     try:
         server = _cli.OAuthServer(("localhost", 51121), _cli.OAuthCallbackHandler)
     except OSError as e:
+        get_pkce_verifier(auth_info["state_id"])
         raise SystemExit(
             "OAuth callback port 51121 is already in use. "
             "Stop the process using that port and run `codex-antigravity login` again."
         ) from e
     server.expected_state_id = auth_info["state_id"]
-    server.timeout = 600
     try:
-        print(f"[*] Opening browser authorization URL...")
-        print(f"[*] If the browser doesn't open automatically, navigate to:\n{url}\n")
-        webbrowser.open(url)
+        print(f"[*] Open this authorization URL in your browser:\n{url}\n")
+        if no_browser:
+            print("[*] Browser launch skipped (--no-browser). Waiting for the loopback callback.")
+        else:
+            try:
+                opened = webbrowser.open(url)
+            except Exception as exc:
+                opened = False
+                print(f"[!] Browser launch failed: {_cli.redact_secret_text(str(exc))}")
+            if not opened:
+                print("[!] No browser opened. Open the URL above manually, or use login --no-browser with an SSH loopback tunnel.")
 
-        # Wait for callback
-        deadline = time.time() + 600
-        while server.auth_code is None:
-            if time.time() > deadline:
-                print("[!] Timed out waiting for OAuth callback.")
-                sys.exit(1)
+        deadline = time.monotonic() + 600
+        while server.auth_code is None and server.auth_error is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SystemExit("Timed out waiting for OAuth callback; run login again to retry.")
+            server.timeout = min(1.0, remaining)
             server.handle_request()
+        if server.auth_error is not None:
+            reason = "consent was denied" if server.auth_error == "access_denied" else _cli.redact_secret_text(server.auth_error)
+            raise SystemExit(f"OAuth authorization failed: {reason}. Run login again to retry.")
 
         print("[*] Callback received. Exchanging code for tokens...")
         try:
@@ -203,15 +215,17 @@ def run_local_oauth_flow(*, select_account: bool = False) -> dict:
             sys.exit(1)
 
         # Retrieve verifier from oauth module verifier store
-        from .oauth import get_pkce_verifier
         verifier_info = get_pkce_verifier(auth_info["state_id"])
         if not verifier_info:
             print("[!] PKCE verifier state not found or expired!")
             sys.exit(1)
 
         tokens = _cli.exchange_antigravity(server.auth_code, verifier_info["verifier"])
+    except KeyboardInterrupt:
+        raise SystemExit("OAuth login cancelled.") from None
     finally:
         server.server_close()
+        get_pkce_verifier(auth_info["state_id"])
 
     # Discover the Cloud Code Assist project for this account.
     # The backend rejects requests without a valid project id (403 VALIDATION_REQUIRED).
@@ -298,7 +312,8 @@ def run_login(args) -> None:
     for attempt in range(count):
         if count > 1:
             print(f"[*] Login {attempt + 1}/{count}")
-        _cli.run_local_oauth_flow(select_account=select_account)
+        options = {"no_browser": True} if getattr(args, "no_browser", False) else {}
+        _cli.run_local_oauth_flow(select_account=select_account, **options)
     _cli.print_account_rotation_summary()
 
 
@@ -325,7 +340,7 @@ def run_setup_google(args) -> None:
             "Set ANTIGRAVITY_CLIENT_ID and ANTIGRAVITY_CLIENT_SECRET, "
             "or create ~/.codex/antigravity-credentials.json before running setup-google."
         )
-    _cli.run_login(argparse.Namespace(count=args.accounts, select_account=True))
+    _cli.run_login(argparse.Namespace(count=args.accounts, select_account=True, no_browser=getattr(args, "no_browser", False)))
 
     if not args.skip_codex_config:
         print("[*] Installing Codex provider block...")
@@ -749,7 +764,7 @@ def run_setup(args) -> dict:
         return report
 
     if google_route:
-        _cli.run_login(argparse.Namespace(count=args.accounts, select_account=True))
+        _cli.run_login(argparse.Namespace(count=args.accounts, select_account=True, no_browser=getattr(args, "no_browser", False)))
         _cli._setup_check(checks, "google_login", "pass", f"completed {args.accounts} OAuth login flow(s)")
     elif openai_route:
         _cli._setup_check(checks, "google_login", "skip", f"{model} routes to OpenAI; Google login not required")
