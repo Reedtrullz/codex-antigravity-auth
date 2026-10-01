@@ -79,6 +79,8 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 def open_http_request(request: urllib.request.Request | str, *, timeout: float = 10.0):
     if isinstance(request, str):
         request = urllib.request.Request(validate_endpoint_url(request, allow_query=True))
+    if request.fragment is not None:
+        raise ValueError("endpoint URL must not include fragments")
     url = validate_endpoint_url(request.full_url, allow_query=True)
     for key, value in list(request.headers.items()):
         if key.lower() in {"authorization", "cookie"}:

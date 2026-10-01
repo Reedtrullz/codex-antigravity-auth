@@ -81,6 +81,16 @@ def test_query_policy_and_ipv6_authority_are_explicit():
     assert shared.httpx_client_options("https://localhost/v1", timeout=1)["trust_env"] is True
 
 
+@pytest.mark.parametrize("suffix", ["#", "#fragment"])
+def test_preconstructed_requests_cannot_hide_fragment_delimiters(monkeypatch, suffix):
+    transport = MagicMock(side_effect=AssertionError("network must not run"))
+    monkeypatch.setattr(shared.urllib.request, "build_opener", transport)
+    request = urllib.request.Request("https://example.invalid/path" + suffix)
+    with pytest.raises(ValueError, match="fragment"):
+        open_http_request(request, timeout=1)
+    transport.assert_not_called()
+
+
 @pytest.mark.parametrize("url", ["https://example.invalid/v1?", "https://example.invalid/v1#"])
 def test_empty_base_delimiters_cannot_capture_an_appended_request_path(monkeypatch, url):
     anti = load_anti()
