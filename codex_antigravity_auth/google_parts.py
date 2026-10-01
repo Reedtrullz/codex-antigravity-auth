@@ -84,6 +84,13 @@ def normalize_google_part(part, validator) -> GooglePart:
     return GooglePart(visible, reasoning, function, has_function, tool_error, partial_id, partial_name, output_error)
 
 
+def merge_output_error(previous, current):
+    """Stable failure selection, independent of part/candidate/chunk order."""
+    priority = {None: 0, 'unsupported_output_part': 1, 'malformed_output_part': 2,
+                'unsupported_output_modality': 3}
+    return current if priority[current] > priority[previous] else previous
+
+
 def output_failure(terminal, code):
     message = ('Generated media output is not supported by the Google adapter.'
                if code == 'unsupported_output_modality' else 'The Google adapter cannot represent an output part.')

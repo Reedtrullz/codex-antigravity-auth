@@ -16,7 +16,9 @@ empty or malformed. The adapter does not decode, fetch, copy into output or save
 media payloads, MIME values or file URIs. Other unrepresented active fields,
 including executable code and function responses, produce
 `unsupported_output_part`; malformed supported fields produce
-`malformed_output_part`. Error messages are fixed and contain no provider values.
+`malformed_output_part`, including a supplied non-list `parts` container. Media
+errors take precedence over malformed parts, then other unsupported parts,
+independent of part/candidate/chunk ordering. Error messages are fixed and contain no provider values.
 
 Usable sibling text, reasoning, valid calls and aggregate usage are retained. A
 nominally completed response becomes failed. A provider's incomplete result keeps

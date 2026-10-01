@@ -26,7 +26,7 @@ from .response_protocol import (
     refusal_item,
 )
 from .tool_calls import FunctionCallValidator, tool_terminal
-from .google_parts import GooglePart, normalize_google_part, output_failure
+from .google_parts import GooglePart, normalize_google_part, output_failure, merge_output_error
 from .transform import (
     safe_project_id,
     transform_gemini_candidate,
@@ -205,13 +205,15 @@ class GoogleResponseAccumulator:
                 continue
             parts = content.get("parts", [])
             if not isinstance(parts, list):
+                self.output_error = merge_output_error(self.output_error, 'malformed_output_part')
+                normalized_parts.append(GooglePart(output_error='malformed_output_part'))
                 continue
             for part in parts:
                 normalized = normalize_google_part(part, self.tool_validator)
                 normalized_parts.append(normalized)
                 self._text += normalized.text
                 self._reasoning += normalized.reasoning
-                self.output_error = self.output_error or normalized.output_error
+                self.output_error = merge_output_error(self.output_error, normalized.output_error)
                 self.tool_error = self.tool_error or normalized.tool_error
                 if normalized.partial_id: self._bad_call_ids.add(normalized.partial_id)
                 if normalized.partial_name: self._partial_names.add(normalized.partial_name)
@@ -562,7 +564,7 @@ class GoogleTransport:
                 finish_reason = candidate_reason
             transformed = transform_gemini_candidate(candidate, tool_validator=tool_validator)
             tool_error = tool_error or transformed.get("tool_error")
-            output_error = output_error or transformed.get("output_error")
+            output_error = merge_output_error(output_error, transformed.get("output_error"))
             partial_ids.update(transformed.get("partial_call_ids", ()))
             partial_names.update(transformed.get("partial_call_names", ()))
             reasoning = transformed.get("reasoning")

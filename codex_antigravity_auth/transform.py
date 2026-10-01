@@ -541,7 +541,8 @@ def transform_gemini_candidate(candidate: dict, *, tool_validator=None) -> dict:
     if not isinstance(content, dict):
         content = {}
     parts = content.get("parts", [])
-    if not isinstance(parts, list):
+    malformed_parts = not isinstance(parts, list)
+    if malformed_parts:
         parts = []
     role = content.get("role", "assistant")
     if not isinstance(role, str):
@@ -550,9 +551,10 @@ def transform_gemini_candidate(candidate: dict, *, tool_validator=None) -> dict:
         role = "assistant"
     
     from .tool_calls import FunctionCallValidator
-    from .google_parts import normalize_google_part
+    from .google_parts import normalize_google_part, merge_output_error
     tool_validator = tool_validator or FunctionCallValidator()
-    tool_error = output_error = None
+    tool_error = None
+    output_error = 'malformed_output_part' if malformed_parts else None
     partial_ids, partial_names = set(), set()
     output_parts = []
     function_calls = []
@@ -565,7 +567,7 @@ def transform_gemini_candidate(candidate: dict, *, tool_validator=None) -> dict:
         reasoning_text += normalized.reasoning
         if normalized.function is not None: function_calls.append(normalized.function)
         tool_error = tool_error or normalized.tool_error
-        output_error = output_error or normalized.output_error
+        output_error = merge_output_error(output_error, normalized.output_error)
         if normalized.partial_id: partial_ids.add(normalized.partial_id)
         if normalized.partial_name: partial_names.add(normalized.partial_name)
 
