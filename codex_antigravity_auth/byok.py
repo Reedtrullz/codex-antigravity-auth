@@ -1,3 +1,4 @@
+from .console import console_print as print
 import os
 import re
 import math

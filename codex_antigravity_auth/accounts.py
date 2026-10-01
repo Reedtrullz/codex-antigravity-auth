@@ -1,3 +1,4 @@
+from .console import console_print as print
 import logging
 import copy
 import math
