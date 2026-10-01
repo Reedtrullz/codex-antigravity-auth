@@ -5,7 +5,9 @@ import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -182,6 +184,8 @@ def test_symlinked_archive_is_not_read_or_modified(log_path, tmp_path):
 
 def test_clean_and_empty_reads_touch_only_retained_files(log_path):
     assert list(logs.iter_request_records()) == []
+    assert logs.request_log_info()["retained_segments"] == []
+    assert logs.clean_request_logs() == []
     assert list(log_path.parent.iterdir()) == []
     for suffix in ("", ".1", ".2"):
         lines(log_path.with_name(log_path.name + suffix), [row(suffix)])
@@ -189,3 +193,63 @@ def test_clean_and_empty_reads_touch_only_retained_files(log_path):
     unrelated.write_text("keep")
     assert len(logs.clean_request_logs()) == 3
     assert unrelated.read_text() == "keep"
+
+
+@pytest.mark.parametrize("operation", ["read", "clean", "info"])
+def test_snapshots_wait_for_zero_backup_rotation(monkeypatch, log_path, operation):
+    logs.write_request_record(row("old", error="x" * 700), max_bytes=1024, backup_count=0)
+    removed, resume, lock_attempted = Event(), Event(), Event()
+    original_unlink, original_lock = Path.unlink, logs.file_lock
+
+    def paused_unlink(path, *args, **kwargs):
+        result = original_unlink(path, *args, **kwargs)
+        if path == log_path and not removed.is_set():
+            removed.set()
+            assert resume.wait(5)
+        return result
+
+    @contextmanager
+    def observed_lock(path):
+        if removed.is_set():
+            lock_attempted.set()
+        with original_lock(path):
+            yield
+
+    monkeypatch.setattr(Path, "unlink", paused_unlink)
+    monkeypatch.setattr(logs, "file_lock", observed_lock)
+    snapshot = {"read": lambda: list(logs.iter_request_records()), "clean": logs.clean_request_logs, "info": logs.request_log_info}[operation]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writer = pool.submit(logs.write_request_record, row("new", error="x" * 700), max_bytes=1024, backup_count=0)
+        try:
+            assert removed.wait(2)
+            reader = pool.submit(snapshot)
+            assert lock_attempted.wait(2), "snapshot bypassed the writer's lock"
+            assert not reader.done()
+        finally:
+            resume.set()
+        writer.result(timeout=5)
+        result = reader.result(timeout=5)
+    if operation == "read":
+        assert [record["request_id"] for record in result] == ["new"]
+    elif operation == "clean":
+        assert result == [str(log_path)]
+        assert not log_path.exists()
+    else:
+        assert result["exists"] is True
+        assert result["retained_segments"] == [{"path": str(log_path), "size_bytes": log_path.stat().st_size}]
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_known_history_gaps_without_timestamps_mark_window_incomplete(monkeypatch, log_path, unreadable):
+    log_path.write_bytes(b"{not-json\n")
+    if unreadable:
+        @contextmanager
+        def failed_lock(*args, **kwargs):
+            raise OSError("synthetic unreadable history")
+            yield
+        monkeypatch.setattr(logs, "_log_lock", failed_lock)
+    report = logs.request_log_summary(since="24h")
+    assert report["malformed_records"] == 1
+    assert report["earliest_retained_timestamp"] is None
+    assert report["requested_window_incomplete"] is True
+    assert report["groups"] == {}

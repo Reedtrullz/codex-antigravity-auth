@@ -86,26 +86,35 @@ def _retained_paths(path: Path) -> list[Path]:
 
 
 @contextmanager
-def _log_lock(path: Path):
+def _log_lock(path: Path, *, existing_only: bool = False):
     lock_path = path.with_name(f".{path.name}.lock")
+    # Writers create this persistent lock before any rotation. Check it LAST:
+    # an absent segment alone may be the middle of a zero-backup rotation.
+    # A completely unused namespace still needs no files for diagnostics.
+    if existing_only and not _retained_paths(path) and not lock_path.exists() and not lock_path.is_symlink():
+        yield False
+        return
     if lock_path.is_symlink() or (lock_path.exists() and not lock_path.is_file()):
         raise OSError("unsafe request-log lock path")
     with file_lock(path):
-        yield
+        yield True
 
 
 def request_log_info() -> dict[str, Any]:
     path = request_log_path()
     maximum, backups, warnings = _retention_settings()
     segments = []
-    for segment in _retained_paths(path):
-        try:
-            segments.append({"path": str(segment), "size_bytes": segment.stat().st_size})
-        except OSError:
-            pass
+    try:
+        with _log_lock(path, existing_only=True) as available:
+            if available:
+                for segment in _retained_paths(path):
+                    segments.append({"path": str(segment), "size_bytes": segment.stat().st_size})
+    except OSError:
+        segments = []
+        warnings.append("Request-log metadata could not be read consistently")
     return {
         "path": str(path),
-        "exists": not path.is_symlink() and path.is_file(),
+        "exists": any(item["path"] == str(path) for item in segments),
         "size_bytes": next((item["size_bytes"] for item in segments if item["path"] == str(path)), 0),
         "rotated_path": str(path.with_suffix(path.suffix + ".1")),
         "max_bytes": maximum,
@@ -227,11 +236,13 @@ def write_request_record(record: dict[str, Any], *, max_bytes: int | None = None
 
 def iter_request_records(*, tail: int | None = None) -> Iterable[dict[str, Any]]:
     path = request_log_path()
-    if tail == 0 or not _retained_paths(path):
+    if tail == 0:
         return []
     lines: list[bytes] = []
     try:
-        with _log_lock(path):
+        with _log_lock(path, existing_only=True) as available:
+            if not available:
+                return []
             for segment in _retained_paths(path):
                 flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
                 fd = os.open(segment, flags)
@@ -447,8 +458,9 @@ def request_log_summary(*, since: str | None = "24h", now: float | None = None) 
         "earliest_retained_timestamp": datetime.fromtimestamp(min(retained_times), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if retained_times else None,
         "latest_retained_timestamp": datetime.fromtimestamp(max(retained_times), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if retained_times else None,
         "requested_window_incomplete": (
-            bool(malformed_records or omitted_records or min(retained_times) > cutoff)
-            if cutoff is not None and retained_times else None
+            (True if malformed_records or omitted_records else
+             min(retained_times) > cutoff if retained_times else None)
+            if cutoff is not None else None
         ),
         "groups": rendered_groups,
     }
@@ -456,11 +468,11 @@ def request_log_summary(*, since: str | None = "24h", now: float | None = None) 
 
 def clean_request_logs() -> list[str]:
     path = request_log_path()
-    if not _retained_paths(path):
-        return []
     removed = []
     try:
-        with _log_lock(path):
+        with _log_lock(path, existing_only=True) as available:
+            if not available:
+                return []
             for segment in _retained_paths(path):
                 try:
                     segment.unlink()
