@@ -10,9 +10,9 @@ released feature. Source inspection below is as of 2026-10-01 at the prerequisit
 | Historical phase | Source disposition | Further portfolio work |
 | --- | --- | --- |
 | 1 enriched findings | Normalization, fingerprints and finding fields exist; do not infer verified truth from model confidence | [#93](https://github.com/Reedtrullz/codex-antigravity-auth/issues/93) validation/merging; [#67](https://github.com/Reedtrullz/codex-antigravity-auth/issues/67) explicit verdicts |
-| 2 role prompts | Role rubrics and role-bearing panel lanes exist | [#65](https://github.com/Reedtrullz/codex-antigravity-auth/issues/65) bounded review decomposition |
+| 2 role prompts | Role rubrics and role-bearing panel lanes exist | [#65](https://github.com/Reedtrullz/codex-antigravity-auth/issues/65) immutable chunk resume |
 | 3 anonymized judging | Anonymization and mapping records exist | Evidence-preserving reports in [#62](https://github.com/Reedtrullz/codex-antigravity-auth/issues/62) |
-| 4 auto routing | Heuristic selection exists; it is not measured quality or availability | [#74](https://github.com/Reedtrullz/codex-antigravity-auth/issues/74) evidence-aware routing |
+| 4 auto routing | Heuristic selection exists; it is not measured quality or availability | [#74](https://github.com/Reedtrullz/codex-antigravity-auth/issues/74) explicit local-only workflow policy |
 | 5 workflow presets | quick-check, consensus and security-review are parser-supported workflows | [#64](https://github.com/Reedtrullz/codex-antigravity-auth/issues/64) scheduling/deadlines |
 | 6 linked verification | Existing verification helpers do not certify arbitrary model findings | [#66](https://github.com/Reedtrullz/codex-antigravity-auth/issues/66) structured local evidence |
 | 7 budget cap | Existing cost estimates are estimates, not provider billing or a complete spend guarantee | [#68](https://github.com/Reedtrullz/codex-antigravity-auth/issues/68) budget accounting |
