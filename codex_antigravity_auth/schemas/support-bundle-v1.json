@@ -336,6 +336,7 @@
               "phase": {
                 "enum": [
                   "started",
+                  "attempt",
                   "terminal",
                   "unknown"
                 ]

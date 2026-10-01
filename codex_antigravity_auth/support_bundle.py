@@ -125,7 +125,7 @@ def _project_record(row, *, key, selected_index):
     return {"requestRef": reference, "selectedInputIndex": selected_index,
             "timestamp": timestamp(row.get("timestamp")),
             "route": _enum(row.get("route"), ROUTES),
-            "phase": _enum(row.get("phase"), {"started", "terminal"}),
+            "phase": _enum(row.get("lifecycle_phase"), {"started", "attempt", "terminal"}),
             "status": _enum(row.get("status"), OUTCOMES),
             "httpStatus": number(row.get("http_status")), "latencyMs": number(row.get("latency_ms")),
             "providerAccepted": row.get("provider_accepted") if type(row.get("provider_accepted")) is bool else None}

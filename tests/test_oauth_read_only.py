@@ -273,6 +273,6 @@ def test_readiness_warns_about_unsafe_credentials_even_without_codex_config(
     assert "Unsafe OAuth credential permissions" in output
     assert "0600" in output and "setup --write" in output
     if json_output:
-        warning = next(check for check in json.loads(output)["checks"] if check["name"] == "google_oauth_credentials_file")
+        warning = next(check for check in json.loads(output)["data"]["checks"] if check["name"] == "google_oauth_credentials_file")
         assert warning["status"] == "warn"
     assert tree_snapshot(isolated_home) == before

@@ -246,21 +246,41 @@ def iter_request_records(*, tail: int | None = None, max_bytes: int | None = Non
         with _log_lock(path, existing_only=True) as available:
             if not available:
                 return []
-            for segment in _retained_paths(path):
+            bounded = max_bytes is not None or max_records is not None
+            segments = _retained_paths(path)
+            # Spend diagnostic budgets on the newest evidence. Prepend each
+            # older segment so terminal selection still sees chronological rows.
+            for segment in reversed(segments) if bounded else segments:
+                if (remaining is not None and remaining <= 0) or (max_records is not None and len(lines) >= max_records):
+                    bounded_gap = True
+                    break
                 flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
                 fd = os.open(segment, flags)
                 with os.fdopen(fd, "rb") as handle:
-                    if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    info = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(info.st_mode):
                         raise OSError("request-log segment is not regular")
-                    raw = handle.read() if remaining is None else handle.read(remaining + 1)
-                    if remaining is not None:
-                        if len(raw) > remaining:
+                    if remaining is None:
+                        raw = handle.read()
+                    else:
+                        start = max(0, info.st_size - remaining)
+                        if start:
                             bounded_gap = True
-                            break
+                            handle.seek(start - 1)
+                            boundary = handle.read(1)
+                        else:
+                            boundary = b"\n"
+                        raw = handle.read(remaining)
                         remaining -= len(raw)
-                    lines.extend(raw.splitlines())
+                        if boundary not in {b"\n", b"\r"}:
+                            # Discard only the partial leading record, never
+                            # attempt to parse a clipped JSON or UTF-8 fragment.
+                            end = raw.find(b"\n")
+                            raw = raw[end + 1:] if end >= 0 else b""
+                    segment_lines = raw.splitlines()
+                    lines = segment_lines + lines if bounded else lines + segment_lines
                     if max_records is not None and len(lines) > max_records:
-                        lines = lines[:max_records]
+                        lines = lines[-max_records:]
                         bounded_gap = True
                         break
     except Exception:

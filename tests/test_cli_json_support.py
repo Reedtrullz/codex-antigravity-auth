@@ -155,7 +155,7 @@ api_key = "{SECRET}"
     for filename in ("antigravity-accounts.json", "antigravity-providers.json"):
         (root / filename).write_text(SECRET + EMAIL)
     now = datetime.now(timezone.utc).isoformat()
-    row = {"request_id": EMAIL, "timestamp": now, "phase": "terminal", "status": "completed", "route": "openai",
+    row = {"request_id": EMAIL, "timestamp": now, "lifecycle_phase": "terminal", "status": "completed", "route": "openai",
            "model": SECRET, "provider": EMAIL, "family": EMAIL, "error": SECRET, "account_email": EMAIL,
            "prompt": SECRET, "raw": EMAIL, "http_status": 200, "latency_ms": 4}
     (root / observability.REQUEST_LOG_FILE).write_text(json.dumps(row) + "\n{bad-json}\n")
@@ -258,9 +258,72 @@ def test_support_numbers_and_unknown_labels_do_not_escape_allowlist(monkeypatch,
     populate(state)
     path = state / "state" / observability.REQUEST_LOG_FILE
     row = json.loads(path.read_text().splitlines()[0])
-    row.update(route=[EMAIL], phase={"private": EMAIL}, status=SECRET, http_status=10**400)
+    row.update(route=[EMAIL], lifecycle_phase={"private": EMAIL}, status=SECRET, http_status=10**400)
     path.write_text(json.dumps(row) + "\n")
     result, captured = invoke(monkeypatch, capsys, ["support-bundle", "--request-id", EMAIL])
     assert EMAIL not in captured.out and SECRET not in captured.out
     # Malformed source data may prevent collection, but never produce non-JSON output.
     assert result["status"] in {"degraded", "failed"}
+
+
+@pytest.mark.parametrize("service_state,status,exit_code", [
+    ("failed", "failed", 1), ("not_installed", "degraded", 0), ("installed_inactive", "degraded", 0),
+    ("ready", "ready", 0),
+])
+def test_reachable_gateway_cannot_mask_failed_service(monkeypatch, capsys, state, service_state, status, exit_code):
+    monkeypatch.setattr(cli, "run_service_command", lambda args: {
+        "service": {"state": service_state}, "gateway": {"reachable": True}})
+    result, _ = invoke(monkeypatch, capsys, ["service", "status", "--json"])
+    assert result["status"] == status and result["exitCode"] == exit_code
+    if service_state == "failed":
+        assert result["errors"] == ["service_failed"]
+
+
+@pytest.mark.parametrize("phase", ["started", "attempt", "terminal"])
+def test_bundle_preserves_gateway_lifecycle_phase(monkeypatch, capsys, state, phase):
+    root = state / "state"; root.mkdir()
+    observability.write_request_record({"request_id": "fixture-request", "lifecycle_phase": phase,
+                                       "status": "completed", "route": "openai"})
+    result, _ = invoke(monkeypatch, capsys, ["support-bundle", "--request-id", "fixture-request"])
+    assert result["data"]["bundle"]["history"]["records"][0]["phase"] == phase
+
+
+def test_oversized_archive_does_not_hide_selected_recent_request(monkeypatch, capsys, state):
+    root = state / "state"; root.mkdir()
+    path = root / observability.REQUEST_LOG_FILE
+    path.with_name(path.name + ".1").write_bytes(b"x" * (support_bundle.MAX_HISTORY_BYTES + 100))
+    observability.write_request_record({"request_id": "recent-fixture", "lifecycle_phase": "terminal",
+                                       "status": "completed", "route": "openai"})
+    result, _ = invoke(monkeypatch, capsys, ["support-bundle", "--request-id", "recent-fixture"])
+    history = result["data"]["bundle"]["history"]
+    assert history["matchedRequestCount"] == 1 and history["requestedWindowIncomplete"] is True
+    assert history["records"][0]["phase"] == "terminal"
+    shown, _ = invoke(monkeypatch, capsys, ["logs", "show", "--json"])
+    assert any(row.get("request_id") == "recent-fixture" for row in shown["data"]["records"])
+    summary, _ = invoke(monkeypatch, capsys, ["logs", "summary", "--json"])
+    assert summary["data"]["included_records"] == 1
+    assert summary["data"]["requested_window_incomplete"] is True
+
+
+def test_tail_budget_preserves_chronological_terminal_selection(monkeypatch, state):
+    root = state / "state"; root.mkdir()
+    path = root / observability.REQUEST_LOG_FILE
+    rows = [{"request_id": "same", "lifecycle_phase": "terminal", "status": status,
+             "timestamp": datetime.now(timezone.utc).isoformat()} for status in ["failed", "incomplete", "completed"]]
+    path.with_name(path.name + ".1").write_text(json.dumps(rows[0]) + "\n")
+    path.write_text("\n".join(json.dumps(row) for row in rows[1:]) + "\n")
+    limited = list(observability.iter_request_records(max_bytes=10000, max_records=2))
+    assert [row["status"] for row in limited] == ["log_gap", "incomplete", "completed"]
+    summary = observability.request_log_summary(since="all", records=limited)
+    assert next(iter(summary["groups"].values()))["success_count"] == 1
+
+
+def test_byte_tail_discards_clipped_leading_utf8_record(monkeypatch, state):
+    root = state / "state"; root.mkdir()
+    path = root / observability.REQUEST_LOG_FILE
+    first = json.dumps({"request_id": "old", "text": "é" * 500}, ensure_ascii=False).encode() + b"\n"
+    last = json.dumps({"request_id": "last", "status": "completed"}).encode() + b"\n"
+    path.write_bytes(first + last)
+    rows = list(observability.iter_request_records(max_bytes=len(last) + 3, max_records=10))
+    assert [row.get("request_id") for row in rows] == [None, "last"]
+    assert rows[0]["status"] == "log_gap"
