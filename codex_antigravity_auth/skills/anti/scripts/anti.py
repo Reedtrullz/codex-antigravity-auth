@@ -2373,7 +2373,7 @@ def changed_paths(
         raise AntiError(f"unsupported review scope: {scope}")
     raw = run_git_bytes(
         root,
-        [*diff_args, "--name-status", "--diff-filter=ACMRTD", "-z"],
+        [*diff_args, "--no-ext-diff", "--no-textconv", "--name-status", "--diff-filter=ACMRTD", "-z"],
     )
     fields = raw.split(b"\0")
     names: list[str] = []
@@ -2399,13 +2399,13 @@ def diff_for_paths(root: Path, scope: str, paths: list[str], *, rev_range: str |
     if not paths or scope == "files":
         return ""
     if scope == "staged":
-        return run_git(root, ["-c", "core.quotePath=false", "diff", "--cached", "--no-ext-diff", "--", *paths], check=False)
+        return run_git(root, ["-c", "core.quotePath=false", "diff", "--cached", "--no-ext-diff", "--no-textconv", "--", *paths])
     if scope == "diff":
         if not rev_range:
             raise AntiError("--scope diff requires --base or --changed-files")
         rev_range = validate_git_rev_range(rev_range, source="revision range")
-        return run_git(root, ["-c", "core.quotePath=false", "diff", "--no-ext-diff", rev_range, "--", *paths], check=False)
-    return run_git(root, ["-c", "core.quotePath=false", "diff", "HEAD", "--no-ext-diff", "--", *paths], check=False)
+        return run_git(root, ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", rev_range, "--", *paths])
+    return run_git(root, ["-c", "core.quotePath=false", "diff", "HEAD", "--no-ext-diff", "--no-textconv", "--", *paths])
 
 
 def file_is_tracked(root: Path, rel_path: str) -> bool:
@@ -2420,6 +2420,8 @@ def file_is_tracked(root: Path, rel_path: str) -> bool:
         )
     except subprocess.TimeoutExpired:
         raise AntiError(f"git ls-files timed out after 60s")
+    if proc.returncode not in (0, 1):
+        raise AntiError(proc.stderr.strip() or "git ls-files failed")
     return proc.returncode == 0
 
 
