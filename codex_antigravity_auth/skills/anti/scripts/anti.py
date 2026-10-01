@@ -2427,8 +2427,9 @@ def changed_paths(
     selected: list[str],
     *,
     rev_range: str | None = None,
+    enumerate_selected: bool = False,
 ) -> tuple[list[str], list[str]]:
-    if selected:
+    if selected and not enumerate_selected:
         return filter_paths(selected, root=root)
     diff_args: list[str]
     if scope == "staged":
@@ -2446,7 +2447,8 @@ def changed_paths(
         raise AntiError(f"unsupported review scope: {scope}")
     raw = run_git_bytes(
         root,
-        [*diff_args, "--no-ext-diff", "--no-textconv", "--name-status", "--diff-filter=ACMRTD", "-z"],
+        [*diff_args, "--no-ext-diff", "--no-textconv", "--name-status", "--diff-filter=ACMRTD", "-z",
+         *(["--", *(":(literal)" + path for path in selected)] if selected else [])],
     )
     fields = raw.split(b"\0")
     names: list[str] = []
@@ -2483,7 +2485,7 @@ def diff_for_paths(root: Path, scope: str, paths: list[str], *, rev_range: str |
     else:
         options.append("HEAD")
     try:
-        return run_git_bytes(root, [*options, "--", *paths]).decode("utf-8")
+        return run_git_bytes(root, [*options, "--", *(":(literal)" + path for path in paths)]).decode("utf-8")
     except UnicodeError:
         raise AntiError("Git patch contains non-UTF-8 text; refusing replacement-based source evidence") from None
 
@@ -3102,6 +3104,11 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
         raise AntiError(str(exc)) from None
     policy_paths(args, root, [*paths, *excluded])
     diff_paths = [path for path in paths if path not in untracked_paths]
+    if selected and diff_paths and args.scope in {"working-tree", "staged", "diff"}:
+        # The current index cannot identify deleted or rename-old paths. Query
+        # the selected diff's names once instead of treating those paths as files.
+        changed, _ = changed_paths(root, args.scope, diff_paths, rev_range=rev_range, enumerate_selected=True)
+        known_tracked.update(changed)
     diff = diff_for_paths(root, args.scope, diff_paths, rev_range=rev_range)
     captured_diff = diff_snapshot.capture(diff, diff_paths) if diff else None
     notes: list[str] = []

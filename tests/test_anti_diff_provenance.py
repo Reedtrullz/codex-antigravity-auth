@@ -151,6 +151,58 @@ def test_added_deleted_files_and_empty_line_locations(repo):
     assert empty['excerptSha256'] == hashlib.sha256(b'').hexdigest()
 
 
+@pytest.mark.parametrize('scope', ['staged', 'working-tree', 'diff'])
+@pytest.mark.parametrize('change', ['delete', 'rename'])
+def test_explicit_old_path_selection_uses_diff_coverage_without_disk_reads(repo, monkeypatch, scope, change):
+    anti, root, git = repo
+    if change == 'delete':
+        (root / 'source.py').unlink()
+    else:
+        git('mv', 'source.py', 'renamed.py')
+        (root / 'renamed.py').write_text((root / 'renamed.py').read_text().replace('base line 2', 'renamed line 2'))
+    git('add', '-u')
+    if scope == 'diff': git('commit', '-qm', 'changed fixture')
+    original = Path.read_bytes
+    def read(path):
+        assert path != root / 'source.py', 'deleted diff source must not be read from disk'
+        return original(path)
+    monkeypatch.setattr(Path, 'read_bytes', read)
+    value, metadata = collect(anti, '--scope', scope, '--file', 'source.py', '--required-file', 'source.py',
+                              *(['--changed-files', 'HEAD~1..HEAD'] if scope == 'diff' else []))
+    assert not value['file_texts']
+    assert metadata['status'] == 'complete' and not metadata['omitted_files']
+    record = next(row for row in metadata['coverage'] if row['path'] == 'source.py')
+    assert record['sourceKind'] == 'diff' and record['contentStatus'] == 'complete'
+    finding = enrich(anti, metadata, 'source.py', 2, 'old')
+    assert finding['line'] == 2 and finding['sourceExcerpt'] == 'base line 2'
+    assert finding['locationStatus'] == 'mapped' and finding['verificationStatus'] == 'unverified'
+    chunks, chunk_metadata = anti.build_review_chunk_prompts(value, max_prompt_chars=8000, max_chunks=0,
+                                                            required_paths=['source.py'])
+    assert chunks and chunk_metadata['status'] == 'complete'
+
+
+def test_missing_explicit_file_without_a_diff_remains_omitted(repo):
+    anti, _, _ = repo
+    value, metadata = collect(anti, '--scope', 'staged', '--file', 'missing.py')
+    assert value['diff'] == '' and metadata['status'] == 'incomplete'
+    assert metadata['coverage'][0]['sourceKind'] == 'file'
+    assert enrich(anti, metadata, 'missing.py', 1, 'old')['line'] is None
+
+
+def test_selected_diff_paths_do_not_expand_git_wildcards(repo):
+    anti, root, git = repo
+    for name in ('source[1].py', 'source1.py'):
+        (root / name).write_text('before\n')
+    git('add', '.'); git('commit', '-qm', 'literal path fixtures')
+    (root / 'source[1].py').write_text('selected change\n')
+    (root / 'source1.py').write_text('unselected change\n')
+    git('add', '-u')
+    value, metadata = collect(anti, '--scope', 'staged', '--file', 'source[1].py')
+    assert value['paths'] == ['source[1].py']
+    assert 'selected change' in value['diff'] and 'unselected change' not in value['diff']
+    assert enrich(anti, metadata, 'source[1].py', 1)['sourceExcerpt'] == 'selected change'
+
+
 def test_no_final_newline_and_unicode_line_separator_are_preserved(repo):
     anti, root, _ = repo
     (root / 'source.py').write_text('captured\u2028separator')

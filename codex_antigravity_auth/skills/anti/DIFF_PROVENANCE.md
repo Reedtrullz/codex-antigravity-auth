@@ -4,6 +4,9 @@ Anti captures ordinary unified Git patches once for staged, working-tree and
 revision-diff reviews. It requests full blob IDs and fixed, uncolored prefixes;
 external diff helpers and text conversion remain disabled. Non-UTF-8 patch text
 fails before generation instead of introducing replacement-based evidence.
+Explicit selections are matched literally and classified against the selected
+diff, so deleted and rename-old paths remain diff-backed even after leaving the
+current index. They are not reread as missing working-tree files.
 
 The coordinate index records old/new paths and blob IDs, rename mappings, hunk
 ranges, and the exact changed/context lines in the captured patch. Subsequent
