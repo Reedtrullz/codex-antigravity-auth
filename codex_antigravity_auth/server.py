@@ -818,7 +818,7 @@ async def list_models():
 @app.get("/health/runtime")
 async def health_runtime(request: Request):
     client_host = request.client.host if request.client else None
-    if not request_uses_loopback_host(request, client_host):
+    if not is_loopback_host(client_host) or not request_uses_loopback_host(request, client_host):
         raise HTTPException(status_code=403, detail="Runtime checks are loopback-only.")
     from .service_manifest import runtime_identity
     return {"ok": True, "service": runtime_identity()}

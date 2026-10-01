@@ -11,12 +11,16 @@ contents or successful secret resolution.
 `service status` and `status` compare that intent with the current executable,
 package version, namespace selection and secret-runtime references, and with the
 installed service definition. The macOS/Linux comparison is deliberately exact:
-even a manual comment or formatting edit reports drift. Windows queries the task's
+even a manual comment or formatting edit reports drift. Repair may restore only
+canonical loopback-host and picker flag edits within the generated macOS/Linux
+definition. Changed executables, wrappers, labels, extra commands/settings and
+other manual definition edits require inspection and reinstall; familiar module
+or marker tokens alone do not authorize replacement. Windows queries the task's
 single executable action as XML and compares its command/arguments; it does not
 claim equivalence of unrelated task triggers or scheduler policies.
 
-A reachable model catalog alone cannot make a service ready. The loopback-only
-`/health/runtime` endpoint reports a process ID and an opaque installation marker,
+A reachable model catalog alone cannot make a service ready. The endpoint requires both a loopback client peer and loopback Host, even with a
+valid remote bearer token. The loopback-only `/health/runtime` endpoint reports a process ID and an opaque installation marker,
 launch-settings hash and startup package version, without loading account or
 provider stores. The marker/hash must match the recorded intent, the service
 manager must report active, the gateway must be reachable, and no configuration
@@ -84,6 +88,12 @@ remain protected even though generated intent contains no credentials.
 
 The Windows inspection uses the documented
 [`schtasks /Query /TN ... /XML` contract](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-query).
+XML query failures never imply absence. Both XML and ordinary task queries must
+report HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), using `/HRESULT`, to confirm a
+missing task. Other errors and conflicting observations refuse mutation. Creation
+after confirmed absence omits `/F`, preventing replacement of a task that appears
+between inspection and registration; `/F` is reserved for a verified existing
+owned action. See Microsoft's [file-not-found code](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-).
 Task action quoting uses Python's Windows command-line renderer. Local validation
 uses temporary files, simulated launchd/systemd/schtasks managers and a synthetic
 loopback runtime server, including failure injection and identity mismatches.

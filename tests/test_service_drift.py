@@ -58,7 +58,7 @@ def host(tmp_path, monkeypatch):
                     ET.SubElement(action, 'Arguments').text = subprocess.list2cmdline(args[1:])
                     self.windows_raw = ET.tostring(task, encoding='unicode')
                 elif '/Query' in command:
-                    if self.windows_raw is None: code = 1
+                    if self.windows_raw is None: code = 0x80070002 if '/HRESULT' in command else 1
                     elif '/XML' in command: text = self.windows_raw
                     else: text = 'Status: Running\n' if self.active else 'Status: Ready\n'
                 elif '/Run' in command: self.active = True
@@ -355,3 +355,146 @@ def test_generated_start_command_reports_the_recorded_runtime_identity(host, mon
     cli.main()
     assert captured == [{'serviceId': record['serviceId'], 'launchHash': manifest.runtime_digest(record['settings']),
                          'packageVersion': '2.4.2', 'pid': os.getpid()}]
+
+
+@pytest.mark.parametrize('platform', ['macos', 'linux'])
+@pytest.mark.parametrize('change', ['executable', 'wrapper', 'manager_identity', 'extra_command', 'unknown_argument'])
+def test_repair_refuses_foreign_definition_even_when_known_tokens_remain(host, tmp_path, monkeypatch, platform, change):
+    from codex_antigravity_auth.onepassword import shutil
+    monkeypatch.setattr(shutil, 'which', lambda _: '/fixture/op')
+    service.install_service(51122, '127.0.0.1', platform_name=platform, op_environment='fixture-environment')
+    target = drift.definition_path(51122, platform)
+    intent = drift.manifest_path(51122)
+    record = json.loads(intent.read_text())
+    command = manifest.command_for(record['settings'], record['serviceId'])
+    if change == 'executable': command[command.index('-m') - 1] = '/fixture/unrelated-python'
+    elif change == 'wrapper': command[0] = '/fixture/unrelated-wrapper'
+    elif change == 'unknown_argument': command.append('--unrecognized-fixture')
+    if platform == 'macos':
+        changed = service.render_macos_launch_agent(51122, '127.0.0.1', _command=command).encode()
+        if change in {'manager_identity', 'extra_command'}:
+            assert changed == target.read_bytes()  # Refusal must target the edit, not reformatting.
+        if change == 'manager_identity':
+            changed = changed.replace(service.service_label(51122).encode(), b'fixture.unrelated.service')
+        elif change == 'extra_command':
+            changed = changed.replace(b'<key>ProgramArguments</key>', b'<key>Program</key><string>/fixture/unrelated-command</string><key>ProgramArguments</key>')
+    else:
+        import shlex
+        raw = target.read_text()
+        old_line = next(line for line in raw.splitlines() if line.startswith('ExecStart='))
+        new_line = 'ExecStart=' + ' '.join(shlex.quote(part).replace('%', '%%') for part in command)
+        raw = raw.replace(old_line, new_line)
+        if change == 'manager_identity': raw = raw.replace('Type=simple', 'Type=simple\nUser=fixture-other')
+        elif change == 'extra_command': raw = raw.replace('[Service]', '[Service]\nExecStartPre=/fixture/unrelated-command')
+        changed = raw.encode()
+    target.write_bytes(changed)
+    before = intent.read_bytes()
+    calls = len(host.calls)
+    with pytest.raises(ValueError, match='ownership'):
+        service.repair_service(51122, platform_name=platform, write=True)
+    assert target.read_bytes() == changed and intent.read_bytes() == before
+    assert len(host.calls) == calls
+
+
+@pytest.mark.parametrize('platform', ['macos', 'linux'])
+def test_only_recognized_canonical_flag_drift_can_be_repaired(host, platform):
+    service.install_service(51122, '127.0.0.1', platform_name=platform)
+    path = drift.manifest_path(51122)
+    record = json.loads(path.read_text())
+    target = drift.definition_path(51122, platform)
+    target.write_bytes(drift.definition({**record['settings'], 'host':'::1', 'unified':True}, record['serviceId'], platform))
+    result = service.repair_service(51122, platform_name=platform, write=True)
+    assert not result['drift']
+    assert json.loads(path.read_text())['settings']['unified'] is False
+
+
+@pytest.mark.parametrize('code', [1, 124, 127, 0x80070005, -2147024891])
+@pytest.mark.parametrize('existing', [False, True])
+def test_failed_windows_xml_inspection_never_authorizes_create(host, monkeypatch, code, existing):
+    if existing:
+        service.install_service(51122, '127.0.0.1', platform_name='windows')
+    path = drift.manifest_path(51122)
+    before = path.read_bytes() if path.exists() else None
+    previous_definition = host.windows_raw
+    original = host.run
+    attempts = []
+    def run(command, **kwargs):
+        attempts.append(command)
+        if '/Query' in command and '/XML' in command:
+            return subprocess.CompletedProcess(command, code, '', 'fixture query failure')
+        return original(command, **kwargs)
+    monkeypatch.setattr(service, '_run', run)
+    with pytest.raises(ValueError, match='could not be inspected'):
+        service.install_service(51122, '127.0.0.1', platform_name='windows')
+    assert not any('/Create' in command or '/Run' in command or '/End' in command for command in attempts)
+    assert (path.read_bytes() if path.exists() else None) == before
+    assert host.windows_raw == previous_definition
+
+
+@pytest.mark.parametrize('confirmation', [0, 1, 124, 0x80070005])
+def test_windows_xml_missing_requires_an_independent_absence_confirmation(host, monkeypatch, confirmation):
+    service.install_service(51122, '127.0.0.1', platform_name='windows')
+    path = drift.manifest_path(51122)
+    before = path.read_bytes()
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0x80070002 if '/XML' in command else confirmation, '', '')
+    monkeypatch.setattr(service, '_run', run)
+    with pytest.raises(ValueError, match='could not be inspected'):
+        service.repair_service(51122, platform_name='windows', write=True)
+    assert len(calls) == 2 and all('/Query' in command and '/HRESULT' in command for command in calls)
+    assert path.read_bytes() == before
+
+
+def test_confirmed_missing_windows_task_is_created_without_force(host):
+    service.install_service(51122, '127.0.0.1', platform_name='windows')
+    creates = [command for command in host.calls if '/Create' in command]
+    assert len(creates) == 1 and '/F' not in creates[0]
+    service.repair_service(51122, platform_name='windows', write=True)
+    creates = [command for command in host.calls if '/Create' in command]
+    assert len(creates) == 2 and '/F' in creates[1]
+
+
+@pytest.mark.parametrize('peer,hostname,expected', [('127.0.0.1','localhost',200), ('::1','localhost',200),
+    ('192.0.2.1','localhost',403), ('2001:db8::1','localhost',403), ('127.0.0.1','example.invalid',403), (None,'localhost',403)])
+def test_runtime_endpoint_requires_loopback_peer_and_host_even_with_remote_token(monkeypatch, peer, hostname, expected):
+    from fastapi.testclient import TestClient
+    from codex_antigravity_auth import server
+    monkeypatch.setenv('ANTIGRAVITY_ALLOW_REMOTE', '1')
+    token = 'fixture-only-' + 'x' * 40
+    monkeypatch.setenv('ANTIGRAVITY_GATEWAY_TOKEN', token)
+    identity = {'serviceId':'a' * 32, 'pid':123}
+    monkeypatch.setattr(manifest, 'runtime_identity', lambda: identity)
+    response = TestClient(server.app, client=(peer, 51200) if peer is not None else None, base_url='http://' + hostname).get(
+        '/health/runtime', headers={'Authorization':'Bearer ' + token})
+    assert response.status_code == expected
+    if expected != 200:
+        assert 'serviceId' not in response.text and '123' not in response.text
+
+
+def test_windows_task_appearing_after_absence_is_never_force_replaced(host, monkeypatch):
+    original = host.run
+    foreign = '<Task><Actions><Exec><Command>fixture-other</Command></Exec></Actions></Task>'
+    attempts = []
+    def run(command, **kwargs):
+        attempts.append(command)
+        if '/Create' in command:
+            assert '/F' not in command
+            host.windows_raw = foreign
+            return subprocess.CompletedProcess(command, 1, '', 'fixture already exists')
+        return original(command, **kwargs)
+    monkeypatch.setattr(service, '_run', run)
+    result = service.install_service(51122, '127.0.0.1', platform_name='windows')
+    assert result['state'] == 'failed' and host.windows_raw == foreign
+    assert not any('/Run' in command or '/End' in command for command in attempts)
+
+
+def test_signed_hresult_absence_is_confirmed_without_localized_error_text(host, monkeypatch):
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, -2147024894, '', 'fixture localized text')
+    monkeypatch.setattr(service, '_run', run)
+    assert drift.installed_definition(51122, 'windows') is None
+    assert len(calls) == 2 and all('/HRESULT' in command for command in calls)

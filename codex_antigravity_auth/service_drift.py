@@ -5,8 +5,6 @@ from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
-import plistlib
-import shlex
 import subprocess
 import urllib.request
 import uuid
@@ -85,10 +83,21 @@ def installed_definition(port, platform):
     path = definition_path(port, platform)
     if path is not None:
         return manifest.read_file(path)
-    query = _service()._run(['schtasks', '/Query', '/TN', _service().service_task_name(port), '/XML'])
-    if query.returncode:
-        return None
-    return windows_action(str(query.stdout))
+    service = _service()
+    command = ['schtasks', '/Query', '/TN', service.service_task_name(port)]
+    query = service._run([*command, '/XML', '/HRESULT'])
+    if query.returncode == 0:
+        return windows_action(str(query.stdout))
+    # /HRESULT avoids interpreting localized stderr or treating timeouts,
+    # permission failures and a missing schtasks executable as missing tasks.
+    # Confirm FILE_NOT_FOUND independently; even then Create omits /F, so a
+    # task appearing after inspection cannot be overwritten by this path.
+    missing = 0x80070002  # HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)
+    if (query.returncode & 0xffffffff) == missing:
+        confirmation = service._run([*command, '/FO', 'LIST', '/HRESULT'])
+        if (confirmation.returncode & 0xffffffff) == missing:
+            return None
+    raise ValueError('Scheduled task definition could not be inspected; registration was preserved')
 
 
 def inspect(port, platform, *, installed):
@@ -184,34 +193,25 @@ def observe(info, gateway, *, identity=None):
 
 def _owned_definition(raw, record, platform):
     if raw is None:
-        return True  # Missing registration can be restored from valid intent.
-    if platform == 'macos':
-        try:
-            args = plistlib.loads(raw).get('ProgramArguments')
-        except Exception:
-            return False
-    elif platform == 'linux':
-        try:
-            lines = [line[len('ExecStart='):] for line in raw.decode().splitlines() if line.startswith('ExecStart=')]
-            args = shlex.split(lines[0].replace('%%', '%')) if len(lines) == 1 else None
-        except (UnicodeError, ValueError):
-            return False
-    else:
-        # Exact matching is intentionally conservative on Windows. A changed
-        # task action requires explicit manual inspection instead of /End.
-        return raw == definition(record['settings'], record['serviceId'], platform)
-    if not isinstance(args, list):
+        return True  # Confirmed missing registration can be restored.
+    expected = definition(record['settings'], record['serviceId'], platform)
+    if raw == expected:
+        return True
+    if platform not in {'macos', 'linux'}:
         return False
-    try:
-        start = args.index('-m')
-        return (args[start + 1:start + 3] == [manifest.MODULE, 'start']
-                and args[args.index('--port') + 1] == str(record['settings']['port'])
-                and args[args.index('--service-id') + 1] == record['serviceId'])
-    except (ValueError, IndexError):
-        return False
+    # Permit only canonical loopback-host/picker flag edits. Comparing the
+    # entire generated definition preserves executable, wrapper, Label, unit
+    # commands, namespace paths and unknown manager settings as one boundary.
+    # Searching for familiar argv tokens does not prove service ownership.
+    for host in ('127.0.0.1', 'localhost', '::1'):
+        for unified in (False, True):
+            value = {**record['settings'], 'host': host, 'unified': unified}
+            if raw == definition(value, record['serviceId'], platform):
+                return True
+    return False
 
 
-def _activate(port, platform, path, command):
+def _activate(port, platform, path, command, *, replace_existing=False):
     service = _service()
     if platform == 'macos':
         target = f'gui/{service._launchd_uid()}'
@@ -230,8 +230,8 @@ def _activate(port, platform, path, command):
             return [reload, enable], False
         restart = service._run(['systemctl', '--user', 'restart', path.name])
         return [reload, enable, restart], all(item.returncode == 0 for item in (reload, enable, restart))
-    create = service._run(['schtasks', '/Create', '/F', '/SC', 'ONLOGON', '/TN', service.service_task_name(port),
-                          '/TR', command])
+    create = service._run(['schtasks', '/Create', *(['/F'] if replace_existing else []),
+                          '/SC', 'ONLOGON', '/TN', service.service_task_name(port), '/TR', command])
     run = service._run(['schtasks', '/Run', '/TN', service.service_task_name(port)]) if create.returncode == 0 else None
     return [item for item in (create, run) if item is not None], bool(run is not None and run.returncode == 0)
 
@@ -267,7 +267,7 @@ def install(port, host, *, platform_name=None, op_env_file=None, op_environment=
             if target is not None:
                 SecureStore().atomic_write_bytes(target, raw)
                 observed['installed'] = True
-            evidence, success = _activate(port, platform, target, raw.decode())
+            evidence, success = _activate(port, platform, target, raw.decode(), replace_existing=before_definition is not None)
             observed = service._platform_status(port, platform_name=platform)
             success = success and observed.get('installed') and observed.get('active')
             if not success:
