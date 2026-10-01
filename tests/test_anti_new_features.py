@@ -175,7 +175,7 @@ class NormalizeAndFindingsTests(unittest.TestCase):
                     metadata={"failure_diagnostics": diagnostics, "scope_status": "partial"},
                     error="review synthesis output was truncated",
                 )
-            result = json.loads((Path(tmp) / "diagnostic-test" / "result.json").read_text())
+            result = json.loads(Path(anti.load_run_record(result_path)["resultPath"]).read_text())
             self.assertEqual(result["failureDiagnostics"], diagnostics)
             self.assertEqual(result_path, Path(tmp) / "diagnostic-test.json")
 

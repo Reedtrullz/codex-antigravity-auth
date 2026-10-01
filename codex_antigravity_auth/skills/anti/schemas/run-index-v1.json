@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "$id": "urn:anti:run-index:1",
+  "title": "Anti run index v1",
+  "required": [
+    "recordSchemaVersion",
+    "id",
+    "writerId",
+    "status",
+    "runStatus",
+    "save_output"
+  ],
+  "properties": {
+    "recordSchemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "writerId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "status": {
+      "enum": [
+        "running",
+        "success",
+        "partial",
+        "error",
+        "failed",
+        "interrupted"
+      ]
+    },
+    "runStatus": {
+      "enum": [
+        "running",
+        "success",
+        "partial",
+        "failed",
+        "interrupted"
+      ]
+    },
+    "scopeStatus": {
+      "enum": [
+        "complete",
+        "partial"
+      ]
+    },
+    "save_output": {
+      "enum": [
+        "never",
+        "summary",
+        "full"
+      ]
+    },
+    "resultPath": {
+      "type": "string"
+    },
+    "publication": {
+      "type": "object",
+      "required": [
+        "revision",
+        "result",
+        "lanes"
+      ],
+      "properties": {
+        "revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "result": {
+          "type": "object",
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "lanes": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "models": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "omittedFileCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "omittedChunkCount": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "save_output": {
+            "const": "never"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "publication"
+              ]
+            },
+            {
+              "required": [
+                "resultPath"
+              ]
+            }
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "publication",
+          "resultPath",
+          "scopeStatus"
+        ]
+      }
+    }
+  ]
+}

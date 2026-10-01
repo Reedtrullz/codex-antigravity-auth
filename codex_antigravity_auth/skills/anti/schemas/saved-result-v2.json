@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "$id": "urn:anti:saved-result:2",
+  "title": "Anti saved result v2",
+  "required": [
+    "schemaVersion",
+    "runId",
+    "writerId",
+    "revisionId",
+    "runStatus",
+    "scopeStatus",
+    "coverage",
+    "verification",
+    "lanes",
+    "resultPath",
+    "artifacts"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "writerId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "revisionId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "runStatus": {
+      "enum": [
+        "running",
+        "success",
+        "partial",
+        "failed",
+        "interrupted"
+      ]
+    },
+    "scopeStatus": {
+      "enum": [
+        "complete",
+        "partial"
+      ]
+    },
+    "coverage": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "chunksExpected": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chunksCompleted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chunksFailed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chunksOmitted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chunksNotSent": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "not_run",
+            "completed_no_evidence",
+            "tool_checks",
+            "unknown"
+          ]
+        },
+        "evidenceCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requiredChecks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence": {
+          "type": "array"
+        },
+        "performedBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "lanes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "resultPath": {
+      "type": "string"
+    },
+    "artifacts": {
+      "type": "object",
+      "required": [
+        "runRecordPath",
+        "resultPath",
+        "rawLanePaths"
+      ],
+      "properties": {
+        "runRecordPath": {
+          "type": "string"
+        },
+        "resultPath": {
+          "type": "string"
+        },
+        "rawLanePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array"
+    },
+    "disagreements": {
+      "type": "array"
+    },
+    "unverifiable": {
+      "type": "array"
+    },
+    "recommendedNextActions": {
+      "type": "array"
+    }
+  }
+}
