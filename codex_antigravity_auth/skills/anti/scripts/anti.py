@@ -5106,8 +5106,8 @@ def fallback_findings_contract(
             "recommended_next_actions": [],
             "caveats": caveats,
             "parse_warning": parse_warning,
-            "findings_total": 0,
-            "findings_dropped": 0,
+            "findings_total": None,
+            "findings_dropped": None,
         }
     )
 

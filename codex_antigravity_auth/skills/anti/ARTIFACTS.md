@@ -101,6 +101,6 @@ Parser normalization loss has separate `parserFindingTotal`,
 `parserFindingsDropped` and `parserLossStatus` fields in every export format.
 These count rows before normalization and rows removed by normalization or
 deduplication; they do not redefine `contentComplete`, which only describes
-retention of normalized findings. Legacy missing parser counters are `null` and
-`unknown`, never invented zeros. Markdown includes run timestamps, source-record
+retention of normalized findings. Legacy missing parser counters and unparseable/prose fallback counts are `null`
+and `unknown`, never invented zeros. Their parse caveats remain visible. Markdown includes run timestamps, source-record
 hashes and the same verdict/content-identity cohort summaries as JSON and SARIF.

@@ -285,3 +285,31 @@ def test_markdown_keeps_record_audit_and_mixed_cohort_occurrences(review):
     group = next(item for item in report["summary"]["recurringFindings"] if item["sourceHash"])
     assert group["identity"] in markdown and group["sourceHash"] in markdown
     assert "Synthetic cohort evidence" in markdown and "Original model evidence" in markdown
+
+
+@pytest.mark.parametrize("mode", ["full", "summary"])
+@pytest.mark.parametrize("text", ['{"findings": [garbage', "Synthetic prose without structured findings"])
+def test_failed_parse_exports_unknown_counts_and_retains_warning(review, mode, text):
+    anti, reflections, reports, _, repo = review
+    parsed, warning, _diagnostics = anti.parse_panel_findings(text)
+    assert parsed is None and warning
+    fallback = anti.fallback_findings_contract(text, [warning], parse_warning=warning)
+    assert fallback["findings_total"] is None and fallback["findings_dropped"] is None
+    capture(review, save_output=mode, findings=fallback["findings"],
+            context={"findings": fallback, "caveats": [warning]})
+    report = reports.build_report(reflections.list_records(repo), repo)
+    run = report["runs"][0]
+    assert run["parserFindingTotal"] is None and run["parserFindingsDropped"] is None
+    assert run["parserLossStatus"] == "unknown" and run["coverage"]["caveats"] == [warning]
+    assert reports.to_sarif(report)["runs"][0]["properties"]["parserLossStatus"] == "unknown"
+    assert "unknown total; unknown dropped; loss status: unknown" in reports.to_markdown(report)
+
+
+def test_successfully_parsed_empty_findings_have_known_zero_loss(review):
+    anti, reflections, reports, _, repo = review
+    parsed, warning, _diagnostics = anti.parse_panel_findings('{"findings": []}')
+    assert parsed is not None and warning is None
+    capture(review, findings=[], context={"findings": parsed})
+    run = reports.build_report(reflections.list_records(repo), repo)["runs"][0]
+    assert run["parserFindingTotal"] == run["parserFindingsDropped"] == 0
+    assert run["parserLossStatus"] == "none"
