@@ -3,6 +3,7 @@
   "files": [
     "ARTIFACTS.md",
     "DATA_POLICY.md",
+    "OWNERSHIP.md",
     "RUN_CONTROL.md",
     "SCOPES.md",
     "SKILL.md",
@@ -22,6 +23,7 @@
     "scripts/anti_lib/context.py",
     "scripts/anti_lib/data_policy.py",
     "scripts/anti_lib/endpoint_policy.py",
+    "scripts/anti_lib/errors.py",
     "scripts/anti_lib/finding_verdicts.py",
     "scripts/anti_lib/inventory.py",
     "scripts/anti_lib/ledger.py",
@@ -31,6 +33,7 @@
     "scripts/anti_lib/reports.py",
     "scripts/anti_lib/retention.py",
     "scripts/anti_lib/run_control.py",
+    "scripts/anti_lib/run_records.py",
     "scripts/anti_lib/runner.py",
     "scripts/anti_lib/secret_redaction.py",
     "scripts/anti_lib/spend_control.py",

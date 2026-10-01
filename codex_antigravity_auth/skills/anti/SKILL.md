@@ -376,3 +376,10 @@ attempts as well as primary lanes, and are released before retry sleeps. If time
 runs out, treat deferred calls and saved partial coverage as incomplete evidence.
 See [run-control semantics and limits](RUN_CONTROL.md); separate Anti processes
 have separate limits, and blocking OS work is not forcibly preempted.
+
+
+## Maintained implementation boundaries
+
+The executable entrypoint preserves compatibility helpers while captured-source
+rendering, coverage and record publication live in owned modules. See
+[ownership and retention boundaries](OWNERSHIP.md) before changing orchestration.
