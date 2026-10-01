@@ -395,14 +395,14 @@ class NormalizeAndFindingsTests(unittest.TestCase):
 
     def test_normalize_defaults_clamps_and_fingerprints(self):
         item = anti.normalize_finding_item(
-            {"claim": "  Unsafe input  ", "verify": "run tests", "confidence": 9, "severity": "bogus", "line": -1},
+            {"claim": "  Unsafe input  ", "verify": "run tests", "confidence": 9, "severity": "bogus", "line": None},
             2,
         )
         self.assertIsNotNone(item)
         self.assertEqual(item["claim"], "Unsafe input")
         self.assertEqual(item["severity"], "medium")
         self.assertEqual(item["confidence"], 1.0)
-        self.assertEqual(item["id"], "F002")
+        self.assertRegex(item["id"], r"^F-[0-9a-f]{16}$")
         self.assertIsNone(item["line"])
         self.assertRegex(item["fingerprint"], r"^sha256:[0-9a-f]{16}$")
         self.assertIsNone(anti.normalize_finding_item({"claim": "missing verify"}, 1))
@@ -423,7 +423,8 @@ class NormalizeAndFindingsTests(unittest.TestCase):
         self.assertEqual(finding["confidence"], 0.5)
         self.assertEqual(set(finding["lanes"]), {"a", "b"})
         self.assertEqual(result["findings_total"], 2)
-        self.assertEqual(result["findings_dropped"], 1)
+        self.assertEqual(result["findings_dropped"], 0)
+        self.assertEqual(result["findings_merged"], 1)
 
 
 class RoutingAndCostTests(unittest.TestCase):
