@@ -344,3 +344,12 @@ bounded optional catalog. `models explain ID --json` stays offline, while
 are preview-first and require `--write --accept-digest` to save. See the
 [discovery and readiness contract](codex_antigravity_auth/design/model-discovery.md)
 for supported pagination, limits, cache semantics and configuration diagnostics.
+
+## Context preflight
+
+`POST /v1/context/preflight` accepts the intended Responses request body and
+returns a count-only `fit`/`unknown`/`reject` assessment without generation. The
+current catalog limits are declarations, so ordinary routes return `unknown`
+with labeled whole-request estimates. See [context preflight](codex_antigravity_auth/skills/anti/CONTEXT_PREFLIGHT.md)
+for component accounting, evidence requirements, generation behavior and Anti
+usage calibration. Character limits are not tokenizer or context guarantees.

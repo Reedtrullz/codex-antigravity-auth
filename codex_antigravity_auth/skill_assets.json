@@ -2,6 +2,7 @@
   "version": 1,
   "files": [
     "ARTIFACTS.md",
+    "CONTEXT_PREFLIGHT.md",
     "DATA_POLICY.md",
     "LOCAL_ONLY.md",
     "OWNERSHIP.md",
@@ -22,6 +23,7 @@
     "scripts/anti_lib/chunking.py",
     "scripts/anti_lib/cleanup.py",
     "scripts/anti_lib/context.py",
+    "scripts/anti_lib/context_budget.py",
     "scripts/anti_lib/data_policy.py",
     "scripts/anti_lib/endpoint_policy.py",
     "scripts/anti_lib/errors.py",
