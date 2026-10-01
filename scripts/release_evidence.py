@@ -105,7 +105,7 @@ def generate(root, output, dist=None):
         report['exactCleanRevision'] = report['sourceUnchanged'] and not before['dirty']
         tests = report['tests'] or {}
         counts = tests.get('junit', {})
-        report['checksPassed'] = (not report['errors'] and tests.get('exitCode') == 0 and counts.get('tests', 0) > 0
+        report['checksPassed'] = (not report['errors'] and tests.get('exitCode') == 0 and counts.get('tests', 0) > counts.get('skipped', 0)
                                   and counts.get('failures') == counts.get('errors') == 0
                                   and report['artifacts']['status'] in {'passed', 'not_checked'})
         report['revisionVerified'] = report['checksPassed'] and report['exactCleanRevision']

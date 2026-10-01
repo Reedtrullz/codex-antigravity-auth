@@ -11,7 +11,8 @@ The release-evidence command owns observed local test results. It runs the check
 synthetic suite, records JUnit test-case counts without relabeling subtests as
 ordinary test counts, and binds the observation to before/after source identity
 and actual Python/OS. Dirty or moving checkouts cannot earn revisionVerified.
-Missing/malformed reports and failed steps remain failures even if partial data
+At least one non-skipped case must execute. Entirely skipped suites,
+missing/malformed reports and failed steps remain failures even if partial data
 exists. Reports are retained on failure so a release author can explain the gap.
 
 Artifact hashes bind optional installed tests to the supplied wheel/sdist bytes.

@@ -24,22 +24,29 @@ provider acceptance. Inline prose and historical snapshots are outside that gate
 ## Reproducible release evidence
 
 ```bash
-python3 scripts/release_evidence.py --output /tmp/antigravity-evidence
+evidence_dir=$(mktemp -d "${TMPDIR:-/tmp}/antigravity-source-evidence.XXXXXX")
+python3 scripts/release_evidence.py --output "$evidence_dir"
 ```
 
 This runs the full checked suite and writes a JSON report, JUnit XML and test log.
 The report reads the package version, records source SHA/cleanliness before and
 after, actual Python/OS, exit code and JUnit counts. Counts describe the supplied
 run; they are never copied into a permanent current-status claim. A dirty or
-moving source cannot be labeled an exact revision, even if its tests pass.
+moving source cannot be labeled an exact revision, even if its tests pass. At least
+one non-skipped test case must run; an entirely skipped suite is not verification.
 
 Build fresh artifacts first, then optionally validate their full contents and
 execute the installed wheel/rebuilt-sdist contract checks:
 
 ```bash
-python3 -m build --sdist --wheel
-python3 scripts/release_evidence.py --output /tmp/antigravity-evidence --dist dist
+artifact_run=$(mktemp -d "${TMPDIR:-/tmp}/antigravity-artifact-evidence.XXXXXX")
+python3 -m build --sdist --wheel --outdir "$artifact_run/dist"
+python3 scripts/release_evidence.py --output "$artifact_run/report" --dist "$artifact_run/dist"
 ```
+
+These POSIX-shell examples allocate fresh directories on every run, so they can
+be used sequentially without replacing earlier evidence. On other shells, choose
+new empty absolute directories for the corresponding paths.
 
 The optional artifact record contains filenames and SHA-256 digests before and
 after validation, content-check outcomes and installed-check exit status.

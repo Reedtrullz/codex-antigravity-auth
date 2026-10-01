@@ -85,3 +85,18 @@ def test_source_disappearing_after_tests_still_leaves_failure_report(tmp_path, m
     report=evidence.generate(tmp_path,tmp_path/'out')
     assert report['sourceAfter'] is None and not report['revisionVerified']
     assert (tmp_path/'out/report.json').exists()
+
+
+@pytest.mark.parametrize('total,skipped,expected', [(12,12,False), (0,0,False), (12,11,True), (12,0,True)])
+def test_revision_verification_requires_an_executed_case(tmp_path, monkeypatch, total, skipped, expected):
+    (tmp_path/'pyproject.toml').write_text('[project]\nversion="0.0.1"\n')
+    monkeypatch.setattr(evidence,'source_identity',lambda root:{'commit':'a'*40,'dirty':False})
+    def run(name,args,root,output):
+        (output/'tests.xml').write_text(f'<testsuite tests="{total}" failures="0" errors="0" skipped="{skipped}"/>')
+        return {'exitCode':0}
+    monkeypatch.setattr(evidence,'run_step',run)
+    report=evidence.generate(tmp_path,tmp_path/'out')
+    assert report['checksPassed'] is expected
+    assert report['revisionVerified'] is expected
+    assert report['tests']['junit']['tests'] == total
+    assert report['tests']['junit']['skipped'] == skipped
