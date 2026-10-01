@@ -402,12 +402,14 @@ def run_logs_command(args) -> None:
         else:
             print(f"[*] Request log summary ({summary['since']})")
             for group in summary["groups"].values():
-                success_pct = group["success_rate"] * 100
+                success_pct = f"{group['success_rate'] * 100:.1f}%" if group["success_rate"] is not None else "n/a"
                 p50 = group["p50_latency_ms"] if group["p50_latency_ms"] is not None else "n/a"
                 p95 = group["p95_latency_ms"] if group["p95_latency_ms"] is not None else "n/a"
                 print(
                     f"- {group['route']}/{group['family']}: {group['request_count']} request(s), "
-                    f"{success_pct:.1f}% success, p50={p50}ms, p95={p95}ms, "
+                    f"{group.get('open_count', 0)} open, {group.get('incomplete_count', 0)} incomplete, "
+                    f"{group.get('cancellation_count', 0)} cancelled, "
+                    f"{success_pct} closed-request success, p50={p50}ms, p95={p95}ms, "
                     f"429s={group['rate_limit_count']}, rotations={group['rotation_attempted_count']}"
                 )
                 if group["top_error_classes"]:
@@ -415,6 +417,10 @@ def run_logs_command(args) -> None:
                         f"{item['error_class']} ({item['count']})" for item in group["top_error_classes"]
                     )
                     print(f"  errors: {errors}")
+        if summary.get("requested_window_incomplete"):
+            print(f"[WARN] Retained logs do not establish the full requested window; earliest retained timestamp: {summary.get('earliest_retained_timestamp')}")
+        if summary.get("omitted_records"):
+            print(f"[WARN] {summary['omitted_records']} oversized request-log record(s) were omitted.")
         if summary["malformed_records"]:
             print(f"[WARN] Ignored {summary['malformed_records']} malformed request-log entry/entries.")
         return
