@@ -4121,8 +4121,8 @@ class BugfixRegressionTests(unittest.TestCase):
         self.assertEqual(record["runStatus"], "partial")
         self.assertNotIn("output_text", record)
         self.assertIn("answer that ends mid-sentence", artifact["output_preview"])
-        self.assertIn("consult_attempts", record["metadata"])
-        self.assertEqual(len(record["metadata"]["consult_attempts"]), 2)
+        self.assertEqual(record["metadata"]["consult_attempt_count"], 2)
+        self.assertEqual(record["metadata"]["retry_disposition"], "exhausted")
 
     def test_consult_recovers_on_higher_cap_retry(self) -> None:
         anti = load_anti()

@@ -49,12 +49,12 @@ from anti_lib.chunking import chunk_manifest
 from anti_lib.cleanup import RUN_ID_RE, assert_not_deleted, clean_runs
 from anti_lib.context import ordered_prompt
 from anti_lib.errors import AntiError
-from anti_lib import run_records
+from anti_lib import run_records, context as scope_context
 from anti_lib.run_records import utc_timestamp, new_run_id
 from anti_lib.artifacts import read_record as load_run_record
 from anti_lib.context import (
     MAX_FILE_BYTES, CHUNK_PART_SUFFIX_RE, GIT_DIFF_TRUNCATION_CAVEAT,
-    truncate_at_line_boundary, read_text_file, decode_source_bytes, file_coverage_record,
+    truncate_at_line_boundary, file_coverage_record,
     coverage_is_incomplete, coverage_summary, review_prompt_parts, review_read_omissions, build_review_prompt,
 )
 
@@ -674,7 +674,7 @@ def scheduling_metadata(metadata=None, control=None):
     if control is not None:
         snapshot = control.snapshot()
         metadata['run_control'] = snapshot
-        for source, target in (('panel_results','panel_lane_count'),('judge_attempts','judge_attempt_count')):
+        for source, target in (('panel_results','panel_lane_count'),('judge_attempts','judge_attempt_count'),('consult_attempts','consult_attempt_count')):
             if isinstance(metadata.get(source), list): metadata[target] = len(metadata[source])
         policy = getattr(control, 'spend_control', None)
         if policy is not None:
@@ -2343,6 +2343,14 @@ def file_is_tracked(root: Path, rel_path: str) -> bool:
     if proc.returncode not in (0, 1):
         raise AntiError(proc.stderr.strip() or "git ls-files failed")
     return proc.returncode == 0
+
+
+def read_text_file(root: Path, rel_path: str, *, truncate: bool = True) -> tuple[str, str | None]:
+    return scope_context.read_text_file(root, rel_path, truncate=truncate, max_bytes=MAX_FILE_BYTES)
+
+
+def decode_source_bytes(rel_path: str, raw: bytes, *, truncate: bool = True) -> tuple[str, str | None]:
+    return scope_context.decode_source_bytes(rel_path, raw, truncate=truncate, max_bytes=MAX_FILE_BYTES)
 
 
 def source_commit(root: Path) -> str | None:

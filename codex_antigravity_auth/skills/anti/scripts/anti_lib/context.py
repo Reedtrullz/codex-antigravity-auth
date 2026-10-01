@@ -32,6 +32,7 @@ def read_text_file(
     rel_path: str,
     *,
     truncate: bool = True,
+    max_bytes: int = MAX_FILE_BYTES,
 ) -> tuple[str, str | None]:
     path = root / rel_path
     if not path.is_file():
@@ -40,21 +41,22 @@ def read_text_file(
         raw = path.read_bytes()
     except OSError as exc:
         return "", f"{rel_path}: {exc}"
-    return decode_source_bytes(rel_path, raw, truncate=truncate)
+    return decode_source_bytes(rel_path, raw, truncate=truncate, max_bytes=max_bytes)
 
 def decode_source_bytes(
     rel_path: str,
     raw: bytes,
     *,
     truncate: bool = True,
+    max_bytes: int = MAX_FILE_BYTES,
 ) -> tuple[str, str | None]:
     if b"\0" in raw:
         return "", f"{rel_path}: binary file skipped"
     note = None
-    if truncate and len(raw) > MAX_FILE_BYTES:
+    if truncate and len(raw) > max_bytes:
         original_len = len(raw)
-        raw = raw[:MAX_FILE_BYTES]
-        note = f"{rel_path}: truncated to {MAX_FILE_BYTES} bytes ({original_len} original bytes)"
+        raw = raw[:max_bytes]
+        note = f"{rel_path}: truncated to {max_bytes} bytes ({original_len} original bytes)"
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:

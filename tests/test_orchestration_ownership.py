@@ -28,3 +28,18 @@ assert not {'anti', 'codex_antigravity_auth.server', 'codex_antigravity_auth.cli
 '''
     result=subprocess.run([sys.executable,'-c',probe,str(scripts)],cwd=tmp_path,capture_output=True,text=True,timeout=20)
     assert result.returncode==0,result.stdout+result.stderr
+
+
+
+def test_compatibility_byte_cap_applies_to_direct_decode_and_file_read(tmp_path):
+    import importlib.util
+    script=Path(codex_antigravity_auth.__file__).parent/'skills/anti/scripts/anti.py'
+    spec=importlib.util.spec_from_file_location('anti_cap_compatibility',script)
+    anti=importlib.util.module_from_spec(spec);spec.loader.exec_module(anti)
+    anti.MAX_FILE_BYTES=7
+    raw=('😀'*10).encode('utf-8')
+    (tmp_path/'fixture.txt').write_bytes(raw)
+    direct=anti.decode_source_bytes('fixture.txt',raw)
+    assert direct==anti.read_text_file(tmp_path,'fixture.txt')
+    assert direct[0]=='😀' and 'truncated to 7 bytes' in direct[1]
+    assert anti.decode_source_bytes('fixture.txt',raw,truncate=False)==('😀'*10,None)

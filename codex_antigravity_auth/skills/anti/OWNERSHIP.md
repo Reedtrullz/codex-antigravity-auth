@@ -35,7 +35,8 @@ flowchart TD
 
 Existing `anti.coverage_summary`, prompt helpers, `AntiError`, record functions
 and constants remain importable through direct exports or small compatibility
-adapters. Dynamic run roots and the caller's atomic-write hook still flow through
+adapters. Dynamic run roots, the caller's atomic-write hook and the entrypoint's effective
+file-byte cap still flow through
 those adapters. They do not duplicate the owned implementation.
 
 ## Combining controls with retention
@@ -45,8 +46,8 @@ labels. It does not regain lane/model details, event histories, pricing sources,
 gateway addresses or output merely because run/admission controls are present.
 It can retain a pricing declaration hash and currency code, not the declaration
 contents. Summary-mode reserves those bounded counters independently of content
-preview limits, so large earlier payloads cannot erase deferred/judge/admission
-counts. Detailed judge identity/output evidence remains available in full mode;
+preview limits, so large earlier payloads cannot erase deferred/judge/consult/admission
+counts and retry disposition. Detailed judge identity/output evidence remains available in full mode;
 live JSON is independent of persistence projection.
 
 The package manifest includes each owner and this document; no personal installed
