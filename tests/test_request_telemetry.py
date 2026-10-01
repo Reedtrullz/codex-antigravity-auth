@@ -251,7 +251,12 @@ def test_upstream_http_200_is_preserved_when_gateway_maps_an_error(monkeypatch, 
     monkeypatch.setattr(server.httpx, "AsyncClient", lambda **kwargs: original_client(transport=httpx.MockTransport(respond), **kwargs))
     model = "fixture:model" if route == "byok" else "gemini-3.8-flash"
     response = TestClient(server.app).post("/v1/responses", json={"model": model, "input": "synthetic", "stream": False})
-    assert response.status_code >= 400
+    if route == "openai_oauth":
+        # Native SSE authority returns a structured failed response even when
+        # the upstream HTTP handshake succeeded (reviewed #78/#82 contract).
+        assert response.status_code == 200 and response.json()["status"] == "failed"
+    else:
+        assert response.status_code >= 400
     terminal = records[-1]
     assert terminal["status"] == "failed"
     assert terminal["http_status"] == response.status_code
