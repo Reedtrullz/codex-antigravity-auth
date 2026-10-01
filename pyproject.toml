@@ -29,6 +29,7 @@ dependencies = [
   "uvicorn>=0.28",
   "keyring>=25.0.0",
   "cryptography>=42.0.0",
+  "tomlkit>=0.13.2",
 ]
 
 [project.optional-dependencies]
