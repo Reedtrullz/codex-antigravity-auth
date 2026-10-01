@@ -88,6 +88,7 @@ def sanitize_request_record(record: dict[str, Any]) -> dict[str, Any]:
         "cancelled",
         "lifecycle_phase",
         "provider_accepted",
+        "upstream_http_status",
     }
     sanitized = {key: redact_secrets(value) for key, value in record.items() if key in allowed}
     sanitized.setdefault("timestamp", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
@@ -240,12 +241,12 @@ def request_log_summary(*, since: str | None = "24h", now: float | None = None) 
         # lifecycle records cannot reopen it. Duplicate terminals count once.
         chosen = terminal_events[-1] if terminal_events else events[-1]
         record = {**events[0], **chosen}
-        for field in ("usage", "latency_ms", "attempt_count", "rotation_count", "family", "provider"):
-            metric = field in {"usage", "latency_ms", "attempt_count", "rotation_count"}
+        for field in ("usage", "latency_ms", "attempt_count", "rotation_count", "http_status", "upstream_http_status", "provider_accepted", "family", "provider"):
+            metric = field not in {"family", "provider"}
             if metric:
                 record[field] = chosen.get(field)
             if record.get(field) is None:
-                source = terminal_events if metric else events
+                source = [] if metric else events
                 previous = next((event[field] for event in reversed(source) if event.get(field) is not None), None)
                 if previous is not None:
                     record[field] = previous
@@ -273,10 +274,8 @@ def request_log_summary(*, since: str | None = "24h", now: float | None = None) 
         acceptance = record.get("provider_accepted")
         if not isinstance(acceptance, bool):
             acceptance = None
-        if any(event.get("provider_accepted") is True for event in events):
-            acceptance = True
-        elif acceptance is None and record.get("http_status") is not None:
-            acceptance = 200 <= _nonnegative_int(record.get("http_status")) < 300
+        if acceptance is None and record.get("upstream_http_status") is not None:
+            acceptance = 200 <= _nonnegative_int(record.get("upstream_http_status")) < 300
         if acceptance is True:
             group["provider_accepted_count"] += 1
         elif acceptance is None:
@@ -299,7 +298,7 @@ def request_log_summary(*, since: str | None = "24h", now: float | None = None) 
                 group["_latencies"].append(latency_ms)
         except (TypeError, ValueError, OverflowError):
             pass
-        if _nonnegative_int(record.get("http_status")) == 429:
+        if 429 in {_nonnegative_int(record.get("http_status")), _nonnegative_int(record.get("upstream_http_status"))}:
             group["rate_limit_count"] += 1
         group["rotation_attempted_count"] += int(bool(record.get("rotation_attempted")))
         group["attempt_count"] += _nonnegative_int(record.get("attempt_count"), 1)
