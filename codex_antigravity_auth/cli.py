@@ -1250,6 +1250,7 @@ def main():
         help="Primary guided setup for using Antigravity Claude from Codex",
     )
     setup_parser.add_argument("--no-browser", action="store_true", help="Print the OAuth URL without opening a browser")
+    setup_parser.add_argument("--plan", action="store_true", help="Print intended stages/prerequisites as JSON without checks, writes or network")
     setup_parser.add_argument("--check", action="store_true", help="Run read-only setup and Codex readiness checks")
     setup_parser.add_argument("--json", action="store_true", help="Print setup/readiness status as JSON")
     setup_parser.add_argument("--write", action="store_true", help="Run login and write the Codex provider block")
@@ -1527,6 +1528,8 @@ def main():
     status_parser.add_argument("--port", type=int, default=51122, help="Gateway server port (default: 51122)")
     status_parser.add_argument("--json", action="store_true", help="Print status as JSON")
 
+    from .setup_profiles import add_parsers
+    add_parsers(subparsers)
     args = parser.parse_args()
     if args.command == "start":
         overrides = {}
@@ -1551,6 +1554,9 @@ def main():
         except (ValueError, RuntimeError, OSError) as exc:
             print(f"[FAIL] {redact_secret_text(str(exc))}")
             sys.exit(1)
+    elif args.command in {"profiles", "setup-history"}:
+        from .setup_profiles import run_command
+        run_command(args)
     elif args.command == "login":
         run_login(args)
     elif args.command == "setup":

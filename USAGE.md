@@ -326,3 +326,7 @@ starts a separate history. Log in through Codex with the selected `CODEX_HOME`
 when a new client identity is needed. Finally set `ANTIGRAVITY_STATE_HOME` to the
 new root and reinstall any service to capture the selection. Neither the copy
 command nor diagnostics changes the current environment or service automatically.
+
+## Setup plans and profiles
+
+Use `setup --plan` for JSON stages/prerequisites without credential resolution or network. `profiles create/apply` default to no-write plans; `setup-history restore` requires explicit config/skill selection and refuses drift. Credentials and services are not rolled back. See [the setup contract](codex_antigravity_auth/SETUP.md) for commands, retention and recovery limits.

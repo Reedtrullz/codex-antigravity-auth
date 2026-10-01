@@ -510,3 +510,5 @@ the `antigravity-unified` provider block for unified pickers.
 Tagged releases are prepared for PyPI Trusted Publishing. The `.github/workflows/publish.yml` workflow runs on `v*` tags, requires the full Ubuntu Python 3.10/3.11/3.12/3.14 plus Windows Python 3.12 test matrix and a checked sdist/wheel build, then publishes with `pypa/gh-action-pypi-publish@release/v1` using OIDC (`id-token: write`) in the `pypi` environment. The tag must exactly match the package version.
 
 Before the first PyPI publish, configure the PyPI project `codex-antigravity-auth` with a trusted publisher for this GitHub repository, workflow file `.github/workflows/publish.yml`, and environment `pypi`. No local PyPI API token is required or expected.
+
+Setup can now emit a no-write `setup --plan`, apply named non-secret `profiles`, and record explicitly restorable local changes. See [setup plans and restoration](codex_antigravity_auth/SETUP.md).
