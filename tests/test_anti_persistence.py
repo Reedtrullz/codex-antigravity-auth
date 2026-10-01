@@ -235,3 +235,57 @@ def test_interrupted_fsync_cleans_only_owned_temporary(stores, monkeypatch, erro
         save(anti, args, "success")
     assert path.read_bytes() == before
     assert not list(path.parent.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("bad_fields", [
+    {"findings_count": "bad"}, {"findings_count": -1}, {"findings_count": True},
+    {"models": "fixture"}, {"models": [{}]}, {"models": None},
+    {"findings": [{"fingerprint": []}]}, {"findings": [{"severity": {}}]},
+    {"findings": [{"file": ["fixture.py"]}]}, {"findings": [{"file": 12}]},
+    {"mode": []}, {"panel_status": {}}, {"run_id": []}, {"verdict": {}},
+    {"timestamp": 2**63 - 1},
+])
+@pytest.mark.parametrize("operation", ["append", "verdict", "summary", "cli"])
+def test_wrong_shaped_reader_fields_preserve_exact_history_bytes(stores, capsys, bad_fields, operation):
+    anti, reflections, persistence, root = stores
+    path = reflections._reflection_path(root)
+    path.parent.mkdir()
+    row = {"timestamp": time.time(), "findings_count": 0, "findings": [], "run_id": "fixture", **bad_fields}
+    original = json.dumps([row], indent=1).encode()
+    path.write_bytes(original)
+    operations = {
+        "append": lambda: reflect(reflections, root),
+        "verdict": lambda: reflections.update_verdict(root, "fixture", "confirmed"),
+        "summary": lambda: reflections.get_summary(root),
+    }
+    if operation == "cli":
+        assert anti.main(["runs", "reflections", "--repo", str(root)]) == 1
+        error = capsys.readouterr().err
+        assert "backup" in error and "Traceback" not in error
+    else:
+        with pytest.raises(persistence.PersistenceError, match="backup"):
+            operations[operation]()
+    assert path.read_bytes() == original
+
+
+def test_nullable_locations_and_unknown_extensions_remain_valid(stores):
+    _, reflections, _, root = stores
+    path = reflections._reflection_path(root)
+    path.parent.mkdir()
+    row = {"timestamp": time.time(), "findings_count": 1, "models": ["fixture"],
+           "findings": [{"file": None, "fingerprint": None, "severity": "low", "futureFinding": [1]}],
+           "futureRow": {"value": 2}}
+    path.write_text(json.dumps([row]))
+    reflect(reflections, root)
+    assert reflections._load_records(path)[0] == row
+    assert reflections.get_summary(root)["total_findings"] == 1
+
+
+def test_new_malformed_record_cannot_poison_existing_history(stores):
+    _, reflections, persistence, root = stores
+    reflect(reflections, root)
+    path = reflections._reflection_path(root)
+    original = path.read_bytes()
+    with pytest.raises(persistence.PersistenceError, match="backup"):
+        reflect(reflections, root, models=[{}])
+    assert path.read_bytes() == original

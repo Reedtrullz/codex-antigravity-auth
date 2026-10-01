@@ -46,6 +46,50 @@ def _ensure_permissions(directory: Path | None = None) -> None:
                 os.chmod(path, 0o600)
 
 
+def _valid_record(row: Any) -> bool:
+    """Validate reader inputs without normalizing or discarding extension fields."""
+    if not isinstance(row, dict):
+        return False
+    timestamp = row.get("timestamp")
+    if type(timestamp) not in (int, float) or not 0 <= timestamp <= 2**63 - 1 or not math.isfinite(timestamp):
+        return False
+    try:
+        time.strftime("%Y-%m-%d %H:%M", time.localtime(timestamp))
+    except (ValueError, OverflowError, OSError):
+        return False
+    count = row.get("findings_count", 0)
+    if type(count) is not int or not 0 <= count <= 2**63 - 1:
+        return False
+    models = row.get("models", [])
+    if not isinstance(models, list) or any(not isinstance(model, str) for model in models):
+        return False
+    for key in ("mode", "panel_status", "run_id", "verdict", "repo", "scope", "save_output"):
+        if key in row and row[key] is not None and not isinstance(row[key], str):
+            return False
+    findings = row.get("findings", [])
+    if not isinstance(findings, list):
+        return False
+    for finding in findings:
+        if not isinstance(finding, dict):
+            return False
+        if not isinstance(finding.get("severity", "medium"), str):
+            return False
+        # Null file/fingerprint denotes an unmapped finding and is safely
+        # skipped by readers. Containers and other scalars are malformed.
+        for key in ("fingerprint", "file"):
+            if key in finding and finding[key] is not None and not isinstance(finding[key], str):
+                return False
+    return True
+
+
+def _validate_records(path: Path, records: Any) -> None:
+    if not isinstance(records, list) or any(not _valid_record(row) for row in records):
+        raise PersistenceError(
+            f"Invalid reflection history shape at {path}. Preserve this file and make a backup "
+            "before manual recovery; no history was replaced."
+        )
+
+
 def _load_records(path: Path) -> list[dict[str, Any]]:
     guidance = "Preserve this file and make a backup before manual recovery; no history was replaced."
     if path.is_symlink() or path.parent.is_symlink():
@@ -62,20 +106,12 @@ def _load_records(path: Path) -> list[dict[str, Any]]:
         data = json.loads(raw)
     except ValueError as exc:
         raise PersistenceError(f"Corrupt reflection history at {path}. {guidance}") from exc
-    if not isinstance(data, list) or any(
-        not isinstance(row, dict)
-        or type(row.get("timestamp")) not in (int, float)
-        or not 0 <= row["timestamp"] <= 2**63 - 1
-        or not math.isfinite(row["timestamp"])
-        or not isinstance(row.get("findings", []), list)
-        or any(not isinstance(finding, dict) for finding in row.get("findings", []))
-        for row in data
-    ):
-        raise PersistenceError(f"Invalid reflection history shape at {path}. {guidance}")
+    _validate_records(path, data)
     return data
 
 
 def _save_records(path: Path, records: list[dict[str, Any]]) -> None:
+    _validate_records(path, records)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(path.parent, 0o700)
     atomic_write_json(path, records)
