@@ -19,6 +19,10 @@ from .byok import (
 )
 
 from .redaction import redact_secret_text
+from .native_output import (
+    MAX_ITEMS, NativeOutputError, check_json, reconcile_output,
+    validate_event, validate_output, validate_response,
+)
 
 from .response_protocol import (
     ProviderCapabilities,
@@ -27,7 +31,6 @@ from .response_protocol import (
     ResponseEventBuilder,
     TerminalKind,
     classify_terminal,
-    meaningful_output_items,
     normalize_usage,
     refusal_item,
 )
@@ -561,36 +564,8 @@ class OpenAICompatibleTransport:
         *,
         display_model: str,
     ) -> dict[str, Any]:
-        if not isinstance(payload, dict):
-            raise ValueError("native Responses payload must be an object")
-        status = payload.get("status")
-        if status is not None and status not in {"completed", "incomplete", "failed"}:
-            raise ValueError("native Responses payload has an invalid status")
-        output = payload.get("output")
-        if not isinstance(output, list):
-            raise ValueError("native Responses payload output must be a list")
-        response = dict(payload)
-        response["model"] = display_model
-        if status is None:
-            status = "completed" if output else "failed"
-            response["status"] = status
-        meaningful_output = meaningful_output_items(output)
-        if status in {"completed", "incomplete"}:
-            response["output"] = list(meaningful_output)
-        if status == "completed" and not meaningful_output:
-            response["status"] = "failed"
-            response["error"] = {
-                "code": "empty_response",
-                "message": "The provider returned no meaningful output.",
-            }
-        elif status == "failed":
-            error = payload.get("error")
-            code = error.get("code") if isinstance(error, dict) else None
-            response["error"] = {
-                "code": code if isinstance(code, str) and code else "provider_error",
-                "message": "The provider request failed.",
-            }
-        return response
+        return validate_response(payload, display_model=display_model)
+
 
 
 class NativeResponsesStreamAdapter:
@@ -612,6 +587,9 @@ class NativeResponsesStreamAdapter:
         self._items: dict[int, str] = {}
         self._item_indices: dict[str, int] = {}
         self._identity_chars = 0
+        self._native_types: dict[int, str] = {}
+        self._completed_items: dict[int, dict] = {}
+        self._completed_budget = [0, 0]
 
     @property
     def visible_output_started(self) -> bool:
@@ -646,6 +624,11 @@ class NativeResponsesStreamAdapter:
 
     def _valid_id(self, value: object) -> bool:
         if not isinstance(value, str) or not value:
+            self._set_failure("invalid_stream_identity", "The provider returned an invalid stream identifier.")
+            return False
+        try:
+            value.encode("utf-8")
+        except UnicodeError:
             self._set_failure("invalid_stream_identity", "The provider returned an invalid stream identifier.")
             return False
         if len(value) > 65536:
@@ -748,10 +731,36 @@ class NativeResponsesStreamAdapter:
         if event_type == "error":
             self._set_failure("provider_error", "The provider reported a stream error.")
             return []
-        if event_type in self._TERMINAL_TYPES:
-            if self._terminal_event is not None:
+        if self._terminal_event is not None:
+            if event_type in self._TERMINAL_TYPES:
                 self._set_failure("duplicate_terminal", "The provider emitted more than one terminal event.")
-                return []
+            else:
+                self._set_failure("output_after_terminal", "The provider emitted output after its terminal event.")
+            return []
+        try:
+            expected_item = validate_event(event)
+            index = event.get("output_index")
+            supplied = []
+            if expected_item is not None and index is not None:
+                supplied.append((index, expected_item))
+            snapshot = event.get("response")
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("output"), list):
+                supplied.extend((offset, item["type"]) for offset, item in enumerate(snapshot["output"]))
+            for offset, item_type in supplied:
+                if offset in self._native_types and self._native_types[offset] != item_type:
+                    raise NativeOutputError("conflicting_native_item")
+                if len(self._native_types) >= MAX_ITEMS and offset not in self._native_types:
+                    raise NativeOutputError("native_output_limit")
+                self._native_types[offset] = item_type
+            if event_type == "response.output_item.done":
+                if index in self._completed_items:
+                    raise NativeOutputError("duplicate_native_item")
+                check_json(event["item"], budget=self._completed_budget)
+                self._completed_items[index] = validate_output([event["item"]])[0]
+        except NativeOutputError as exc:
+            self._set_failure(exc.code, str(exc))
+            return []
+        if event_type in self._TERMINAL_TYPES:
             response = event.get("response")
             if not isinstance(response, dict):
                 self._set_failure("invalid_terminal_event", "The provider returned an invalid terminal event.")
@@ -761,29 +770,17 @@ class NativeResponsesStreamAdapter:
             if provider_status is not None and provider_status != expected_status:
                 self._set_failure("invalid_terminal_event", "The provider terminal status did not match its event type.")
                 return []
-            normalized = {**response, "status": expected_status, "model": self.display_model}
-            output = response.get("output")
-            meaningful = meaningful_output_items(output) if isinstance(output, list) else ()
-            if expected_status in {"completed", "incomplete"}:
-                if meaningful:
-                    normalized["output"] = list(meaningful)
-                elif self._visible_output_started:
-                    normalized.setdefault("output", [])
-                else:
-                    self._set_failure("empty_response", "The provider returned no meaningful output.")
-                    return []
-            if expected_status == "failed":
-                error = response.get("error")
-                code = error.get("code") if isinstance(error, dict) else None
-                normalized["error"] = {
-                    "code": code if isinstance(code, str) and code else "provider_error",
-                    "message": "The provider request failed.",
-                }
+            try:
+                output = reconcile_output(response.get("output"), self._completed_items)
+                if any(index >= len(output) for index in self._native_types):
+                    raise NativeOutputError("incomplete_native_output")
+                normalized = validate_response({**response, "status": expected_status, "output": output}, display_model=self.display_model)
+            except (NativeOutputError, ValueError) as exc:
+                self._set_failure(getattr(exc, "code", "invalid_native_output"), "The provider returned an invalid native terminal snapshot.")
+                return []
+            expected_status = normalized["status"]
             normalized_type = f"response.{expected_status}"
             self._terminal_event = {"type": normalized_type, "response": normalized}
-            return []
-        if self._terminal_event is not None:
-            self._set_failure("output_after_terminal", "The provider emitted output after its terminal event.")
             return []
         if event_type.startswith("response.output") or event_type.startswith("response.reasoning"):
             self._visible_output_started = True

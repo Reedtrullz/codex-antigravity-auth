@@ -2515,9 +2515,10 @@ async def create_openai_upstream_response(
             status_code=502,
             detail=openai_failure_detail(display_model, f"OpenAI returned non-JSON data: {exc}"),
         ) from exc
-    if isinstance(data, dict):
-        data["model"] = display_model
-    return data
+    try:
+        return OpenAICompatibleTransport(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS).validate_native_response(data, display_model=display_model)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=openai_failure_detail(display_model, "OpenAI returned an invalid native response.")) from exc
 
 
 def _collect_openai_sse_terminal(sse_text: str | bytes, display_model: str) -> dict:
