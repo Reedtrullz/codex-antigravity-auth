@@ -540,3 +540,7 @@ and [SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi
 contracts. Native Windows tests inspect temporary-file ACLs independently through
 PowerShell; non-Windows runs skip that check and exercise synthetic refusal paths.
 No Windows ACL success is inferred from POSIX mode bits or mocked tests.
+
+## Setup plans and profiles
+
+Use `setup --plan` for JSON stages/prerequisites without credential resolution or network. `profiles create/apply` default to no-write plans; `setup-history restore` requires explicit config/skill selection and refuses drift. Credentials and services are not rolled back. See [the setup contract](codex_antigravity_auth/SETUP.md) for commands, retention and recovery limits.

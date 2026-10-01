@@ -542,3 +542,5 @@ Before the first PyPI publish, configure the PyPI project `codex-antigravity-aut
 
 Developer ownership of route telemetry, request resources, Anti scope rendering
 and immutable run publication is mapped in [the orchestration guide](codex_antigravity_auth/design/orchestration.md).
+
+Setup can now emit a no-write `setup --plan`, apply named non-secret `profiles`, and record explicitly restorable local changes. See [setup plans and restoration](codex_antigravity_auth/SETUP.md).

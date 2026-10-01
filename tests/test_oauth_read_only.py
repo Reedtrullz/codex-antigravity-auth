@@ -215,7 +215,7 @@ def test_explicit_setup_and_login_still_repair_permissions(monkeypatch, isolated
     monkeypatch.setattr(cli, "authorize_antigravity", capture_credentials)
     monkeypatch.setattr(cli, "run_login", lambda args: cli.run_local_oauth_flow())
     monkeypatch.setattr(sys, "argv", ["codex-antigravity", *command])
-    with pytest.raises(StopBeforeNetwork):
+    with pytest.raises(SystemExit if command[0] == "setup" else StopBeforeNetwork):
         cli.main()
     assert observed == [("env-id", FILE_SECRET)]
     assert credentials.read_bytes() == original

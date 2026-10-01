@@ -1,0 +1,350 @@
+"""Synthetic setup state and injected local callbacks; no live login, gateway or keyring."""
+import argparse
+import json
+from pathlib import Path
+import sys
+from unittest.mock import Mock
+
+import pytest
+import tomlkit
+
+from codex_antigravity_auth import cli, cli_setup, setup_profiles as setup
+
+SECRET = "sk-fixtureabcdefghijklmnopqrstuvwxyz"
+ORIGINAL = '# Keep this comment\nmodel = "original-model"\nmodel_provider = "original-provider"\n[projects."/fixture"]\ntrust_level = "trusted"\n'
+
+
+@pytest.fixture
+def isolated(tmp_path, monkeypatch):
+    client, state = tmp_path / "client", tmp_path / "state"
+    monkeypatch.setenv("CODEX_HOME", str(client))
+    monkeypatch.setenv("ANTIGRAVITY_STATE_HOME", str(state))
+    monkeypatch.setattr(cli, "resolve_oauth_credentials", lambda **kw: ("synthetic-client", SECRET))
+    monkeypatch.setattr(cli, "run_login", Mock())
+    monkeypatch.setattr(cli, "start_gateway_background", Mock(return_value={"pid": 123}))
+    monkeypatch.setattr(cli, "wait_for_gateway_model_ids", lambda *a, **kw: {"claude-sonnet-4-6"})
+    monkeypatch.setattr(cli, "codex_ready_report", lambda **kw: {"ok": True, "checks": [], "next_command": "codex"})
+    return client, state
+
+
+def options(**changes):
+    values = dict(name="google", model="claude-sonnet-4-6", provider="antigravity", provider_name="Google Antigravity",
+                  base_url="http://localhost:51122/v1", unified_model_picker=False, gateway_token_env=None,
+                  write=False, activate=False, install_skill=False, skill_dir="~/.codex/skills", config="~/.codex/config.toml",
+                  force=False, repair=False, check=False, json=False, start=False, accounts=1, no_input=True,
+                  no_browser=True, host="127.0.0.1", port=51122, allow_remote=False, gateway_timeout=1,
+                  verify_skill=False, live=False, plan=False)
+    values.update(changes)
+    return argparse.Namespace(**values)
+
+
+def tree(root):
+    return {str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns)
+            for path in root.rglob("*") if path.is_file()}
+
+
+def existing_config(client):
+    client.mkdir(parents=True, exist_ok=True)
+    target = client / "config.toml"
+    target.write_text(ORIGINAL)
+    return target
+
+
+def test_setup_plan_is_machine_readable_and_does_not_resolve_credentials_or_write(isolated, monkeypatch, capsys):
+    client, state = isolated
+    for name in ("resolve_oauth_credentials", "run_login", "start_gateway_background", "codex_ready_report"):
+        monkeypatch.setattr(cli, name, Mock(side_effect=AssertionError("planning must not inspect credentials or network")))
+    plan = cli_setup.run_setup(options(plan=True, install_skill=True, start=True))
+    assert json.loads(capsys.readouterr().out) == plan
+    assert plan["readOnly"] is True and plan["activateDefault"] is False
+    assert [row["id"] for row in plan["stages"]] == list(setup.STAGES)
+    assert plan["credentialsAndServicesRestorable"] is False
+    assert not client.exists() and not state.exists()
+
+
+def test_profiles_store_only_settings_and_reference_names_and_create_defaults_to_dry_run(isolated, monkeypatch):
+    client, state = isolated
+    monkeypatch.setenv("FIXTURE_GATEWAY_KEY", SECRET)
+    plan = setup.create_profile(options(gateway_token_env="FIXTURE_GATEWAY_KEY"))
+    assert not state.exists() and not client.exists()
+    assert SECRET not in json.dumps(plan)
+    saved = setup.create_profile(options(write=True, gateway_token_env="FIXTURE_GATEWAY_KEY"))
+    content = Path(saved["path"]).read_text()
+    assert "FIXTURE_GATEWAY_KEY" in content and SECRET not in content
+    assert setup.load_profile("google")["secretReferences"] == {"gatewayTokenEnv": "FIXTURE_GATEWAY_KEY"}
+    with pytest.raises(setup.SetupError, match="already exists"):
+        setup.create_profile(options(write=True))
+
+
+def test_profile_apply_preserves_unrelated_toml_and_requires_explicit_activation(isolated):
+    client, state = isolated
+    target = existing_config(client)
+    setup.create_profile(options(write=True, gateway_token_env="FIXTURE_GATEWAY_KEY"))
+    before = tree(state), target.read_bytes()
+    plan = setup.apply_profile(options())
+    assert plan["write"] is False and (tree(state), target.read_bytes()) == before
+    applied = setup.apply_profile(options(write=True))
+    document = tomlkit.parse(target.read_text()).unwrap()
+    assert document["model"] == "original-model" and document["model_provider"] == "original-provider"
+    assert document["projects"]["/fixture"]["trust_level"] == "trusted" and "# Keep this comment" in target.read_text()
+    assert document["model_providers"]["antigravity"]["env_key"] == "FIXTURE_GATEWAY_KEY"
+    assert applied["runtimeChanged"] is False
+    setup.create_profile(options(name="local-byok", model="ollama:gpt-oss:20b", write=True))
+    setup.apply_profile(options(name="local-byok", write=True, activate=True))
+    document = tomlkit.parse(target.read_text()).unwrap()
+    assert document["model"] == "ollama:gpt-oss:20b" and document["model_provider"] == "antigravity"
+    assert "env_key" not in document["model_providers"]["antigravity"]
+    assert document["projects"]["/fixture"]["trust_level"] == "trusted"
+
+
+def test_unified_profile_uses_its_own_provider_and_does_not_change_running_services(isolated):
+    client, _state = isolated
+    existing_config(client)
+    created = setup.create_profile(options(name="unified", unified_model_picker=True, model="gpt-5.6", write=True))
+    assert created["profile"]["settings"]["provider"] == "antigravity-unified"
+    result = setup.apply_profile(options(name="unified", write=True, activate=True))
+    assert result["runtimeChanged"] is False
+    assert "--unified-model-picker" in result["nextSteps"][0]
+    cli.start_gateway_background.assert_not_called()
+    cli.run_login.assert_not_called()
+
+
+@pytest.mark.parametrize("existed", [False, True])
+def test_explicit_config_restore_is_dry_first_and_retains_original_backup(isolated, existed):
+    client, state = isolated
+    target = client / "config.toml"
+    if existed:
+        existing_config(client)
+    setup.create_profile(options(write=True))
+    result = setup.apply_profile(options(write=True, activate=True))
+    run_id = result["receipt"]["id"]
+    before = tree(client), tree(state)
+    preview = setup.restore_receipt(run_id, ["config"])
+    assert preview["stages"] == [{"stage": "config", "status": "would_restore"}]
+    assert (tree(client), tree(state)) == before
+    setup.restore_receipt(run_id, ["config"], write=True)
+    if existed:
+        assert target.read_text() == ORIGINAL
+        assert (setup.receipts_root() / run_id / "config-before").read_text() == ORIGINAL
+    else:
+        assert not target.exists()
+    assert (setup.receipts_root() / run_id / "config-before-restore").is_file()
+    assert setup.load_receipt(run_id)[1]["stages"][2]["state"] == "restored"
+
+
+def test_drifted_config_and_changed_backup_refuse_restoration_without_changes(isolated):
+    client, state = isolated
+    target = existing_config(client)
+    setup.create_profile(options(write=True))
+    receipt = setup.apply_profile(options(write=True))["receipt"]
+    target.write_text(target.read_text() + '\n# user changed this\n')
+    before = tree(client), tree(state)
+    with pytest.raises(setup.SetupError, match="drifted"):
+        setup.restore_receipt(receipt["id"], ["config"], write=True)
+    assert target.read_bytes() == before[0]["config.toml"][0]
+    # The same guard applies during a read-only restore plan.
+    with pytest.raises(setup.SetupError, match="drifted"):
+        setup.restore_receipt(receipt["id"], ["config"])
+
+
+@pytest.mark.parametrize("existed", [False, True])
+def test_selective_skill_restore_preserves_previous_and_displaced_trees(isolated, monkeypatch, existed):
+    client, _state = isolated
+    target = client / "skills/anti"
+    if existed:
+        target.mkdir(parents=True)
+        (target / "custom.txt").write_text("synthetic original skill")
+        (target / "empty-dir").mkdir()
+    def install(parent, **kwargs):
+        destination = parent / "anti"
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "new.txt").write_text("synthetic installed skill")
+        if existed:
+            (destination / "custom.txt").unlink()
+        return "installed", destination, None
+    monkeypatch.setattr(cli, "install_codex_skill", install)
+    setup.create_profile(options(write=True))
+    result = setup.apply_profile(options(write=True, install_skill=True, force=True))
+    config_after = (client / "config.toml").read_bytes()
+    run_id = result["receipt"]["id"]
+    setup.restore_receipt(run_id, ["skill"], write=True)
+    assert (client / "config.toml").read_bytes() == config_after
+    if existed:
+        assert (target / "custom.txt").read_text() == "synthetic original skill"
+        assert (target / "empty-dir").is_dir() and not (target / "new.txt").exists()
+    else:
+        assert not target.exists()
+    row = setup.load_receipt(run_id)[1]["stages"][3]
+    assert (Path(row["retainedAfterRestore"]) / "new.txt").read_text() == "synthetic installed skill"
+
+
+@pytest.mark.parametrize("failed", setup.STAGES)
+def test_each_setup_stage_failure_records_completed_failed_pending_without_secrets(isolated, monkeypatch, capsys, failed):
+    client, state = isolated
+    existing_config(client)
+    target = client / "skills/anti"
+    target.mkdir(parents=True)
+    (target / "old.txt").write_text("old skill")
+    def fault():
+        raise RuntimeError(SECRET)
+    if failed == "credentials": monkeypatch.setattr(cli, "resolve_oauth_credentials", lambda **kw: fault())
+    elif failed == "login": monkeypatch.setattr(cli, "run_login", lambda _: fault())
+    elif failed == "gateway": monkeypatch.setattr(cli, "start_gateway_background", lambda _: fault())
+    elif failed == "readiness": monkeypatch.setattr(cli, "codex_ready_report", lambda **kw: fault())
+    configure = cli.run_configure_codex
+    def config(args):
+        configure(args)
+        if failed == "config": fault()
+    monkeypatch.setattr(cli, "run_configure_codex", config)
+    def skill(args):
+        (target / "new.txt").write_text("new skill")
+        if failed == "skill": fault()
+    monkeypatch.setattr(cli, "run_install_skill", skill)
+    with pytest.raises(SystemExit):
+        cli_setup.run_setup(options(write=True, install_skill=True, force=True, start=True))
+    output = capsys.readouterr()
+    assert SECRET not in output.out + output.err
+    files = list((state / "setup-receipts").glob("*/receipt.json"))
+    assert len(files) == 1 and SECRET not in files[0].read_text()
+    receipt = setup.load_receipt(files[0].parent.name)[1]
+    assert receipt["state"] == "failed"
+    index = setup.STAGES.index(failed)
+    assert all(row["state"] == "completed" for row in receipt["stages"][:index])
+    assert receipt["stages"][index]["state"] == "failed"
+    assert all(row["state"] == "pending" for row in receipt["stages"][index + 1:])
+    assert receipt["nextSteps"]
+
+
+def test_running_unknown_receipt_and_nonowned_stages_cannot_be_restored(isolated):
+    client, state = isolated
+    existing_config(client)
+    journal = setup.SetupJournal(setup.setup_plan(options()))
+    before = tree(client), tree(state)
+    with pytest.raises(setup.SetupError, match="still running"):
+        setup.restore_receipt(journal.id, ["config"])
+    with pytest.raises(setup.SetupError, match="cannot be restored"):
+        setup.restore_receipt(journal.id, ["credentials"])
+    assert (tree(client), tree(state)) == before
+
+
+@pytest.mark.parametrize("change", ["version", "key_value", "unknown_setting", "secret_name"])
+def test_invalid_profiles_never_echo_or_rewrite_credentials(isolated, change, capsys):
+    _client, state = isolated
+    created = setup.create_profile(options(write=True))
+    path = Path(created["path"])
+    profile = json.loads(path.read_text())
+    if change == "version": profile["schemaVersion"] = 123
+    elif change == "key_value": profile["secretReferences"]["gatewayTokenEnv"] = SECRET
+    elif change == "unknown_setting": profile["settings"]["api_key"] = SECRET
+    else: profile["settings"]["provider_name"] = SECRET
+    path.write_text(json.dumps(profile))
+    before = tree(state)
+    with pytest.raises((setup.SetupError, ValueError)):
+        setup.load_profile("google")
+    assert tree(state) == before and SECRET not in capsys.readouterr().out
+
+
+def test_cli_profile_and_history_commands_emit_json_only(isolated, monkeypatch, capsys):
+    client, _state = isolated
+    for argv in (["profiles", "create", "google"], ["profiles", "create", "google", "--write"], ["profiles", "list"], ["profiles", "show", "google"], ["profiles", "apply", "google"], ["setup-history", "list"]):
+        monkeypatch.setattr(sys, "argv", ["codex-antigravity", *argv])
+        cli.main()
+        value = json.loads(capsys.readouterr().out)
+        assert value["schemaVersion"] == 1 and value["ok"] is True
+    assert not client.exists()
+
+
+def test_backup_tampering_and_uncertain_restore_are_preserved(isolated):
+    client, state = isolated
+    target = existing_config(client)
+    setup.create_profile(options(write=True))
+    receipt = setup.apply_profile(options(write=True))["receipt"]
+    root = setup.receipts_root() / receipt["id"]
+    (root / "config-before").write_bytes(b"changed backup")
+    current = target.read_bytes()
+    with pytest.raises(setup.SetupError, match="backup is missing or changed"):
+        setup.restore_receipt(receipt["id"], ["config"], write=True)
+    assert target.read_bytes() == current
+    (root / "config-before").write_text(ORIGINAL)
+    data = json.loads((root / "receipt.json").read_text())
+    data["stages"][2]["state"] = "restoring"
+    (root / "receipt.json").write_text(json.dumps(data))
+    before = tree(state), tree(client)
+    with pytest.raises(setup.SetupError, match="uncertain"):
+        setup.restore_receipt(receipt["id"], ["config"])
+    assert (tree(state), tree(client)) == before
+
+
+def test_malformed_and_future_receipts_are_not_rewritten(isolated):
+    client, state = isolated
+    existing_config(client)
+    journal = setup.SetupJournal(setup.setup_plan(options()))
+    journal.finish(ok=False)
+    for change in (lambda data: data.update(schemaVersion=99), lambda data: data["stages"].append("bad row"),
+                   lambda data: data["stages"][2].update(before={"exists": "yes", "sha256": "bad"})):
+        value = json.loads(journal.path.read_text())
+        change(value)
+        journal.path.write_text(json.dumps(value))
+        before = tree(state)
+        with pytest.raises(setup.SetupError):
+            setup.load_receipt(journal.id)
+        assert tree(state) == before
+        journal.persist()
+
+
+def test_repeated_restore_detects_subsequent_user_drift(isolated):
+    client, _state = isolated
+    target = existing_config(client)
+    setup.create_profile(options(write=True))
+    run_id = setup.apply_profile(options(write=True))["receipt"]["id"]
+    setup.restore_receipt(run_id, ["config"], write=True)
+    assert setup.restore_receipt(run_id, ["config"])["stages"][0]["status"] == "unchanged"
+    target.write_text(ORIGINAL + "\n# new user edit\n")
+    with pytest.raises(setup.SetupError, match="drifted"):
+        setup.restore_receipt(run_id, ["config"], write=True)
+    assert "new user edit" in target.read_text()
+
+
+def test_restore_write_failure_leaves_an_uncertain_receipt_with_recovery_paths(isolated, monkeypatch):
+    client, _state = isolated
+    target = existing_config(client)
+    setup.create_profile(options(write=True))
+    run_id = setup.apply_profile(options(write=True))["receipt"]["id"]
+    real_write = setup.SecureStore.atomic_write_bytes
+    def fail(self, path, content, **kwargs):
+        if path == target:
+            raise OSError("synthetic filesystem failure")
+        return real_write(self, path, content, **kwargs)
+    monkeypatch.setattr(setup.SecureStore, "atomic_write_bytes", fail)
+    with pytest.raises(OSError):
+        setup.restore_receipt(run_id, ["config"], write=True)
+    row = setup.load_receipt(run_id)[1]["stages"][2]
+    assert row["state"] == "restoring"
+    assert all(Path(value).exists() for value in row["restorePaths"].values())
+    with pytest.raises(setup.SetupError, match="uncertain"):
+        setup.restore_receipt(run_id, ["config"])
+
+
+def test_concurrent_profile_switches_refuse_a_stale_plan(isolated, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    client, _state = isolated
+    target = existing_config(client)
+    setup.create_profile(options(name="first", write=True))
+    setup.create_profile(options(name="second", model="gemini-3.8-flash", write=True))
+    real_plan = setup.setup_plan
+    barrier = threading.Barrier(2)
+    def plan(*args, **kwargs):
+        result = real_plan(*args, **kwargs)
+        barrier.wait(timeout=5)
+        return result
+    monkeypatch.setattr(setup, "setup_plan", plan)
+    def apply(name):
+        try:
+            return setup.apply_profile(options(name=name, write=True, activate=True))["ok"]
+        except setup.SetupError:
+            return False
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(apply, ("first", "second")))
+    assert sorted(results) == [False, True]
+    assert tomlkit.parse(target.read_text())["model"] in {"claude-sonnet-4-6", "gemini-3.8-flash"}
