@@ -28,6 +28,12 @@ def _number(value):
     return type(value) in (int, float, Decimal)
 
 
+def _comparison_number(value):
+    # JSON schema floats and argument Decimals must share JSON decimal semantics,
+    # rather than comparing against a float's exact binary approximation.
+    return Decimal(str(value)) if type(value) is float else value
+
+
 def _check(value):
     pending = [(value, 0)]
     budget = [MAX_NODES]
@@ -192,8 +198,9 @@ def _schema(value, schema, root, budget, depth=0, *, google=False):
                                ('minProperties','maxProperties',len(value) if type(value) is dict else None),
                                ('minimum','maximum',value if _number(value) else None)):
         if measured is not None:
-            if low in schema and measured < schema[low]: raise ToolCallError('function_schema_mismatch')
-            if high in schema and measured > schema[high]: raise ToolCallError('function_schema_mismatch')
+            measured = _comparison_number(measured)
+            if low in schema and measured < _comparison_number(schema[low]): raise ToolCallError('function_schema_mismatch')
+            if high in schema and measured > _comparison_number(schema[high]): raise ToolCallError('function_schema_mismatch')
 
 
 def declaration_sources(request, *, native=False):
@@ -332,10 +339,8 @@ def google_arguments(function, validator):
         raise ToolCallError('invalid_function_call')
     if 'willContinue' in function and type(function['willContinue']) is not bool:
         raise ToolCallError('invalid_function_call')
-    if function.get('willContinue') or function.get('partialArgs'):
+    if function.get('willContinue') or 'partialArgs' in function:
         raise ToolCallError('unsupported_partial_function_call')
-    if 'partialArgs' in function and type(function['partialArgs']) is not list:
-        raise ToolCallError('invalid_function_call')
     from .transform import _valid_tool_call_id
     call_id = function.get('id')
     if call_id and (not _valid_tool_call_id(call_id) or len(call_id) > 1024):

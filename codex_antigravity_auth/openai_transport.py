@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import json
 import math
@@ -70,7 +71,7 @@ class PreparedOpenAIRequest:
     timeout: float
 
 
-def _message_output(message: object, *, tool_validator=None, tool_errors=None) -> list[dict[str, Any]]:
+def _message_output(message: object, *, tool_validator=None, tool_errors=None, duplicate_ids=()) -> list[dict[str, Any]]:
     tool_validator = tool_validator or FunctionCallValidator()
     tool_errors = tool_errors if tool_errors is not None else []
     if not isinstance(message, dict):
@@ -114,6 +115,9 @@ def _message_output(message: object, *, tool_validator=None, tool_errors=None) -
             try:
                 if not isinstance(tool_call, dict) or tool_call.get("type", "function") != "function":
                     raise ToolCallError("invalid_function_call")
+                provider_id = tool_call.get("id")
+                if isinstance(provider_id, str) and provider_id in duplicate_ids:
+                    raise ToolCallError("conflicting_function_call")
                 function = tool_call.get("function")
                 if not isinstance(function, dict):
                     raise ToolCallError("invalid_function_call")
@@ -247,7 +251,6 @@ class ChatResponseAccumulator:
             )
         if self._refusal and not output:
             output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
-        from collections import Counter
         counts = Counter(self._tool_ids.values())
         for index in self._tool_order:
             if index in self._invalid_tool_indices:
@@ -380,6 +383,16 @@ class OpenAICompatibleTransport:
         choices = payload.get("choices", [])
         if not isinstance(choices, list):
             choices = []
+        # Count raw IDs before validating arguments so a malformed sibling cannot
+        # make an otherwise ambiguous provider identity appear safe to execute.
+        call_ids = Counter()
+        for choice in choices:
+            message = choice.get("message") if isinstance(choice, dict) else None
+            calls = message.get("tool_calls") if isinstance(message, dict) else None
+            if isinstance(calls, list):
+                call_ids.update(call["id"] for call in calls if isinstance(call, dict)
+                                and isinstance(call.get("id"), str) and call["id"])
+        duplicate_ids = {call_id for call_id, count in call_ids.items() if count > 1}
         output: list[dict[str, Any]] = []
         finish_reason: str | None = None
         refusal = False
@@ -393,7 +406,8 @@ class OpenAICompatibleTransport:
             message = choice.get("message")
             if isinstance(message, dict):
                 refusal = refusal or bool(message.get("refusal"))
-            output.extend(_message_output(message, tool_validator=tool_validator, tool_errors=tool_errors))
+            output.extend(_message_output(message, tool_validator=tool_validator, tool_errors=tool_errors,
+                                          duplicate_ids=duplicate_ids))
         if refusal and not output:
             output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
         usage = payload.get("usage")

@@ -33,7 +33,9 @@ Local schema checking is bounded and deliberately limited: types (including
 number/boolean distinction), required properties, properties, enums/const,
 additional properties when no regex properties exist, items/prefix items,
 string/array/object size bounds, numeric minimum/maximum, local references and
-allOf/anyOf/oneOf. Google OpenAPI-style nullable fields are recognized. Regex,
+allOf/anyOf/oneOf. Numeric bounds compare JSON decimal values without introducing
+binary-float boundary errors; integer values retain their exact precision.
+Google OpenAPI-style nullable fields are recognized. Regex,
 format, conditional/dependency and remote-reference semantics are not evaluated
 locally. No remote schema is fetched and no regex is executed. Other constraints
 remain the provider's responsibility; this is not a local strict-schema
@@ -41,6 +43,7 @@ certification or authorization to execute a call.
 
 ## Failure and streaming behavior
 
+Duplicate provider call IDs invalidate every call sharing that identity.
 Invalid calls are removed from executable output while validated sibling text,
 reasoning and valid calls remain. A completed response with invalid calls becomes
 `failed` with a fixed code/message that contains no argument values. A provider's
@@ -60,8 +63,10 @@ published before its validation result. Conflicting finalized argument snapshots
 fail rather than choosing one. Ordinary in-progress argument strings need not yet
 be valid JSON.
 
-Google partialArgs/willContinue forms are explicitly unsupported here. They never
-become fabricated complete calls, and a later fragment cannot erase that failure.
+Google `partialArgs` is unsupported whenever present, including an empty list.
+`willContinue: true` is likewise unsupported; `willContinue: false` without
+`partialArgs` permits normal finalized-call validation. Unsupported partial forms
+never become fabricated complete calls, and a later fragment cannot erase that failure.
 This does not claim live Antigravity support for those newer Google fields.
 
 Validation limits: 8 Mi characters of argument text, 100,000 decoded argument or

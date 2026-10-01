@@ -153,6 +153,26 @@ def test_schema_constraints_do_not_coerce_boolean_to_integer_or_ignore_nested_ru
             validator.arguments('lookup',json.dumps(value))
 
 
+@pytest.mark.parametrize('bound,value,accepted', [
+    ({'minimum':0.1}, '0.1', True), ({'maximum':0.3}, '0.3', True),
+    ({'minimum':0.1}, '0.099999999999999999999', False),
+    ({'maximum':0.3}, '0.300000000000000000001', False),
+    ({'minimum':-0.3, 'maximum':-0.1}, '-0.3', True),
+    ({'minimum':-0.3, 'maximum':-0.1}, '-0.1', True),
+    ({'minimum':9007199254740993}, '9007199254740993', True),
+    ({'minimum':9007199254740993}, '9007199254740992', False),
+])
+def test_numeric_bounds_compare_json_values_without_binary_float_rounding(bound, value, accepted):
+    validator = FunctionCallValidator(request({'type':'object','properties':{'q':{'type':'number', **bound}},'required':['q']}))
+    arguments = '{"q":' + value + '}'
+    if accepted:
+        assert validator.arguments('lookup', arguments) == arguments
+    else:
+        with pytest.raises(ToolCallError) as caught:
+            validator.arguments('lookup', arguments)
+        assert caught.value.code == 'function_schema_mismatch'
+
+
 def test_local_refs_are_bounded_and_remote_refs_are_never_fetched():
     schema = {'type':'object','properties':{'q':{'$ref':'#/$defs/value'}},'$defs':{'value':{'type':'string','minLength':2}}}
     validator = FunctionCallValidator(request(schema))
@@ -211,6 +231,44 @@ def test_google_partial_forms_never_become_completed_calls():
     assert not any(item['type'] == 'function_call' for item in result.output)
 
 
+@pytest.mark.parametrize('partial', [[], [{'jsonPath':'$.q', 'stringValue':'prefix'}]])
+@pytest.mark.parametrize('stream', [False, True])
+def test_google_partial_args_presence_fails_and_preserves_independent_siblings(partial, stream):
+    payload = {'candidates':[{'content':{'parts':[{'text':'usable'},
+        {'functionCall':{'name':'lookup','id':'partial','args':{'q':'prefix'},'partialArgs':partial,'willContinue':False}},
+        {'functionCall':{'name':'lookup','id':'partial','args':{'q':'suffix'}}},
+        {'functionCall':{'name':'lookup','id':'good','args':{'q':'fixture'},'willContinue':False}}]},'finishReason':'STOP'}],
+        'usageMetadata':{'promptTokenCount':1,'candidatesTokenCount':2,'totalTokenCount':3}}
+    if stream:
+        accumulator = GoogleResponseAccumulator(tool_validator=FunctionCallValidator(request(), route='google'))
+        accumulator.consume(payload)
+        result = accumulator.finalize()
+    else:
+        result = GoogleTransport(timeout=0).parse_response(payload, request=request())
+    assert result.terminal.kind is TerminalKind.FAILED
+    assert result.terminal.error_code == 'unsupported_partial_function_call'
+    assert any(row['type'] == 'message' for row in result.output)
+    assert [row['call_id'] for row in result.output if row['type'] == 'function_call'] == ['good']
+    assert result.usage['total_tokens'] == 3
+
+
+@pytest.mark.parametrize('separate_choices', [False, True])
+@pytest.mark.parametrize('second_arguments', ['{"q":"other"}', '{'])
+def test_chat_duplicate_call_ids_remove_all_ambiguous_calls_but_keep_siblings(separate_choices, second_arguments):
+    calls = [{'id':'duplicate','function':{'name':'lookup','arguments':'{"q":"fixture"}'}},
+             {'id':'duplicate','function':{'name':'lookup','arguments':second_arguments}},
+             {'id':'good','function':{'name':'lookup','arguments':'{"q":"fixture"}'}}]
+    groups = [[call] for call in calls] if separate_choices else [calls]
+    payload = {'choices':[{'message':{'content':'usable','tool_calls':group},'finish_reason':'tool_calls'} for group in groups],
+               'usage':{'prompt_tokens':1,'completion_tokens':2,'total_tokens':3}}
+    result = OpenAICompatibleTransport(timeout=0).parse_chat_response(payload, request=request())
+    assert result.terminal.kind is TerminalKind.FAILED
+    assert result.terminal.error_code == 'conflicting_function_call'
+    assert any(row['type'] == 'message' for row in result.output)
+    assert [row['call_id'] for row in result.output if row['type'] == 'function_call'] == ['good']
+    assert result.usage['total_tokens'] == 3
+
+
 def test_chat_malformed_finished_arguments_do_not_erase_text_or_valid_sibling_calls():
     payload = {'choices':[{'message':{'content':'usable','tool_calls':[
         {'id':'bad','function':{'name':'lookup','arguments':'{'}},
@@ -239,12 +297,17 @@ def test_custom_native_tool_input_is_not_parsed_as_json():
 
 @pytest.mark.parametrize('route', ['google','byok','api_key','codex_oauth'])
 @pytest.mark.parametrize('stream', [False,True])
-@pytest.mark.parametrize('case', ['malformed','undeclared','schema','valid'])
+@pytest.mark.parametrize('case', ['malformed','undeclared','schema','valid','minimum','maximum','outside_minimum','outside_maximum'])
 def test_actual_routes_apply_original_function_contract_without_retries(monkeypatch, route, stream, case):
     from unittest.mock import AsyncMock
     req = request()
     name = 'other' if case == 'undeclared' else 'lookup'
     args = '{' if case == 'malformed' else '{"q":3}' if case == 'schema' else '{"q":"fixture"}'
+    if case in {'minimum','maximum','outside_minimum','outside_maximum'}:
+        req = request({'type':'object','properties':{'q':{'type':'number','minimum':0.1,'maximum':0.3}},'required':['q']})
+        number = {'minimum':'0.1', 'maximum':'0.3', 'outside_minimum':'0.09', 'outside_maximum':'0.31'}[case]
+        args = '{"q":' + number + '}'
+    valid = case in {'valid','minimum','maximum'}
     native_items = [function_item(args,name=name),text_item()]
     if route == 'google':
         google_args = ['invalid'] if case == 'malformed' else json.loads(args)
@@ -288,11 +351,11 @@ def test_actual_routes_apply_original_function_contract_without_retries(monkeypa
         final = [event['response'] for event in emitted if event['type'] in {'response.completed','response.failed','response.incomplete'}][-1]
     else:
         final = result.json()
-    assert final['status'] == ('completed' if case == 'valid' else 'failed')
+    assert final['status'] == ('completed' if valid else 'failed')
     assert any(item['type'] == 'message' for item in final['output'])
     calls = [item for item in final['output'] if item['type'] == 'function_call']
-    assert bool(calls) == (case == 'valid')
-    if stream and case != 'valid':
+    assert bool(calls) == valid
+    if stream and not valid:
         assert not any(event['type'] == 'response.function_call_arguments.done' for event in emitted)
 
 
