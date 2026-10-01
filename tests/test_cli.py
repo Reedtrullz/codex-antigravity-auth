@@ -1673,7 +1673,7 @@ class TestV3NativeSetup(unittest.TestCase):
                                     run_setup(args)
 
         printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
-        self.assertIn("still booting", printed_text)
+        self.assertIn("Setup stage gateway failed", printed_text)
         self.assertIn("codex-antigravity status --port 51122", printed_text)
 
     def test_setup_check_reports_ignored_action_flags(self):
