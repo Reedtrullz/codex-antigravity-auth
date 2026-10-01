@@ -20,6 +20,7 @@ from .retention import control_metadata
 VERSION = 1
 MAX_CHUNKS = 512
 MAX_EVENTS = 2048
+MAX_LINEAGE_RUNS = 64
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
 SHA = re.compile(r'[0-9a-f]{64}\Z')
@@ -180,7 +181,7 @@ class Checkpoint:
                 self.events.append(entry)
                 self.latest[entry['index']] = entry
             prior = manifest.get('priorRuns', {})
-            require(isinstance(prior, dict) and len(prior) < 64 and all(RUN_ID_RE.fullmatch(key) for key in prior), 'Invalid checkpoint run lineage')
+            require(isinstance(prior, dict) and len(prior) + 2 <= MAX_LINEAGE_RUNS and all(RUN_ID_RE.fullmatch(key) for key in prior), 'Invalid checkpoint run lineage')
             require(run_id not in prior and self.run_id not in prior, 'Checkpoint lineage must not contain cycles')
             require(all(isinstance(value, dict) and self.accounting(value) == value for value in prior.values()), 'Invalid checkpoint accounting')
             self.prior_runs = dict(prior)

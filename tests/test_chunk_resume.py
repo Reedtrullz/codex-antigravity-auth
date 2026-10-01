@@ -532,3 +532,19 @@ def test_another_advertised_model_is_not_equivalent_to_the_checkpoint(anti_fixtu
         capsys.readouterr()
         assert anti.main(review_argv('second','--resume-from','first','--rerun-chunk','3','--model','fixture:other-model'))==1
         assert 'changed' in capsys.readouterr().err and len(seen)==3
+
+
+@pytest.mark.parametrize('prior_count,allowed',[(62,True),(63,False)])
+def test_lineage_bound_counts_prior_source_and_current_run(tmp_path,prior_count,allowed):
+    write_record(tmp_path,'source');source=create(tmp_path)
+    source.prior_runs={f'prior_{index}':{} for index in range(prior_count)}
+    source.publish()
+    write_record(tmp_path,'source',status='error',checkpoint=source)
+    write_record(tmp_path,'target')
+    if allowed:
+        target=create(tmp_path,'target',resume='source')
+        assert len(target.prior_runs)+1==cp.MAX_LINEAGE_RUNS==64
+    else:
+        with pytest.raises(cp.CheckpointError,match='lineage'):
+            create(tmp_path,'target',resume='source')
+        assert not (tmp_path/'target/checkpoints').exists()
