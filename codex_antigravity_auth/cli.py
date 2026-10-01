@@ -71,6 +71,7 @@ from .oauth import (
     token_expires_in_seconds,
 )
 from .service import install_service, service_status, uninstall_service
+from .secure_store import file_lock
 from .service_manager import observed_service_result
 from .storage import (
     account_store_diagnostics,
@@ -283,36 +284,87 @@ def install_codex_skill(
     skill_root = bundled_skill_root()
     destination = skill_dir.expanduser() / BUNDLED_CODEX_SKILL_NAME
     bundled_manifest = _resource_tree_manifest(skill_root)
+    required = {"SKILL.md", "agents/openai.yaml", "scripts/anti.py", "tests/test_anti.py"}
+    if not required <= bundled_manifest.keys():
+        raise RuntimeError("Bundled Anti skill is incomplete; reinstall the package before installing the skill")
 
-    if destination.is_symlink():
-        raise RuntimeError(f"Refusing to replace symlinked Codex skill path: {destination}")
-
-    backup_path = None
-    if destination.exists():
+    def plan() -> tuple[str, Path | None]:
+        if destination.is_symlink():
+            raise RuntimeError(f"Refusing to replace symlinked Codex skill path: {destination}")
+        if not destination.exists():
+            return "installed", None
         if destination.is_dir() and _path_tree_manifest(destination) == bundled_manifest:
-            return "unchanged", destination, None
+            return "unchanged", None
         if not force:
             raise RuntimeError(
                 f"Codex skill already exists at {destination}. "
                 "Use --force to back it up and replace it with the bundled skill."
             )
         backup_root = _skill_backup_root(skill_dir.expanduser())
+        if backup_root.is_symlink():
+            raise RuntimeError(f"Refusing symlinked skill backup directory: {backup_root}")
         backup_base = backup_root / f"{destination.name}.backup-{time.strftime('%Y%m%d%H%M%S')}"
         backup_path = backup_base
         suffix = 2
-        while backup_path.exists():
+        while backup_path.exists() or backup_path.is_symlink():
             backup_path = backup_base.with_name(f"{backup_base.name}-{suffix}")
             suffix += 1
-        if not dry_run:
-            backup_root.mkdir(parents=True, exist_ok=True)
-            destination.rename(backup_path)
-            _copy_resource_tree(skill_root, destination)
-        return "replaced", destination, backup_path
+        return "replaced", backup_path
 
-    if not dry_run:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        _copy_resource_tree(skill_root, destination)
-    return "installed", destination, None
+    action, backup_path = plan()
+    if dry_run or action == "unchanged":
+        return action, destination, backup_path
+    # Serialize installers, then re-evaluate in case another installer finished.
+    lock_path = destination.with_name(f".{destination.name}.lock")
+    if lock_path.is_symlink() or (lock_path.exists() and not lock_path.is_file()):
+        raise RuntimeError(f"Refusing unsafe skill install lock: {lock_path}")
+    with file_lock(destination):
+        action, backup_path = plan()
+        if action == "unchanged":
+            return action, destination, backup_path
+        published_and_validated = False
+        try:
+            with tempfile.TemporaryDirectory(prefix=f".{destination.name}.stage-", dir=destination.parent) as temporary:
+                staging_root = Path(temporary)
+                staged = staging_root / "payload"
+                _copy_resource_tree(skill_root, staged)
+                staged.chmod(0o700)
+                if _path_tree_manifest(staged) != bundled_manifest:
+                    raise RuntimeError("Staged Anti skill failed manifest validation; existing skill was not changed")
+                moved_previous = False
+                published = False
+                try:
+                    if backup_path is not None:
+                        backup_path.parent.mkdir(parents=True, exist_ok=True)
+                        destination.rename(backup_path)
+                        moved_previous = True
+                    staged.rename(destination)
+                    published = True
+                    if _path_tree_manifest(destination) != bundled_manifest:
+                        raise RuntimeError("Published Anti skill failed manifest validation")
+                    published_and_validated = True
+                except BaseException as exc:
+                    try:
+                        if published:
+                            destination.rename(staging_root / "failed-install")
+                        if moved_previous:
+                            backup_path.rename(destination)
+                    except BaseException as restore_exc:
+                        recovery = (
+                            f"Previous installation remains at {backup_path}. Move {destination} aside if it exists, "
+                            f"then rename {backup_path} to {destination}."
+                            if moved_previous else f"Inspect {destination} and move any incomplete installation aside before retrying."
+                        )
+                        raise RuntimeError(f"Skill replacement failed and automatic restore failed. {recovery}") from restore_exc
+                    raise
+        except Exception as exc:
+            if published_and_validated:
+                raise RuntimeError(
+                    f"Skill is installed at {destination}, but staging cleanup failed at {temporary}. "
+                    f"Previous installation backup: {backup_path or 'none'}. Remove only that staging directory after checking it."
+                ) from exc
+            raise
+    return action, destination, backup_path
 
 
 def codex_skill_short_description(skill_path: Path) -> str | None:
