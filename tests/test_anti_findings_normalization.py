@@ -98,3 +98,21 @@ def test_judge_input_treats_merging_as_complete_and_actual_loss_as_partial():
             caveats=[],
         )
         assert metadata["judge_input_contract_status"] == expected
+
+
+def test_duplicate_corroboration_does_not_amplify_judge_prompt_past_default_budget():
+    inputs = [finding(evidence=f"evidence-{index}:" + "x" * 1000, verify=f"check {index}") for index in range(45)]
+    raw = json.dumps({"findings": inputs})
+    assert len(raw) < 60_000
+    contract, _ = parse(inputs)
+    assert len(contract["findings"][0]["corroboration"]) == 45
+    metadata = {}
+    prompt, _, _ = anti.build_panel_synthesis_prompt(
+        panel_mode="ask", source_prompt="fixture", roles=[], max_chars=120_000,
+        panel_results=[{"status": "success", "model": "fixture", "output_text": raw}],
+        metadata=metadata, caveats=[],
+    )
+    assert len(prompt) < 120_000
+    assert metadata["judge_input_contract_status"] == "complete"
+    for item in inputs:
+        assert prompt.count(item["evidence"]) == 1
