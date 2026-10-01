@@ -1992,7 +1992,7 @@ class TestV3NativeSetup(unittest.TestCase):
         self.assertTrue(info["reachable"])
         status_info.assert_called_once_with(51122, wait=True, timeout=5.0)
         self.assertTrue(info["service"]["reachable"])
-        self.assertEqual(info["service"]["state"], "ready")
+        self.assertEqual(info["service"]["state"], "degraded")
 
     def test_run_gateway_status_marks_registered_but_unreachable_service_degraded(self):
         with patch(
@@ -2832,19 +2832,17 @@ class TestVNextPolishCli(unittest.TestCase):
         self.assertEqual(mock_run.call_args.args[0][:3], ["taskkill", "/PID", "12345"])
 
     def test_service_install_uses_windows_scheduled_task_command(self):
-        proc = MagicMock()
-        proc.returncode = 0
-        proc.stdout = ""
-        with patch("codex_antigravity_auth.service._run", return_value=proc) as mock_run:
-            status = install_service(51122, "127.0.0.1", platform_name="windows")
-
-        self.assertEqual(status["platform"], "windows")
-        create_call = mock_run.call_args_list[0].args[0]
-        self.assertEqual(create_call[:2], ["schtasks", "/Create"])
-        self.assertIn("/TR", create_call)
-        task_command = create_call[create_call.index("/TR") + 1]
-        self.assertIn('"start"', task_command)
-        self.assertIn('"--port"', task_command)
+        from codex_antigravity_auth import service_drift
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, '', '')
+        with patch("codex_antigravity_auth.service._run", side_effect=run):
+            evidence, success = service_drift._activate(51122, 'windows', None, 'fixture-python -m codex_antigravity_auth.cli start --port 51122')
+        self.assertTrue(success)
+        self.assertEqual(calls[0][:2], ['schtasks', '/Create'])
+        self.assertIn('/TR', calls[0])
+        self.assertEqual(calls[1], ['schtasks', '/Run', '/TN', 'CodexAntigravityGateway51122'])
 
     def test_stop_hints_when_durable_service_is_installed(self):
         with TemporaryDirectory() as tmp:
@@ -2902,7 +2900,7 @@ class TestVNextPolishCli(unittest.TestCase):
                         result = run_service_command(Namespace(service_command="status", port=51122, json=False))
 
         self.assertTrue(result["gateway"]["reachable"])
-        self.assertEqual(result["service"]["state"], "ready")
+        self.assertEqual(result["service"]["state"], "degraded")
         printed = "\n".join(call.args[0] for call in mock_print.call_args_list if call.args)
         self.assertIn("Service status: installed, active", printed)
         self.assertIn("Gateway process: reachable (7 model(s) at http://127.0.0.1:51122/v1)", printed)

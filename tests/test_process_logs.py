@@ -48,14 +48,15 @@ def test_account_refresh_and_cooldown_runtime_messages_never_include_identity_or
     monkeypatch.setattr("codex_antigravity_auth.oauth.discover_project_id", lambda _: "private-project-sentinel")
     manager = accounts.AccountManager()
     monkeypatch.setattr(manager, "_mutate_state", lambda f: f(manager._state_owner))
+    monkeypatch.setattr(accounts, "update_accounts", lambda callback: callback({"accounts": [account], "accountState": {}}))
     with logs.runtime_logging(path, console=False):
-        assert accounts._apply_token_refresh(account, "fixture-refresh")
+        assert manager._refresh_snapshot(dict(account)) == "refreshed"
         manager.mark_failure(account["email"], "fixture-unlabelled-secret person@example.invalid", status_code=429)
         del account["projectId"]
         monkeypatch.setattr("codex_antigravity_auth.oauth.discover_project_id", Mock(side_effect=ValueError("fixture-unlabelled-secret")))
-        assert accounts._apply_token_refresh(account, "fixture-refresh")
+        assert manager._refresh_snapshot(dict(account)) == "refreshed"
     output = path.read_text()
-    assert "acct_" in output and "ValueError" in output and "Discovered project" in output
+    assert "acct_" in output and "Project discovery failed during token refresh" in output
     for sentinel in ("person@example.invalid", "private-project-sentinel", "fixture-access", "fixture-refresh", "fixture-unlabelled-secret"):
         assert sentinel not in output
     assert account["email"] == "person@example.invalid" and account["accessToken"] == "fixture-access"

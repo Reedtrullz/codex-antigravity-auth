@@ -134,6 +134,8 @@ def _outcome(command, data, action=None):
             service = data.get("service", {})
             if service.get("state") == "failed":
                 errors.append("service_failed")
+            elif service.get("state") == "degraded":
+                warnings.append("service_identity_or_configuration_drift")
             elif action == "status" or command == "status":
                 if service.get("state") == "not_installed":
                     warnings.append("service_not_installed")

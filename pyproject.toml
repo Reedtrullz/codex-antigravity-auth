@@ -56,6 +56,7 @@ codex_antigravity_auth = [
   "schemas/*.json",
   "SETUP.md",
   "PROCESS_LOGS.md",
+  "SERVICES.md",
 
   "NATIVE_RESPONSES.md",
   "REQUEST_DEADLINES.md",

@@ -69,7 +69,7 @@ from .oauth import (
     generate_pkce,
     token_expires_in_seconds,
 )
-from .service import install_service, service_status, uninstall_service
+from .service import install_service, service_status, uninstall_service, repair_service, restart_service
 from .secure_store import file_lock
 from .service_manager import observed_service_result
 from .storage import (
@@ -1436,6 +1436,19 @@ def main():
     service_status_parser.add_argument("--port", type=int, default=51122, help="Gateway server port")
     service_status_parser.add_argument("--json", action="store_true", help="Print service status as JSON")
 
+    for operation in ('repair', 'restart'):
+        service_operation = service_sub.add_parser(operation, help=f'Plan or explicitly {operation} the recorded service')
+        service_operation.add_argument('--port', type=int, default=51122)
+        service_operation.add_argument('--write', action='store_true', help='Apply the operation (default is preview)')
+        service_operation.add_argument('--json', action='store_true')
+        if operation == 'repair':
+            service_operation.add_argument('--host', default=None)
+            references = service_operation.add_mutually_exclusive_group()
+            references.add_argument('--op-env-file')
+            references.add_argument('--op-environment')
+            references.add_argument('--clear-secret-runtime', action='store_true')
+            service_operation.add_argument('--unified-model-picker', action=argparse.BooleanOptionalAction, default=None)
+
     logs_parser = subparsers.add_parser("logs", help="Show, summarize, or clean sanitized gateway request logs")
     logs_parser.add_argument("logs_action", nargs="?", choices=["show", "clean", "summary"], default="show", help="Log action")
     logs_parser.add_argument("--tail", type=int, default=50, help="Number of recent entries to show")
@@ -1507,6 +1520,7 @@ def main():
         action="store_true",
         help="Allow non-loopback clients when ANTIGRAVITY_GATEWAY_TOKEN is set to at least 32 visible ASCII characters",
     )
+    start_parser.add_argument("--service-id", help=argparse.SUPPRESS)
     start_parser.add_argument("--process-log", help=argparse.SUPPRESS)
     start_parser.add_argument("--quiet-runtime-console", action="store_true", help=argparse.SUPPRESS)
     start_parser.add_argument("--background", action="store_true", help="Start the gateway as a background process with pid/log files")
@@ -1694,6 +1708,11 @@ def main():
             else:
                 print(f"[*] No stored BYOK provider named {args.provider}")
     elif args.command == "start":
+        from .service_manifest import configure_runtime
+        try:
+            configure_runtime(args)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         ensure_unified_env_for_gateway(args)
         if args.background:
             start_gateway_background(args)

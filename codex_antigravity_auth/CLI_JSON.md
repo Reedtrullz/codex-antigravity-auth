@@ -79,3 +79,5 @@ time window; records without timestamps cannot establish membership.
 Tests use temporary namespaces, synthetic credentials and blocked connections.
 Local POSIX private-file checks are not native Windows ACL evidence; the shared
 protection helper's platform limitations still apply.
+
+Service `repair` and `restart` share the version-1 envelope and default to previews; `--write` explicitly applies them. Service data adds `drift`, `identity_status`, `owned_ready` and recovery paths. A reachable foreign/unverified runtime is degraded, while an unsuccessful applied repair/restart returns a failed envelope. See [service ownership and recovery](SERVICES.md).

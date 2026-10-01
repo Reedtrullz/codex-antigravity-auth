@@ -361,3 +361,7 @@ still show local account identity. See [the process-log contract](codex_antigrav
 ## Request time budgets
 
 Google, BYOK and native OpenAI requests now share a monotonic 60-second preparation/nonstream deadline. Streaming has separate 60-second event-idle and 30-minute total defaults, including preparation, with validated metadata overrides. Downstream backpressure and resource cleanup are bounded; timeouts never trigger replay after visible output. See [request deadlines and cleanup](codex_antigravity_auth/REQUEST_DEADLINES.md) for overrides, failure outcomes, cleanup grace and cancellation limits.
+
+## Service configuration drift
+
+`service status` distinguishes catalog reachability from owned service readiness. New installs record nonsecret launch intent; `service repair` and `service restart` preview changes until `--write` is supplied. Repairs retain protected backups and report incomplete registration explicitly. See [service identity, migration and recovery](codex_antigravity_auth/SERVICES.md).
