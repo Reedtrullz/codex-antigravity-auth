@@ -302,6 +302,7 @@ def test_windows_job_creation_failure_never_starts_a_process(checks, monkeypatch
 def test_windows_job_assignment_failure_keeps_gate_closed(checks, monkeypatch):
     _, verifier, root = checks
     monkeypatch.setattr(verifier, "WINDOWS", True)
+    guarded_windows_fixture(monkeypatch, verifier)
     marker = root / "must-not-run"
     state = {"closed": False}
     class Job:
@@ -311,7 +312,7 @@ def test_windows_job_assignment_failure_keeps_gate_closed(checks, monkeypatch):
         def close(self):
             state["closed"] = True
     monkeypatch.setattr(verifier, "_create_windows_job", Job)
-    command = [sys.executable, "-I", "-S", "-c", "from pathlib import Path; Path('must-not-run').write_text('bad')"]
+    command = [sys.executable, "-c", "from pathlib import Path; Path('must-not-run').write_text('bad')"]
     outcome = verifier._run_check(command, b"fixture", root)
     assert outcome["reason"] == "process_control_unavailable"
     assert state["closed"] and not marker.exists()
@@ -320,6 +321,7 @@ def test_windows_job_assignment_failure_keeps_gate_closed(checks, monkeypatch):
 def test_windows_gated_wrapper_starts_only_after_assignment(checks, monkeypatch):
     _, verifier, root = checks
     monkeypatch.setattr(verifier, "WINDOWS", True)
+    guarded_windows_fixture(monkeypatch, verifier)
     state = {"assigned": False, "closed": False}
     marker = root / "checker-started"
     class Job:
@@ -330,7 +332,7 @@ def test_windows_gated_wrapper_starts_only_after_assignment(checks, monkeypatch)
         def close(self):
             state["closed"] = True
     monkeypatch.setattr(verifier, "_create_windows_job", Job)
-    command = [sys.executable, "-I", "-S", "-c", "from pathlib import Path; import sys; Path('checker-started').write_text(sys.stdin.buffer.read().decode()); print('synthetic result')"]
+    command = [sys.executable, "-c", "from pathlib import Path; import sys; Path('checker-started').write_text(sys.stdin.buffer.read().decode()); print('synthetic result')"]
     outcome = verifier._run_check(command, b"synthetic captured bytes", root)
     assert outcome["status"] == "passed"
     assert state == {"assigned": True, "closed": True}
@@ -343,6 +345,7 @@ def test_windows_job_adapter_terminates_synthetic_descendants_on_timeout(checks,
     import signal
     _, verifier, root = checks
     monkeypatch.setattr(verifier, "WINDOWS", True)
+    guarded_windows_fixture(monkeypatch, verifier)
     monkeypatch.setattr(verifier, "CHECK_TIMEOUT_SECONDS", 0.8)
     state = {"assigned": False, "closed": False}
     class Job:
@@ -359,11 +362,21 @@ def test_windows_job_adapter_terminates_synthetic_descendants_on_timeout(checks,
                 self.pid = None
             state["closed"] = True
     monkeypatch.setattr(verifier, "_create_windows_job", Job)
-    code = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-I','-S','-c','import time; time.sleep(20)']); print('synthetic-child-started',flush=True); time.sleep(20)"
-    outcome = verifier._run_check([sys.executable, "-I", "-S", "-c", code], b"", root)
+    code = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(20)']); print('synthetic-child-started',flush=True); time.sleep(20)"
+    outcome = verifier._run_check([sys.executable, "-c", code], b"", root)
     assert outcome["reason"] == "tool_timeout"
     assert "synthetic-child-started" in outcome["output"]
     assert state == {"assigned": True, "closed": True}
+
+
+def guarded_windows_fixture(monkeypatch, verifier):
+    # Exercise the actual gated wrapper with synthetic children while retaining
+    # startup isolation. Production still requests -I/-S for its own wrapper.
+    original = verifier.subprocess.Popen
+    def start(argv, **kwargs):
+        assert argv[:4] == [sys.executable, '-I', '-S', '-c']
+        return original([argv[0], *argv[3:]], **kwargs)
+    monkeypatch.setattr(verifier.subprocess, 'Popen', start)
 
 
 def test_windows_job_uses_kill_on_close_and_required_assignment_rights(monkeypatch):

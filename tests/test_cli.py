@@ -280,7 +280,7 @@ wire_api = "responses"
         self.assertFalse(ready)
         self.assertIn("active model_provider", reason)
 
-    @patch("urllib.request.urlopen", side_effect=urllib.error.URLError("fixture offline"))
+    @patch("codex_antigravity_auth.cli.open_http_request", side_effect=urllib.error.URLError("fixture offline"))
     def test_run_doctor_byok_only_fails_for_missing_provider_key(self, _urlopen):
         provider = {
             "displayName": "DeepSeek",

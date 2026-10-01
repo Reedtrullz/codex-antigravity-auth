@@ -271,6 +271,11 @@ content and provenance limits follow the
 
 ### Anti repository submission policies
 
+For explicit repository audits, use `review --scope repository` with optional
+literal `--review-root` / `--exclude-path` selections. Working-tree reviews report
+excluded untracked files; `--include-untracked` opts in to their content. Staged
+scope stays unchanged. See [review inventory and coverage limits](codex_antigravity_auth/skills/anti/SCOPES.md).
+
 `consult`, `review`, `plan`, `compare`, `panel` and `workflow` accept opt-in
 `--data-policy PATH`. Exact gateway/model/stage allowlists and forbidden source
 paths restrict the chosen run. Bounded secret-pattern checks stop a submission

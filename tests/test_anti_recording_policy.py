@@ -1,3 +1,4 @@
+from standalone import without_installed_packages
 """Inspect every persisted fixture file; never contact a provider or real store."""
 import argparse
 import importlib.util
@@ -191,7 +192,7 @@ def test_standalone_copy_uses_same_retention_without_installed_package(isolated_
     copied = root / "copy"
     shutil.copytree(SCRIPT.parent, copied, ignore=shutil.ignore_patterns("__pycache__"))
     probe = "from anti_lib.retention import summary_projection; assert len(summary_projection('x'*4000)) == 1600"
-    subprocess.run([sys.executable, "-S", "-c", probe], cwd=copied, check=True)
+    subprocess.run([sys.executable, "-c", without_installed_packages(probe)], cwd=copied, check=True)
 
 
 @pytest.mark.parametrize("retention", ["never", "summary", "full"])

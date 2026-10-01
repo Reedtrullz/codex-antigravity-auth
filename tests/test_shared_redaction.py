@@ -1,3 +1,4 @@
+from standalone import without_installed_packages
 """One synthetic credential corpus for the gateway and standalone Anti."""
 
 import json
@@ -114,8 +115,8 @@ from anti_lib.redaction import redact_sensitive_text
 corpus = json.load(sys.stdin)
 print(json.dumps([redact_sensitive_text(text) for text, _ in corpus]))
 """
-    result = subprocess.run([sys.executable, "-I", "-S", "-c", code, str(tmp_path)],
-                            input=json.dumps(CORPUS), text=True, capture_output=True, timeout=10)
+    result = subprocess.run([sys.executable, "-c", without_installed_packages(code), str(tmp_path)],
+                            cwd=tmp_path, input=json.dumps(CORPUS), text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     outputs = json.loads(result.stdout)
     assert outputs == [anti.redact_sensitive_text(text) for text, _ in CORPUS]

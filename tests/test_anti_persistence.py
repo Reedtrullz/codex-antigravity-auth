@@ -1,3 +1,4 @@
+from standalone import without_installed_packages
 """Synthetic persistence failures, competing writers and standalone processes."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -182,8 +183,8 @@ try:
 except anti.AntiError:
     raise SystemExit(3)
 '''
-    processes = [subprocess.Popen([sys.executable, "-S", "-c", code, str(SCRIPT.parent), str(anti.RUNS_DIR)],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(4)]
+    processes = [subprocess.Popen([sys.executable, "-c", without_installed_packages(code), str(SCRIPT.parent), str(anti.RUNS_DIR)],
+                                  cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(4)]
     codes = []
     for process in processes:
         _, stderr = process.communicate(timeout=15)

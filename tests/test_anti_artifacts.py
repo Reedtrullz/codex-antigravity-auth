@@ -1,3 +1,4 @@
+from standalone import without_installed_packages
 """Saved publication fixtures use synthetic bytes and temporary roots only."""
 import importlib.util
 import json
@@ -256,7 +257,7 @@ def test_standalone_reader_validates_the_same_publication(publications, tmp_path
     copied = tmp_path / "standalone"
     shutil.copytree(SCRIPT.parent, copied, ignore=shutil.ignore_patterns("__pycache__"))
     code = "from pathlib import Path; import sys; from anti_lib.artifacts import read_record; assert read_record(Path(sys.argv[1]))['publicationStatus'] == 'validated'"
-    subprocess.run([sys.executable, "-S", "-c", code, str(path)], cwd=copied, check=True)
+    subprocess.run([sys.executable, "-c", without_installed_packages(code), str(path)], cwd=copied, check=True)
 
 
 @pytest.mark.parametrize("coverage_fields", [
