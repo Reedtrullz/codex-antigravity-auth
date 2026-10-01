@@ -434,6 +434,26 @@ python3 -m pytest
 
 Protected stores and standalone Anti use descriptor-validated process locks and owner-only file protection. Unsupported locking or Windows ACL facilities fail explicitly; see [private storage and lock files](USAGE.md#private-storage-and-lock-files).
 
+## Client and gateway directories
+
+`CODEX_HOME` selects the client `config.toml`, `auth.json`, and default skill
+installation directory. `ANTIGRAVITY_STATE_HOME` separately selects gateway
+accounts, providers, Google OAuth client settings, model overlays, runtime logs,
+and Anti run/reflection state. Both default to `~/.codex`; selecting only a
+client root intentionally leaves the gateway on its shared default state.
+Set both to isolate both. Paths must be absolute (a leading `~` is expanded).
+An explicitly selected client never falls back to another root's `auth.json`.
+
+`codex-antigravity namespace show` reports the relationship without reading
+credentials or creating files. Installed services freeze both effective roots
+in their command arguments, so later shell environment changes do not silently
+switch service identities. Reinstall the service to change its roots. Separate
+state roots using the same port still address the same gateway/service; choose
+different ports for simultaneously running instances.
+
+Switching roots never moves files automatically. See [namespace copy and
+migration limits](USAGE.md#namespace-copy) for an explicit dry-run-first copy.
+
 ## Troubleshooting
 
 ### HTTP 403 VALIDATION_REQUIRED

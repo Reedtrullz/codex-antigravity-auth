@@ -409,7 +409,7 @@ def google_family_rotation_status(data: dict, family: str) -> dict:
 
 
 def _read_codex_config_for_readiness(config: str) -> tuple[Path, str | None, str | None]:
-    config_path = Path(os.path.expanduser(config))
+    config_path = _cli.client_config_path(config)
     if not config_path.is_file():
         return config_path, None, f"Codex config not found: {config_path}"
     try:
@@ -748,6 +748,7 @@ def codex_ready_report(
         "checks": checks,
         "request_log": _cli.request_log_info(),
         "diagnostics": {
+            "namespaces": _cli.namespace_diagnostics(),
             **storage_diagnostics,
             "service": service_snapshot,
             "provider_capability_mismatches": capability_mismatches,
@@ -796,7 +797,7 @@ def run_doctor(
     print("           GOOGLE ANTIGRAVITY AUTH DOCTOR           ")
     print("=" * 60)
     healthy = True
-    codex_config = Path(os.path.expanduser(config))
+    codex_config = _cli.client_config_path(config)
     codex_config_content = None
     codex_config_model = ""
     if codex_config.is_file():
