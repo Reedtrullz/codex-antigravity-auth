@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import contextvars
 import concurrent.futures
 from collections import deque
 import email.utils
@@ -40,6 +41,7 @@ from anti_lib.artifacts import (
 from anti_lib.chunking import chunk_manifest
 from anti_lib.cleanup import RUN_ID_RE, assert_not_deleted, clean_runs
 from anti_lib.context import ordered_prompt
+from anti_lib.data_policy import DataPolicy, PolicyError
 from anti_lib.ledger import execution_entry, prompts_as_text
 from anti_lib.endpoint_policy import open_http_request, validate_endpoint_url
 from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
@@ -595,6 +597,62 @@ class AntiError(Exception):
     pass
 
 
+_POLICY_STAGE = contextvars.ContextVar("anti_data_policy_stage", default="primary")
+
+
+def data_policy(args):
+    if args is None:
+        return None
+    if hasattr(args, "_data_policy_session"):
+        return args._data_policy_session
+    path = getattr(args, "data_policy", None)
+    acknowledgements = getattr(args, "acknowledge_secret_hash", None) or []
+    if acknowledgements and not path:
+        raise PolicyError("Secret acknowledgements require --data-policy")
+    session = DataPolicy(Path(path).expanduser(), root=find_repo_root(Path.cwd()) or Path.cwd(), acknowledgements=acknowledgements) if path else None
+    args._data_policy_session = session
+    return session
+
+
+def policy_paths(args, root, paths):
+    session = data_policy(args)
+    if session:
+        session.check_paths(paths, root=root)
+
+
+def policy_submit(args, *, model, prompt, base_url, fallback=False):
+    session = data_policy(args)
+    if session:
+        session.check(model=model, prompt=prompt, base_url=base_url, stage=_POLICY_STAGE.get())
+        if fallback:
+            session.check(model=model, prompt=prompt, base_url=base_url, stage="fallback")
+
+
+def policy_generate(args, *, stage, **kwargs):
+    token = _POLICY_STAGE.set(stage)
+    try:
+        return generate_with_fallback(args, **kwargs)
+    finally:
+        _POLICY_STAGE.reset(token)
+
+
+def policy_preflight(args, prompt, routes):
+    session = data_policy(args)
+    if session is None:
+        return False
+    fallback = getattr(args, "fallback_model", None)
+    for model, stage in routes:
+        session.check(model=model, prompt=prompt, base_url=args.base_url, stage=stage)
+        if fallback and getattr(args, "fallback_policy", "never") != "never":
+            resolved = resolve_model(fallback, default=fallback)
+            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage=stage)
+            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage="fallback")
+    if getattr(args, "dry_run", False):
+        print(json.dumps({"dryRun": True, "dataPolicy": session.audit(), "noContentSubmitted": True}, indent=2))
+        return True
+    return False
+
+
 def eprint(message: str) -> None:
     print(message, file=sys.stderr)
 
@@ -873,6 +931,8 @@ def _write_run_record_unlocked(
             raise AntiError(f"refusing to overwrite symlinked run record: {record_path}")
         record["writerId"] = args._anti_writer_id
         record["recordSchemaVersion"] = RECORD_SCHEMA_VERSION
+        if getattr(args, "_data_policy_session", None):
+            record["metadata"]["dataPolicy"] = args._data_policy_session.audit()
         validate_record(record, record_path)
         atomic_write_json(record_path, record)
         args.run_record_written = status != "running"
@@ -1117,6 +1177,8 @@ def _write_run_record_unlocked(
         "lanes": [file_reference(RUNS_DIR, Path(path)) for path in raw_lane_paths],
     }
     path = run_record_path
+    if getattr(args, "_data_policy_session", None):
+        record.setdefault("metadata", {})["dataPolicy"] = args._data_policy_session.audit()
     validate_record(record, path)
     fsync_directory(revisions_dir)
     fsync_directory(run_dir)
@@ -1819,7 +1881,9 @@ def post_response(
     run_id: str | None = None,
     budget_args: argparse.Namespace | None = None,
     budget_purpose: str | None = None,
+    policy_fallback: bool = False,
 ) -> ResponseText:
+    policy_submit(budget_args, model=model, prompt=prompt, base_url=base_url, fallback=policy_fallback)
     requested_model = model
     available_model_ids = model_ids
     if available_model_ids is None:
@@ -1833,8 +1897,10 @@ def post_response(
         suggestions = closest_catalog_models(model, available_model_ids)
         suggestion_note = f" Closest advertised: {', '.join(suggestions)}." if suggestions else ""
         raise AntiError(f"model {model!r} is not advertised by /v1/models.{suggestion_note} Available sample: {sample}")
+    policy_submit(budget_args, model=matched_model, prompt=prompt, base_url=base_url, fallback=policy_fallback)
     if matched_model != model:
-        eprint(f"[anti] model alias {model!r} matched catalog id {matched_model!r}; forwarding the catalog id")
+        if not data_policy(budget_args):
+            eprint(f"[anti] model alias {model!r} matched catalog id {matched_model!r}; forwarding the catalog id")
         model = matched_model
     payload = {
         "model": model,
@@ -2160,6 +2226,7 @@ def generate_with_fallback(
                     run_id=getattr(args, "run_id", None),
                     budget_args=args,
                     budget_purpose=f"{purpose} fallback",
+                    **({"policy_fallback": True} if data_policy(args) else {}),
                 )
         except AntiError as fallback_exc:
             fallback_error = redact_sensitive_text(str(fallback_exc))
@@ -2334,6 +2401,8 @@ def validate_path_list_item(value: str, *, source: str) -> None:
 def selected_paths_from_args(args: argparse.Namespace) -> list[str]:
     paths = list(getattr(args, "file", None) or [])
     for spec in getattr(args, "files_from", None) or []:
+        if spec != "-":
+            policy_paths(args, Path.cwd(), [spec])
         paths.extend(read_paths_file(spec))
     return paths
 
@@ -2791,6 +2860,7 @@ def extract_file_paths_from_prompt(prompt: str) -> list[str]:
 def build_consult_file_context(
     prompt: str,
     max_prompt_chars: int,
+    *, policy_args=None,
 ) -> tuple[str, list[str], list[str]]:
     """Read files mentioned in the prompt, inject contents to prevent hallucination."""
     file_paths = extract_file_paths_from_prompt(prompt)
@@ -2803,6 +2873,7 @@ def build_consult_file_context(
     
     workspace_root = find_repo_root(Path.cwd()) or Path.cwd().resolve()
     for file_path_str in file_paths:
+        policy_paths(policy_args, Path.cwd(), [file_path_str])
         raw_path = Path(file_path_str).expanduser()
         if raw_path.is_symlink():
             caveats.append(f"Skipped symlink: {file_path_str}")
@@ -2958,6 +3029,7 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
     selected = selected_paths_from_args(args)
     rev_range = review_rev_range(args)
     paths, excluded = changed_paths(root, args.scope, selected, rev_range=rev_range)
+    policy_paths(args, root, [*paths, *excluded])
     diff = diff_for_paths(root, args.scope, paths, rev_range=rev_range)
     notes: list[str] = []
     file_texts: list[tuple[str, str]] = []
@@ -3856,8 +3928,9 @@ def run_chunked_review(
     ]
     caveats.extend(synthesis_caveats)
     try:
-        synthesis, synthesis_model, synthesis_generation = generate_with_fallback(
+        synthesis, synthesis_model, synthesis_generation = policy_generate(
             args,
+            stage="summary",
             model=model,
             prompt=synthesis_prompt,
             max_output_tokens=args.max_output_tokens,
@@ -4000,6 +4073,7 @@ def assemble_plan_prompt(args: argparse.Namespace, *, apply_limit: bool = True) 
             root = Path.cwd().resolve()
 
         paths, excluded = changed_paths(root, args.scope, args.file or [])
+        policy_paths(args, root, [*paths, *excluded])
         diff = diff_for_paths(root, args.scope, paths)
         notes: list[str] = []
         file_blocks: list[str] = []
@@ -4020,7 +4094,7 @@ def assemble_plan_prompt(args: argparse.Namespace, *, apply_limit: bool = True) 
                 scope_line += f", ... ({len(paths)} files total)"
 
         context_parts = [f"Planning context scope: {scope_line}."]
-        repo_profile = detect_repo_profile(root)
+        repo_profile = "" if data_policy(args) else detect_repo_profile(root)
         if repo_profile:
             context_parts.insert(1, f"## Repository Profile\n{repo_profile}")
         if diff.strip():
@@ -4200,8 +4274,9 @@ def run_chunked_plan(
         raise failure
     caveats = [*caveats, *synthesis_caveats]
     try:
-        text, synthesis_model, synthesis_generation = generate_with_fallback(
+        text, synthesis_model, synthesis_generation = policy_generate(
             args,
+            stage="summary",
             model=model,
             prompt=synthesis_prompt,
             max_output_tokens=args.max_output_tokens,
@@ -4267,6 +4342,7 @@ def read_prompt(args: argparse.Namespace) -> str:
     pieces: list[str] = []
     if args.prompt_file:
         path = Path(args.prompt_file).expanduser()
+        policy_paths(args, Path.cwd(), [path])
         raw = path.read_bytes()
         if b"\0" in raw:
             raise AntiError("prompt file looks binary")
@@ -6253,15 +6329,20 @@ def maybe_summarize_panel_review(
     summary_model = panel_review_summary_model(panel_models)
     prompt_budget = prompt_budget_for_model(args, summary_model)
     progress(args, f"panel review: summarizing broad review context with {summary_model} before fan-out")
-    summary_text, summary_caveats, summary_metadata = run_chunked_review(
-        args=args,
-        context=context,
-        model=summary_model,
-        base_metadata=metadata,
-        max_prompt_chars=prompt_budget,
-        chunks=pre_chunks,
-        chunk_metadata=pre_chunk_metadata,
-    )
+    policy_token = _POLICY_STAGE.set("summary")
+    try:
+        summary_text, summary_caveats, summary_metadata = run_chunked_review(
+            args=args,
+            context=context,
+            model=summary_model,
+            base_metadata=metadata,
+            max_prompt_chars=prompt_budget,
+            chunks=pre_chunks,
+            chunk_metadata=pre_chunk_metadata,
+        )
+    finally:
+        _POLICY_STAGE.reset(policy_token)
+
     instruction_prefix = prompt.split("\n## Review Manifest", 1)[0].rstrip()
     if not instruction_prefix:
         instruction_prefix = "\n\n".join(
@@ -6414,6 +6495,8 @@ def command_panel(args: argparse.Namespace) -> int:
         panel_models=panel_models,
         judge_model=judge_model,
     )
+    if policy_preflight(args, prompt, [(model, "primary") for model in panel_models] + [(judge_model, "judge")]):
+        return 0
     if args.dry_run:
         print(format_dry_run(mode=f"panel {args.mode}", model=panel_models[0],
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
@@ -6773,8 +6856,9 @@ def command_panel(args: argparse.Namespace) -> int:
     judge_call_outputs: list[str] = []
 
     def run_judge(prompt: str, max_output_tokens: int) -> tuple[str, str, dict[str, Any]]:
-        result = generate_with_fallback(
+        result = policy_generate(
             args,
+            stage="judge",
             model=judge_model,
             prompt=prompt,
             max_output_tokens=max_output_tokens,
@@ -7093,7 +7177,7 @@ def command_consult(args: argparse.Namespace) -> int:
     read_files: list[str] = []
     if not getattr(args, "no_pre_read", False):
         prompt, file_caveats, read_files = build_consult_file_context(
-            prompt, args.max_prompt_chars
+            prompt, args.max_prompt_chars, **({"policy_args": args} if data_policy(args) else {})
         )
         caveats.extend(file_caveats)
     else:
@@ -7103,6 +7187,8 @@ def command_consult(args: argparse.Namespace) -> int:
     
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
     estimated_cost = estimate_call_cost(model, len(prompt), args.max_output_tokens)
+    if policy_preflight(args, prompt, [(model, "primary")]):
+        return 0
     if args.dry_run:
         print(format_dry_run(mode="consult", model=model,
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
@@ -7260,6 +7346,8 @@ def command_review(args: argparse.Namespace) -> int:
         metadata.setdefault("privacy_disclosures", []).append(disclosure)
         if not args.print_prompt:
             eprint(f"[anti] {redact_sensitive_text(disclosure)}")
+    if policy_preflight(args, prompt, [(model, "primary")]):
+        return 0
     if args.dry_run:
         stage_plan = [{"name": "review", "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 1}]
         if chunked_review:
@@ -7481,6 +7569,8 @@ def command_plan(args: argparse.Namespace) -> int:
         if not args.print_prompt:
             eprint(f"[anti] {redact_sensitive_text(disclosure)}")
     recorded_prompt = prompt
+    if policy_preflight(args, prompt, [(model, "primary")]):
+        return 0
     if args.dry_run:
         stage_plan = [{"name": "plan", "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 1}]
         if should_chunk_plan(args, prompt, max_prompt_chars=prompt_budget):
@@ -7864,6 +7954,10 @@ def command_smoke(args: argparse.Namespace) -> int:
 
 def command_compare(args: argparse.Namespace) -> int:
     """Send one bounded prompt through each requested model and report the outcomes."""
+    if data_policy(args):
+        policy_prompt = read_prompt(args)
+        if policy_preflight(args, policy_prompt, [(resolve_model(value, default=value), "primary") for value in args.model]):
+            return 0
     if args.dry_run:
         print(format_dry_run(
             mode="compare",
@@ -8186,6 +8280,10 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         "--save-output",
         args.save_output,
     ]
+    if getattr(args, "data_policy", None):
+        common.extend(["--data-policy", args.data_policy])
+    for acknowledgement in getattr(args, "acknowledge_secret_hash", None) or []:
+        common.extend(["--acknowledge-secret-hash", acknowledgement])
     if args.budget is not None:
         common.extend(["--budget", str(args.budget)])
     if args.max_output_tokens is not None:
@@ -8404,6 +8502,9 @@ def command_workflow(args: argparse.Namespace) -> int:
     progress(args, "workflow expands to: " + workflow_command_for_progress(expanded))
     parser = build_parser()
     expanded_args = parser.parse_args(expanded)
+    expanded_args.data_policy = getattr(args, "data_policy", None)
+    expanded_args.acknowledge_secret_hash = getattr(args, "acknowledge_secret_hash", None)
+    expanded_args._data_policy_session = data_policy(args)
     expanded_args.workflow_name = args.name
     if getattr(args, "_anti_writer_id", None):
         expanded_args._anti_writer_id = args._anti_writer_id
@@ -8677,6 +8778,8 @@ def add_generation_control_args(
     *,
     default_save_output: str = "never",
 ) -> None:
+    parser.add_argument("--data-policy", help="Explicit path to a version 1 restrictive repository submission policy")
+    parser.add_argument("--acknowledge-secret-hash", action="append", help="Explicitly acknowledge this exact assembled prompt SHA-256; repeatable")
     parser.add_argument("--auto-route", action="store_true", help="Automatically pick the cheapest adequate model based on diff size and risk")
     parser.add_argument("--fallback-model", help="Fallback model alias/id for retryable or timeout failures")
     parser.add_argument(
@@ -9089,9 +9192,10 @@ def main(argv: list[str] | None = None) -> int:
         _install_run_signal_handlers(args)
         if hasattr(args, "base_url") and args.base_url is not None:
             args.base_url = normalize_base_url(args.base_url)
+        data_policy(args)
         return int(args.func(args))
     except KeyboardInterrupt:
-        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False):
+        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False) and not (getattr(args, "dry_run", False) or getattr(args, "print_prompt", False)):
             try:
                 run_id = getattr(args, "run_id", None)
                 correlation = {"request_log_correlation_id": run_id} if run_id else {}
@@ -9108,8 +9212,10 @@ def main(argv: list[str] | None = None) -> int:
                 pass
         eprint("Interrupted")
         return 130
-    except (AntiError, PersistenceError) as exc:
-        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False):
+    except (AntiError, PersistenceError, PolicyError) as exc:
+        if isinstance(exc, PolicyError) and getattr(args, "_data_policy_session", None) and not (getattr(args, "dry_run", False) or getattr(args, "print_prompt", False)):
+            args.run_id = getattr(args, "run_id", None) or new_run_id()
+        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False) and not (getattr(args, "dry_run", False) or getattr(args, "print_prompt", False)):
             try:
                 run_id = getattr(args, "run_id", None)
                 correlation = {"request_log_correlation_id": run_id} if run_id else {}
