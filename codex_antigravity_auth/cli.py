@@ -386,6 +386,17 @@ def _confirm_account_mutation(prompt: str, *, yes: bool, non_interactive_error: 
 
 def run_accounts_command(args) -> None:
     action = getattr(args, "accounts_action", None) or "list"
+    if action == "explain":
+        from .account_diagnostics import account_eligibility_lines, account_eligibility_report
+        report = account_eligibility_report(args.model)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            for line in account_eligibility_lines(report):
+                print(line)
+        if not report["ok"]:
+            raise SystemExit(1)
+        return
     if action == "list":
         data = load_accounts()
         accounts = data.get("accounts", [])
@@ -1413,6 +1424,9 @@ def main():
     accounts_parser = subparsers.add_parser("accounts", help="List or manage configured Google accounts")
     accounts_sub = accounts_parser.add_subparsers(dest="accounts_action")
     accounts_sub.add_parser("list", help="List configured Google accounts")
+    accounts_explain = accounts_sub.add_parser("explain", help="Explain local Google eligibility without refreshing or changing state")
+    accounts_explain.add_argument("--model", required=True, help="Google model whose family to inspect")
+    accounts_explain.add_argument("--json", action="store_true", help="Print sanitized eligibility as JSON")
     accounts_remove = accounts_sub.add_parser("remove", help="Remove a Google account from the encrypted rotation store")
     accounts_remove.add_argument("email", help="Google account email to remove")
     accounts_remove.add_argument("--yes", action="store_true", help="Confirm removal without prompting")
