@@ -86,6 +86,9 @@ def sanitize_request_record(record: dict[str, Any]) -> dict[str, Any]:
         "cooldown_category",
         "outcome_category",
         "cancelled",
+        "lifecycle_phase",
+        "provider_accepted",
+        "upstream_http_status",
     }
     sanitized = {key: redact_secrets(value) for key, value in record.items() if key in allowed}
     sanitized.setdefault("timestamp", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
@@ -187,6 +190,32 @@ def _percentile(values: list[int], percentile: float) -> int | None:
     return ordered[index]
 
 
+def _record_phase(record: dict[str, Any]) -> str:
+    phase = record.get("lifecycle_phase")
+    if isinstance(phase, str) and phase in {"started", "attempt", "terminal"}:
+        return phase
+    return "started" if record.get("status") == "stream_started" else "terminal"
+
+
+def _record_outcome(record: dict[str, Any]) -> str:
+    if record.get("cancelled") is True or record.get("status") == "cancelled":
+        return "cancelled"
+    terminal = record.get("terminal_kind")
+    if isinstance(terminal, str) and terminal in {"completed", "incomplete", "failed"}:
+        return terminal
+    status = record.get("status")
+    return {"success": "completed", "completed": "completed", "incomplete": "incomplete"}.get(status, "failed") if isinstance(status, str) else "failed"
+
+
+def _nonnegative_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return max(0, int(value))
+    except (ValueError, TypeError, OverflowError):
+        return default
+
+
 def request_log_summary(*, since: str | None = "24h", now: float | None = None) -> dict[str, Any]:
     window_seconds = _parse_since_seconds(since)
     now_value = time.time() if now is None else float(now)
@@ -195,91 +224,100 @@ def request_log_summary(*, since: str | None = "24h", now: float | None = None) 
     groups: dict[str, dict[str, Any]] = {}
     malformed_records = 0
     excluded_by_time = 0
-
-    for record in records:
+    logical: dict[tuple[str, object], list[dict[str, Any]]] = {}
+    for index, record in enumerate(records):
         if record.get("status") == "malformed":
             malformed_records += 1
             continue
-        timestamp = _timestamp_epoch(record.get("timestamp"))
+        request_id = record.get("request_id")
+        # Legacy rows without an ID cannot be safely combined with one another.
+        key = ("id", request_id) if isinstance(request_id, str) and request_id else ("legacy", index)
+        logical.setdefault(key, []).append(record)
+
+    included_events = 0
+    for events in logical.values():
+        terminal_events = [event for event in events if _record_phase(event) == "terminal"]
+        # The last terminal record is authoritative; later start/replayed
+        # lifecycle records cannot reopen it. Duplicate terminals count once.
+        chosen = terminal_events[-1] if terminal_events else events[-1]
+        record = {**events[0], **chosen}
+        for field in ("usage", "latency_ms", "attempt_count", "rotation_count", "http_status", "upstream_http_status", "provider_accepted", "family", "provider"):
+            metric = field not in {"family", "provider"}
+            if metric:
+                record[field] = chosen.get(field)
+            if record.get(field) is None:
+                source = [] if metric else events
+                previous = next((event[field] for event in reversed(source) if event.get(field) is not None), None)
+                if previous is not None:
+                    record[field] = previous
+        timestamp = _timestamp_epoch(chosen.get("timestamp"))
         if cutoff is not None and timestamp is not None and timestamp < cutoff:
-            excluded_by_time += 1
+            excluded_by_time += len(events)
             continue
+        included_events += len(events)
         route = str(record.get("route") or "unknown")
         family = str(record.get("family") or record.get("provider") or "unknown")
         key = f"{route}/{family}"
-        group = groups.setdefault(
-            key,
-            {
-                "route": route,
-                "family": family,
-                "request_count": 0,
-                "success_count": 0,
-                "failure_count": 0,
-                "rate_limit_count": 0,
-                "rotation_attempted_count": 0,
-                "attempt_count": 0,
-                "rotation_count": 0,
-                "cancellation_count": 0,
-                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                "terminal_counts": {},
-                "_latencies": [],
-                "_errors": {},
-            },
-        )
+        group = groups.setdefault(key, {
+            "route": route, "family": family,
+            "request_count": 0, "closed_request_count": 0, "open_count": 0,
+            "success_count": 0, "failure_count": 0, "incomplete_count": 0,
+            "cancellation_count": 0, "provider_accepted_count": 0,
+            "provider_acceptance_unknown_count": 0,
+            "rate_limit_count": 0, "rotation_attempted_count": 0,
+            "attempt_count": 0, "rotation_count": 0,
+            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            "terminal_counts": {}, "terminal_reason_counts": {},
+            "_latencies": [], "_errors": {},
+        })
         group["request_count"] += 1
-        if record.get("status") == "success":
-            group["success_count"] += 1
-        else:
-            group["failure_count"] += 1
+        acceptance = record.get("provider_accepted")
+        if not isinstance(acceptance, bool):
+            acceptance = None
+        if acceptance is None and record.get("upstream_http_status") is not None:
+            acceptance = 200 <= _nonnegative_int(record.get("upstream_http_status")) < 300
+        if acceptance is True:
+            group["provider_accepted_count"] += 1
+        elif acceptance is None:
+            group["provider_acceptance_unknown_count"] += 1
+        if not terminal_events:
+            group["open_count"] += 1
+            continue
+        group["closed_request_count"] += 1
+        outcome = _record_outcome(record)
+        count_field = {"completed": "success_count", "failed": "failure_count", "incomplete": "incomplete_count", "cancelled": "cancellation_count"}[outcome]
+        group[count_field] += 1
+        group["terminal_counts"][outcome] = group["terminal_counts"].get(outcome, 0) + 1
+        reason = record.get("terminal_reason")
+        reason = reason if isinstance(reason, str) and reason else outcome
+        group["terminal_reason_counts"][reason] = group["terminal_reason_counts"].get(reason, 0) + 1
+        latency = record.get("latency_ms")
         try:
-            latency_ms = int(float(record.get("latency_ms")))
+            latency_ms = int(float(latency))
             if latency_ms >= 0:
                 group["_latencies"].append(latency_ms)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             pass
-        try:
-            if int(record.get("http_status")) == 429:
-                group["rate_limit_count"] += 1
-        except (TypeError, ValueError):
-            pass
-        if bool(record.get("rotation_attempted")):
-            group["rotation_attempted_count"] += 1
-        try:
-            group["attempt_count"] += max(0, int(record.get("attempt_count", 1)))
-        except (TypeError, ValueError):
-            group["attempt_count"] += 1
-        try:
-            group["rotation_count"] += max(0, int(record.get("rotation_count", 0)))
-        except (TypeError, ValueError):
-            pass
-        if bool(record.get("cancelled")):
-            group["cancellation_count"] += 1
+        if 429 in {_nonnegative_int(record.get("http_status")), _nonnegative_int(record.get("upstream_http_status"))}:
+            group["rate_limit_count"] += 1
+        group["rotation_attempted_count"] += int(bool(record.get("rotation_attempted")))
+        group["attempt_count"] += _nonnegative_int(record.get("attempt_count"), 1)
+        group["rotation_count"] += _nonnegative_int(record.get("rotation_count"))
         usage = record.get("usage")
         if isinstance(usage, dict):
-            for field in ("input_tokens", "output_tokens", "total_tokens"):
-                try:
-                    group["usage"][field] += max(0, int(usage.get(field, 0)))
-                except (TypeError, ValueError):
-                    pass
-        terminal_kind = record.get("terminal_kind")
-        if isinstance(terminal_kind, str) and terminal_kind in {"completed", "incomplete", "failed"}:
-            group["terminal_counts"][terminal_kind] = int(
-                group["terminal_counts"].get(terminal_kind, 0)
-            ) + 1
+            for field in group["usage"]:
+                group["usage"][field] += _nonnegative_int(usage.get(field))
         error_class = record.get("error_class")
         if isinstance(error_class, str) and error_class:
-            errors = group["_errors"]
-            errors[error_class] = int(errors.get(error_class, 0)) + 1
+            group["_errors"][error_class] = group["_errors"].get(error_class, 0) + 1
 
     rendered_groups: dict[str, dict[str, Any]] = {}
     for key, group in sorted(groups.items()):
-        request_count = int(group["request_count"])
-        success_count = int(group["success_count"])
-        latencies = group.pop("_latencies")
-        errors = group.pop("_errors")
-        rendered = {
+        closed = group["closed_request_count"]
+        latencies, errors = group.pop("_latencies"), group.pop("_errors")
+        rendered_groups[key] = {
             **group,
-            "success_rate": round(success_count / request_count, 4) if request_count else 0.0,
+            "success_rate": round(group["success_count"] / closed, 4) if closed else None,
             "p50_latency_ms": _percentile(latencies, 50),
             "p95_latency_ms": _percentile(latencies, 95),
             "top_error_classes": [
@@ -287,16 +325,12 @@ def request_log_summary(*, since: str | None = "24h", now: float | None = None) 
                 for error_class, count in sorted(errors.items(), key=lambda item: (-item[1], item[0]))[:3]
             ],
         }
-        rendered_groups[key] = rendered
-
     return {
-        "path": str(request_log_path()),
-        "since": since if since is not None else "all",
-        "window_seconds": window_seconds,
-        "total_records": len(records),
+        "path": str(request_log_path()), "since": since if since is not None else "all",
+        "window_seconds": window_seconds, "total_records": len(records),
         "included_records": sum(group["request_count"] for group in rendered_groups.values()),
-        "excluded_by_time": excluded_by_time,
-        "malformed_records": malformed_records,
+        "included_event_records": included_events,
+        "excluded_by_time": excluded_by_time, "malformed_records": malformed_records,
         "groups": rendered_groups,
     }
 

@@ -55,6 +55,8 @@ The request JSONL log is capped and rotated at `10 MiB`. It records request ids,
 
 `codex-antigravity doctor --codex-ready --json` includes read-only account/provider store format and migration status, account-state schema version, observed service state, and provider capability mismatches under `diagnostics`. These checks do not migrate stores or rewrite config. See `docs/refactor-migration.md` before upgrading or rolling back a store used by an older package.
 
+Request-log rows distinguish lifecycle phase (`started` or `terminal`) from semantic terminal outcome. `logs summary` groups by `request_id`, counts the last terminal contribution once, and reports completed, incomplete, failed, cancelled, and requests with no retained terminal record separately. Start rows do not enter latency or failure samples; success rate uses closed requests only and is unknown when none have closed. Duplicate terminals do not double usage or attempts. `upstream_http_status` and `provider_accepted` record observed upstream HTTP acceptance separately from the gateway status and generation outcome. Local validation does not infer provider acceptance; unknown remains unknown. Metrics come only from the selected last terminal, without borrowing from discarded terminals. Disconnect after an observed terminal retains that outcome. Legacy rows remain readable; rows lacking a request ID are counted independently because they cannot safely be correlated.
+
 Google account selection is sticky for sequential requests but load-aware for concurrent ones. `AccountState` owns family/account cooldowns, process-local leases, attempt counters, and persisted schema-version `2` state; request handlers release every lease when non-streaming responses finish or streaming responses end/disconnect.
 
 To expose a local model definition in Codex's model picker, add an overlay entry:
@@ -190,6 +192,10 @@ codex-antigravity doctor --codex-ready --live --live-model claude-sonnet-4-6
 
 `doctor --live` currently supports Google Antigravity models only. It also performs a once-daily cached package-version check against PyPI and warns when an upgrade is available. Set `CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1` to disable that external metadata lookup.
 
+Token refresh and project discovery run outside account-selection and storage locks. A concurrent selection can use another eligible account; a busy refresh never makes an expired token eligible. Each account has one refresh owner per gateway process. The credential snapshot is checked before refresh and before writing back, so removal, changed credentials, and newer token state take precedence. Family cooldowns remain independent of token refresh.
+
+The gateway lifespan starts a refresh-ahead check and repeats checks every 60 seconds while idle, refreshing tokens within five minutes of expiry. At most one refresh-ahead worker runs at a time. Shutdown stops the timer, signals the worker to stop before further discovery/merges/accounts, and waits for the current synchronous call to finish using its existing network timeouts. It does not abandon a live worker thread. This is process-local refresh ownership; multiple gateway processes are not coordinated by a distributed refresh lease.
+
 ## 1. Supported Models & Aliases
 You can use standard, developer-friendly names in your `~/.codex/config.toml` that the gateway automatically translates to the official Google Antigravity backend model definitions:
 
@@ -249,3 +255,7 @@ Malformed message/content/tool shapes and orphan outputs return field-specific H
 Completed tool arguments must encode JSON objects and satisfy the available declared identity and supported schema checks. Invalid calls cannot become executable completion events; usable sibling output is retained with an explicit failed/incomplete result. Google’s internal `_placeholder` is removed only with per-tool injection provenance. See [final-call validation and limits](codex_antigravity_auth/design/tool-calls.md).
 
 Google generated-media parts produce an explicit failure while retaining supported sibling output. The image-generation backend is recognized but excluded from advertised models and rejected before account selection; image input on supported text models remains available. See [Google output support](codex_antigravity_auth/design/google-output.md).
+
+## Request time budgets
+
+Google, BYOK and native OpenAI requests now share a monotonic 60-second preparation/nonstream deadline. Streaming has separate 60-second event-idle and 30-minute total defaults, including preparation, with validated metadata overrides. Downstream backpressure and resource cleanup are bounded; timeouts never trigger replay after visible output. See [request deadlines and cleanup](codex_antigravity_auth/REQUEST_DEADLINES.md) for overrides, failure outcomes, cleanup grace and cancellation limits.

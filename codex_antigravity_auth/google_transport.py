@@ -12,6 +12,7 @@ import uuid
 
 import httpx
 
+from .request_budget import call_sync, owned_context
 from .sse import SSELineError, iter_sse_data
 
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
@@ -158,6 +159,10 @@ class GoogleResponseAccumulator:
         self._usage = normalize_usage()
         self._malformed = False
         self._done = False
+
+    @property
+    def usage(self) -> dict[str, int]:
+        return dict(self._usage)
 
     def mark_malformed(self) -> None:
         self._malformed = True
@@ -444,12 +449,12 @@ class GoogleTransport:
 
     async def post(self, request: dict[str, Any], lease: AccountLease) -> httpx.Response:
         url = f"{self.endpoint}/v1internal:generateContent"
-        payload = self.build_request(request, lease)
-        async with self.client_factory(timeout=self.timeout) as client:
+        payload = await call_sync(self.build_request, request, lease)
+        async with owned_context(self.client_factory(timeout=self.timeout)) as client:
             return await client.post(
                 url,
                 json=payload,
-                headers=self.build_headers(lease),
+                headers=await call_sync(self.build_headers, lease),
             )
 
     async def execute(
@@ -475,14 +480,14 @@ class GoogleTransport:
     @asynccontextmanager
     async def stream(self, request: dict[str, Any], lease: AccountLease):
         url = f"{self.endpoint}/v1internal:streamGenerateContent?alt=sse"
-        payload = self.build_request(request, lease)
-        async with self.client_factory(timeout=self.timeout) as client:
-            async with client.stream(
+        payload = await call_sync(self.build_request, request, lease)
+        async with owned_context(self.client_factory(timeout=self.timeout)) as client:
+            async with owned_context(client.stream(
                 "POST",
                 url,
                 json=payload,
-                headers=self.build_headers(lease),
-            ) as response:
+                headers=await call_sync(self.build_headers, lease),
+            )) as response:
                 yield response
 
     async def stream_events(
@@ -493,6 +498,7 @@ class GoogleTransport:
         response_id: str,
         display_model: str,
         adapter: GoogleStreamEventAdapter | None = None,
+        telemetry: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any] | str]:
         adapter = adapter or GoogleStreamEventAdapter(
             response_id=response_id,
@@ -500,6 +506,8 @@ class GoogleTransport:
             request=request,
         )
         async with self.stream(request, lease) as response:
+            if telemetry is not None:
+                telemetry["http_status"] = response.status_code
             if response.status_code != 200:
                 raise GoogleHTTPError(
                     response.status_code,
