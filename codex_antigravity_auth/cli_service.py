@@ -484,6 +484,7 @@ def start_gateway_background(args) -> dict:
         str(args.port),
         "--log-level",
         "info",
+        "--no-proxy-headers",
     ]
     try:
         onepassword_description = _cli.onepassword_runtime_description(

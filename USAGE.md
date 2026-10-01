@@ -180,7 +180,23 @@ codex-antigravity service install --port 51122 --host 127.0.0.1 --op-env-file ~/
 Set the env file to private permissions (`chmod 600 ~/.codex/antigravity.env`). The 1Password CLI must be installed on `PATH`; gateway start and service install resolve it to an absolute path and fail before starting the process or writing a manifest if `op` is missing. Durable services still depend on your local 1Password unlock/session behavior after reboot.
 
 If your 1Password CLI includes the Environments beta commands, use `--op-environment <environment-id>` instead of `--op-env-file`.
-The gateway binds to loopback by default. Non-loopback binds require `--allow-remote` plus `ANTIGRAVITY_GATEWAY_TOKEN` set to at least 32 visible ASCII characters; remote clients must send it as a bearer token. The built-in server is still plain HTTP, so remote use should go through a trusted tunnel, local network boundary, or TLS-terminating proxy.
+
+### Gateway access and reverse proxies
+
+The gateway binds to loopback by default. Local-only mode grants unauthenticated access only to an observed loopback peer with a valid loopback `Host` and no proxy-indicator headers. This applies to `/health` and `/v1/models` as well as generation requests. A request carrying `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-Port`, or `X-Real-IP` cannot use that exemption, regardless of the header value.
+
+For a reverse proxy, enable authenticated mode **even if the gateway binds to loopback**:
+
+```bash
+# Supply a private, randomly generated token in this environment first.
+codex-antigravity start --host 127.0.0.1 --allow-remote
+```
+
+`--allow-remote` requires `ANTIGRAVITY_GATEWAY_TOKEN` to contain at least 32 visible ASCII characters and enables bearer authentication for **every request**, including direct loopback requests and health checks. Setting `ANTIGRAVITY_ALLOW_REMOTE=1` in the gateway's runtime environment enables the same authentication policy. A non-loopback bind additionally requires the explicit `--allow-remote` flag. Each client must send `Authorization: Bearer <token>`. Readiness/status commands need the token in their own environment too; when using a secret runtime, wrap the invoking command so both the launcher and its child receive the token.
+
+Foreground, background, and managed-service launches disable Uvicorn's forwarded-header interpretation. Forwarded addresses never grant access, and the gateway does not reconstruct browser origins from forwarded scheme or host values. Custom Uvicorn launches must also use `--no-proxy-headers`. Keep the backend private; the built-in server speaks plain HTTP, so remote access needs a protected tunnel or a TLS-terminating proxy with a protected backend connection. The proxy must relay each client's bearer header, rather than inject the gateway token for unauthenticated callers.
+
+A local proxy that strips all proxy indicators and rewrites `Host` looks like any other local process. The gateway cannot detect that proxy automatically; authenticated mode is required before exposing it. JSON content-type, cross-site fetch, and Origin checks remain active after authentication. For browser requests, Origin must match the scheme and Host visible to the backend; forwarding `X-Forwarded-Proto: https` alone does not make an HTTP backend origin match an HTTPS browser origin.
 
 Use live diagnostics sparingly when proving a final install:
 

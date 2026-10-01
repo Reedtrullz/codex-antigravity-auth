@@ -106,7 +106,10 @@ GOOGLE_REQUEST_TIMEOUT_METADATA_KEY = "antigravity_request_timeout_seconds"
 GOOGLE_REQUEST_TIMEOUT_MIN_SECONDS = 1.0
 GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS = 600.0
 CLIENT_DISCONNECT_POLL_SECONDS = 0.1
-TEST_CLIENT_HOSTS = {"testserver"}
+TEST_CLIENT_HOSTS = {"testserver", "testclient"}
+PROXY_INDICATOR_HEADERS = frozenset({
+    "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "x-real-ip",
+})
 REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
     native_responses=True,
     parallel_tool_calls=True,
@@ -174,7 +177,9 @@ def request_origin_matches(request: Request, origin: str) -> bool:
     if request_port is None:
         request_port = 443 if request_url.scheme == "https" else 80
     host_matches = parsed_origin.hostname.lower() == (request_url.hostname or "").lower()
-    if not host_matches and is_loopback_host(parsed_origin.hostname) and is_loopback_host(request_url.hostname):
+    if (not host_matches and parsed_origin.hostname.lower() not in TEST_CLIENT_HOSTS
+            and (request_url.hostname or "").lower() not in TEST_CLIENT_HOSTS
+            and is_loopback_host(parsed_origin.hostname) and is_loopback_host(request_url.hostname)):
         host_matches = True
     return (
         parsed_origin.scheme == request_url.scheme
@@ -184,10 +189,33 @@ def request_origin_matches(request: Request, origin: str) -> bool:
 
 
 def request_uses_loopback_host(request: Request, client_host: str | None = None) -> bool:
-    hostname = request.url.hostname
-    if is_loopback_host(hostname):
-        return True
-    return (hostname or "").lower() in TEST_CLIENT_HOSTS and client_host == "testclient"
+    # Some ASGI URL implementations fall back to scope.server for a malformed
+    # Host. Access control must inspect the supplied authority before that
+    # fallback can turn invalid input into an apparently local request.
+    hosts = request.headers.getlist("host")
+    if len(hosts) != 1:
+        return False
+    authority = hosts[0]
+    if (not authority or any(ch.isspace() or ord(ch) < 0x20 or 0x7f <= ord(ch) < 0xa0 for ch in authority)
+            or any(ch in authority for ch in "/?#@\\") or authority.endswith(":")):
+        return False
+    try:
+        parsed = urlparse("//" + authority)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    if authority.startswith("["):
+        suffix = authority[authority.find("]") + 1:]
+        if suffix and not re.fullmatch(r":\d+", suffix):
+            return False
+    elif authority.count(":") > 1:
+        return False
+    if port is not None and not 1 <= port <= 65535:
+        return False
+    if (hostname or "").lower() in TEST_CLIENT_HOSTS:
+        return client_host == "testclient"
+    return is_loopback_host(hostname)
 
 
 def mutating_json_request_guard(request: Request) -> JSONResponse | None:
@@ -204,10 +232,6 @@ def mutating_json_request_guard(request: Request) -> JSONResponse | None:
             content={"detail": "Mutating gateway requests must use Content-Type: application/json."},
         )
 
-    client_host = request.client.host if request.client else None
-    if is_loopback_host(client_host) and not request_uses_loopback_host(request, client_host):
-        return JSONResponse(status_code=403, content={"detail": "Loopback gateway requests must use a loopback Host."})
-
     if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
         return JSONResponse(status_code=403, content={"detail": "Cross-site browser requests are not allowed."})
 
@@ -221,20 +245,25 @@ def mutating_json_request_guard(request: Request) -> JSONResponse | None:
 @app.middleware("http")
 async def require_remote_gateway_token(request: Request, call_next):
     client_host = request.client.host if request.client else None
-    if is_loopback_host(client_host):
+    allow_remote = os.environ.get("ANTIGRAVITY_ALLOW_REMOTE") == "1"
+    proxy_marked = any(name in request.headers for name in PROXY_INDICATOR_HEADERS)
+    # Header values can never grant the local exemption. In authenticated mode
+    # even a loopback peer may be a reverse proxy acting for a remote client.
+    if is_loopback_host(client_host) and not allow_remote and not proxy_marked:
+        if not request_uses_loopback_host(request, client_host):
+            return JSONResponse(status_code=403, content={"detail": "Loopback gateway requests must use a loopback Host."})
         guard_response = mutating_json_request_guard(request)
         if guard_response is not None:
             return guard_response
         return await call_next(request)
 
-    allow_remote = os.environ.get("ANTIGRAVITY_ALLOW_REMOTE") == "1"
     try:
         token = validate_gateway_token_strength(os.environ.get("ANTIGRAVITY_GATEWAY_TOKEN")) if allow_remote else ""
     except ValueError as e:
         return JSONResponse(status_code=403, content={"detail": str(e)})
     expected_auth = f"Bearer {token}" if token else ""
     supplied_auth = request.headers.get("authorization", "")
-    if allow_remote and token and secrets.compare_digest(supplied_auth, expected_auth):
+    if allow_remote and token and secrets.compare_digest(supplied_auth.encode("utf-8"), expected_auth.encode("ascii")):
         guard_response = mutating_json_request_guard(request)
         if guard_response is not None:
             return guard_response

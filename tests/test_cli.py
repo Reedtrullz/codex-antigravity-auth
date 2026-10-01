@@ -2148,6 +2148,7 @@ class TestV3NativeSetup(unittest.TestCase):
             self.assertEqual(info["pid_file"], str(pid_file))
             self.assertEqual(info["log_file"], str(log_file))
             popen.assert_called_once()
+            self.assertIn("--no-proxy-headers", popen.call_args.args[0])
 
     def test_start_background_removes_pid_and_terminates_when_readiness_fails(self):
         proc = MagicMock()
@@ -2197,6 +2198,7 @@ class TestV3NativeSetup(unittest.TestCase):
             self.assertEqual(cmd[:4], ["/usr/local/bin/op", "run", "--env-file", str(env_file)])
             self.assertIn("--", cmd)
             self.assertIn("uvicorn", cmd)
+            self.assertIn("--no-proxy-headers", cmd)
             self.assertIn("codex_antigravity_auth.server:app", cmd)
 
     def test_start_background_rejects_onepassword_when_op_missing_before_popen(self):
