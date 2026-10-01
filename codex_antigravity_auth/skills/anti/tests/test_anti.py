@@ -1276,7 +1276,7 @@ class AntiHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
             anti.RUNS_DIR = Path(tmp)
             record_path = anti.RUNS_DIR / "run-1.json"
-            record_path.write_text(json.dumps({"id": "run-1"}), encoding="utf-8")
+            record_path.write_text(json.dumps({"id": "run-1", "status": "success"}), encoding="utf-8")
             old = time.time() - 3 * 86400
             os.utime(record_path, (old, old))
             output = io.StringIO()
@@ -2647,10 +2647,12 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_request_json_never_forwards_authorization_on_redirect(self) -> None:
         anti = load_anti()
-        real_urlopen = anti.urllib.request.urlopen
+        real_urlopen = anti.open_http_request
         captured: dict[str, dict] = {}
 
-        def fake_urlopen(req, timeout=10.0):
+        def fake_urlopen(req, timeout=10.0, before_open=None):
+            if before_open is not None:
+                timeout = before_open(req, timeout)
             captured["regular"] = dict(req.headers)
             captured["unredirected"] = dict(req.unredirected_hdrs)
 
@@ -2668,7 +2670,7 @@ class AntiHelperTests(unittest.TestCase):
 
             return FakeResponse()
 
-        anti.urllib.request.urlopen = fake_urlopen
+        anti.open_http_request = fake_urlopen
         try:
             with unittest.mock.patch.dict(os.environ, {"ANTIGRAVITY_GATEWAY_TOKEN": "redirect-test-token"}):
                 status, decoded = anti.request_json(
@@ -2679,7 +2681,7 @@ class AntiHelperTests(unittest.TestCase):
                     token_env="ANTIGRAVITY_GATEWAY_TOKEN",
                 )
         finally:
-            anti.urllib.request.urlopen = real_urlopen
+            anti.open_http_request = real_urlopen
 
         self.assertEqual(status, 200)
         self.assertEqual(decoded, {})
@@ -3694,7 +3696,7 @@ class PostResponseGuardTests(unittest.TestCase):
         anti.request_json = lambda *a, **kw: (200, self._make_failed_response())
         try:
             anti.post_response(
-                base_url="http://x", model="gemini-3.5-flash-high",
+                base_url="https://fixture.example", model="gemini-3.5-flash-high",
                 prompt="x", max_output_tokens=100, timeout=5, token_env="",
                 retries=0, model_ids=model_ids,
             )
@@ -3710,7 +3712,7 @@ class PostResponseGuardTests(unittest.TestCase):
         anti.request_json = lambda *a, **kw: (200, self._make_empty_output_response())
         try:
             anti.post_response(
-                base_url="http://x", model="gemini-3.5-flash-high",
+                base_url="https://fixture.example", model="gemini-3.5-flash-high",
                 prompt="x", max_output_tokens=100, timeout=5, token_env="",
                 retries=0, model_ids=model_ids,
             )
@@ -3727,7 +3729,7 @@ class PostResponseGuardTests(unittest.TestCase):
             "output": [{"type": "message", "content": [{"type": "output_text", "text": "Good review."}]}],
         })
         result = anti.post_response(
-            base_url="http://x", model="gemini-3.5-flash-high",
+            base_url="https://fixture.example", model="gemini-3.5-flash-high",
             prompt="x", max_output_tokens=100, timeout=5, token_env="",
             retries=0, model_ids=model_ids,
         )
@@ -3743,7 +3745,7 @@ class PostResponseGuardTests(unittest.TestCase):
             "output": [{"type": "message", "content": [{"type": "output_text", "text": "partial"}]}],
         })
         incomplete = anti.post_response(
-            base_url="http://x", model="gemini-3.5-flash-high", prompt="x",
+            base_url="https://fixture.example", model="gemini-3.5-flash-high", prompt="x",
             max_output_tokens=100, timeout=5, token_env="", retries=0, model_ids=model_ids,
         )
         self.assertEqual(incomplete.response_metadata["upstream_status"], "incomplete")
@@ -3756,7 +3758,7 @@ class PostResponseGuardTests(unittest.TestCase):
             "model": "gemini-3.5-flash-high", "status": "completed", "output": [],
         })
         empty = anti.post_response(
-            base_url="http://x", model="gemini-3.5-flash-high", prompt="x",
+            base_url="https://fixture.example", model="gemini-3.5-flash-high", prompt="x",
             max_output_tokens=100, timeout=5, token_env="", retries=0, model_ids=model_ids,
         )
         self.assertTrue(empty.response_metadata["upstream_output_empty"])
@@ -4118,7 +4120,7 @@ class BugfixRegressionTests(unittest.TestCase):
         self.assertEqual(record["status"], "partial")
         self.assertEqual(record["runStatus"], "partial")
         self.assertNotIn("output_text", record)
-        self.assertIn("answer that ends mid-sentence", artifact["output_text"])
+        self.assertIn("answer that ends mid-sentence", artifact["output_preview"])
         self.assertIn("consult_attempts", record["metadata"])
         self.assertEqual(len(record["metadata"]["consult_attempts"]), 2)
 
@@ -4168,7 +4170,7 @@ class BugfixRegressionTests(unittest.TestCase):
             self.assertTrue(rows[0]["interrupted"])
             self.assertEqual(rows[0]["size"], 0)
 
-    def test_runs_clean_removes_stale_tmp_files(self) -> None:
+    def test_runs_clean_preserves_stale_tmp_files(self) -> None:
         anti = load_anti()
         with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
             anti.RUNS_DIR = Path(tmp)
@@ -4180,8 +4182,9 @@ class BugfixRegressionTests(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 rc = anti.main(["runs", "clean", "--older-than", "1"])
             self.assertEqual(rc, 0)
-            self.assertFalse(tmp_path.exists())
-            self.assertIn("Removed 1", output.getvalue())
+            self.assertTrue(tmp_path.exists())
+            self.assertIn("Removed 0", output.getvalue())
+            self.assertIn("temporary_ownership_unknown", output.getvalue())
 
     # --- B6: provider identifier redaction ---
 
@@ -4990,10 +4993,10 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                             "review", "--scope", "files", "--file", "fixture.py",
                             "--max-prompt-chars", str(cap), "--max-review-chunks", "0",
                             "--chunked", "always", "--run-id", run_id,
-                            "--save-output", "summary", "--json", "--no-progress",
+                            "--save-output", "full", "--json", "--no-progress",
                         ])
 
-                    artifact = json.loads((anti.RUNS_DIR / run_id / "result.json").read_text(encoding="utf-8"))
+                    artifact = json.loads(Path(anti.load_run_record(anti.RUNS_DIR / f"{run_id}.json")["resultPath"]).read_text(encoding="utf-8"))
                     planned = chunk_stage["planned_calls"]
                     if cap == 1000:
                         self.assertEqual(rc, 1)
@@ -5113,7 +5116,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 os.chdir(old_cwd)
 
             artifact = json.loads(
-                (anti.RUNS_DIR / "synthesis-failure" / "result.json").read_text(encoding="utf-8")
+                Path(anti.load_run_record(anti.RUNS_DIR / "synthesis-failure.json")["resultPath"]).read_text(encoding="utf-8")
             )
 
         self.assertEqual(rc, 1)
@@ -5165,7 +5168,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 os.chdir(old_cwd)
 
             artifact = json.loads(
-                (anti.RUNS_DIR / "incomplete-synthesis" / "result.json").read_text(encoding="utf-8")
+                Path(anti.load_run_record(anti.RUNS_DIR / "incomplete-synthesis.json")["resultPath"]).read_text(encoding="utf-8")
             )
 
         self.assertEqual(rc, 1)
@@ -5378,13 +5381,13 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 },
             )
             assert record_path is not None
-            artifact_path = Path(tmp) / "scope-test" / "result.json"
+            artifact_path = Path(anti.load_run_record(record_path)["resultPath"])
             self.assertTrue(artifact_path.exists())
             record = json.loads(record_path.read_text(encoding="utf-8"))
             artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
 
         self.assertEqual(record["resultPath"], str(artifact_path))
-        self.assertEqual(artifact["schemaVersion"], 1)
+        self.assertEqual(artifact["schemaVersion"], 2)
         self.assertEqual(artifact["runId"], "scope-test")
         self.assertEqual(artifact["runStatus"], "partial")
         self.assertEqual(artifact["scopeStatus"], "partial")
@@ -5549,7 +5552,9 @@ class ScopeIntegrityContractTests(unittest.TestCase):
             summary_record = json.loads(summary_record_path.read_text())
             summary_artifact = json.loads(Path(summary_record["resultPath"]).read_text())
         self.assertNotIn("output_text", summary_record)
-        self.assertEqual(summary_artifact["output_text"], "answer-" + "x" * 2000)
+        self.assertNotIn("output_text", summary_artifact)
+        self.assertEqual(summary_artifact["output_preview"], ("answer-" + "x" * 2000)[:1600])
+        self.assertFalse(summary_artifact["retention"]["contentComplete"])
         self.assertEqual(summary_artifact["artifacts"]["rawLanePaths"], [])
 
 
@@ -5891,7 +5896,7 @@ class AntiHardeningTests(unittest.TestCase):
             try:
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
-                    rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json", "--no-progress"])
+                    rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json", "--no-progress", "--save-output", "summary"])
                 self.assertEqual(rc, 0, output.getvalue())
                 parsed = json.loads(output.getvalue())
                 run_id = parsed["metadata"]["run_id"]

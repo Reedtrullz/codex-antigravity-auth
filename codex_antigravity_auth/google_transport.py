@@ -14,6 +14,7 @@ import httpx
 
 from .request_budget import call_sync, owned_context
 from .sse import SSELineError, iter_sse_data
+from .endpoint_policy import httpx_client_options, validate_endpoint_url
 
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
 from .response_protocol import (
@@ -422,7 +423,7 @@ class GoogleTransport:
     ) -> None:
         self.timeout = timeout
         self.platform_name = platform_name or get_platform()
-        self.endpoint = endpoint.rstrip("/")
+        self.endpoint = validate_endpoint_url(endpoint, label="Google endpoint").rstrip("/")
         self.client_factory = client_factory
 
     def build_request(self, request: dict[str, Any], lease: AccountLease) -> dict[str, Any]:
@@ -450,7 +451,7 @@ class GoogleTransport:
     async def post(self, request: dict[str, Any], lease: AccountLease) -> httpx.Response:
         url = f"{self.endpoint}/v1internal:generateContent"
         payload = await call_sync(self.build_request, request, lease)
-        async with owned_context(self.client_factory(timeout=self.timeout)) as client:
+        async with owned_context(self.client_factory(**httpx_client_options(url, timeout=self.timeout))) as client:
             return await client.post(
                 url,
                 json=payload,
@@ -481,7 +482,7 @@ class GoogleTransport:
     async def stream(self, request: dict[str, Any], lease: AccountLease):
         url = f"{self.endpoint}/v1internal:streamGenerateContent?alt=sse"
         payload = await call_sync(self.build_request, request, lease)
-        async with owned_context(self.client_factory(timeout=self.timeout)) as client:
+        async with owned_context(self.client_factory(**httpx_client_options(url, timeout=self.timeout))) as client:
             async with owned_context(client.stream(
                 "POST",
                 url,

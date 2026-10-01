@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "$id": "urn:anti:raw-lane:1",
+  "title": "Anti raw lane v1",
+  "required": [
+    "laneSchemaVersion",
+    "runId",
+    "revisionId"
+  ],
+  "properties": {
+    "laneSchemaVersion": {
+      "const": 1
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "revisionId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    }
+  }
+}

@@ -994,7 +994,7 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertIsNone(get_pkce_verifier("expired_state"))
 
     @patch("codex_antigravity_auth.oauth.require_credentials", return_value=("client-id", "client-secret"))
-    @patch("urllib.request.urlopen")
+    @patch("codex_antigravity_auth.oauth.open_http_request")
     def test_oauth_exchange_and_refresh_use_timeout(self, mock_urlopen, mock_creds):
         mock_resp = MagicMock()
         mock_resp.status = 200
@@ -1354,7 +1354,7 @@ class TestRegressionFixes(unittest.TestCase):
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
-    @patch("urllib.request.urlopen")
+    @patch("codex_antigravity_auth.cli.open_http_request")
     def test_doctor_treats_auth_http_error_as_online(self, mock_urlopen, mock_load, mock_creds):
         mock_creds.return_value = ("client_id_val", "client_secret_val")
         mock_load.return_value = {"accounts": []}

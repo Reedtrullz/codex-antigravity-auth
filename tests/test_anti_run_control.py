@@ -197,7 +197,8 @@ def test_panel_judge_expiry_preserves_partial_lane_record_without_raw_never_data
     record=json.loads((tmp_path/'runs/fixture-run.json').read_text())
     assert record['runStatus']!='success'
     assert record['metadata']['scope_status']=='partial'
-    assert len(record['metadata']['panel_results'])==2
+    assert record['metadata']['panel_lane_count']==2
+    assert 'panel_results' not in record['metadata']
     assert record['metadata']['run_control']['attempts_started']==2
     assert 'private-fixture' not in json.dumps(record)
 
@@ -326,6 +327,7 @@ def test_transport_timeout_is_rechecked_after_preparation(anti,monkeypatch):
         timeouts.append(timeout)
         response=io.BytesIO(body);response.status=200;return response
     monkeypatch.setattr(anti.urllib.request,'urlopen',opened)
+    monkeypatch.setattr(anti.urllib.request,'build_opener',lambda *handlers:argparse.Namespace(open=opened))
     anti.generate_with_fallback(settings,model='fixture:model',prompt='fixture',max_output_tokens=32,
                                 purpose='preparation',model_ids={'fixture:model'})
     assert timeouts==[.75]
@@ -360,7 +362,10 @@ def test_deferred_judge_retry_retains_first_judge_evidence_per_policy(anti,monke
                       '--save-output',retention,'--no-progress'])==1
     assert len(calls)==3
     record=json.loads((tmp_path/'runs/judge-retry.json').read_text())
-    assert len(record['metadata']['judge_attempts'])==1
+    if retention=='full':
+        assert len(record['metadata']['judge_attempts'])==1
+    else:
+        assert record['metadata']['judge_attempt_count']==1
     assert record['metadata']['synthesis_status']=='not_sent'
     if retention=='full':
         judges=[entry for entry in record['execution_ledger'] if entry['stage']=='panel_judge_1']

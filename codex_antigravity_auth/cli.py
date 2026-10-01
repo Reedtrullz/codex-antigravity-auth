@@ -1,3 +1,4 @@
+from .endpoint_policy import open_http_request
 import sys
 import os
 import argparse

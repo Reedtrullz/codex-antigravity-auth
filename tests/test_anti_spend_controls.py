@@ -298,12 +298,12 @@ def test_quote_gateway_mismatch_refuses_before_transport(anti,monkeypatch,tmp_pa
 
 
 def test_normalized_scope_matches_and_is_rechecked_after_gateway_change(anti,monkeypatch,tmp_path):
-    path=profile(tmp_path,gateway='HTTP://EXAMPLE.INVALID:80/v1/')
-    args=settings(currency_budget='1',pricing_file=str(path),base_url='http://example.invalid/v1')
+    path=profile(tmp_path,gateway='HTTPS://EXAMPLE.INVALID:443/v1/')
+    args=settings(currency_budget='1',pricing_file=str(path),base_url='https://example.invalid/v1')
     calls=open_sequence(monkeypatch,anti,[(200,response())])
     generate(anti,args)
-    assert args._run_control.spend_control.snapshot()['currency']['gateway']=='http://example.invalid/v1'
-    args.base_url='http://different.invalid/v1'
+    assert args._run_control.spend_control.snapshot()['currency']['gateway']=='https://example.invalid/v1'
+    args.base_url='https://different.invalid/v1'
     with pytest.raises(anti.SpendAdmissionError,match='gateway'):generate(anti,args)
     assert len(calls)==1
 

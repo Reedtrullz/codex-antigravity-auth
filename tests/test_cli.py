@@ -116,7 +116,7 @@ class TestCliDoctor(unittest.TestCase):
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
-    @patch("urllib.request.urlopen")
+    @patch("codex_antigravity_auth.cli.open_http_request")
     def test_run_doctor_displays_accurate_information(self, mock_urlopen, mock_load, mock_creds):
         mock_creds.return_value = ("client_id_val", "client_secret_val")
         mock_load.return_value = {"accounts": [{"email": "test@example.com", "expiresAt": 9_999_999_999}]}
@@ -142,7 +142,7 @@ class TestCliDoctor(unittest.TestCase):
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
-    @patch("urllib.request.urlopen")
+    @patch("codex_antigravity_auth.cli.open_http_request")
     def test_run_doctor_uses_backend_model_for_google_probe(self, mock_urlopen, mock_load, mock_creds):
         mock_creds.return_value = ("client_id_val", "client_secret_val")
         mock_load.return_value = {"accounts": [{"email": "test@example.com", "expiresAt": 9_999_999_999}]}
@@ -169,7 +169,7 @@ class TestCliDoctor(unittest.TestCase):
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
-    @patch("urllib.request.urlopen")
+    @patch("codex_antigravity_auth.cli.open_http_request")
     def test_main_doctor_exits_nonzero_on_hard_failure(self, mock_urlopen, mock_load, mock_creds):
         mock_creds.return_value = (None, None)
         mock_load.return_value = {"accounts": []}
@@ -188,7 +188,7 @@ class TestCliDoctor(unittest.TestCase):
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
-    @patch("urllib.request.urlopen")
+    @patch("codex_antigravity_auth.cli.open_http_request")
     def test_main_doctor_exits_nonzero_without_google_accounts(self, mock_urlopen, mock_load, mock_creds):
         mock_creds.return_value = ("client_id_val", "client_secret_val")
         mock_load.return_value = {"accounts": []}
@@ -209,7 +209,7 @@ class TestCliDoctor(unittest.TestCase):
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
-    @patch("urllib.request.urlopen")
+    @patch("codex_antigravity_auth.cli.open_http_request")
     def test_run_doctor_reports_malformed_byok_key_without_secret(self, mock_urlopen, mock_load, mock_creds):
         mock_creds.return_value = ("client_id_val", "client_secret_val")
         mock_load.return_value = {"accounts": []}
@@ -237,7 +237,7 @@ class TestCliDoctor(unittest.TestCase):
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
-    @patch("urllib.request.urlopen")
+    @patch("codex_antigravity_auth.cli.open_http_request")
     def test_run_doctor_byok_only_skips_google_checks(self, mock_urlopen, mock_load, mock_creds):
         provider = {
             "displayName": "DeepSeek",
@@ -280,7 +280,7 @@ wire_api = "responses"
         self.assertFalse(ready)
         self.assertIn("active model_provider", reason)
 
-    @patch("urllib.request.urlopen", side_effect=urllib.error.URLError("fixture offline"))
+    @patch("codex_antigravity_auth.cli.open_http_request", side_effect=urllib.error.URLError("fixture offline"))
     def test_run_doctor_byok_only_fails_for_missing_provider_key(self, _urlopen):
         provider = {
             "displayName": "DeepSeek",
@@ -356,7 +356,7 @@ wire_api = "responses"
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
-    @patch("urllib.request.urlopen")
+    @patch("codex_antigravity_auth.cli.open_http_request")
     def test_run_doctor_reports_account_store_load_failure(self, mock_urlopen, mock_load, mock_creds):
         mock_creds.return_value = ("client_id_val", "client_secret_val")
         mock_load.side_effect = RuntimeError("access_token=ya29.secret")
@@ -377,7 +377,7 @@ wire_api = "responses"
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
-    @patch("urllib.request.urlopen")
+    @patch("codex_antigravity_auth.cli.open_http_request")
     def test_run_doctor_accepts_custom_codex_provider_id(self, mock_urlopen, mock_load, mock_creds):
         mock_creds.return_value = ("client_id_val", "client_secret_val")
         mock_load.return_value = {"accounts": [{"email": "test@example.com", "expiresAt": 9_999_999_999}]}
@@ -393,7 +393,7 @@ wire_api = "responses"
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")
-    @patch("urllib.request.urlopen")
+    @patch("codex_antigravity_auth.cli.open_http_request")
     def test_run_doctor_reports_env_storage_key_as_configured(self, mock_urlopen, mock_load, mock_creds):
         mock_creds.return_value = ("client_id_val", "client_secret_val")
         mock_load.return_value = {"accounts": [{"email": "test@example.com", "expiresAt": 9_999_999_999}]}
@@ -1268,7 +1268,7 @@ class TestInstallSkill(unittest.TestCase):
             return response
 
         with patch.dict(os.environ, {"TEST_GATEWAY_TOKEN": "unit-test-token-value"}):
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("codex_antigravity_auth.cli.open_http_request", side_effect=fake_urlopen):
                 ids = gateway_model_ids("https://gateway.example/v1", token_env="TEST_GATEWAY_TOKEN")
 
         self.assertEqual(ids, {"claude-opus-4-6-thinking"})
@@ -1287,7 +1287,7 @@ class TestInstallSkill(unittest.TestCase):
 
         env = {key: value for key, value in os.environ.items() if key != "TEST_GATEWAY_TOKEN"}
         with patch.dict(os.environ, env, clear=True):
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("codex_antigravity_auth.cli.open_http_request", side_effect=fake_urlopen):
                 gateway_model_ids("https://gateway.example/v1", token_env="TEST_GATEWAY_TOKEN")
 
         self.assertIsNone(captured["auth"])
@@ -1302,13 +1302,13 @@ class TestInstallSkill(unittest.TestCase):
             captured["body"] = json.loads(req.data.decode("utf-8"))
             response = MagicMock()
             response.status = 200
-            response.read.return_value = b'{"output":[{"content":[{"type":"output_text","text":"ready"}]}]}'
+            response.read.return_value = b'{"status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ready"}]}]}'
             response.__enter__ = lambda self_: response
             response.__exit__ = lambda self_, *exc: False
             return response
 
         with patch.dict(os.environ, {"TEST_GATEWAY_TOKEN": "token-value"}, clear=False):
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("codex_antigravity_auth.cli.open_http_request", side_effect=fake_urlopen):
                 probe = gateway_generate_probe(
                     "https://gateway.example/v1",
                     "claude-sonnet-4-6",
@@ -1329,7 +1329,7 @@ class TestInstallSkill(unittest.TestCase):
         response.read.return_value = b'{"api_key":"sk-secret-value"}'
         error = urllib.error.HTTPError("https://gateway.example/v1/responses", 502, "Bad Gateway", {}, response)
 
-        with patch("urllib.request.urlopen", side_effect=error):
+        with patch("codex_antigravity_auth.cli.open_http_request", side_effect=error):
             probe = gateway_generate_probe(
                 "https://gateway.example/v1",
                 "claude-sonnet-4-6",
@@ -2724,7 +2724,7 @@ class TestVNextPolishCli(unittest.TestCase):
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
                 with patch("codex_antigravity_auth.cli._source_checkout_version", return_value=None):
                     with patch("codex_antigravity_auth.cli.importlib_metadata.version", return_value="1.4.0"):
-                        with patch("codex_antigravity_auth.cli.urllib.request.urlopen", return_value=response):
+                        with patch("codex_antigravity_auth.cli.open_http_request", return_value=response):
                             result = version_check_result(timeout=0.01)
 
             cache_path = Path(tmp) / "antigravity-version-check.json"
@@ -2745,7 +2745,7 @@ class TestVNextPolishCli(unittest.TestCase):
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
                 with patch("codex_antigravity_auth.cli._source_checkout_version", return_value=None):
                     with patch("codex_antigravity_auth.cli.importlib_metadata.version", return_value="1.4.0"):
-                        with patch("codex_antigravity_auth.cli.urllib.request.urlopen") as urlopen:
+                        with patch("codex_antigravity_auth.cli.open_http_request") as urlopen:
                             result = version_check_result(timeout=0.01)
 
         self.assertEqual(result["status"], "pass")
@@ -2753,7 +2753,7 @@ class TestVNextPolishCli(unittest.TestCase):
 
     def test_version_check_can_be_disabled_by_env(self):
         with patch.dict(os.environ, {"CODEX_ANTIGRAVITY_NO_UPDATE_CHECK": "1"}):
-            with patch("codex_antigravity_auth.cli.urllib.request.urlopen") as urlopen:
+            with patch("codex_antigravity_auth.cli.open_http_request") as urlopen:
                 result = version_check_result(timeout=0.01)
 
         self.assertEqual(result["status"], "skip")
@@ -2770,7 +2770,7 @@ class TestVNextPolishCli(unittest.TestCase):
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
                 with patch("codex_antigravity_auth.cli._source_checkout_version", return_value=None):
                     with patch("codex_antigravity_auth.cli.importlib_metadata.version", return_value="1.4.0"):
-                        with patch("codex_antigravity_auth.cli.urllib.request.urlopen", return_value=response):
+                        with patch("codex_antigravity_auth.cli.open_http_request", return_value=response):
                             result = version_check_result(timeout=0.01)
 
         self.assertEqual(result["status"], "skip")
@@ -3479,12 +3479,12 @@ class VisionSidecarDoctorTests(unittest.TestCase):
         mock_resp.status = 200
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
-        with patch('urllib.request.urlopen', return_value=mock_resp):
+        with patch('codex_antigravity_auth.cli.open_http_request', return_value=mock_resp):
             result = openrouter_reachability_check(timeout=1.0)
             self.assertTrue(result['ok'])
 
     def test_openrouter_reachability_check_failure(self):
-        with patch('urllib.request.urlopen', side_effect=urllib.error.URLError('timeout')):
+        with patch('codex_antigravity_auth.cli.open_http_request', side_effect=urllib.error.URLError('timeout')):
             result = openrouter_reachability_check(timeout=1.0)
             self.assertFalse(result['ok'])
 
