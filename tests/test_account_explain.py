@@ -10,7 +10,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from codex_antigravity_auth import account_diagnostics as diagnostics
-from codex_antigravity_auth import accounts, cli, constants, storage
+from codex_antigravity_auth import accounts, byok, cli, constants, storage
 from codex_antigravity_auth.account_state import AccountState
 
 
@@ -212,3 +212,51 @@ def test_byok_route_does_not_inspect_google_store(isolated_store, monkeypatch):
     report = diagnostics.account_eligibility_report("openrouter:synthetic")
     assert report["error_class"] == "unsupported_route"
     read.assert_not_called()
+
+
+@pytest.mark.parametrize("model,expected,ok", [
+    ("gpt-5.6", {"classic": "openai-disabled", "unified": "openai"}, False),
+    ("custom-fixture/deepseek-chat", {"classic": "byok", "unified": "byok"}, False),
+    ("openai:sonnet", {"classic": "antigravity", "unified": "antigravity"}, True),
+    ("sonnet", {"classic": "antigravity", "unified": "antigravity"}, True),
+    ("unlisted-fixture-backend", {"classic": "antigravity", "unified": "unknown"}, True),
+])
+def test_route_shapes_share_read_only_classifier(isolated_store, monkeypatch, model, expected, ok):
+    root, path, write = isolated_store
+    write(fixture_data())
+    provider_path = path.with_name("providers.json")
+    provider_path.write_text(json.dumps({"providers": {"custom-fixture": {
+        "baseUrl": "https://example.invalid/v1", "apiKey": "synthetic-provider-secret", "models": ["deepseek-chat"],
+    }}}))
+    monkeypatch.setattr(byok, "providers_json_path_read_only", lambda: provider_path)
+    monkeypatch.setattr(byok, "load_provider_config", MagicMock(side_effect=AssertionError("must not migrate provider store")))
+    before = tree_snapshot(root)
+    report = diagnostics.account_eligibility_report(model)
+    assert report["ok"] is ok
+    assert report["route_by_mode"] == expected
+    if model in {"sonnet", "openai:sonnet"}:
+        assert report["family"] == "claude"
+    assert "synthetic-provider-secret" not in json.dumps(report)
+    assert tree_snapshot(root) == before
+
+
+def test_unreadable_slash_provider_configuration_does_not_claim_google_eligibility(isolated_store, monkeypatch):
+    monkeypatch.setattr(byok, "all_provider_configs_read_only", MagicMock(side_effect=RuntimeError("synthetic-secret")))
+    report = diagnostics.account_eligibility_report("custom-fixture/model")
+    assert report["error_class"] == "route_configuration_unavailable"
+    assert "synthetic-secret" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("inside_home", [True, False])
+def test_private_namespace_components_are_masked(isolated_store, monkeypatch, inside_home):
+    root, path, write = isolated_store
+    private = (root if inside_home else root.parent) / "fixture@example.invalid" / "synthetic-private-profile"
+    monkeypatch.setattr(storage, "ANTIGRAVITY_ACCOUNTS_FILE", str(private / "accounts.json"))
+    monkeypatch.setattr(constants, "CREDENTIALS_FILE", str(private / "oauth.json"))
+    before = tree_snapshot(root)
+    report = diagnostics.account_eligibility_report("sonnet")
+    text = json.dumps(report) + "\n".join(diagnostics.account_eligibility_lines(report))
+    assert "fixture@example.invalid" not in text and "synthetic-private-profile" not in text
+    assert report["namespace"]["account_store"].startswith("<configured path ")
+    assert diagnostics.account_eligibility_report("sonnet")["namespace"] == report["namespace"]
+    assert tree_snapshot(root) == before

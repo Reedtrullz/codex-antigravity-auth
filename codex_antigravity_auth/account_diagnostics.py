@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -11,7 +12,8 @@ from typing import Any
 from . import constants, storage
 from .account_state import AccountState, UnsupportedAccountStateVersion
 from .accounts import AccountManager
-from .redaction import redact_secret_text
+from .models import canonical_model_id
+from .unified import classify_route
 
 
 SELECTION_RULE = (
@@ -30,7 +32,7 @@ def explain_account_data(data: dict[str, Any], model: str, *, now: float | None 
                          in_flight: dict[str, int] | None = None) -> dict[str, Any]:
     """Inspect a copy; in_flight=None means live leases are unobservable."""
     current = time.time() if now is None else now
-    family = AccountManager._model_family(model)
+    family = AccountManager._model_family(canonical_model_id(model))
     snapshot = copy.deepcopy(data)
     owner = AccountState(snapshot, now=lambda: current, in_flight=copy.deepcopy(in_flight))
     selection = owner.selection_snapshot(family)
@@ -90,25 +92,36 @@ def explain_account_data(data: dict[str, Any], model: str, *, now: float | None 
     }
 
 
-def _display_path(path: Path) -> str:
-    try:
-        value = "~/" + str(path.relative_to(Path.home()))
-    except ValueError:
-        value = str(path)
-    return redact_secret_text(value)
+def _display_path(path: Path, default_name: str) -> str:
+    if path == Path.home() / ".codex" / default_name:
+        return f"~/.codex/{default_name}"
+    # Even a path below HOME may contain private account/profile components.
+    identity = hashlib.sha256(str(path.absolute()).encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"<configured path {identity}>"
 
 
 def account_eligibility_report(model: str) -> dict[str, Any]:
     namespace = {
-        "account_store": _display_path(storage.accounts_json_path_read_only()),
-        "oauth_client_file": _display_path(Path(os.path.expanduser(constants.CREDENTIALS_FILE))),
+        "account_store": _display_path(storage.accounts_json_path_read_only(), "antigravity-accounts.json"),
+        "oauth_client_file": _display_path(Path(os.path.expanduser(constants.CREDENTIALS_FILE)), "antigravity-credentials.json"),
         "oauth_client_environment": ["ANTIGRAVITY_CLIENT_ID", "ANTIGRAVITY_CLIENT_SECRET"],
         "keyring_service": storage.KEYRING_SERVICE_NAME,
         "keyring_key": storage.KEYRING_KEY_NAME,
     }
-    if not model.strip() or ":" in model:
+    if not model.strip() or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7f for ch in model.strip()):
         return {"ok": False, "error_class": "unsupported_route", "namespace": namespace,
-                "message": "Choose a Google model; provider-prefixed BYOK models do not use this account pool."}
+                "message": "Choose a non-empty model ID without whitespace or control characters."}
+    model = model.strip()
+    routed_model = canonical_model_id(model) if ":" not in model else model
+    try:
+        routes = {mode: classify_route(routed_model, unified_enabled=enabled, read_only=True)
+                  for mode, enabled in (("classic", False), ("unified", True))}
+    except Exception:
+        return {"ok": False, "error_class": "route_configuration_unavailable", "namespace": namespace,
+                "message": "Cannot inspect provider routing configuration; check its store and encryption key."}
+    if "antigravity" not in routes.values():
+        return {"ok": False, "error_class": "unsupported_route", "namespace": namespace, "route_by_mode": routes,
+                "message": "This model does not use the Google account pool in either gateway mode."}
     try:
         report = explain_account_data(storage.load_accounts_read_only(), model)
     except Exception as exc:
@@ -126,11 +139,14 @@ def account_eligibility_report(model: str) -> dict[str, Any]:
                 if unsupported else "Cannot inspect the account store. Check its path, permissions and configured encryption key."
             ),
         }
-    return {**report, "namespace": namespace}
+    return {**report, "namespace": namespace, "route_by_mode": routes,
+            "gateway_mode": "unknown_other_process"}
 
 
 def account_eligibility_lines(report: dict[str, Any]) -> list[str]:
     lines = [f"{key}: {value}" for key, value in report["namespace"].items()]
+    if "route_by_mode" in report:
+        lines.append(f"Routes by gateway mode: {report['route_by_mode']}; the running gateway mode is not observed.")
     if not report["ok"]:
         return lines + [f"{report['error_class']}: {report['message']}"]
     lines += [f"Family: {report['family']}", report["selection_rule"],

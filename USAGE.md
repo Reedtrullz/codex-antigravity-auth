@@ -231,6 +231,8 @@ Use `codex-antigravity accounts explain --model claude-sonnet-4-6` (or add `--js
 
 Routing eligibility is separate from token readiness: an expired token may require refresh, whose success is unknown until attempted. The command never refreshes, probes providers, takes leases, writes migrations, or repairs files. Unsupported store versions fail with recovery guidance. Runtime selection prefers the lowest lease count, with ties ordered cyclically from the family's preferred account; this is sticky preference, not round-robin. The CLI cannot observe another gateway process's leases, so it reports them as unknown and does not predict the next selected account. Cooldown expiry alone does not reveal whether its cause was throttling, transport failure, or authentication.
 
+The view reports route classification for both classic and unified gateway modes because a separate gateway may run with different settings. Google eligibility applies only to modes classified as `antigravity`; OpenAI and BYOK routes are rejected. Standard namespace paths use `~/.codex/...`; customized paths are represented by stable hashes so private directory names stay out of shared reports.
+
 ---
 
 ## 3. High-Fidelity Streaming & Reasoning

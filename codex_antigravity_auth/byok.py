@@ -810,7 +810,7 @@ def remove_provider_config(provider_id: str) -> bool:
     ))
 
 
-def split_provider_model(model: str) -> tuple[str | None, str]:
+def split_provider_model(model: str, *, read_only: bool = False) -> tuple[str | None, str]:
     model = str(model)
     colon_index = model.find(":")
     slash_index = model.find("/")
@@ -821,7 +821,8 @@ def split_provider_model(model: str) -> tuple[str | None, str]:
         provider_id, provider_model = model.split("/", 1)
         if provider_id in RESERVED_SLASH_PROVIDER_PREFIXES:
             return None, model
-        if provider_id in PROVIDER_PRESETS or provider_id in all_provider_configs(include_env_enabled=False):
+        configs = all_provider_configs_read_only if read_only else all_provider_configs
+        if provider_id in PROVIDER_PRESETS or provider_id in configs(include_env_enabled=False):
             return provider_id, provider_model
     return None, model
 
