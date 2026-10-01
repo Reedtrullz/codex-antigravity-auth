@@ -787,9 +787,7 @@ async def list_models():
 
 @app.get("/health")
 async def health(request: Request):
-    client_host = request.client.host if request.client else None
-    if not request_uses_loopback_host(request, client_host):
-        raise HTTPException(status_code=403, detail="Health checks are loopback-only.")
+    # The middleware applies the same local/authenticated boundary to every route.
     providers, provider_catalog_status = await provider_health_catalog_fail_soft()
     catalog = native_model_catalog()
     unified = is_unified_mode_enabled()

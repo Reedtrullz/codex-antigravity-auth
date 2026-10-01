@@ -161,3 +161,29 @@ def test_foreground_and_service_entrypoint_disable_proxy_interpretation(monkeypa
     cli.main()
     launch.assert_called_once()
     assert launch.call_args.kwargs["proxy_headers"] is False
+
+
+@pytest.mark.parametrize("peer", ["127.0.0.1", "203.0.113.7"])
+@pytest.mark.parametrize("remote,authenticated,expected", [(False, False, 403), (True, False, 403), (True, True, 200)])
+def test_complete_health_route_honors_authenticated_public_host(monkeypatch, peer, remote, authenticated, expected):
+    monkeypatch.setenv("ANTIGRAVITY_ALLOW_REMOTE", "1" if remote else "0")
+    monkeypatch.setenv("ANTIGRAVITY_GATEWAY_TOKEN", TOKEN)
+    async def providers():
+        return {}, {"status": "fixture"}
+    monkeypatch.setattr(server, "provider_health_catalog_fail_soft", providers)
+    monkeypatch.setattr(server, "native_model_catalog", lambda: [])
+    monkeypatch.setattr(server, "is_unified_mode_enabled", lambda: False)
+    monkeypatch.setattr(server, "account_health_summary", lambda: {"fixture": True})
+    monkeypatch.setattr(server, "request_log_info", lambda: {"fixture": True})
+    async def run():
+        transport = httpx.ASGITransport(app=server.app, client=(peer, 12345))
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway.example") as client:
+            headers = {"x-forwarded-for": "203.0.113.7"}
+            if authenticated:
+                headers["authorization"] = "Bearer " + TOKEN
+            return await client.get("/health", headers=headers)
+    response = asyncio.run(run())
+    assert response.status_code == expected
+    if expected == 200:
+        assert response.json()["ok"] is True
+        assert response.json()["accounts"] == {"fixture": True}
