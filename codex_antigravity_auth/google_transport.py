@@ -16,6 +16,7 @@ from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
 from .response_protocol import (
     AttemptOutcome,
     ProviderResult,
+    POLICY_FINISH_REASONS,
     PrimaryAlternativeSelector,
     ProviderTerminal,
     ResponseEventBuilder,
@@ -198,6 +199,8 @@ class GoogleResponseAccumulator:
             finish_reason = candidate.get("finishReason")
             if isinstance(finish_reason, str) and finish_reason:
                 self._finish_reason = finish_reason
+                if finish_reason.strip().lower() in POLICY_FINISH_REASONS:
+                    self._safety_block = self._safety_block or {"blockReason": finish_reason.strip().upper()}
             content = candidate.get("content")
             if content is None:
                 continue
@@ -261,7 +264,7 @@ class GoogleResponseAccumulator:
                 }
             )
         output.extend(self._function_calls)
-        if self._safety_block and not output:
+        if self._safety_block:
             output.append(refusal_item(self._safety_block))
         terminal = classify_terminal(
             output=output,
@@ -665,9 +668,11 @@ class GoogleTransport:
                 output.extend(item for item in function_calls if isinstance(item, dict))
 
         safety_block = unwrapped.get("promptFeedback")
-        if not isinstance(safety_block, dict):
+        if not isinstance(safety_block, dict) or not safety_block.get("blockReason"):
             safety_block = None
-        if safety_block and not output:
+        if isinstance(finish_reason, str) and finish_reason.strip().lower() in POLICY_FINISH_REASONS:
+            safety_block = safety_block or {"blockReason": finish_reason.strip().upper()}
+        if safety_block:
             output.append(refusal_item(safety_block))
 
         usage = unwrapped.get("usageMetadata")

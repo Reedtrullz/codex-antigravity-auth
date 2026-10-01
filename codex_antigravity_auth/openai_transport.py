@@ -22,6 +22,7 @@ from .redaction import redact_secret_text
 
 from .response_protocol import (
     ProviderCapabilities,
+    POLICY_FINISH_REASONS,
     PrimaryAlternativeSelector,
     ProviderResult,
     ProviderTerminal,
@@ -131,6 +132,26 @@ class PreparedOpenAIRequest:
     timeout: float
 
 
+def _message_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(part["text"] for part in content if isinstance(part, dict) and isinstance(part.get("text"), str))
+    return ""
+
+
+def _message_refusal(message: dict[str, Any]) -> str:
+    refusal = message.get("refusal")
+    if isinstance(refusal, str) and refusal:
+        return refusal
+    content = message.get("content")
+    if isinstance(content, list):
+        return "".join(part["refusal"] for part in content if isinstance(part, dict)
+                       and part.get("type") == "refusal" and isinstance(part.get("refusal"), str))
+    return ""
+
+
 def _message_output(message: object) -> list[dict[str, Any]]:
     if not isinstance(message, dict):
         return []
@@ -145,17 +166,7 @@ def _message_output(message: object) -> list[dict[str, Any]]:
                 "step_by_step_summary": reasoning,
             }
         )
-    content = message.get("content")
-    if isinstance(content, str):
-        text = content
-    elif isinstance(content, list):
-        text = "".join(
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and isinstance(part.get("text"), str)
-        )
-    else:
-        text = ""
+    text = _message_text(message)
     if text:
         output.append(
             {
@@ -166,6 +177,9 @@ def _message_output(message: object) -> list[dict[str, Any]]:
                 "content": [{"type": "output_text", "text": text, "annotations": []}],
             }
         )
+    refusal = _message_refusal(message)
+    if refusal:
+        output.append(refusal_item(refusal_text=refusal))
     tool_calls = message.get("tool_calls")
     if isinstance(tool_calls, list):
         for tool_call in tool_calls:
@@ -197,7 +211,8 @@ class ChatResponseAccumulator:
         self._done = False
         self._malformed = False
         self._primary = PrimaryAlternativeSelector()
-        self._refusal = False
+        self._refusal = ""
+        self._blocked = False
         self._tool_names: dict[int, str] = {}
         self._tool_arguments: dict[int, str] = {}
 
@@ -229,19 +244,16 @@ class ChatResponseAccumulator:
             finish_reason = choice.get("finish_reason")
             if isinstance(finish_reason, str) and finish_reason:
                 self._finish_reason = finish_reason
-                if finish_reason == "content_filter":
-                    self._refusal = True
+                if finish_reason.strip().lower() in POLICY_FINISH_REASONS:
+                    self._blocked = True
             delta = choice.get("delta")
             if not isinstance(delta, dict):
                 continue
-            content = delta.get("content")
-            if isinstance(content, str):
-                self._text += content
+            self._text += _message_text(delta)
             reasoning = delta.get("reasoning_content")
             if isinstance(reasoning, str):
                 self._reasoning += reasoning
-            if isinstance(delta.get("refusal"), str) and delta["refusal"]:
-                self._refusal = True
+            self._refusal += _message_refusal(delta)
             tool_calls = delta.get("tool_calls")
             if isinstance(tool_calls, list):
                 for position, tool_call in enumerate(tool_calls):
@@ -281,8 +293,8 @@ class ChatResponseAccumulator:
                     "content": [{"type": "output_text", "text": self._text, "annotations": []}],
                 }
             )
-        if self._refusal and not output:
-            output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
+        if self._refusal or self._blocked:
+            output.append(refusal_item({"blockReason": "CONTENT_FILTER"}, refusal_text=self._refusal))
         for index in sorted(self._tool_names):
             name = self._tool_names[index]
             if valid_function_name(name):
@@ -299,7 +311,7 @@ class ChatResponseAccumulator:
         terminal = classify_terminal(
             output=output,
             finish_reason=self._finish_reason,
-            safety_block={"blockReason": "CONTENT_FILTER"} if self._refusal else None,
+            safety_block={"blockReason": "CONTENT_FILTER"} if self._blocked else None,
             malformed=self._malformed,
         )
         if terminal.kind is TerminalKind.COMPLETED and self._finish_reason is None and not self._done:
@@ -418,24 +430,25 @@ class OpenAICompatibleTransport:
             return self._failed_result("invalid_alternatives", str(exc), usage=normalized_usage)
         output: list[dict[str, Any]] = []
         finish_reason: str | None = None
-        refusal = False
+        blocked = False
+        explicit_refusal = False
         for choice in choices:
             if not isinstance(choice, dict):
                 continue
             reason = choice.get("finish_reason")
             if isinstance(reason, str) and reason:
                 finish_reason = reason
-                refusal = refusal or reason == "content_filter"
+                blocked = blocked or reason.strip().lower() in POLICY_FINISH_REASONS
             message = choice.get("message")
             if isinstance(message, dict):
-                refusal = refusal or bool(message.get("refusal"))
+                explicit_refusal = explicit_refusal or bool(_message_refusal(message))
             output.extend(_message_output(message))
-        if refusal and not output:
+        if blocked and not explicit_refusal:
             output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
         terminal = classify_terminal(
             output=output,
             finish_reason=finish_reason,
-            safety_block={"blockReason": "CONTENT_FILTER"} if refusal else None,
+            safety_block={"blockReason": "CONTENT_FILTER"} if blocked else None,
         )
         return ProviderResult(output=tuple(output), usage=normalized_usage, terminal=terminal)
 
@@ -556,7 +569,7 @@ class OpenAICompatibleTransport:
                                     reasoning_active = True
                                     for event in builder.add_reasoning_delta(reasoning):
                                         yield event
-                                content_str = delta.get("content")
+                                content_str = _message_text(delta)
                                 if isinstance(content_str, str) and content_str:
                                     text_active = True
                                     for event in builder.add_text_delta(content_str):

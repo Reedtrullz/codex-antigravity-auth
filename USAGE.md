@@ -234,6 +234,8 @@ When multiple Google accounts are registered, the gateway automatically rotates 
 ---
 
 ## 3. High-Fidelity Streaming & Reasoning
+Explicit provider refusal text is retained as refusal content even alongside an answer prefix or tool call. A refusal-only response can be `completed`, while readiness still reports it as refused. Filtered responses with ordinary text or tools are `incomplete` with reason `content_filter`; token-limit responses use `max_output_tokens`. Known technical or unknown finish reasons fail explicitly while retaining supported partial output. Policy metadata without user-facing refusal text produces a generic refusal notice, and safety ratings without an explicit block do not imply refusal. Streaming and non-streaming normalization use the same outcome rules.
+
 The local server natively isolates explicit thinking blocks and stream envelopes, ensuring standard formatting:
 - **Thinking/Reasoning block**: Emits `response.reasoning_text.delta` for explicit backend thinking parts while preserving regular `thoughtSignature` text as visible output.
 - **SSE Stream**: Formats candidates, function calls, usage metadata, and completion events into Responses API SSE chunks parsed correctly by both Codex CLI and Codex Desktop.
