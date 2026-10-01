@@ -257,7 +257,6 @@ def test_google_parser_all_byte_splits_preserve_terminal_and_unicode():
         assert terminal["response"]["output"][0]["content"][0]["text"] == "hé🙂"
 
 
-@pytest.mark.xfail(strict=True, reason="Known #77: native adapter decodes each UTF-8 byte chunk separately")
 def test_native_parser_unicode_byte_split_contract():
     from codex_antigravity_auth.openai_transport import NativeResponsesStreamAdapter
     wire = 'data: {"type":"response.output_text.delta","delta":"hé🙂"}\n\n'.encode()

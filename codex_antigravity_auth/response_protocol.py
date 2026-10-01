@@ -238,12 +238,26 @@ def _function_choice_name(tool_choice: dict[str, Any]) -> str | None:
     return None
 
 
-def _advertised_function_names(request: dict[str, Any]) -> set[str]:
+def _advertised_function_names(request: dict[str, Any], *, native=False) -> set[str]:
     names: set[str] = set()
-    tools = request.get("tools")
-    if not isinstance(tools, list):
-        return names
-    for tool in tools:
+    from .tool_calls import declaration_sources
+    tools = [tool for tool, _ in declaration_sources(request, native=native)]
+    if len(tools) > 100000:
+        raise CapabilityError("tools: declaration limit exceeded")
+    pending = list(tools)
+    visited = 0
+    while pending:
+        tool = pending.pop()
+        visited += 1
+        if visited > 100000:
+            raise CapabilityError("tools: declaration limit exceeded")
+        if native and isinstance(tool, dict) and tool.get("type") == "namespace":
+            children = tool.get("tools", [])
+            if isinstance(children, list):
+                if len(children) + len(pending) + visited > 100000:
+                    raise CapabilityError("tools: declaration limit exceeded")
+                pending.extend(children)
+            continue
         if not isinstance(tool, dict) or tool.get("type") != "function":
             continue
         name = tool.get("name")
@@ -258,7 +272,8 @@ def _advertised_function_names(request: dict[str, Any]) -> set[str]:
 def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabilities) -> None:
     from .input_fidelity import validate_input
     try:
-        validate_input(request, capabilities.input_modalities, capabilities.image_forms, image_detail=capabilities.image_detail)
+        validate_input(request, capabilities.input_modalities, capabilities.image_forms, image_detail=capabilities.image_detail,
+                       native_passthrough=capabilities.native_responses)
     except ValueError as exc:
         raise CapabilityError(str(exc)) from exc
 
@@ -269,10 +284,12 @@ def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabil
 
     tool_choice = request.get("tool_choice")
     if tool_choice is not None:
-        mode = tool_choice if isinstance(tool_choice, str) else "function"
-        if mode not in capabilities.tool_choice_modes:
+        native_choice = (capabilities.native_responses and isinstance(tool_choice, dict)
+                         and tool_choice.get("type") != "function")
+        mode = tool_choice if isinstance(tool_choice, str) else tool_choice.get("type", "function") if isinstance(tool_choice, dict) else "function"
+        if not native_choice and mode not in capabilities.tool_choice_modes:
             raise CapabilityError(f"tool_choice mode '{mode}' is not supported by the selected route")
-        if mode == "required" and not _advertised_function_names(request):
+        if mode == "required" and not (_advertised_function_names(request, native=capabilities.native_responses) or (capabilities.native_responses and request.get("tools"))):
             raise CapabilityError("tool_choice 'required' needs at least one advertised function")
         if mode == "function":
             if not isinstance(tool_choice, dict):
@@ -280,7 +297,7 @@ def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabil
             name = _function_choice_name(tool_choice)
             if not name:
                 raise CapabilityError("function tool_choice requires a function name")
-            if name not in _advertised_function_names(request):
+            if name not in _advertised_function_names(request, native=capabilities.native_responses):
                 raise CapabilityError(f"tool_choice function '{name}' was not advertised")
 
     if "stop" in request and not capabilities.stop_sequences:
@@ -339,7 +356,7 @@ def response_from_result(
         response["incomplete_details"] = {
             "reason": result.terminal.incomplete_reason or result.terminal.reason
         }
-    if result.terminal.kind is TerminalKind.FAILED:
+    if result.terminal.kind is TerminalKind.FAILED or result.terminal.error_code:
         response["error"] = {
             "code": result.terminal.error_code or "provider_error",
             "message": result.terminal.error_message or "The provider request failed.",

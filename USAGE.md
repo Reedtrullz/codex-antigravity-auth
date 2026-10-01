@@ -230,6 +230,20 @@ When multiple Google accounts are registered, the gateway automatically rotates 
 ---
 
 ## 3. High-Fidelity Streaming & Reasoning
+Native Responses content deltas remain streaming, but the final completed/incomplete/failed outcome is committed only after EOF or a detected failure. `[DONE]` does not publish early success: duplicate terminal markers, trailing output, inconsistent supplied identities/sequences, malformed data and interrupted streams produce one failed terminal. Clean EOF after a terminal works without `[DONE]`. Waiting from a candidate terminal to EOF is bounded by the existing OpenAI upstream timeout, including comment-only keepalives. Supplied sequence numbers may have gaps, and compatible providers may omit identity fields or lifecycle events; contradictory supplied values fail. Identity bookkeeping is limited to 10,000 items and 65,536 item-ID characters. Buffered native SSE collection uses the same outcome validation.
+
+Native output preservation and supported item/field limits are documented in [the native Responses contract](codex_antigravity_auth/NATIVE_RESPONSES.md). Reasoning continuation, web-search calls, citations, custom calls and assistant phase survive native routing without using translated-output heuristics. Unsupported item types fail explicitly.
+
+Streaming readers decode UTF-8 incrementally, ignore one leading BOM, and recognize LF, CRLF, and CR line endings. Native Responses events are dispatched at a blank line, with multiple `data:` fields joined by a newline. Malformed UTF-8 is replaced consistently; unfinished data at EOF fails instead of becoming a complete event. Chat Completions and Google retain an explicit legacy JSON-line mode for endpoints that omit blank separators, including multiline JSON continuations; a physical data line must still terminate. Readers retain at most 8 Mi decoded characters and 10,000 data lines per pending frame. These bounds do not impose whole-response or gateway admission limits.
+
 The local server natively isolates explicit thinking blocks and stream envelopes, ensuring standard formatting:
 - **Thinking/Reasoning block**: Emits `response.reasoning_text.delta` for explicit backend thinking parts while preserving regular `thoughtSignature` text as visible output.
 - **SSE Stream**: Formats candidates, function calls, usage metadata, and completion events into Responses API SSE chunks parsed correctly by both Codex CLI and Codex Desktop.
+
+## Request shape and schema diagnostics
+
+Malformed message/content/tool shapes and orphan outputs return field-specific HTTP400 errors before account work. Translated routes reject unsupported built-in tools and explicit schema weakening; Google cannot honor `strict: true`. Native Responses keeps provider-specific items/tools and continuation intact. See [request validation and translation-loss behavior](codex_antigravity_auth/design/request-shapes.md) for compatibility changes and limits.
+
+## Completed function-call validation
+
+Completed tool arguments must encode JSON objects and satisfy the available declared identity and supported schema checks. Invalid calls cannot become executable completion events; usable sibling output is retained with an explicit failed/incomplete result. Google’s internal `_placeholder` is removed only with per-tool injection provenance. See [final-call validation and limits](codex_antigravity_auth/design/tool-calls.md).

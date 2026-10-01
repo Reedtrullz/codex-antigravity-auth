@@ -890,7 +890,16 @@ def validate_response_request_body(value: object) -> dict:
         value["metadata"] = normalized_metadata
     validate_response_generation_options(value)
     validate_response_tool_choice(value)
-    validate_response_tool_schemas(value)
+    from .request_shapes import validate_request_shapes
+    try:
+        validate_request_shapes(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    from .tool_calls import FunctionCallValidator, ToolCallError
+    try:
+        FunctionCallValidator(value)  # Check rule containers before auth/account work.
+    except ToolCallError as exc:
+        raise HTTPException(status_code=400, detail="tools: function declarations cannot be validated") from exc
     try:
         validate_capabilities(value, REQUEST_BOUNDARY_CAPABILITIES)
     except CapabilityError as exc:
@@ -962,8 +971,10 @@ def validate_response_tool_choice(codex_req: dict) -> None:
         if tool_choice not in {"auto", "none", "required"}:
             raise HTTPException(status_code=400, detail="tool_choice must be auto, none, required, or a function choice object")
         return
-    if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
+    if not isinstance(tool_choice, dict) or not isinstance(tool_choice.get("type"), str) or not tool_choice["type"]:
         raise HTTPException(status_code=400, detail="tool_choice must be auto, none, required, or a function choice object")
+    if tool_choice["type"] != "function":
+        return  # Provider-native choices are validated on the selected route.
     nested = tool_choice.get("function")
     name = tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
     if not valid_function_name(name):
@@ -974,40 +985,12 @@ def validate_response_tool_choice(codex_req: dict) -> None:
 
 
 def validate_response_tool_schemas(codex_req: dict) -> None:
-    """Reject malformed tool schemas before any provider/account work."""
-    tools = codex_req.get("tools")
-    if not isinstance(tools, list):
-        return
-
-    def visit(schema: object, path: str) -> None:
-        if not isinstance(schema, dict):
-            raise HTTPException(status_code=400, detail=f"{path} must be an object")
-        if "$ref" in schema and not isinstance(schema["$ref"], str):
-            raise HTTPException(status_code=400, detail=f"{path}.$ref must be a string")
-        if "properties" in schema:
-            properties = schema["properties"]
-            if not isinstance(properties, dict):
-                raise HTTPException(status_code=400, detail=f"{path}.properties must be an object")
-            for name, child in properties.items():
-                visit(child, f"{path}.properties[{name!r}]")
-        if "items" in schema:
-            visit(schema["items"], f"{path}.items")
-        for key in ("anyOf", "oneOf", "allOf"):
-            if key in schema:
-                options = schema[key]
-                if not isinstance(options, list):
-                    raise HTTPException(status_code=400, detail=f"{path}.{key} must be an array")
-                for index, option in enumerate(options):
-                    visit(option, f"{path}.{key}[{index}]")
-
-    for index, tool in enumerate(tools):
-        if not isinstance(tool, dict) or tool.get("type") != "function":
-            continue
-        function = tool.get("function")
-        if not isinstance(function, dict):
-            function = tool
-        if isinstance(function, dict) and "parameters" in function:
-            visit(function["parameters"], f"tools[{index}].function.parameters")
+    """Compatibility entry point for pure tool definition/schema validation."""
+    from .request_shapes import validate_request_shapes
+    try:
+        validate_request_shapes({"tools": codex_req["tools"]} if "tools" in codex_req else {})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def response_stream_flag(codex_req: dict) -> bool:
@@ -1224,7 +1207,6 @@ async def create_response(request: Request):
         request_run_id = request_metadata["run_id"]
     google_backend_timeout = google_backend_timeout_from_metadata(request_metadata)
 
-    reject_unsupported_previous_response(codex_req)
     model = response_model_id(codex_req)
     codex_req["model"] = model
     stream = response_stream_flag(codex_req)
@@ -1437,6 +1419,11 @@ async def create_response(request: Request):
         return response
     provider_id, provider_model = split_provider_model(model)
     validate_provider_model_id(provider_id, provider_model)
+    from .request_shapes import validate_request_shapes
+    try:
+        validate_request_shapes(codex_req, route="byok" if provider_id is not None else "google")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if provider_id is not None:
         # Normalize self-referential prefixes (openrouter:openrouter/x ->
         # openrouter:x) so catalog ids, capability lookup, and the upstream
@@ -2063,7 +2050,7 @@ async def create_response(request: Request):
                             rotation_attempted=rotation_attempted,
                         ),
                     )
-                provider_result = google_transport.parse_response(gemini_resp)
+                provider_result = google_transport.parse_response(gemini_resp, request=codex_req)
                 codex_resp = response_from_result(
                     provider_result,
                     response_id=provider_result.provider_response_id or f"resp_{secrets.token_hex(6)}",
@@ -2206,7 +2193,7 @@ async def create_response(request: Request):
     async def sse_generator() -> AsyncGenerator[str, None]:
         import uuid
         response_id = f"resp_{uuid.uuid4().hex[:12]}"
-        adapter = GoogleStreamEventAdapter(response_id=response_id, display_model=model)
+        adapter = GoogleStreamEventAdapter(response_id=response_id, display_model=model, request=codex_req)
         attempt_num = 0
 
         def serialize_transport_event(event: dict | str) -> str:
@@ -2469,7 +2456,7 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
                 status_code=status_code_from_backend_error(code, message),
                 detail=f"{provider['id']} API error: {safe_error_detail(message)}",
             )
-        return transform_chat_response(chat_resp, display_model)
+        return transform_chat_response(chat_resp, display_model, request=codex_req)
     except HTTPException:
         raise
     except Exception as e:
@@ -2510,7 +2497,7 @@ async def create_openai_upstream_response(
                 detail=openai_failure_detail(display_model, f"OpenAI upstream error: {safe_error_detail(res.text)}"),
             )
         try:
-            terminal = _collect_openai_sse_terminal(res.text, display_model)
+            terminal = _collect_openai_sse_terminal(res.content, display_model, request=codex_req)
         except Exception as exc:
             raise HTTPException(
                 status_code=502,
@@ -2552,33 +2539,21 @@ async def create_openai_upstream_response(
             status_code=502,
             detail=openai_failure_detail(display_model, f"OpenAI returned non-JSON data: {exc}"),
         ) from exc
-    if isinstance(data, dict):
-        data["model"] = display_model
-    return data
+    try:
+        return OpenAICompatibleTransport(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS).validate_native_response(data, display_model=display_model, request=codex_req)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=openai_failure_detail(display_model, "OpenAI returned an invalid native response.")) from exc
 
 
-def _collect_openai_sse_terminal(sse_text: str, display_model: str) -> dict | None:
-    """Extract the terminal Responses object from a buffered SSE body."""
-    terminal: dict | None = None
-    for raw_line in sse_text.splitlines():
-        line = raw_line.strip()
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            continue
-        try:
-            event = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        if event.get("type") in {"response.completed", "response.incomplete", "response.failed"}:
-            response = event.get("response")
-            if isinstance(response, dict):
-                terminal = dict(response)
-                terminal["model"] = display_model
-    return terminal
+def _collect_openai_sse_terminal(sse_text: str | bytes, display_model: str, *, request=None) -> dict:
+    """Apply the same terminal authority to buffered and streamed native SSE."""
+    wire = sse_text.encode("utf-8") if isinstance(sse_text, str) else sse_text
+    adapter = NativeResponsesStreamAdapter(display_model=display_model, request=request)
+    for offset in range(0, len(wire), 65536):
+        adapter.consume_bytes(wire[offset:offset + 65536])
+        if adapter.protocol_failed:
+            break
+    return adapter.finish()[-1]["response"]
 
 
 async def _close_openai_upstream_stream(client, stream_context) -> None:
@@ -2685,16 +2660,43 @@ async def openai_upstream_sse_generator(
             return
 
     client, stream_context, response = stream_state
-    adapter = NativeResponsesStreamAdapter(display_model=display_model)
+    adapter = NativeResponsesStreamAdapter(display_model=display_model, request=codex_req)
+    tail_deadline = None
     try:
-        async for chunk in response.aiter_text():
-            for event in adapter.consume_bytes(chunk.encode("utf-8", errors="replace")):
-                yield f"data: {json.dumps(event)}\n\n"
-        for event in adapter.finish():
+        iterator = response.aiter_bytes().__aiter__()
+        try:
+            while True:
+                try:
+                    if tail_deadline is None:
+                        chunk = await anext(iterator)
+                    else:
+                        remaining = tail_deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError
+                        with anyio.fail_after(remaining):
+                            chunk = await anext(iterator)
+                except StopAsyncIteration:
+                    break
+                for event in adapter.consume_bytes(chunk):
+                    yield f"data: {json.dumps(event)}\n\n"
+                if adapter.protocol_failed:
+                    break
+                if adapter.awaiting_eof and tail_deadline is None:
+                    # Bound terminal-to-EOF waiting even if keepalive comments
+                    # repeatedly reset HTTPX's per-read timeout.
+                    tail_deadline = time.monotonic() + OPENAI_UPSTREAM_TIMEOUT_SECONDS
+        except (TimeoutError, httpx.TimeoutException):
+            terminal_events = adapter.abort("stream_timeout", "The provider stream timed out before EOF.")
+        except Exception:
+            terminal_events = adapter.abort("stream_interrupted", "The provider stream was interrupted before EOF.")
+        else:
+            terminal_events = adapter.finish()
+        for event in terminal_events:
             yield f"data: {json.dumps(event)}\n\n"
         yield "data: [DONE]\n\n"
     finally:
-        await _close_openai_upstream_stream(client, stream_context)
+        with anyio.CancelScope(shield=True):
+            await _close_openai_upstream_stream(client, stream_context)
 
 
 async def openai_compatible_sse_generator(

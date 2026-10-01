@@ -1,3 +1,4 @@
+from tests.conftest import byte_chunks
 import json
 import os
 import io
@@ -689,6 +690,7 @@ class TestBYOKProviders(unittest.TestCase):
             {
                 "model": "deepseek:deepseek-chat",
                 "input": [
+                    {"type":"function_call", "call_id":"call_1", "name":"lookup", "arguments":"{}"},
                     {
                         "type": "message",
                         "role": "user",
@@ -706,20 +708,16 @@ class TestBYOKProviders(unittest.TestCase):
             "deepseek-chat",
         )
 
-        self.assertEqual(payload["messages"], [
+        self.assertEqual(payload["messages"][1:], [
             {"role": "tool", "tool_call_id": "call_1", "content": '{"ok": true}', "name": "lookup"}
         ])
 
-    def test_byok_top_level_orphan_tool_output_is_preserved_when_call_id_is_valid(self):
-        payload = transform_request_to_chat(
-            {
+    def test_byok_top_level_orphan_tool_output_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"input\[0\].call_id: orphan"):
+            transform_request_to_chat({
                 "model": "deepseek:deepseek-chat",
                 "input": [{"type": "function_call_output", "call_id": "call_1", "output": "result"}],
-            },
-            "deepseek-chat",
-        )
-
-        self.assertEqual(payload["messages"], [{"role": "tool", "tool_call_id": "call_1", "content": "result"}])
+            }, "deepseek-chat")
 
     def test_flat_responses_function_tools_transform_for_google_and_byok(self):
         flat_tool = {
@@ -734,7 +732,9 @@ class TestBYOKProviders(unittest.TestCase):
             "strict": True,
         }
 
-        google = transform_request({"model": "gemini-3.5-flash-high", "input": "hi", "tools": [flat_tool]})
+        with self.assertRaisesRegex(ValueError, "strict: translation_loss"):
+            transform_request({"model": "gemini-3.5-flash-high", "input": "hi", "tools": [flat_tool]})
+        google = transform_request({"model": "gemini-3.5-flash-high", "input": "hi", "tools": [{**flat_tool, "strict": False}]})
         declaration = google["request"]["tools"][0]["functionDeclarations"][0]
         self.assertEqual(declaration["name"], "lookup")
         self.assertEqual(declaration["parameters"]["required"], ["q"])
@@ -1302,7 +1302,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1328,7 +1328,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = []
@@ -1394,7 +1394,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1420,7 +1420,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ") and line != "data: [DONE]"]
@@ -1460,7 +1460,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1486,7 +1486,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'first'}, {'type': 'function', 'name': 'second'}]},
                 )
 
         events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ") and line != "data: [DONE]"]
@@ -1525,7 +1525,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1583,7 +1583,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(['data: {"choices": [}\n', "data: [DONE]\n"]))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(['data: {"choices": [}\n', "data: [DONE]\n"])))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1616,7 +1616,7 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertIn("invalid_stream_chunk", response.text)
         self.assertNotIn("response.completed", response.text)
 
-    def test_streaming_byok_ignores_malformed_tool_call_deltas(self):
+    def test_streaming_byok_reports_malformed_tool_call_deltas(self):
         provider = {
             "id": "xai",
             "displayName": "xAI",
@@ -1654,7 +1654,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1688,15 +1688,15 @@ class TestBYOKProviders(unittest.TestCase):
             if line.startswith("data: ") and line != "data: [DONE]":
                 events.append(json.loads(line[6:]))
 
-        self.assertFalse([e for e in events if e.get("type") == "error"])
+        self.assertTrue([e for e in events if e.get("type") == "error"])
         deltas = [e["delta"] for e in events if e.get("type") == "response.output_text.delta"]
         arg_done = [e for e in events if e.get("type") == "response.function_call_arguments.done"]
         tool_done = [e["item"] for e in events if e.get("type") == "response.output_item.done" and e["item"]["type"] == "function_call"]
-        completed = [e for e in events if e.get("type") == "response.completed"]
+        completed = [e for e in events if e.get("type") == "response.failed"]
 
         self.assertEqual("".join(deltas), "ok")
-        self.assertEqual([e["arguments"] for e in arg_done], ["{}"])
-        self.assertEqual(tool_done[0]["name"], "lookup")
+        self.assertEqual(arg_done, [])
+        self.assertEqual(tool_done, [])
         self.assertTrue(completed)
         self.assertEqual(completed[0]["response"]["usage"], {"input_tokens": 0, "output_tokens": 5, "total_tokens": 5})
 
@@ -1732,7 +1732,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1758,7 +1758,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = []
@@ -1813,7 +1813,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1839,7 +1839,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = []
@@ -1889,7 +1889,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1915,7 +1915,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = []

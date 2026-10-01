@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import json
 import math
@@ -20,6 +21,10 @@ from .byok import (
 )
 
 from .redaction import redact_secret_text
+from .native_output import (
+    MAX_ITEMS, NativeOutputError, check_json, reconcile_output,
+    validate_event, validate_output, validate_response,
+)
 
 from .response_protocol import (
     ProviderCapabilities,
@@ -29,82 +34,16 @@ from .response_protocol import (
     ResponseEventBuilder,
     TerminalKind,
     classify_terminal,
-    meaningful_output_items,
     normalize_usage,
     refusal_item,
 )
 from .transform import function_call_arguments_string, valid_function_name
+from .tool_calls import (FunctionCallValidator, ToolCallError, tool_terminal, parse_arguments,
+                         checked_native_call, native_response)
 from .transform import transform_request_to_chat
 
 
-class SSELineError(RuntimeError):
-    """Raised when an SSE stream produces a malformed or truncated line."""
-
-
-async def iter_sse_data(response, *, label: str = "provider") -> AsyncIterator[str]:
-    buffer = ""
-    pending: list[str] = []
-
-    async for chunk in response.aiter_text():
-        buffer += chunk
-        while "\n" in buffer:
-            line, buffer = buffer.split("\n", 1)
-            stripped = line.strip()
-            if not stripped:
-                # SSE event boundary: flush any accumulated data lines.
-                if pending:
-                    payload = "\n".join(pending)
-                    pending = []
-                    yield payload
-                continue
-            if not stripped.startswith("data:"):
-                # Non-data metadata lines (event:, id:, retry:) are ignored;
-                # a pending frame is flushed at the next event boundary.
-                continue
-            payload = stripped[5:].strip()
-            # SSE continuation lines join with "\n". Parse-or-accumulate:
-            # a standalone line is emitted immediately, and a fragment that
-            # does not yet parse as JSON waits for its continuation lines so
-            # both blank-line-separated and bare-\n frames work.
-            if pending:
-                if payload == "[DONE]":
-                    # A [DONE] marker is never a JSON continuation: flush the
-                    # incomplete fragment (the caller reports it as malformed)
-                    # and deliver the marker on its own.
-                    yield "\n".join(pending)
-                    pending = []
-                    yield payload
-                    continue
-                candidate = "\n".join([*pending, payload])
-                try:
-                    json.loads(candidate)
-                except json.JSONDecodeError:
-                    pending.append(payload)
-                    continue
-                pending = []
-                yield candidate
-                continue
-            if payload == "[DONE]":
-                yield payload
-                continue
-            try:
-                json.loads(payload)
-            except json.JSONDecodeError:
-                pending.append(payload)
-                continue
-            yield payload
-    if buffer.strip():
-        stripped = buffer.strip()
-        if stripped.startswith("data:"):
-            payload = stripped[5:].strip()
-            if pending:
-                yield "\n".join([*pending, payload])
-            else:
-                yield payload
-        else:
-            raise SSELineError(f"The {label} stream ended with an incomplete SSE frame.")
-    elif pending:
-        yield "\n".join(pending)
+from .sse import SSEDecoder, SSELineError, iter_sse_data
 
 
 def parse_sse_payload(data: str, *, label: str = "provider") -> dict[str, Any]:
@@ -132,7 +71,9 @@ class PreparedOpenAIRequest:
     timeout: float
 
 
-def _message_output(message: object) -> list[dict[str, Any]]:
+def _message_output(message: object, *, tool_validator=None, tool_errors=None, duplicate_ids=()) -> list[dict[str, Any]]:
+    tool_validator = tool_validator or FunctionCallValidator()
+    tool_errors = tool_errors if tool_errors is not None else []
     if not isinstance(message, dict):
         return []
     output: list[dict[str, Any]] = []
@@ -167,12 +108,22 @@ def _message_output(message: object) -> list[dict[str, Any]]:
             }
         )
     tool_calls = message.get("tool_calls")
+    if tool_calls is not None and not isinstance(tool_calls, list):
+        tool_errors.append("invalid_function_call")
     if isinstance(tool_calls, list):
         for tool_call in tool_calls:
-            if not isinstance(tool_call, dict):
-                continue
-            function = tool_call.get("function")
-            if not isinstance(function, dict) or not valid_function_name(function.get("name")):
+            try:
+                if not isinstance(tool_call, dict) or tool_call.get("type", "function") != "function":
+                    raise ToolCallError("invalid_function_call")
+                provider_id = tool_call.get("id")
+                if isinstance(provider_id, str) and provider_id in duplicate_ids:
+                    raise ToolCallError("conflicting_function_call")
+                function = tool_call.get("function")
+                if not isinstance(function, dict):
+                    raise ToolCallError("invalid_function_call")
+                arguments = tool_validator.arguments(function.get("name"), function.get("arguments"))
+            except ToolCallError as exc:
+                tool_errors.append(exc.code)
                 continue
             provider_id = tool_call.get("id")
             call_id = provider_id if isinstance(provider_id, str) and provider_id else f"call_{uuid.uuid4().hex[:8]}"
@@ -182,14 +133,19 @@ def _message_output(message: object) -> list[dict[str, Any]]:
                     "id": call_id if call_id.startswith("fc_") else f"fc_{uuid.uuid4().hex[:8]}",
                     "call_id": call_id,
                     "name": function["name"],
-                    "arguments": function_call_arguments_string(function.get("arguments", "{}")),
+                    "arguments": arguments,
                 }
             )
     return output
 
 
 class ChatResponseAccumulator:
-    def __init__(self) -> None:
+    def __init__(self, *, tool_validator=None) -> None:
+        self.tool_validator = tool_validator or FunctionCallValidator()
+        self.tool_error = None
+        self._tool_order = []
+        self._tool_ids = {}
+        self._invalid_tool_indices = set()
         self._text = ""
         self._reasoning = ""
         self._finish_reason: str | None = None
@@ -235,20 +191,41 @@ class ChatResponseAccumulator:
             if isinstance(delta.get("refusal"), str) and delta["refusal"]:
                 self._refusal = True
             tool_calls = delta.get("tool_calls")
+            if tool_calls is not None and not isinstance(tool_calls, list):
+                self.tool_error = self.tool_error or "invalid_function_call"
             if isinstance(tool_calls, list):
                 for position, tool_call in enumerate(tool_calls):
-                    if not isinstance(tool_call, dict):
+                    if not isinstance(tool_call, dict) or tool_call.get("type", "function") not in {None, "function"}:
+                        self.tool_error = self.tool_error or "invalid_function_call"
                         continue
                     index = tool_call.get("index", position)
-                    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                    if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < 10000:
+                        self.tool_error = self.tool_error or "invalid_function_call"
                         continue
+                    if index not in self._tool_order:
+                        self._tool_order.append(index)
+                    call_id = tool_call.get("id")
+                    if isinstance(call_id, str) and call_id:
+                        if index in self._tool_ids and self._tool_ids[index] != call_id:
+                            self.tool_error = self.tool_error or "conflicting_function_call"
+                            self._invalid_tool_indices.add(index)
+                        self._tool_ids[index] = call_id
                     function = tool_call.get("function")
+                    if function is None:
+                        continue
                     if not isinstance(function, dict):
+                        self.tool_error = self.tool_error or "invalid_function_call"
                         continue
                     name = function.get("name")
+                    if name is not None and not isinstance(name, str):
+                        self.tool_error = self.tool_error or "invalid_function_name"
+                        self._invalid_tool_indices.add(index)
                     if isinstance(name, str):
                         self._tool_names[index] = self._tool_names.get(index, "") + name
                     arguments = function.get("arguments")
+                    if arguments is not None and not isinstance(arguments, str):
+                        self.tool_error = self.tool_error or "invalid_function_arguments"
+                        self._invalid_tool_indices.add(index)
                     if isinstance(arguments, str):
                         self._tool_arguments[index] = self._tool_arguments.get(index, "") + arguments
 
@@ -274,19 +251,21 @@ class ChatResponseAccumulator:
             )
         if self._refusal and not output:
             output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
-        for index in sorted(self._tool_names):
-            name = self._tool_names[index]
-            if valid_function_name(name):
-                arguments = self._tool_arguments.get(index, "")
-                output.append(
-                    {
-                        "type": "function_call",
-                        "id": f"fc_{uuid.uuid4().hex[:8]}",
-                        "call_id": f"call_{uuid.uuid4().hex[:8]}",
-                        "name": name,
-                        "arguments": arguments if arguments else "{}",
-                    }
-                )
+        counts = Counter(self._tool_ids.values())
+        for index in self._tool_order:
+            if index in self._invalid_tool_indices:
+                continue
+            name = self._tool_names.get(index, "")
+            try:
+                arguments = self.tool_validator.arguments(name, self._tool_arguments.get(index, ""))
+                call_id = self._tool_ids.setdefault(index, f"call_{uuid.uuid4().hex[:8]}")
+                if counts[call_id] > 1:
+                    raise ToolCallError("conflicting_function_call")
+            except ToolCallError as exc:
+                self.tool_error = self.tool_error or exc.code
+                continue
+            output.append({"type": "function_call", "id": f"fc_{uuid.uuid4().hex[:8]}",
+                           "call_id": call_id, "name": name, "arguments": arguments})
         terminal = classify_terminal(
             output=output,
             finish_reason=self._finish_reason,
@@ -299,6 +278,8 @@ class ChatResponseAccumulator:
                 error_code="missing_terminal_signal",
                 error_message="The provider stream ended without a terminal signal.",
             )
+        if self.tool_error:
+            terminal = tool_terminal(terminal, self.tool_error)
         return ProviderResult(output=tuple(output), usage=self._usage, terminal=terminal)
 
 
@@ -394,12 +375,24 @@ class OpenAICompatibleTransport:
             timeout=self.provider_timeout(provider),
         )
 
-    def parse_chat_response(self, payload: object) -> ProviderResult:
+    def parse_chat_response(self, payload: object, *, request=None) -> ProviderResult:
+        tool_validator = FunctionCallValidator(request, route="byok")
+        tool_errors = []
         if not isinstance(payload, dict):
             payload = {}
         choices = payload.get("choices", [])
         if not isinstance(choices, list):
             choices = []
+        # Count raw IDs before validating arguments so a malformed sibling cannot
+        # make an otherwise ambiguous provider identity appear safe to execute.
+        call_ids = Counter()
+        for choice in choices:
+            message = choice.get("message") if isinstance(choice, dict) else None
+            calls = message.get("tool_calls") if isinstance(message, dict) else None
+            if isinstance(calls, list):
+                call_ids.update(call["id"] for call in calls if isinstance(call, dict)
+                                and isinstance(call.get("id"), str) and call["id"])
+        duplicate_ids = {call_id for call_id, count in call_ids.items() if count > 1}
         output: list[dict[str, Any]] = []
         finish_reason: str | None = None
         refusal = False
@@ -413,7 +406,8 @@ class OpenAICompatibleTransport:
             message = choice.get("message")
             if isinstance(message, dict):
                 refusal = refusal or bool(message.get("refusal"))
-            output.extend(_message_output(message))
+            output.extend(_message_output(message, tool_validator=tool_validator, tool_errors=tool_errors,
+                                          duplicate_ids=duplicate_ids))
         if refusal and not output:
             output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
         usage = payload.get("usage")
@@ -428,6 +422,8 @@ class OpenAICompatibleTransport:
             finish_reason=finish_reason,
             safety_block={"blockReason": "CONTENT_FILTER"} if refusal else None,
         )
+        if tool_errors:
+            terminal = tool_terminal(terminal, tool_errors[0])
         return ProviderResult(output=tuple(output), usage=normalized_usage, terminal=terminal)
 
     @staticmethod
@@ -457,9 +453,7 @@ class OpenAICompatibleTransport:
             model=display_model,
             created_at=int(time.time()),
         )
-        accumulator = ChatResponseAccumulator()
-        tool_calls: dict[int, dict[str, str]] = {}
-        tool_seen_order: list[int] = []
+        accumulator = ChatResponseAccumulator(tool_validator=FunctionCallValidator(prepared.payload, route="byok"))
         text_active = False
         reasoning_active = False
         terminal_emitted = False
@@ -502,7 +496,7 @@ class OpenAICompatibleTransport:
                             yield event
                         return
                     try:
-                        async for data in iter_sse_data(response, label="OpenAI"):
+                        async for data in iter_sse_data(response, label="OpenAI", legacy_json_lines=True):
                             if data == "[DONE]":
                                 if provider_done:
                                     async for event in fail("duplicate_done", "The provider emitted [DONE] more than once."):
@@ -547,34 +541,6 @@ class OpenAICompatibleTransport:
                                     text_active = True
                                     for event in builder.add_text_delta(content_str):
                                         yield event
-                                raw_calls = delta.get("tool_calls")
-                                if not isinstance(raw_calls, list):
-                                    continue
-                                for position, raw_call in enumerate(raw_calls):
-                                    if not isinstance(raw_call, dict):
-                                        continue
-                                    raw_index = raw_call.get("index", position)
-                                    if isinstance(raw_index, bool):
-                                        continue
-                                    try:
-                                        index = int(raw_index)
-                                    except (TypeError, ValueError):
-                                        continue
-                                    if index < 0:
-                                        continue
-                                    if index not in tool_calls:
-                                        tool_seen_order.append(index)
-                                    state = tool_calls.setdefault(index, {"call_id": "", "name": "", "arguments": ""})
-                                    call_id = raw_call.get("id")
-                                    if isinstance(call_id, str) and call_id:
-                                        state["call_id"] = call_id
-                                    function = raw_call.get("function")
-                                    if not isinstance(function, dict):
-                                        continue
-                                    for field in ("name", "arguments"):
-                                        fragment = function.get(field)
-                                        if isinstance(fragment, str):
-                                            state[field] += fragment
                     except SSELineError as exc:
                         async for event in fail("invalid_stream_chunk", str(exc)):
                             yield event
@@ -607,14 +573,9 @@ class OpenAICompatibleTransport:
         if refusal is not None:
             for event in builder.add_output_item(refusal):
                 yield event
-        for index in tool_seen_order:
-            state = tool_calls[index]
-            if valid_function_name(state["name"]):
-                for event in builder.add_function_call(
-                    state["name"],
-                    function_call_arguments_string(state["arguments"]),
-                    call_id=state["call_id"] or None,
-                ):
+        for item in result.output:
+            if item.get("type") == "function_call":
+                for event in builder.add_function_call(item["name"], item["arguments"], call_id=item["call_id"]):
                     yield event
         if result.terminal.kind is TerminalKind.FAILED:
             yield builder.error(
@@ -629,37 +590,10 @@ class OpenAICompatibleTransport:
         payload: object,
         *,
         display_model: str,
+        request=None,
     ) -> dict[str, Any]:
-        if not isinstance(payload, dict):
-            raise ValueError("native Responses payload must be an object")
-        status = payload.get("status")
-        if status is not None and status not in {"completed", "incomplete", "failed"}:
-            raise ValueError("native Responses payload has an invalid status")
-        output = payload.get("output")
-        if not isinstance(output, list):
-            raise ValueError("native Responses payload output must be a list")
-        response = dict(payload)
-        response["model"] = display_model
-        if status is None:
-            status = "completed" if output else "failed"
-            response["status"] = status
-        meaningful_output = meaningful_output_items(output)
-        if status in {"completed", "incomplete"}:
-            response["output"] = list(meaningful_output)
-        if status == "completed" and not meaningful_output:
-            response["status"] = "failed"
-            response["error"] = {
-                "code": "empty_response",
-                "message": "The provider returned no meaningful output.",
-            }
-        elif status == "failed":
-            error = payload.get("error")
-            code = error.get("code") if isinstance(error, dict) else None
-            response["error"] = {
-                "code": code if isinstance(code, str) and code else "provider_error",
-                "message": "The provider request failed.",
-            }
-        return response
+        return native_response(payload, display_model=display_model, validator=FunctionCallValidator(request))
+
 
 
 class NativeResponsesStreamAdapter:
@@ -667,18 +601,43 @@ class NativeResponsesStreamAdapter:
 
     _TERMINAL_TYPES = {"response.completed", "response.incomplete", "response.failed"}
 
-    def __init__(self, *, display_model: str) -> None:
+    def __init__(self, *, display_model: str, request=None) -> None:
+        self._tool_validator = FunctionCallValidator(request)
+        self._tool_error = None
+        self._bad_tool_indices = set()
+        self._invalid_tool_snapshots = {}
+        self._finalized_arguments = {}
+        self._deferred_events = []
+        self._deferred_budget = [0, 0]
+        self._deferring_tools = False
         self.display_model = display_model
-        self._buffer = ""
+        self._decoder = SSEDecoder()
         self._terminal_event: dict[str, Any] | None = None
         self._terminal_emitted = False
         self._provider_done = False
         self._visible_output_started = False
         self._response_id = f"resp_{uuid.uuid4().hex[:12]}"
+        self._provider_response_id: str | None = None
+        self._protocol_error = False
+        self._last_sequence: int | None = None
+        self._items: dict[int, str] = {}
+        self._item_indices: dict[str, int] = {}
+        self._identity_chars = 0
+        self._native_types: dict[int, str] = {}
+        self._completed_items: dict[int, dict] = {}
+        self._completed_budget = [0, 0]
 
     @property
     def visible_output_started(self) -> bool:
         return self._visible_output_started
+
+    @property
+    def awaiting_eof(self) -> bool:
+        return self._terminal_event is not None or self._provider_done
+
+    @property
+    def protocol_failed(self) -> bool:
+        return self._protocol_error
 
     def _failure(self, code: str, message: str) -> dict[str, Any]:
         return {
@@ -694,7 +653,82 @@ class NativeResponsesStreamAdapter:
         }
 
     def _set_failure(self, code: str, message: str) -> None:
+        if self._terminal_emitted or self._protocol_error:
+            return
+        self._protocol_error = True
         self._terminal_event = self._failure(code, message)
+
+    def _valid_id(self, value: object) -> bool:
+        if not isinstance(value, str) or not value:
+            self._set_failure("invalid_stream_identity", "The provider returned an invalid stream identifier.")
+            return False
+        try:
+            value.encode("utf-8")
+        except UnicodeError:
+            self._set_failure("invalid_stream_identity", "The provider returned an invalid stream identifier.")
+            return False
+        if len(value) > 65536:
+            self._set_failure("stream_identity_limit", "The provider exceeded the stream identity limit.")
+            return False
+        return True
+
+    def _bind_item(self, index: object, item_id: object) -> bool:
+        if index is not None and (type(index) is not int or index < 0):
+            self._set_failure("invalid_output_index", "The provider returned an invalid output index.")
+            return False
+        if item_id is None:
+            return True
+        if not self._valid_id(item_id):
+            return False
+        if index is None:
+            return True
+        if (index in self._items and self._items[index] != item_id) or (
+            item_id in self._item_indices and self._item_indices[item_id] != index
+        ):
+            self._set_failure("mismatched_item_id", "The provider contradicted an output item's identity.")
+            return False
+        if index not in self._items:
+            if len(self._items) >= 10000 or self._identity_chars + len(item_id) > 65536:
+                self._set_failure("stream_identity_limit", "The provider exceeded the stream identity limit.")
+                return False
+            self._identity_chars += len(item_id)
+            self._items[index] = item_id
+            self._item_indices[item_id] = index
+        return True
+
+    def _validate_identity(self, event: dict[str, Any]) -> bool:
+        # Compatible providers may omit these fields or lifecycle events. Check
+        # supplied facts for contradictions without inventing missing state.
+        if "sequence_number" in event:
+            sequence = event["sequence_number"]
+            if type(sequence) is not int or sequence < 0 or (
+                self._last_sequence is not None and sequence <= self._last_sequence
+            ):
+                self._set_failure("invalid_stream_sequence", "The provider returned invalid or out-of-order sequence numbers.")
+                return False
+            self._last_sequence = sequence
+        response = event.get("response")
+        response = response if isinstance(response, dict) else {}
+        for response_id in (event.get("response_id"), response.get("id")):
+            if response_id is None:
+                continue
+            if not self._valid_id(response_id):
+                return False
+            if self._provider_response_id is not None and response_id != self._provider_response_id:
+                self._set_failure("mismatched_response_id", "The provider contradicted the response identity.")
+                return False
+            self._provider_response_id = self._response_id = response_id
+        item = event.get("item")
+        item = item if isinstance(item, dict) else {}
+        if not self._bind_item(event.get("output_index"), event.get("item_id")):
+            return False
+        if not self._bind_item(event.get("output_index"), item.get("id")):
+            return False
+        if isinstance(response.get("output"), list):
+            for index, output in enumerate(response["output"]):
+                if isinstance(output, dict) and not self._bind_item(index, output.get("id")):
+                    return False
+        return True
 
     def _release_terminal(self) -> list[dict[str, Any]]:
         if self._terminal_event is None or self._terminal_emitted:
@@ -702,11 +736,10 @@ class NativeResponsesStreamAdapter:
         self._terminal_emitted = True
         return [self._terminal_event]
 
-    def _consume_line(self, line: str) -> list[dict[str, Any]]:
-        stripped = line.strip()
-        if not stripped or stripped.startswith(":") or not stripped.startswith("data:"):
+    def _consume_payload(self, data: str) -> list[dict[str, Any]]:
+        if self._terminal_emitted or self._protocol_error:
             return []
-        data = stripped[5:].strip()
+        data = data.strip()
         if data == "[DONE]":
             if self._provider_done:
                 self._set_failure("duplicate_done", "The provider emitted [DONE] more than once.")
@@ -716,23 +749,87 @@ class NativeResponsesStreamAdapter:
                     "missing_terminal_signal",
                     "The provider stream ended without a terminal response event.",
                 )
-            return self._release_terminal()
+            return []
         if self._provider_done:
             self._set_failure("output_after_done", "The provider emitted output after [DONE].")
-            return self._release_terminal()
+            return []
         try:
             event = json.loads(data)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             self._set_failure("invalid_stream_chunk", "The provider returned malformed stream JSON.")
             return []
         if not isinstance(event, dict) or not isinstance(event.get("type"), str):
             self._set_failure("invalid_stream_event", "The provider returned an invalid stream event.")
             return []
         event_type = event["type"]
-        if event_type in self._TERMINAL_TYPES:
-            if self._terminal_event is not None:
+        if not self._validate_identity(event):
+            return []
+        if event_type == "error":
+            self._set_failure("provider_error", "The provider reported a stream error.")
+            return []
+        if self._terminal_event is not None:
+            if event_type in self._TERMINAL_TYPES:
                 self._set_failure("duplicate_terminal", "The provider emitted more than one terminal event.")
-                return []
+            else:
+                self._set_failure("output_after_terminal", "The provider emitted output after its terminal event.")
+            return []
+        index = event.get("output_index")
+        bad_tool_event = False
+        item = event.get("item")
+        function_done = event_type == "response.output_item.done" and isinstance(item, dict) and item.get("type") == "function_call"
+        arguments_done = event_type == "response.function_call_arguments.done"
+        if function_done or arguments_done:
+            try:
+                if type(index) is not int or not 0 <= index < MAX_ITEMS:
+                    raise NativeOutputError("invalid_output_index")
+                if function_done:
+                    checked_native_call(item, self._tool_validator, finalized_arguments=self._finalized_arguments.get(index))
+                else:
+                    parse_arguments(event.get("arguments"))
+                    if index in self._finalized_arguments:
+                        raise ToolCallError("conflicting_function_arguments")
+                    self._finalized_arguments[index] = event["arguments"]
+            except (ToolCallError, NativeOutputError) as exc:
+                self._tool_error = self._tool_error or exc.code
+                self._bad_tool_indices.add(index)
+                bad_tool_event = True
+        try:
+            if bad_tool_event:
+                # Invalid finalized call data is withheld, while usable sibling
+                # events are still read. Structural identity was checked above.
+                check_json(event)
+                if type(index) is not int or not 0 <= index < MAX_ITEMS:
+                    raise NativeOutputError("invalid_output_index")
+                expected_item = "function_call"
+                if function_done:
+                    from copy import deepcopy
+                    check_json(item, budget=self._completed_budget)
+                    self._invalid_tool_snapshots[index] = deepcopy(item)
+            else:
+                expected_item = validate_event(event)
+            index = event.get("output_index")
+            supplied = []
+            if expected_item is not None and index is not None:
+                supplied.append((index, expected_item))
+            snapshot = event.get("response")
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("output"), list):
+                supplied.extend((offset, item["type"]) for offset, item in enumerate(snapshot["output"])
+                                if isinstance(item, dict) and isinstance(item.get("type"), str))
+            for offset, item_type in supplied:
+                if offset in self._native_types and self._native_types[offset] != item_type:
+                    raise NativeOutputError("conflicting_native_item")
+                if len(self._native_types) >= MAX_ITEMS and offset not in self._native_types:
+                    raise NativeOutputError("native_output_limit")
+                self._native_types[offset] = item_type
+            if event_type == "response.output_item.done" and not bad_tool_event:
+                if index in self._completed_items:
+                    raise NativeOutputError("duplicate_native_item")
+                check_json(event["item"], budget=self._completed_budget)
+                self._completed_items[index] = validate_output([event["item"]])[0]
+        except NativeOutputError as exc:
+            self._set_failure(exc.code, str(exc))
+            return []
+        if event_type in self._TERMINAL_TYPES:
             response = event.get("response")
             if not isinstance(response, dict):
                 self._set_failure("invalid_terminal_event", "The provider returned an invalid terminal event.")
@@ -742,29 +839,24 @@ class NativeResponsesStreamAdapter:
             if provider_status is not None and provider_status != expected_status:
                 self._set_failure("invalid_terminal_event", "The provider terminal status did not match its event type.")
                 return []
-            normalized = {**response, "status": expected_status, "model": self.display_model}
-            output = response.get("output")
-            meaningful = meaningful_output_items(output) if isinstance(output, list) else ()
-            if expected_status in {"completed", "incomplete"}:
-                if meaningful:
-                    normalized["output"] = list(meaningful)
-                elif self._visible_output_started:
-                    normalized.setdefault("output", [])
-                else:
-                    self._set_failure("empty_response", "The provider returned no meaningful output.")
-                    return []
-            if expected_status == "failed":
-                error = response.get("error")
-                code = error.get("code") if isinstance(error, dict) else None
-                normalized["error"] = {
-                    "code": code if isinstance(code, str) and code else "provider_error",
-                    "message": "The provider request failed.",
-                }
+            try:
+                output = reconcile_output(response.get("output"), {**self._completed_items, **self._invalid_tool_snapshots}, validate=False)
+                if any(index >= len(output) for index in self._native_types):
+                    raise NativeOutputError("incomplete_native_output")
+                tool_errors = []
+                normalized = native_response(
+                    {**response, "status": expected_status, "output": output}, display_model=self.display_model,
+                    validator=self._tool_validator, bad_indices=self._bad_tool_indices, error_code=self._tool_error,
+                    finalized_arguments=self._finalized_arguments, errors=tool_errors,
+                )
+                if tool_errors:
+                    self._tool_error = self._tool_error or tool_errors[0]
+            except (NativeOutputError, ValueError) as exc:
+                self._set_failure(getattr(exc, "code", "invalid_native_output"), "The provider returned an invalid native terminal snapshot.")
+                return []
+            expected_status = normalized["status"]
             normalized_type = f"response.{expected_status}"
             self._terminal_event = {"type": normalized_type, "response": normalized}
-            return []
-        if self._terminal_event is not None:
-            self._set_failure("output_after_terminal", "The provider emitted output after its terminal event.")
             return []
         if event_type.startswith("response.output") or event_type.startswith("response.reasoning"):
             self._visible_output_started = True
@@ -773,26 +865,71 @@ class NativeResponsesStreamAdapter:
             event["response"] = {**event["response"], "model": self.display_model}
         return [event]
 
+    def _emit_or_defer(self, events):
+        visible = []
+        for event in events:
+            item = event.get("item")
+            snapshot = event.get("response")
+            functions = (isinstance(item, dict) and item.get("type") == "function_call") or event.get("type", "").startswith("response.function_call_arguments")
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("output"), list):
+                functions = functions or any(isinstance(child, dict) and child.get("type") == "function_call" for child in snapshot["output"])
+            index = event.get("output_index")
+            # Do not expose indices beyond an unknown earlier slot: that slot
+            # may later prove to be a rejected function. This keeps retained
+            # sibling output indices coherent when withheld calls are removed.
+            prefix = 0
+            while self._native_types.get(prefix) not in {None, "function_call"}:
+                prefix += 1
+            if functions or (type(index) is int and index >= prefix):
+                self._deferring_tools = True
+            if self._deferring_tools:
+                try:
+                    check_json(event, budget=self._deferred_budget)
+                except NativeOutputError:
+                    self._deferred_events.clear()
+                    self._set_failure("tool_output_limit", "The pending tool stream exceeded its validation limit.")
+                    return visible
+                self._deferred_events.append(event)
+            else:
+                visible.append(event)
+        return visible
+
     def consume_bytes(self, chunk: bytes) -> list[dict[str, Any]]:
-        if not isinstance(chunk, bytes):
-            self._set_failure("invalid_stream_chunk", "The provider returned a non-byte stream chunk.")
+        if self._terminal_emitted or self._protocol_error:
             return []
-        self._buffer += chunk.decode("utf-8", errors="replace")
         events: list[dict[str, Any]] = []
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            events.extend(self._consume_line(line))
-        return events
+        try:
+            for data in self._decoder.feed(chunk):
+                events.extend(self._consume_payload(data))
+        except SSELineError as exc:
+            self._set_failure("invalid_stream_chunk", str(exc))
+        return self._emit_or_defer(events)
 
     def finish(self) -> list[dict[str, Any]]:
+        if self._terminal_emitted:
+            return []
         events: list[dict[str, Any]] = []
-        if self._buffer.strip():
-            events.extend(self._consume_line(self._buffer))
-        self._buffer = ""
+        try:
+            for data in self._decoder.finish():
+                events.extend(self._consume_payload(data))
+        except SSELineError as exc:
+            self._set_failure("invalid_stream_chunk", str(exc))
         if self._terminal_event is None:
             self._set_failure(
                 "missing_terminal_signal",
                 "The provider stream ended without a terminal response event.",
             )
-        events.extend(self._release_terminal())
-        return events
+        visible = self._emit_or_defer(events)
+        terminal_events = self._release_terminal()
+        if terminal_events:
+            response = terminal_events[-1].get("response", {})
+            if not self._protocol_error and not self._tool_error:
+                visible.extend(self._deferred_events)
+            # On failure/incompleteness, the terminal snapshot carries retained
+            # usable siblings. Never emit completion events for discarded calls.
+            self._deferred_events.clear()
+        return visible + terminal_events
+
+    def abort(self, code: str, message: str) -> list[dict[str, Any]]:
+        self._set_failure(code, message)
+        return self.finish()
