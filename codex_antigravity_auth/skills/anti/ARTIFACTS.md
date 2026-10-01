@@ -1,6 +1,6 @@
 # Saved Anti publications
 
-Saved files use separate versions from the console JSON response. JSON schemas ship in [schemas/](schemas/): [run index v1](schemas/run-index-v1.json), [saved result v2](schemas/saved-result-v2.json), and [raw lane v1](schemas/raw-lane-v1.json). Additional fields are allowed. The standalone `anti_lib.artifacts` validator also enforces cross-file identity, paths, lifecycle/scope agreement, retention and checksums; JSON Schema alone cannot establish those relationships.
+Saved files use separate versions from the console JSON response. JSON schemas ship in [schemas/](schemas/): [run index v1](schemas/run-index-v1.json), [saved result v2](schemas/saved-result-v2.json), and [raw lane v1](schemas/raw-lane-v1.json). Additional fields are allowed in content publications; never-mode indexes and their metadata use closed lifecycle allowlists. The standalone `anti_lib.artifacts` validator also enforces cross-file identity, paths, lifecycle/scope agreement, retention declarations and checksums; JSON Schema alone cannot establish those relationships.
 
 A run index lives at `<runs>/<runId>.json`. Summary/full indexes contain:
 
@@ -29,12 +29,12 @@ Readers must open `<runId>.json` and follow its committed `resultPath`, rather t
 | `publicationStatus: lifecycle_only` | A current never-mode index has no content artifact references. |
 | `publicationStatus: legacy_unverified` | An unversioned index, optionally with a v1 result, was adapted without adding checksum assurance or inventing scope. |
 | `unsupported_version` | The index/result/lane version is unknown; no guess or rewrite is made. |
-| `incomplete_publication`, `checksum_mismatch`, `identity_mismatch`, `conflicting_status`, `invalid_reference` | The publication cannot be trusted as complete. Preserve it for inspection. |
+| `incomplete_publication`, `checksum_mismatch`, `identity_mismatch`, `conflicting_status`, `retention_mismatch`, `invalid_reference` | The publication cannot be trusted as complete. Preserve it for inspection. |
 
 Legacy references are checked for containment, presence and understood shape when supplied. Older metadata-only indexes remain readable without inventing result files. Legacy reads never rewrite history. Raw JSON/shape/read failures also return explicit errors.
 
 ## Limits of the contract
 
-Publication validation establishes file consistency, **not correctness of model findings**. Lifecycle success and scope completeness are independent: a successful execution may have partial scope, and partial coverage/known omissions cannot become complete scope. Verification retains its own `not_run`, `completed_no_evidence`, `tool_checks` or `unknown` state; matching checksums never promote that state.
+Publication validation establishes file consistency, **not correctness of model findings**. Lifecycle success and scope completeness are independent: a successful execution may have partial scope, and positive failed/omitted/not-sent counts, incomplete detailed coverage and nonempty loss lists require partial coverage and scope. Known index omissions also require partial scope. Verification retains its own `not_run`, `completed_no_evidence`, `tool_checks` or `unknown` state; matching checksums never promote that state.
 
-The recording policy still applies. Never mode publishes only its lifecycle index. Summary mode publishes bounded previews with `retention.contentComplete=false`, independent of scope coverage, and no raw lanes. Full mode may publish up to 10,000 referenced lane files and retains redacted output. Schemas do not authorize saving prompts or secrets. The ownership and cleanup contracts in [SKILL.md](SKILL.md#operational-fallbacks) still apply.
+The recording policy still applies. Never mode publishes only its lifecycle index. Summary mode publishes bounded previews with `retention.contentComplete=false`, independent of scope coverage, and no raw lanes. Index and result retention declarations must agree (`summary`/`contentComplete=false` or `full`/`contentComplete=true`); this describes retention independently of scope. Full mode may publish up to 10,000 referenced lane files and retains redacted output. Schemas do not authorize saving prompts or secrets. The ownership and cleanup contracts in [SKILL.md](SKILL.md#operational-fallbacks) still apply.

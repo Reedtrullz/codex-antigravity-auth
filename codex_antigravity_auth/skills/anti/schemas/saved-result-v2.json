@@ -15,7 +15,8 @@
     "verification",
     "lanes",
     "resultPath",
-    "artifacts"
+    "artifacts",
+    "retention"
   ],
   "properties": {
     "schemaVersion": {
@@ -79,6 +80,74 @@
         "chunksNotSent": {
           "type": "integer",
           "minimum": 0
+        },
+        "omittedFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "truncatedFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "partialFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "failedFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "contentStatus": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "bytesDeclared": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "bytesSent": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "chunks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "contentStatus": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "bytesDeclared": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "bytesSent": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
         }
       }
     },
@@ -164,6 +233,35 @@
     },
     "recommendedNextActions": {
       "type": "array"
+    },
+    "retention": {
+      "type": "object",
+      "required": [
+        "mode",
+        "contentComplete"
+      ],
+      "oneOf": [
+        {
+          "properties": {
+            "mode": {
+              "const": "summary"
+            },
+            "contentComplete": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "mode": {
+              "const": "full"
+            },
+            "contentComplete": {
+              "const": true
+            }
+          }
+        }
+      ]
     }
   }
 }

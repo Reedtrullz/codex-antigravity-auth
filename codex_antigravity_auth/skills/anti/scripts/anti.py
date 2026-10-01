@@ -35,7 +35,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
-    file_reference, read_record, validate_record,
+    file_reference, read_record, validate_record, coverage_has_loss,
 )
 from anti_lib.chunking import chunk_manifest
 from anti_lib.cleanup import RUN_ID_RE, assert_not_deleted, clean_runs
@@ -1016,6 +1016,8 @@ def _write_run_record_unlocked(
             "resultPath": str(artifact_path),
         }
     )
+    if coverage_has_loss(artifact["coverage"]):
+        artifact["coverage"]["status"] = "partial"
     if artifact["coverage"]["status"] == "partial" or record.get("omittedFileCount", 0) or record.get("omittedChunkCount", 0):
         record["scopeStatus"] = artifact["scopeStatus"] = "partial"
     if output_mode == "summary":
@@ -1065,6 +1067,8 @@ def _write_run_record_unlocked(
         record["id"] = str(record_id)
         if "metadata" in record:
             record["metadata"]["request_log_correlation_id"] = str(record_id)
+    if output_mode == "full":
+        artifact["retention"] = record["retention"] = {"mode": "full", "contentComplete": True}
     artifact["writerId"] = args._anti_writer_id
     artifact["runId"] = str(record_id)
     artifact["revisionId"] = revision_id

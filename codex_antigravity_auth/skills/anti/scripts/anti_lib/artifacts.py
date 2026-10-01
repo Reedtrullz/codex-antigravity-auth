@@ -10,6 +10,7 @@ from typing import Any
 
 from .cleanup import RUN_ID_RE
 from .persistence import PersistenceError
+from .retention import lifecycle_metadata
 
 RECORD_SCHEMA_VERSION = 1
 SAVED_RESULT_SCHEMA_VERSION = 2
@@ -87,6 +88,34 @@ def _checked_reference(root: Path, reference: Any, run_id: str, expected: str) -
     return path, _object(raw)
 
 
+COVERAGE_LOSS_COUNTS = ("chunksFailed", "chunksOmitted", "chunksNotSent")
+COVERAGE_LOSS_LISTS = ("omittedFiles", "truncatedFiles", "partialFiles", "failedFiles")
+NEVER_FIELDS = {"recordSchemaVersion", "id", "writerId", "created_at", "command", "mode", "status",
+                "save_output", "runStatus", "metadata", "error"}
+LIFECYCLE_COMMANDS = {"consult", "review", "plan", "panel", "moa", "fusion", "workflow", "compare", "unknown"}
+
+
+def coverage_has_loss(coverage: dict[str, Any]) -> bool:
+    if any(coverage.get(key, 0) for key in COVERAGE_LOSS_COUNTS):
+        return True
+    if any(coverage.get(key, []) for key in COVERAGE_LOSS_LISTS):
+        return True
+    if coverage.get("chunksExpected", 0) > coverage.get("chunksCompleted", 0):
+        return True
+    for row in coverage.get("files", []):
+        if row.get("contentStatus") in ("partial", "truncated", "omitted", "failed", "error"):
+            return True
+        if row.get("bytesDeclared", 0) > row.get("bytesSent", 0):
+            return True
+    return any(row.get("status") in ("failed", "error", "not_sent", "partial", "truncated", "omitted", "pending", "running")
+               for row in coverage.get("chunks", []))
+
+
+def _retention_agrees(value: Any, mode: str) -> bool:
+    return (isinstance(value, dict) and value.get("mode") == mode
+            and value.get("contentComplete") is (mode == "full"))
+
+
 def _result_shape(result: dict[str, Any], run_id: str, record: dict[str, Any], *, current: bool) -> None:
     version = result.get("schemaVersion")
     _require(type(version) is int and version == (SAVED_RESULT_SCHEMA_VERSION if current else 1),
@@ -103,6 +132,21 @@ def _result_shape(result: dict[str, Any], run_id: str, record: dict[str, Any], *
     for key in ("chunksExpected", "chunksCompleted", "chunksFailed", "chunksOmitted", "chunksNotSent"):
         if key in coverage:
             _require(type(coverage[key]) is int and coverage[key] >= 0, "Coverage counts must be nonnegative integers")
+    for key in COVERAGE_LOSS_LISTS:
+        if key in coverage:
+            _require(isinstance(coverage[key], list) and all(isinstance(item, str) for item in coverage[key]), "Invalid coverage file list")
+    for key in ("files", "chunks"):
+        rows = coverage.get(key, [])
+        _require(isinstance(rows, list) and all(isinstance(row, dict) for row in rows), "Invalid detailed coverage")
+        for row in rows:
+            for field in ("contentStatus", "status"):
+                if field in row:
+                    _require(isinstance(row[field], str), "Invalid detailed coverage status")
+            for field in ("bytesDeclared", "bytesSent"):
+                if field in row:
+                    _require(type(row[field]) is int and row[field] >= 0, "Invalid coverage byte count")
+    if coverage_has_loss(coverage):
+        _require(coverage["status"] == "partial" and result["scopeStatus"] == "partial", "Coverage loss cannot be labelled complete", "conflicting_status")
     verification = result.get("verification")
     _require(isinstance(verification, dict) and isinstance(verification.get("status"), str)
              and verification["status"] in VERIFICATION_STATES, "Invalid verification state")
@@ -129,12 +173,16 @@ def validate_record(record: dict[str, Any], path: Path) -> dict[str, Any]:
     """Return a read adapter with publicationStatus; never change saved bytes."""
     root = path.parent
     _require(not root.is_symlink(), "Run directory is a symlink", "invalid_reference")
-    run_id = record.get("id", path.stem)
+    current = "recordSchemaVersion" in record
+    if current:
+        _require(type(record["recordSchemaVersion"]) is int and record["recordSchemaVersion"] == RECORD_SCHEMA_VERSION,
+                 "Unsupported run index schema version", "unsupported_version")
+    run_id = record.get("id") if current else record.get("id", path.stem)
     _require(isinstance(run_id, str) and bool(RUN_ID_RE.fullmatch(run_id)) and run_id == path.stem,
              "Index identity does not match its filename", "identity_mismatch")
     models = record.get("models", [])
     _require(models is None or (isinstance(models, list) and all(isinstance(model, str) for model in models)), "Invalid index model list")
-    if "recordSchemaVersion" not in record:
+    if not current:
         # Legacy records have no publication checksum. Keep their scope/status,
         # never infer completeness from existence or silently upgrade trust.
         if record.get("resultPath"):
@@ -148,8 +196,6 @@ def validate_record(record: dict[str, Any], path: Path) -> dict[str, Any]:
             for reference in lanes:
                 _object(_bytes(_owned_path(root, reference, run_id, relative=False)))
         return {**record, "publicationStatus": "legacy_unverified"}
-    _require(type(record["recordSchemaVersion"]) is int and record["recordSchemaVersion"] == RECORD_SCHEMA_VERSION,
-             "Unsupported run index schema version", "unsupported_version")
     state = record.get("status")
     _require(isinstance(state, str) and state in STATES, "Invalid index lifecycle")
     _require(record.get("runStatus") == ("failed" if state == "error" else state), "Index lifecycle fields conflict", "conflicting_status")
@@ -158,8 +204,17 @@ def validate_record(record: dict[str, Any], path: Path) -> dict[str, Any]:
     mode = record.get("save_output")
     _require(mode in ("never", "summary", "full"), "Invalid retention mode")
     if mode == "never":
-        _require("publication" not in record and "resultPath" not in record, "Never-mode index must not reference content")
+        _require(set(record) <= NEVER_FIELDS, "Never-mode index contains non-lifecycle fields")
+        for key in ("command", "mode"):
+            _require(isinstance(record.get(key), str) and record[key] in LIFECYCLE_COMMANDS, "Invalid lifecycle command")
+        _require(isinstance(record.get("created_at"), str) and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", record["created_at"])), "Invalid lifecycle timestamp")
+        _require(record.get("error") in (None, "run_failed", "interrupted"), "Never-mode index contains a content-bearing error")
+        metadata = record.get("metadata")
+        _require(isinstance(metadata, dict) and metadata.get("request_log_correlation_id") == run_id, "Invalid lifecycle correlation")
+        permitted = {**lifecycle_metadata(metadata), "request_log_correlation_id": run_id}
+        _require(metadata == permitted, "Never-mode metadata contains non-lifecycle fields")
         return {**record, "publicationStatus": "lifecycle_only"}
+    _require(_retention_agrees(record.get("retention"), mode), "Index retention declaration disagrees with its mode", "retention_mismatch")
     _require(record.get("scopeStatus") in ("complete", "partial"), "Invalid index scope")
     for key in ("omittedFileCount", "omittedChunkCount"):
         if key in record:
@@ -172,6 +227,7 @@ def validate_record(record: dict[str, Any], path: Path) -> dict[str, Any]:
     prefix = f"{run_id}/revisions/{revision}"
     result_path, result = _checked_reference(root, publication.get("result"), run_id, f"{prefix}/result.json")
     _result_shape(result, run_id, record, current=True)
+    _require(_retention_agrees(result.get("retention"), mode), "Index and result retention disagree", "retention_mismatch")
     _require(result.get("revisionId") == revision and result.get("writerId") == owner, "Result revision/writer differs from its index", "identity_mismatch")
     _require(record.get("resultPath") == str(result_path) and result.get("resultPath") == str(result_path), "Result path aliases disagree", "invalid_reference")
     references = publication.get("lanes")
