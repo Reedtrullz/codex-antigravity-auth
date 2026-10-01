@@ -1,6 +1,6 @@
 # AGENTS.md — Codex Antigravity Auth
 
-> **Release verification — 2026-09-22:** v2.4.2 includes the Anti hardening changes from the 2026-09-22 consult incomplete-retry bug report (P0 retry, never-mode heartbeat records, `VALIDATION_REQUIRED` terminal classification, runs list/reflections fixes, test isolation). Release preparation passed the 121-test Anti suite locally with all four skill copies parity-matched; per-PR CI evidence is in the merged PR description. Live credentialed verification (bounded caps) passed for the P0 retry exhausted and succeeded paths, never-mode heartbeat and SIGTERM records, and two-lane flash consensus; no fresh full-scope live generation is claimed here. Earlier release evidence below is historical.
+> Start at [STATUS.md](STATUS.md) for current source contracts and evidence boundaries. Historical release claims are preserved in [the dated archive](docs/history/2026-10-01/AGENTS.md); they are not proof for this checkout.
 
 Guidance for AI coding agents (Codex, Claude Code, OpenCode, etc.) working on this project.
 
@@ -10,43 +10,9 @@ Local gateway server that allows OpenAI Codex (CLI and Desktop) to use Google An
 
 ## Architecture
 
-```
-codex_antigravity_auth/
-├── server.py        # FastAPI gateway: POST /v1/responses, GET /v1/models
-├── transform.py     # Codex Responses API ↔ Google Gemini/Claude translation
-├── accounts.py      # AccountManager: selection, rotation, cooldowns, refresh
-├── oauth.py         # PKCE OAuth flow, token exchange, refresh
-├── storage.py       # Encrypted JSON persistence (Fernet + OS keyring)
-├── cli.py           # CLI: login, doctor, accounts, start
-├── constants.py     # Endpoints, credential resolution, platform detection
-├── byok.py          # Encrypted BYOK provider config, presets, model routing
-├── models.py        # User-facing model name → backend ID mapping
-├── schema.py        # JSON Schema sanitization for Antigravity compatibility
-tests/
-├── test_transform.py
-├── test_server_streaming.py
-├── test_accounts.py
-├── test_storage.py
-├── test_cli.py
-├── test_schema_sanitization.py
-├── test_fidelity_transforms.py
-├── test_fidelity_edge_cases.py
-```
-
-## How Requests Flow
-
-```
-Codex Desktop/CLI
-    │  POST /v1/responses  (Responses API format)
-    ▼
-server.py: create_response()
-    │  1. select_active_account(model)  → accounts.py
-    │  2. transform_request()           → transform.py
-    │  3. POST to daily-cloudcode-pa.googleapis.com/v1internal:generateContent
-    │  4. transform_response()          → transform.py
-    ▼
-Codex Desktop/CLI  ←  Responses API formatted response
-```
+[STATUS.md](STATUS.md) maps Google, native OpenAI and BYOK routes to their owning
+modules. Use the central capability catalog for model aliases/families and adapter
+support; do not infer support from names or duplicate a model registry in docs.
 
 ## Key Conventions
 
@@ -59,25 +25,13 @@ Codex Desktop/CLI  ←  Responses API formatted response
 - **Accounts**: `~/.codex/antigravity-accounts.json` (Fernet-encrypted)
 - **BYOK providers**: `~/.codex/antigravity-providers.json` (Fernet-encrypted) or provider API key env vars
 
-## Model Name Mapping
+## Model and capability ownership
 
-User-facing aliases → Google backend models (`models.py`):
-- `gemini-3.8-flash` → `gemini-3.8-flash-tiered` (current Flash generation)
-- `gemini-3.7-flash` → `gemini-3.7-flash-tiered` (supported Flash generation)
-- `gemini-3.1-pro` → `gemini-3.1-pro-low` (alias: `gemini-pro-agent` → `gemini-pro-agent`)
-- `gemini-3.1-flash-image` → `gemini-3.1-flash-image` (image generation)
-- `gemini-3.5-flash-high` → `gemini-3-flash-agent` (retired, backward compat)
-- `gemini-3.6-flash-high` → `gemini-3.7-flash-tiered` (backward compat)
-- `claude-sonnet-4-6` → `claude-sonnet-4-6` (alias: `claude-3.5-sonnet`)
-- `claude-opus-4-6-thinking` → `claude-opus-4-6-thinking` (alias: `claude-opus-4-6`)
-- `gpt-oss-120b-medium` → `gpt-oss-120b-medium` (open-source, text-only)
-
-BYOK provider models use a provider prefix:
-- `deepseek:deepseek-chat`
-- `openrouter:deepseek/deepseek-chat`
-- `xai:grok-code-fast-1`
-- `kimi:kimi-k2-0711-preview`
-- `ollama:gpt-oss:20b`
+`models.py` owns Google model aliases; `capability_catalog.py` projects route
+contracts and the generated standalone Anti snapshot. See
+[capability semantics](codex_antigravity_auth/design/capabilities.md) and
+[discovery evidence](codex_antigravity_auth/design/model-discovery.md). Catalog
+advertisement, transport support and live generation evidence are distinct.
 
 ## Critical Pitfalls
 

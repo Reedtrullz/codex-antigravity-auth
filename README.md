@@ -8,6 +8,8 @@ Released local gateway for using Google Antigravity Claude Opus/Sonnet from Open
 
 The default setup is intentionally conservative: it can install the Codex provider block and start the gateway, but it will not replace your active Codex model unless you explicitly pass `--activate`.
 
+Current contracts and evidence boundaries: [STATUS.md](STATUS.md). Package metadata describes this source; historical live or release results do not certify this checkout.
+
 ## Quick Start
 
 ```bash

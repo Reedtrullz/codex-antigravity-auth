@@ -1,135 +1,71 @@
-# Verification Guide
+# Verification and evidence
 
-> **Release verification — 2026-09-22:** v2.4.2 includes the Anti hardening changes from the 2026-09-22 consult incomplete-retry bug report (P0 retry, never-mode heartbeat records, `VALIDATION_REQUIRED` terminal classification, runs list/reflections fixes, test isolation). Release preparation passed the 121-test Anti suite locally with all four skill copies parity-matched; per-PR CI evidence is in the merged PR description. Live credentialed verification (bounded caps) passed for the P0 retry exhausted and succeeded paths, never-mode heartbeat and SIGTERM records, and two-lane flash consensus; no fresh full-scope live generation is claimed here. Earlier release evidence below is historical.
+[Current status](STATUS.md) owns the source-contract map. Historical release and
+credentialed observations are preserved in the
+[original verification snapshot](docs/history/2026-10-01/VERIFICATION.md).
 
-## Quick Start (5 minutes)
+## Synthetic source checks
 
-### 1. Install
-```bash
-uv tool install "git+https://github.com/Reedtrullz/codex-antigravity-auth.git"
-```
-
-From a checkout, use `uv tool install .` instead.
-
-### 2. Configure Google Credentials
-Create a Google OAuth desktop client with this local callback:
-
-```text
-http://localhost:51121/oauth-callback
-```
-
-Write `~/.codex/antigravity-credentials.json`:
-```json
-{
-  "client_id": "YOUR_CLIENT_ID.apps.googleusercontent.com",
-  "client_secret": "YOUR_CLIENT_SECRET"
-}
-```
-Or export: `ANTIGRAVITY_CLIENT_ID` + `ANTIGRAVITY_CLIENT_SECRET`. The credential JSON is plaintext but permission-repaired to `0600`; login tokens are stored separately in encrypted storage.
-
-### 3. Login Or Configure BYOK
-```bash
-codex-antigravity login
-```
-Opens browser → pick Google account → tokens stored encrypted.
-
-For BYOK providers:
-```bash
-codex-antigravity provider set deepseek --api-key-env DEEPSEEK_API_KEY --model deepseek-chat
-codex-antigravity provider set openrouter --api-key-env OPENROUTER_API_KEY --model deepseek/deepseek-chat
-codex-antigravity provider set xai --api-key-env XAI_API_KEY --model grok-code-fast-1
-codex-antigravity provider set kimi --api-key-env KIMI_API_KEY --model kimi-k2-0711-preview
-codex-antigravity provider set ollama --base-url http://localhost:11434/v1 --model gpt-oss:20b
-```
-Provider ids may only contain letters, numbers, underscores, and hyphens; provider model ids may still contain `/` or `:`, but not whitespace or control characters.
-
-### 4. Configure Codex
-Add to `~/.codex/config.toml`:
+Use a development environment and the checked runner; it isolates credentials,
+state, keyring and sockets before test collection. No live key is required.
 
 ```bash
-codex-antigravity configure-codex --write
-# BYOK-only example:
-codex-antigravity configure-codex --write --model deepseek:deepseek-chat
+uv pip install -e ".[dev]"
+python3 scripts/run_tests.py -q
+python3 scripts/run_tests.py tests/test_documented_commands.py -q
 ```
 
-Equivalent manual TOML:
+The documentation check parses all gateway and Anti commands in shell code blocks
+of README, USAGE, STATUS and this guide using the actual parsers. It never invokes
+setup, login, services, probes or Anti generation. This proves CLI grammar, not
+successful execution of credentialed operations, shell installation commands or
+provider acceptance. Inline prose and historical snapshots are outside that gate.
 
-```toml
-model = "gemini-3.8-flash"
-model_provider = "antigravity"
-wire_api = "responses"
-
-[model_providers.antigravity]
-name = "Google Antigravity"
-base_url = "http://localhost:51122/v1"
-wire_api = "responses"
-```
-
-### 5. Start Gateway
-```bash
-codex-antigravity start
-```
-
-### 6. Verify
-```bash
-codex-antigravity doctor        # diagnostics
-codex-antigravity doctor --byok-only
-codex-antigravity doctor --codex-ready --json  # read-only store/schema/service/capability report
-python3 scripts/run_tests.py -q  # full suite with credential/socket isolation
-curl http://localhost:51122/v1/models | python3 -m json.tool  # model catalog
-```
-
-Treat verification evidence in layers: unit/mocked route tests prove local contracts; wheel and installed-skill checks prove packaging; `/health`, service status, and model-catalog readbacks prove the running local gateway; only an explicit `doctor --codex-ready --live` or manual `/v1/responses` call proves a credentialed provider path. Do not present local or mocked evidence as a live-provider claim.
-
-The `1.7.0` release-candidate paragraph below is historical and must not be used as current release state. For v2.3.0, use the release PR verification; the prior v2.2.0 publication is historical evidence. No fresh credentialed live-provider result is claimed.
-
-## Manual Smoke Test
-```bash
-curl -s -X POST http://localhost:51122/v1/responses \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gemini-3.8-flash","input":"Say hello!"}'
-# Expect: 200 with output containing text
-```
-
-### Optional BYOK Smoke
-With provider API keys exported only in the shell environment:
+## Reproducible release evidence
 
 ```bash
-export DEEPSEEK_API_KEY="..."
-curl -s http://localhost:51122/v1/models | python3 -m json.tool
-curl -s -X POST http://localhost:51122/v1/responses \
-  -H "Content-Type: application/json" \
-  -d '{"model":"deepseek:deepseek-chat","input":"Return exactly: byok-smoke-ok","max_output_tokens":256}'
-
-export OPENROUTER_API_KEY="..."
-curl -s http://localhost:51122/v1/models | python3 -m json.tool
-curl -s -X POST http://localhost:51122/v1/responses \
-  -H "Content-Type: application/json" \
-  -d '{"model":"openrouter:openrouter/auto","input":"Return exactly: openrouter-smoke-ok","max_output_tokens":256}'
+python3 scripts/release_evidence.py --output /tmp/antigravity-evidence
 ```
 
-If you want to smoke `deepseek:deepseek-v4-flash` instead, include `--model deepseek-v4-flash` in the DeepSeek `provider set` command so it appears in `/v1/models`.
+This runs the full checked suite and writes a JSON report, JUnit XML and test log.
+The report reads the package version, records source SHA/cleanliness before and
+after, actual Python/OS, exit code and JUnit counts. Counts describe the supplied
+run; they are never copied into a permanent current-status claim. A dirty or
+moving source cannot be labeled an exact revision, even if its tests pass.
 
-Historical credentialed smokes were run on 2026-07-03 against PR #1 head `e6a81ac` before squash merge `191daa4`; they are not evidence for `1.7.0`. DeepSeek used a transient `DEEPSEEK_API_KEY` environment variable only, did not persist the key, exposed `deepseek:deepseek-v4-flash` in `/v1/models`, and returned exact sentinels for both non-streaming and streaming `/v1/responses`.
-OpenRouter was also smoke-tested with a transient `OPENROUTER_API_KEY` environment variable only: `/v1/models` exposed `openrouter:openrouter/auto`, non-streaming and streaming `/v1/responses` returned exact sentinels for `openrouter:openrouter/auto`, and manual explicit routing returned an exact non-streaming sentinel for `openrouter:deepseek/deepseek-chat`. The Anti V2 workflow release has local package/unit proof and CI proof recorded in `STATUS.md`, but has not rerun credentialed live Google or BYOK generation smokes.
+Build fresh artifacts first, then optionally validate their full contents and
+execute the installed wheel/rebuilt-sdist contract checks:
 
-## Switching Between ChatGPT and Antigravity
-- **Use ChatGPT**: Remove `model_provider` line from config.toml
-- **Use Antigravity**: Add `model_provider = "antigravity"`, ensure gateway is running
+```bash
+python3 -m build --sdist --wheel
+python3 scripts/release_evidence.py --output /tmp/antigravity-evidence --dist dist
+```
 
-## Available Models
-- `gemini-3.8-flash` → Gemini 3.8 Flash (Low/Medium/High)
-- `gemini-3.7-flash` → Gemini 3.7 Flash (Low/Medium/High)
-- `gemini-3.6-flash-high` → Gemini 3.6 Flash compatibility ID
-- `gemini-3.1-pro` → Gemini 3.1 Pro (Reasoning)
-- `gemini-3.1-flash-image` → Gemini 3.1 Flash Image generation
-- `claude-sonnet-4-6` → Claude Sonnet 4.6 (Google)
-- `claude-opus-4-6-thinking` → Claude Opus 4.6 (Google)
-- `gpt-oss-120b-medium` → GPT-OSS 120B (text-only)
-- `deepseek:deepseek-v4-flash` → DeepSeek V4 Flash BYOK
-- `deepseek:deepseek-chat` → DeepSeek BYOK
-- `openrouter:openrouter/auto` → OpenRouter BYOK auto-router
-- `openrouter:deepseek/deepseek-chat` → OpenRouter BYOK
-- `xai:grok-code-fast-1` → xAI BYOK
-- `kimi:kimi-k2-0711-preview` → Kimi/Moonshot BYOK
-- `ollama:gpt-oss:20b` → Ollama BYOK/local
+The optional artifact record contains filenames and SHA-256 digests before and
+after validation, content-check outcomes and installed-check exit status.
+Build provenance remains explicitly unattested: these checks exercise the supplied
+artifact bytes; they cannot prove where or how those bytes were built.
+It does not claim that a local wheel was uploaded to PyPI, or that local checks
+ran on every CI platform. Keep the report outside the tracked source and attach
+it to the release/PR as evidence for that revision. A failed check returns nonzero
+and still leaves the report. Reports describe local execution, not external CI.
+
+## Explicit operational checks
+
+These commands read local configuration or contact a running gateway. They are
+examples for an operator; the documentation parser does not execute them.
+
+```bash
+codex-antigravity doctor --codex-ready --json
+codex-antigravity models explain gemini-3.8-flash --json
+codex-antigravity models probe gemini-3.8-flash --network --json
+```
+
+The last command explicitly spends a provider request with configured credentials.
+It is not part of synthetic verification. A model catalog response or HTTP 200 is
+insufficient: require a completed terminal with usable assistant output, no error
+or incomplete detail, and the expected route/model. Record the timestamp, exact
+source/artifact and chosen model/configuration without prompts, output text or
+credentials. Streaming checks must inspect the terminal event, not merely bytes
+arriving. Failed, incomplete, empty and refusal-only responses are not generation
+readiness. No new live generation is claimed here.
