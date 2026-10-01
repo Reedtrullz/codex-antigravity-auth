@@ -37,27 +37,61 @@ def _diagnostic_all_provider_configs() -> dict[str, dict]:
 def _responses_output_preview(payload: dict) -> str:
     if not isinstance(payload, dict):
         return ""
-    direct = payload.get("output_text")
-    if isinstance(direct, str):
-        return direct.strip()
     fragments: list[str] = []
     output = payload.get("output")
     if isinstance(output, list):
         for item in output:
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            if item.get("role") != "assistant" or item.get("status") != "completed":
                 continue
             content = item.get("content")
             if isinstance(content, list):
                 for part in content:
-                    if not isinstance(part, dict):
+                    if not isinstance(part, dict) or part.get("type") != "output_text":
                         continue
-                    text = part.get("text") or part.get("output_text")
+                    text = part.get("text")
                     if isinstance(text, str):
                         fragments.append(text)
-            text = item.get("text")
-            if isinstance(text, str):
-                fragments.append(text)
     return "".join(fragments).strip()
+
+
+def _generation_probe_outcome(payload: object) -> tuple[str, str, str | None]:
+    """Classify the single-word probe, which requires completed, usable text."""
+    if not isinstance(payload, dict):
+        return "malformed", "invalid_response", "Gateway response must be a JSON object"
+    status = payload.get("status")
+    if not isinstance(status, str) or status not in {
+        "completed", "failed", "incomplete", "cancelled", "queued", "in_progress",
+    }:
+        return "malformed", "invalid_status", "Gateway response has a missing or invalid terminal status"
+    error = payload.get("error")
+    if status == "failed" or error is not None:
+        detail = error.get("message") or error.get("code") if isinstance(error, dict) else error
+        return "failed", "response_error", f"Generation failed: {detail or 'no error detail supplied'}"
+    if status == "incomplete":
+        details = payload.get("incomplete_details")
+        reason = details.get("reason") if isinstance(details, dict) else None
+        reason = reason if isinstance(reason, str) and reason else "unspecified"
+        return "incomplete", reason, f"Generation incomplete ({reason}); completed text is required"
+    if status != "completed":
+        return status, "not_completed", f"Generation status is {status}; completed text is required"
+    output = payload.get("output")
+    if not isinstance(output, list) or any(not isinstance(item, dict) for item in output):
+        return "malformed", "invalid_output", "Gateway response output must be a list of objects"
+    for item in output:
+        if item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list) or any(not isinstance(part, dict) for part in content):
+            return "malformed", "invalid_content", "Gateway response message content must be a list of objects"
+        if any(part.get("type") == "refusal" for part in content):
+            return "refusal", "refused", "Generation was refused; the readiness probe requires usable text"
+        if item.get("status") != "completed":
+            return "incomplete", "message_not_completed", "Generation contains an unfinished message"
+    if not _responses_output_preview(payload):
+        return "empty", "empty_output", "Generation completed with empty output; usable text is required"
+    return "completed", "completed_text", None
 
 
 def gateway_generate_probe(
@@ -68,7 +102,6 @@ def gateway_generate_probe(
     token_env: str,
     max_output_tokens: int = 16,
 ) -> dict:
-    url = base_url.rstrip("/") + "/responses"
     body = {
         "model": model,
         "input": "Reply with the single word: ready",
@@ -85,20 +118,25 @@ def gateway_generate_probe(
     started = time.monotonic()
     result = {
         "ok": False,
+        "transport_ok": False,
+        "generation_ok": False,
+        "terminal_kind": None,
+        "terminal_reason": None,
         "model": model,
         "latency_ms": 0,
         "output_preview": "",
         "http_status": None,
         "error": None,
     }
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        url = _cli.validate_http_base_url(base_url, label="gateway base URL") + "/responses"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with _cli.open_http_request(req, timeout=timeout) as response:
             raw = response.read()
             result["http_status"] = getattr(response, "status", 200)
     except urllib.error.HTTPError as exc:
@@ -119,16 +157,25 @@ def gateway_generate_probe(
         result["error"] = _cli.redact_secret_text(str(exc))[:500]
         return result
     result["latency_ms"] = int((time.monotonic() - started) * 1000)
+    result["transport_ok"] = 200 <= int(result["http_status"] or 0) < 300
     try:
         payload = json.loads(raw.decode("utf-8"))
     except Exception as exc:
+        result["terminal_kind"] = "malformed"
+        result["terminal_reason"] = "invalid_json"
         result["error"] = f"Gateway returned non-JSON data: {_cli.redact_secret_text(str(exc))}"
         return result
     preview = _cli.redact_secret_text(_cli._responses_output_preview(payload)).replace("\n", " ").strip()
     result["output_preview"] = preview[:80]
-    result["ok"] = 200 <= int(result["http_status"] or 0) < 300
-    if not result["ok"] and not result["error"]:
-        result["error"] = _cli.redact_secret_text(str(payload))[:500]
+    kind, reason, error = _generation_probe_outcome(payload)
+    result["terminal_kind"] = kind
+    result["terminal_reason"] = _cli.redact_secret_text(reason)[:200]
+    result["generation_ok"] = result["transport_ok"] and kind == "completed"
+    result["ok"] = result["generation_ok"]
+    if not result["transport_ok"]:
+        error = f"HTTP {result['http_status']}: {error or 'generation transport failed'}"
+    if error:
+        result["error"] = _cli.redact_secret_text(error)[:500]
     return result
 
 
@@ -163,7 +210,7 @@ def openrouter_reachability_check(*, timeout: float = 5.0) -> dict:
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _cli.open_http_request(req, timeout=timeout) as resp:
             if 200 <= resp.status < 300:
                 result["ok"] = True
             else:
@@ -275,7 +322,7 @@ def _write_version_cache(latest: str) -> None:
 
 def latest_pypi_version(timeout: float = 2.0) -> str | None:
     req = urllib.request.Request(_cli.PYPI_PROJECT_JSON_URL, headers={"Accept": "application/json"}, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as response:
+    with _cli.open_http_request(req, timeout=timeout) as response:
         payload = json.loads(response.read().decode("utf-8"))
     info = payload.get("info") if isinstance(payload, dict) else None
     latest = info.get("version") if isinstance(info, dict) else None
@@ -802,7 +849,7 @@ def run_doctor(
                                          data=json.dumps({"model": resolve_backend_model(DEFAULT_GEMINI_MODEL_ID), "request": {"contents": []}}).encode("utf-8"),
                                          headers={"Content-Type": "application/json"})
             try:
-                resp_ctx = urllib.request.urlopen(req, timeout=5.0)
+                resp_ctx = _cli.open_http_request(req, timeout=5.0)
             except urllib.error.HTTPError as e:
                 if e.code in (401, 403):
                     print("[PASS] Google Antigravity Connectivity: ONLINE (authentication required)")
