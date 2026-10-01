@@ -186,6 +186,7 @@ def run_local_oauth_flow(*, select_account: bool = False, no_browser: bool = Fal
                 print("[!] No browser opened. Open the URL above manually, or use login --no-browser with an SSH loopback tunnel.")
 
         deadline = time.monotonic() + 600
+        server.callback_deadline = deadline
         while server.auth_code is None and server.auth_error is None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
