@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -49,8 +50,16 @@ def key_looks_secret(key: Any) -> bool:
     )
 
 
-def redact_sensitive_text(text: str) -> str:
+def redact_sensitive_text(text: str, _depth: int = 0) -> str:
     redacted = shared_redact_secret_text(str(text))
+    if _depth < 32 and redacted.lstrip().startswith(("{", "[", '"')):
+        try:
+            parsed = json.loads(redacted)
+        except (ValueError, RecursionError):
+            pass
+        else:
+            sanitized = _sanitize_json(parsed, _depth + 1)
+            redacted = json.dumps(sanitized, ensure_ascii=False) if sanitized != parsed else redacted
     redacted = str(normalize_redaction_markers(redacted))
     redacted = HEADER_SECRET_RE.sub(lambda match: match.group(1) + match.group(2) + REDACTION_MARKER, redacted)
     redacted = PROVIDER_ID_JSON_RE.sub(lambda match: match.group(1) + REDACTION_MARKER + match.group(2), redacted)
@@ -66,22 +75,29 @@ def _secret_value_should_redact(key: Any, item: Any) -> bool:
     if item is None or item == "" or isinstance(item, bool):
         return False
     normalized = str(key).replace("-", "_").lower()
-    return not (normalized == "code" and isinstance(item, int) and 100 <= item <= 599)
+    if normalized == "code":
+        if isinstance(item, (int, float)) and 100 <= item <= 599:
+            return False
+        if isinstance(item, str) and len(item) == 3 and item.isdecimal() and 100 <= int(item) <= 599:
+            return False
+    return True
 
 
-def _sanitize_json(value: Any) -> Any:
+def _sanitize_json(value: Any, depth: int = 0) -> Any:
+    if depth > 32:
+        return REDACTION_MARKER + " (diagnostic input limit exceeded)"
     value = normalize_redaction_markers(value)
     if isinstance(value, dict):
         return {
             str(key): REDACTION_MARKER
             if key_looks_secret(key) and _secret_value_should_redact(key, item)
-            else _sanitize_json(item)
+            else _sanitize_json(item, depth + 1)
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):
-        return [_sanitize_json(item) for item in value]
+        return [_sanitize_json(item, depth + 1) for item in value]
     if isinstance(value, str):
-        return redact_sensitive_text(value)
+        return redact_sensitive_text(value, depth + 1)
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     return redact_sensitive_text(str(value))
