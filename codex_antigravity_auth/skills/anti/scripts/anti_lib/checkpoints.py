@@ -99,13 +99,35 @@ def write_new(directory, category, value):
     return {'path': path.relative_to(directory).as_posix(), 'sha256': hashlib.sha256(raw).hexdigest(), 'bytes': len(raw)}
 
 
+def generation_projection(value):
+    """Only outcome/identity/counter evidence is needed to reuse a chunk."""
+    result = {}
+    if not isinstance(value, dict):return result
+    for key in ('actual_model','actual_provider','requested_model','model_used','backend_model','fallback_model','fallback_policy'):
+        item = value.get(key)
+        if isinstance(item,str) and len(item) <= 512:result[key] = item
+    for key in ('fallback_used','submitted','upstream_output_empty'):
+        if type(value.get(key)) is bool:result[key] = value[key]
+    for key in ('upstream_status','terminal_kind','terminal_reason'):
+        if isinstance(value.get(key),str) and re.fullmatch(r'[A-Za-z0-9_-]{1,64}',value[key]):result[key] = value[key]
+    if isinstance(value.get('gateway_routing_identity'),str) and SHA.fullmatch(value['gateway_routing_identity']):
+        result['gateway_routing_identity'] = value['gateway_routing_identity']
+    usage = value.get('usage')
+    if isinstance(usage,dict):
+        result['usage'] = {key:item for key,item in usage.items() if key in {'input_tokens','output_tokens','total_tokens'}
+                           and type(item) is int and 0 <= item <= 2**63-1}
+    if type(value.get('elapsed_ms')) is int and 0 <= value['elapsed_ms'] <= 2**63-1:
+        result['elapsed_ms'] = value['elapsed_ms']
+    return result
+
+
 class Checkpoint:
     def __init__(self, root, run_id, writer_id, *, recipe, chunks, routes, resume=None, rerun=()):
         self.root, self.run_id, self.writer_id = Path(root), run_id, writer_id
         require(isinstance(recipe, str) and SHA.fullmatch(recipe), 'Checkpoint recipe identity is unavailable')
         require(isinstance(chunks, list) and 0 < len(chunks) <= MAX_CHUNKS
                 and all(isinstance(value, str) and SHA.fullmatch(value) for value in chunks), 'Invalid or oversized checkpoint chunk plan')
-        require(routes and all(isinstance(value, str) and SHA.fullmatch(value) for value in routes), 'Checkpoint needs declared route identities')
+        require(isinstance(routes, (list, tuple, set)) and routes and all(isinstance(value, str) and SHA.fullmatch(value) for value in routes), 'Checkpoint needs declared route identities')
         self.recipe, self.chunks, self.routes = recipe, chunks, set(routes)
         self.events, self.refs, self.latest = [], [], {}
         self.prior_runs = {}
@@ -131,6 +153,7 @@ class Checkpoint:
         except ArtifactError as exc:
             raise CheckpointError('Checkpoint source or writer publication is invalid; preserve the saved run') from exc
         require(value.get('id') == run_id and value.get('save_output') == 'full', 'Checkpoint requires a full-retention run')
+        require(isinstance(value.get('metadata'), dict), 'Checkpoint record metadata must be an object')
         return value
 
     def _load_source(self, run_id):
@@ -177,6 +200,7 @@ class Checkpoint:
         require(isinstance(entry['eventId'], str) and re.fullmatch(r'[0-9a-f]{32}', entry['eventId']), 'Invalid checkpoint event identity')
         require(isinstance(entry['status'], str) and entry['status'] in STATUSES and type(entry['reusable']) is bool, 'Invalid checkpoint outcome')
         require(isinstance(entry['output'], str) and isinstance(entry['model'], str) and isinstance(entry['generation'], dict), 'Invalid checkpoint payload')
+        require(generation_projection(entry['generation']) == entry['generation'], 'Invalid checkpoint generation evidence')
         require(entry['route'] is None or (isinstance(entry['route'], str) and entry['route'] in self.routes), 'Checkpoint actual route changed')
         if entry['reusable']:
             require(entry['status'] == 'success' and bool(entry['output'].strip()) and entry['route'] in self.routes,
@@ -200,7 +224,7 @@ class Checkpoint:
         require(len(self.events) < MAX_EVENTS, 'Checkpoint attempt history is full; start a new run')
         value = {'eventId':uuid.uuid4().hex,'index':index,'promptSha256':self.chunks[index-1],
                  'status':status if status in STATUSES else 'incomplete','output':output,'model':model,
-                 'generation':generation or {},'route':route if route in self.routes else None,'reusable':False}
+                 'generation':generation_projection(generation),'route':route if route in self.routes else None,'reusable':False}
         clean = sanitize_json(value)
         clean['reusable'] = status == 'success' and bool(output.strip()) and clean == value and route in self.routes
         self._validate_event(clean)
@@ -215,14 +239,30 @@ class Checkpoint:
         with file_lock(self.root / (self.run_id + '.json')):
             record = self._record(self.run_id)
             require(record.get('writerId') == self.writer_id and record.get('status') == 'running', 'Checkpoint writer no longer owns a running record')
+            require(self.reference is not None or not record.get('metadata', {}).get('checkpoint'),
+                    'Run already has a checkpoint; initialize a new run instead of replacing it')
             while len(self.refs) < len(self.events):
                 self.refs.append(write_new(directory, 'events', self.events[len(self.refs)]))
             manifest = {'schemaVersion':VERSION,'runId':self.run_id,'recipe':self.recipe,'chunks':self.chunks,
                         'routes':sorted(self.routes),'events':list(self.refs),'priorRuns':self.prior_runs}
             ref = write_new(directory, 'manifests', manifest)
             receipt = {'schemaVersion':VERSION,'manifest':ref,'sourceRun':self.source,
-                       'reusedChunks':sorted(self.reused),'priorRuns':self.prior_runs}
+                       'reusedChunks':sorted(self.reused),'priorRuns':self.prior_runs,
+                       'chunks':[{'index':index,'status':self.latest.get(index,{}).get('status','not_sent'),
+                                  'reusable':self.latest.get(index,{}).get('reusable',False)}
+                                 for index in range(1,len(self.chunks)+1)]}
             record.setdefault('metadata', {})['checkpoint'] = receipt
             validate_record(record, self.root / (self.run_id + '.json'))
-            atomic_write_json(self.root / (self.run_id + '.json'), record)
+            try:
+                atomic_write_json(self.root / (self.run_id + '.json'), record)
+            except OSError:
+                # A directory-fsync failure can follow a successful replace.
+                # Keep the in-memory pointer aligned without claiming success.
+                try:
+                    current, _ = read_json(self.root / (self.run_id + '.json'))
+                    if current.get('metadata', {}).get('checkpoint') == receipt:
+                        self.reference = receipt
+                except (CheckpointError, AttributeError):
+                    pass
+                raise
             self.reference = receipt

@@ -353,3 +353,12 @@ current catalog limits are declarations, so ordinary routes return `unknown`
 with labeled whole-request estimates. See [context preflight](codex_antigravity_auth/skills/anti/CONTEXT_PREFLIGHT.md)
 for component accounting, evidence requirements, generation behavior and Anti
 usage calibration. Character limits are not tokenizer or context guarantees.
+
+## Explicit chunk-review resume
+
+Direct Anti review/plan can opt into immutable checkpoints with
+`--checkpoint-chunks --save-output full`. `--resume-from ID` creates a new run,
+requires the original source/task identity, reuses verified completed chunks and
+always resynthesizes. Failed/truncated chunks need explicit `--rerun-chunk N`.
+See [chunk resume](codex_antigravity_auth/skills/anti/CHUNK_RESUME.md) for retention,
+route receipts, coverage, combined reporting and per-invocation allowance scope.

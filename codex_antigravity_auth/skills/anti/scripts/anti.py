@@ -42,6 +42,7 @@ from anti_lib.spend_control import SpendControl, SpendRefused, AdmissionConfigEr
 from anti_lib.capabilities import CapabilityRegistry
 from anti_lib import local_policy as local_workflow
 from anti_lib.context_budget import assess as assess_context, calibration as context_calibration
+from anti_lib import checkpoints as chunk_checkpoints
 
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
@@ -930,6 +931,7 @@ def check_record_retention(record_id: str, output_mode: str) -> None:
 def _write_run_record_unlocked(args: argparse.Namespace, **kwargs: Any) -> Path | None:
     output_mode = save_output_mode(args)
     kwargs['metadata'] = scheduling_metadata(kwargs.get('metadata'), getattr(args, '_run_control', None))
+    kwargs['metadata'].update(checkpoint_metadata(args))
     metadata = kwargs['metadata']
     if kwargs['status'] == 'success' and (metadata.get('run_control', {}).get('deferred_calls') or
                                        metadata.get('admission_controls', {}).get('assumption_exceeded')):
@@ -1440,10 +1442,12 @@ def request_json(
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
 
     retry_after_header: object = None
+    routing_header = None
     try:
         with open_gateway_request(req, timeout=timeout, payload=payload, body=body) as res:
             raw = read_response_body(res, timeout)
             status = int(res.status)
+            routing_header = getattr(res, 'headers', {}).get('X-Antigravity-Route-Identity')
     except urllib.error.HTTPError as exc:
         with exc:
             raw = read_response_body(exc, timeout)
@@ -1462,6 +1466,10 @@ def request_json(
         raise AntiError(f"request to {url} returned HTTP {status} non-JSON response") from exc
     if not isinstance(decoded, dict):
         raise AntiError(f"request to {url} returned JSON {type(decoded).__name__}, expected object")
+    if method.upper() == 'POST':
+        decoded.pop('_gateway_routing_identity', None)
+        if isinstance(routing_header, str) and re.fullmatch(r'v1:[0-9a-f]{64}', routing_header):
+            decoded['_gateway_routing_identity'] = routing_header[3:]
     if status in {408, 409, 425, 500, 502, 503, 504} or status == 429:
         retry_after = _retry_after_seconds(retry_after_header)
         if retry_after is not None:
@@ -1885,6 +1893,8 @@ def post_response(
             response_model = extract_response_model(decoded)
             if response_model:
                 response_metadata["backend_model"] = response_model
+            if isinstance(decoded.get('_gateway_routing_identity'), str):
+                response_metadata['gateway_routing_identity'] = decoded['_gateway_routing_identity']
             response_metadata['context_preflight'] = context_report
             response_metadata['context_calibration'] = context_calibration(context_report, extract_usage(decoded))
             control.check(submitted=True)
@@ -3259,6 +3269,199 @@ def normalized_priority_paths(
     return paths
 
 
+def checkpoint_requested(args):
+    return getattr(args, 'checkpoint_chunks', False) is True or isinstance(getattr(args, 'resume_from', None), str)
+
+
+def configure_checkpoint_args(args):
+    if not checkpoint_requested(args):
+        if getattr(args, 'rerun_chunk', None):
+            raise AntiError('--rerun-chunk requires --resume-from')
+        return
+    if getattr(args, 'dry_run', False) or getattr(args, 'print_prompt', False):
+        raise AntiError('Checkpoint execution cannot be combined with --dry-run/--print-prompt; inspect a normal plan without checkpoint flags')
+    if args.command not in {'review', 'plan'}:
+        raise AntiError('Chunk checkpoints currently support direct review and plan commands')
+    if save_output_mode(args) != 'full':
+        raise AntiError('Chunk checkpoints require explicit --save-output full; never/summary cannot be resumed')
+    if getattr(args, 'chunked', 'auto') == 'off':
+        raise AntiError('Chunk checkpoints require chunking; omit --chunked off')
+    source = getattr(args, 'resume_from', None)
+    if source is not None and (not isinstance(source,str) or not RUN_ID_RE.fullmatch(source)):
+        raise AntiError('Invalid checkpoint source run id')
+    if getattr(args, 'rerun_chunk', None) and source is None:
+        raise AntiError('--rerun-chunk requires --resume-from')
+    if source is not None and source == getattr(args, 'run_id', None):
+        raise AntiError('Resume must use a new --run-id')
+    args.chunked = 'always'
+
+
+def checkpoint_catalog(args, selected):
+    ids = fetch_model_ids(args.base_url, timeout=args.timeout, token_env=args.gateway_token_env)
+    if CAPABILITY_REGISTRY.source != 'gateway':
+        raise AntiError('Checkpoint reuse requires a compatible live gateway capability catalog')
+    entries = {}
+    for model in selected:
+        key = next((name for name in ids if catalog_model_matches(model, name)), None)
+        caps = CAPABILITY_REGISTRY.entries.get((key or '').lower())
+        receipt = caps.get('routing_identity') if isinstance(caps, dict) else None
+        if (not isinstance(receipt, dict) or type(receipt.get('version')) is not int or receipt['version'] != 1
+                or not isinstance(receipt.get('sha256'), str) or not chunk_checkpoints.SHA.fullmatch(receipt['sha256'])):
+            raise AntiError('Checkpoint model has no verifiable gateway route identity; update/configure the gateway')
+        entries[key] = dict(caps)
+    return ids, entries
+
+
+def checkpoint_io(function, *values, **kwargs):
+    # Checkpoint publications use the same run lock as lifecycle writes. Defer
+    # signal-triggered terminal writes until that lock and pointer are settled.
+    _RECORD_WRITES.depth = getattr(_RECORD_WRITES, 'depth', 0) + 1
+    try:
+        return function(*values, **kwargs)
+    except OSError as exc:
+        raise chunk_checkpoints.CheckpointError('Checkpoint I/O failed; preserve the original run and retained snapshots for inspection') from exc
+    finally:
+        _RECORD_WRITES.depth -= 1
+        if not _RECORD_WRITES.depth:
+            pending = getattr(_RECORD_WRITES, 'pending_signal', None)
+            _RECORD_WRITES.pending_signal = None
+            if pending is not None:
+                _handle_run_signal(*pending)
+
+
+def prepare_chunk_checkpoint(args, *, kind, prompts, model, source):
+    if not checkpoint_requested(args):
+        return None
+    configure_checkpoint_args(args)
+    if not getattr(args, '_anti_writer_id', None):
+        ensure_run_id(args)
+    selected = [model]
+    if getattr(args, 'fallback_model', None) and args.fallback_policy != 'never':
+        selected.append(resolve_model(args.fallback_model, default=args.fallback_model))
+    _ids, entries = checkpoint_catalog(args, selected)
+    helper = helper_identity().get('treeHash')
+    if not isinstance(helper, str) or not chunk_checkpoints.SHA.fullmatch(helper):
+        raise AntiError('Checkpoint helper identity is unavailable')
+    policy = data_policy(args)
+    for prompt in prompts:
+        for selected_model in selected:
+            policy_submit(args, model=selected_model, prompt=prompt, base_url=args.base_url,
+                          fallback=selected_model != model)
+    control = run_control(args)
+    admission = getattr(control, 'spend_control', None)
+    quote = admission.snapshot().get('currency') if admission is not None else None
+    recipe = chunk_checkpoints.digest({'version':1,'kind':kind,'source':source,
+        'helper':helper,'catalog':entries,'gateway':normalize_base_url(args.base_url),
+        'policy':policy.identity if policy else None,
+        'acknowledgements':sorted(getattr(args,'acknowledge_secret_hash',None) or []),
+        'local_policy':getattr(args,'_local_policy',None),'quote':quote,
+        'model':model,'fallback':getattr(args,'fallback_model',None),'fallback_policy':args.fallback_policy,
+        'chunk_output_tokens':args.chunk_output_tokens,'synthesis_output_tokens':args.max_output_tokens,
+        'synthesis_chars':args.max_synthesis_chars})
+    def initialize():
+        session = chunk_checkpoints.Checkpoint(RUNS_DIR,args.run_id,args._anti_writer_id,
+            recipe=recipe,chunks=[hashlib.sha256(prompt.encode('utf-8')).hexdigest() for prompt in prompts],
+            routes=[caps['routing_identity']['sha256'] for caps in entries.values()],
+            resume=getattr(args,'resume_from',None),rerun=getattr(args,'rerun_chunk',None) or [])
+        args._chunk_checkpoint = session
+        args._checkpoint_catalog = entries
+        args._checkpoint_selected = selected
+        return session
+    return checkpoint_io(initialize)
+
+
+def checkpoint_metadata(args):
+    session = getattr(args, '_chunk_checkpoint', None)
+    if not isinstance(session, chunk_checkpoints.Checkpoint) or session.reference is None:
+        return {}
+    current = session.accounting(scheduling_metadata({}, getattr(args, '_run_control', None)))
+    current.update(session.accounting(budget_metadata(args)))
+    runs = {**session.prior_runs, args.run_id:current}
+    counts = [value.get('run_control',{}).get('attempts_started') for value in runs.values()]
+    heuristic = [value.get('budget_committed') for value in runs.values()]
+    from decimal import Decimal
+    ceilings = {}
+    unknown_currency = []
+    for run_id, value in runs.items():
+        admission = value.get('admission_controls') or {}
+        currency = (admission.get('currency') or {}).get('currency')
+        bound = admission.get('currency_committed_ceiling')
+        if currency and isinstance(bound,str):
+            ceilings[currency] = ceilings.get(currency,Decimal(0)) + Decimal(bound)
+        else:
+            unknown_currency.append(run_id)
+    return {'checkpoint':session.reference,'resume_accounting':{
+        'scope':'lineage_reporting_new_invocation_allowances','runs':runs,
+        'submitted_attempts':sum(counts) if all(type(value) is int for value in counts) else None,
+        'heuristic_units':sum(heuristic) if all(type(value) in (int,float) for value in heuristic) else None,
+        'currency_committed_ceilings':{key:str(value) for key,value in ceilings.items()},
+        'unknown_currency_runs':unknown_currency,'actual_billing_known':False,
+        'reused_chunks':sorted(session.reused),'coverage_basis':'immutable_checkpoint_lineage'}}
+
+
+def checkpoint_generate(args, session, *, index=None, **kwargs):
+    if session is None:
+        return generate_with_fallback(args, **kwargs)
+    ids, entries = checkpoint_catalog(args, args._checkpoint_selected)
+    if entries != args._checkpoint_catalog:
+        raise AntiError('Gateway catalog or actual route changed during checkpoint execution; start a new run')
+    saved = session.take(index) if index is not None else None
+    if saved is not None:
+        caps = next(value for value in entries.values() if value['routing_identity']['sha256'] == saved['route'])
+        policy_submit(args,model=caps['canonical_id'],prompt=kwargs['prompt'],base_url=args.base_url,
+                      fallback=bool(saved['generation'].get('fallback_used')))
+        fallback_used = bool(saved['generation'].get('fallback_used'))
+        chain = [kwargs['model']]
+        if fallback_used and getattr(args, 'fallback_model', None):
+            chain.append(resolve_model(args.fallback_model, default=args.fallback_model))
+        generation = {**panel_model_identity(requested_model=kwargs['model'],actual_model=saved['model'],
+                         fallback_used=fallback_used,fallback_chain=chain,
+                         fallback_reason='reused completed fallback' if fallback_used else None),
+                      **saved['generation'],'primary_model':kwargs['model'],'reused':True,'reused_from':session.source,
+                      'submitted':False,'submitted_this_run':False,'prior_error_details_retained':False}
+        return saved['output'], saved['model'], generation
+    try:
+        text, actual, generation = generate_with_fallback(args, model_ids=ids, **kwargs)
+    except AntiError as exc:
+        if index is not None:
+            try:
+                checkpoint_io(session.record,index,status='failed' if getattr(exc,'submitted',False) else 'not_sent',
+                    model=kwargs['model'],generation=getattr(exc,'generation_metadata',{}))
+            except AntiError as publication_error:
+                publication_error.submitted = bool(getattr(exc,'submitted',False))
+                publication_error.generation_metadata = getattr(exc,'generation_metadata',{})
+                raise publication_error from exc
+        raise
+    receipt = generation.get('gateway_routing_identity')
+    caps = next((value for value in entries.values() if value['routing_identity']['sha256'] == receipt), None)
+    allowed = {str(value).lower() for value in ([caps['canonical_id'],caps['backend_id'],*caps.get('aliases',[])] if caps else [])}
+    route = receipt if str(actual).lower() in allowed else None
+    status = lane_output_status(text,generation.get('usage'),kwargs['max_output_tokens'],generation)
+    if index is not None:
+        try:
+            checkpoint_io(session.record,index,status=status,output=text,model=actual,generation=generation,route=route)
+        except AntiError as exc:
+            exc.submitted = True
+            exc.generation_metadata = generation
+            raise
+    if route is None:
+        error = AntiError('Actual generation route could not be verified against the checkpoint catalog; retained output is not reusable')
+        error.submitted = True
+        error.generation_metadata = generation
+        raise error
+    return text, actual, {**generation,'submitted_this_run':True}
+
+
+def checkpoint_synthesis(args, session, **kwargs):
+    if session is None:
+        return policy_generate(args, stage='summary', **kwargs)
+    token = _POLICY_STAGE.set('summary')
+    try:
+        return checkpoint_generate(args, session, **kwargs)
+    finally:
+        _POLICY_STAGE.reset(token)
+
+
 def run_chunked_review(
     *,
     args: argparse.Namespace,
@@ -3303,6 +3506,11 @@ def run_chunked_review(
         plan_message += f"; {len(omitted_items)} item(s) omitted"
     progress(args, plan_message + f"; labels: {plan_labels}")
 
+    checkpoint = None
+    if checkpoint_requested(args):
+        checkpoint = prepare_chunk_checkpoint(args,kind='review',prompts=[chunk['prompt'] for chunk in chunks],model=model,
+            source={'commit':context.get('source_commit'),'scope':context.get('scope'),
+                    'content':chunk_checkpoints.digest({'files':context.get('file_texts'),'diff':context.get('diff')})})
     chunk_outputs: list[str] = []
     chunk_generation: list[dict[str, Any]] = []
     execution_ledger: list[dict[str, Any]] = []
@@ -3314,8 +3522,8 @@ def run_chunked_review(
 
     def update_chunk_coverage() -> None:
         completed = sum(1 for item in chunk_generation if item.get("status") == "success")
-        failed = sum(1 for item in chunk_generation if item.get("status") != "success" and item.get("submitted") is True)
-        attempted = sum(1 for item in chunk_generation if item.get("submitted") is True)
+        failed = sum(1 for item in chunk_generation if item.get("status") != "success" and (item.get("submitted") is True or item.get("reused") is True))
+        attempted = sum(1 for item in chunk_generation if (item.get("submitted") is True or item.get("reused") is True))
         for record in chunk_metadata.get("coverage", []):
             path = str(record.get("path") or "")
             if not path:
@@ -3332,7 +3540,7 @@ def run_chunked_review(
             failed_for_file = sum(
                 1
                 for item, planned_chunk in zip(chunk_generation, chunks)
-                if item.get("status") != "success" and item.get("submitted") is True
+                if item.get("status") != "success" and (item.get("submitted") is True or item.get("reused") is True)
                 and any(
                     CHUNK_PART_SUFFIX_RE.sub("", str(included)) == path
                     for included in planned_chunk.get("metadata", {}).get("included_files", [])
@@ -3342,7 +3550,7 @@ def run_chunked_review(
             attempted_chunks = [
                 planned_chunk
                 for index, planned_chunk in enumerate(chunks)
-                if index < len(chunk_generation) and chunk_generation[index].get("submitted") is True
+                if index < len(chunk_generation) and (chunk_generation[index].get("submitted") is True or chunk_generation[index].get("reused") is True)
                 and any(
                     CHUNK_PART_SUFFIX_RE.sub("", str(included)) == path
                     for included in planned_chunk.get("metadata", {}).get("included_files", [])
@@ -3358,7 +3566,7 @@ def run_chunked_review(
             record["bytesSent"] = sum(
                 int(planned_chunk.get("metadata", {}).get("source_bytes", {}).get(path, 0) or 0)
                 for item, planned_chunk in zip(chunk_generation, chunks)
-                if item.get("submitted") is True
+                if (item.get("submitted") is True or item.get("reused") is True)
             )
             record["bytesReviewed"] = sum(
                 int(planned_chunk.get("metadata", {}).get("source_bytes", {}).get(path, 0) or 0)
@@ -3404,8 +3612,8 @@ def run_chunked_review(
 
     for index, chunk in enumerate(chunks, start=1):
         try:
-            chunk_text, chunk_model, generation_metadata = generate_with_fallback(
-                args,
+            chunk_text, chunk_model, generation_metadata = checkpoint_generate(
+                args, checkpoint, index=index,
                 model=model,
                 prompt=chunk["prompt"],
                 max_output_tokens=args.chunk_output_tokens,
@@ -3526,9 +3734,8 @@ def run_chunked_review(
     ]
     caveats.extend(synthesis_caveats)
     try:
-        synthesis, synthesis_model, synthesis_generation = policy_generate(
-            args,
-            stage="summary",
+        synthesis, synthesis_model, synthesis_generation = checkpoint_synthesis(
+            args, checkpoint,
             model=model,
             prompt=synthesis_prompt,
             max_output_tokens=args.max_output_tokens,
@@ -3619,6 +3826,7 @@ def run_chunked_review(
         **synthesis_metadata,
         "_execution_ledger": execution_ledger,
     }
+    metadata.update(checkpoint_metadata(args))
     return synthesis, caveats, metadata
 
 
@@ -3774,6 +3982,22 @@ def run_chunked_plan(
     if not prompt_chunks:
         raise AntiError("plan chunking produced no prompt chunks")
 
+    prepared_prompts = []
+    for index, chunk in enumerate(prompt_chunks,start=1):
+        chunk_prompt = "\n\n".join([
+            "You are reviewing one bounded chunk of a larger Codex work-planning prompt.",
+            "Extract concrete implementation tasks, risks, dependencies, validation ideas, and caveats from this chunk only.",
+            f"Chunk {index}/{len(prompt_chunks)}:",chunk])
+        local_caveats = []
+        prepared_prompts.append(apply_prompt_limit(chunk_prompt,max_prompt_chars,local_caveats))
+        caveats.extend(f"Plan chunk {index}: {value}" for value in local_caveats)
+    checkpoint = None
+    if checkpoint_requested(args):
+        root = find_repo_root(Path.cwd()) or Path.cwd()
+        checkpoint = prepare_chunk_checkpoint(args,kind='plan',prompts=prepared_prompts,model=model,
+            source={'commit':source_commit(root),'scope':getattr(args,'scope',None),
+                    'prompt':hashlib.sha256(prompt.encode('utf-8')).hexdigest()})
+
     chunk_outputs: list[str] = []
     chunk_generation: list[dict[str, Any]] = []
     incomplete_chunks: list[int] = []
@@ -3793,7 +4017,7 @@ def run_chunked_plan(
                 1 for item in chunk_generation if item.get("status") == "success"
             ),
             "failed_chunk_count": sum(1 for item in chunk_generation if item.get('submitted') and item.get('status') != 'success'),
-            "not_sent_chunk_count": max(0, planned_chunk_count - sum(1 for item in chunk_generation if item.get('submitted'))),
+            "not_sent_chunk_count": max(0, planned_chunk_count - sum(1 for item in chunk_generation if item.get('submitted') or item.get('reused'))),
             "chunk_generation": chunk_generation,
             "synthesis_status": synthesis_status,
             "failed_chunk": failed_chunk,
@@ -3804,22 +4028,10 @@ def run_chunked_plan(
             **budget_metadata(args),
         }
 
-    for index, chunk in enumerate(prompt_chunks, start=1):
-        chunk_prompt = "\n\n".join(
-            [
-                "You are reviewing one bounded chunk of a larger Codex work-planning prompt.",
-                "Extract concrete implementation tasks, risks, dependencies, validation ideas, and caveats from this chunk only.",
-                f"Chunk {index}/{len(prompt_chunks)}:",
-                chunk,
-            ]
-        )
-        chunk_caveats: list[str] = []
-        chunk_prompt = apply_prompt_limit(chunk_prompt, max_prompt_chars, chunk_caveats)
-        if chunk_caveats:
-            caveats.extend(f"Plan chunk {index}: {caveat}" for caveat in chunk_caveats)
+    for index, chunk_prompt in enumerate(prepared_prompts, start=1):
         try:
-            text, model_used, generation_metadata = generate_with_fallback(
-                args,
+            text, model_used, generation_metadata = checkpoint_generate(
+                args, checkpoint, index=index,
                 model=model,
                 prompt=chunk_prompt,
                 max_output_tokens=args.chunk_output_tokens,
@@ -3877,9 +4089,8 @@ def run_chunked_plan(
         raise failure
     caveats = [*caveats, *synthesis_caveats]
     try:
-        text, synthesis_model, synthesis_generation = policy_generate(
-            args,
-            stage="summary",
+        text, synthesis_model, synthesis_generation = checkpoint_synthesis(
+            args, checkpoint,
             model=model,
             prompt=synthesis_prompt,
             max_output_tokens=args.max_output_tokens,
@@ -3938,6 +4149,7 @@ def run_chunked_plan(
         "omitted_files": [],
         "_execution_ledger": execution_ledger,
     }
+    metadata.update(checkpoint_metadata(args))
     return text, caveats, metadata, synthesis_model
 
 
@@ -8804,6 +9016,10 @@ def build_parser() -> argparse.ArgumentParser:
     local_profile.add_argument('--fallback-model')
     local_profile.add_argument('--fallback-policy', choices=sorted(FALLBACK_POLICIES), default='never')
     local_profile.set_defaults(func=command_local_profile)
+    for checkpoint_parser in (review, plan):
+        checkpoint_parser.add_argument('--checkpoint-chunks', action='store_true', help='Retain immutable chunk checkpoints; requires --save-output full')
+        checkpoint_parser.add_argument('--resume-from', help='Resume a terminal full-retention checkpoint into a new run; repeat original source/task options')
+        checkpoint_parser.add_argument('--rerun-chunk', action='append', type=positive_int, help='Explicitly rerun this immutable chunk index; repeatable')
     return parser
 
 
@@ -8853,6 +9069,7 @@ def main(argv: list[str] | None = None) -> int:
     args._provided_options = {value.split('=', 1)[0] for value in (argv if argv is not None else sys.argv[1:]) if value.startswith('--')}
     try:
         local_workflow.prepare_args(args)
+        configure_checkpoint_args(args)
         _install_run_signal_handlers(args)
         if hasattr(args, "base_url") and args.base_url is not None:
             args.base_url = normalize_base_url(args.base_url)

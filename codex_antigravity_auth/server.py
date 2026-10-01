@@ -146,6 +146,8 @@ _refresh_ahead_owner: "_RefreshAheadOwner | None" = None
 REFRESH_AHEAD_THROTTLE_SECONDS = 60.0
 STREAM_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 REQUEST_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+from .route_identity import identity as routing_identity, observe as observe_routing_identity
+
 MUTATING_JSON_PATHS = {"/v1/responses", "/v1/local/responses", "/v1/context/preflight"}
 MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS = 2.0
 GOOGLE_BACKEND_TIMEOUT_SECONDS = 60.0
@@ -267,6 +269,9 @@ async def require_remote_gateway_token(request: Request, call_next):
         if isinstance(report, dict):
             response.headers['X-Antigravity-Context-Status'] = report['status']
             response.headers['X-Antigravity-Context-Estimate'] = 'utf8-estimate-not-token-guarantee'
+        receipt = getattr(request.state, 'routing_identity', None)
+        if isinstance(receipt, dict) and receipt.get('version') == 1 and isinstance(receipt.get('sha256'), str):
+            response.headers['X-Antigravity-Route-Identity'] = 'v1:' + receipt['sha256']
         return response
 
     client_host = request.client.host if request.client else None
@@ -796,6 +801,7 @@ def provider_model_catalog(created: int, *, diagnostics: list | None = None) -> 
                 declaration_source="provider_configuration", declared_capabilities=declared,
             )
             byok_models[-1]['capabilities']['destination_scope'] = endpoint_scope(provider.get('baseUrl'))
+            byok_models[-1]['capabilities']['routing_identity'] = routing_identity('byok', model_id, provider=provider)
     return byok_models
 
 
@@ -904,6 +910,12 @@ async def list_models():
                     supported_reasoning_efforts=openai_model_capabilities(m["id"]).reasoning_effort_levels,
                 )
             )
+    catalog_auth = None
+    if is_unified_mode_enabled() and not gateway_local_only():
+        try:
+            catalog_auth = await asyncio.wait_for(run_in_threadpool(resolve_openai_auth), timeout=MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS)
+        except Exception:
+            pass  # A missing receipt never becomes an availability claim.
     for entry in models:
         definition = native_model_definition(entry["id"])
         if definition is not None:
@@ -915,6 +927,8 @@ async def list_models():
                 capabilities=openai_model_capabilities(entry["id"]), context_window=entry["context_window"],
                 declaration_source="openai_registry",
             )
+        entry["capabilities"]["routing_identity"] = routing_identity(
+            'antigravity' if definition is not None else 'openai', entry['id'], auth=catalog_auth)
         entry["canonical_id"] = entry["capabilities"]["canonical_id"]
         entry["alias_of"] = entry["canonical_id"] if entry["id"] != entry["canonical_id"] else None
     models = models + byok_models
@@ -2748,6 +2762,7 @@ async def create_openai_upstream_response(
 
     url = openai_responses_url(auth)
     headers = openai_request_headers(auth)
+    observe_routing_identity(routing_identity('openai', upstream_model, auth=auth, backend=upstream_model))
     if auth.kind == "codex_oauth":
         # ChatGPT backend is stream-only: collect SSE into one Response object.
         payload = await call_sync(_build_payload, codex_req, upstream_model, stream=True)
@@ -2851,6 +2866,7 @@ async def _open_openai_upstream_stream(
 
     url = openai_responses_url(auth)
     headers = openai_request_headers(auth)
+    observe_routing_identity(routing_identity('openai', upstream_model, auth=auth, backend=upstream_model))
     payload = await call_sync(_build_payload, codex_req, upstream_model, stream=True)
     if auth.kind == "codex_oauth":
         payload["store"] = bool(codex_req.get("store", False))

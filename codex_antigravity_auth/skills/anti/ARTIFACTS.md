@@ -104,3 +104,9 @@ deduplication; they do not redefine `contentComplete`, which only describes
 retention of normalized findings. Legacy missing parser counters and unparseable/prose fallback counts are `null`
 and `unknown`, never invented zeros. Their parse caveats remain visible. Markdown includes run timestamps, source-record
 hashes and the same verdict/content-identity cohort summaries as JSON and SARIF.
+
+Explicit chunk checkpoints are additional immutable event/manifest files inside
+the owning run directory. The index's `metadata.checkpoint.manifest` is their
+committed reference; resume verifies their schema and bytes under the source
+record lock. A new resume run copies the needed immutable history and preserves
+the original index. See [checkpoint ownership and limits](CHUNK_RESUME.md).

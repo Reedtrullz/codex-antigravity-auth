@@ -66,3 +66,8 @@ Retry-After, retry timeout reduction, exception release, workflow propagation,
 partial chunk/judge evidence, queued lanes and owned HTTP fixtures. These tests
 also run against installed wheel/rebuilt-sdist artifacts. No live provider
 performance, rate quota or native resolver cancellation is claimed.
+
+An explicit [chunk resume](CHUNK_RESUME.md) is a new invocation with its own
+deadline and admission allowances. Reused completed chunks acquire no provider
+permit and submit no request. The resume report combines prior/current counters
+without treating old calls as new submissions or refunding their costs.

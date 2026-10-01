@@ -371,6 +371,8 @@ class OpenAICompatibleTransport:
         except ValueError as exc:
             raise TransportConfigError(400, str(exc)) from exc
         payload["stream"] = stream
+        from .route_identity import identity, observe
+        observe(identity('byok', provider_model, provider=provider, backend=payload.get('model')))
         return PreparedOpenAIRequest(
             payload=payload,
             url=self.chat_completions_url(provider),

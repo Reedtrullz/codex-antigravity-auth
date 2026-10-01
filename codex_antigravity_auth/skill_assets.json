@@ -2,6 +2,7 @@
   "version": 1,
   "files": [
     "ARTIFACTS.md",
+    "CHUNK_RESUME.md",
     "CONTEXT_PREFLIGHT.md",
     "DATA_POLICY.md",
     "LOCAL_ONLY.md",
