@@ -351,3 +351,57 @@ def test_local_start_refuses_secret_network_wrapper(monkeypatch, option):
     setattr(args, option, 'synthetic-fixture')
     with pytest.raises(SystemExit, match='1Password network wrapper'):
         cli.configure_local_gateway_environment(args)
+
+
+@pytest.mark.parametrize('path', ['/v1/responses', '/v1/local/responses'])
+@pytest.mark.parametrize('headers,status,message', [
+    ({'Content-Type': 'text/plain'}, 415, 'application/json'),
+    ({'Content-Type': 'application/x-www-form-urlencoded'}, 415, 'application/json'),
+    ({'Sec-Fetch-Site': 'cross-site'}, 403, 'Cross-site'),
+    ({'Origin': 'https://untrusted.example.invalid'}, 403, 'Cross-origin'),
+    ({'Host': 'untrusted.example.invalid:51122'}, 403, 'loopback Host'),
+    ({'Host': 'testserver:51122'}, 403, 'loopback Host'),
+])
+def test_local_generation_keeps_existing_browser_and_host_guards(configurations, monkeypatch, path, headers, status, message):
+    monkeypatch.setattr(server, 'all_provider_configs', lambda: pytest.fail('no provider configuration after boundary refusal'))
+    monkeypatch.setattr(server, '_create_response', AsyncMock(side_effect=AssertionError('no handler dispatch')))
+    client = TestClient(server.app, base_url='http://127.0.0.1:51122', client=('127.0.0.1', 50000))
+    response = client.post(path, content=json.dumps({'model': 'local:one', 'input': 'fixture'}),
+                           headers={'Content-Type': 'application/json', **headers})
+    assert response.status_code == status and message in response.json()['detail']
+
+
+@pytest.mark.parametrize('path', ['/v1/responses', '/v1/local/responses'])
+def test_valid_local_origin_reaches_local_inference(configurations, path):
+    with upstream((200, {'Content-Type': 'application/json'}, chat('Complete local origin fixture answer.'))) as (base, seen):
+        configurations['local'] = provider('local', base + '/v1')
+        client = TestClient(server.app, base_url='http://127.0.0.1:51122', client=('127.0.0.1', 50000))
+        response = client.post(path, json={'model': 'local:one', 'input': 'fixture'},
+                               headers={'Origin': 'http://localhost:51122', 'Sec-Fetch-Site': 'same-origin'})
+    assert response.status_code == 200 and len(seen) == 1
+
+
+@pytest.mark.parametrize('use_profile', [False, True])
+def test_quick_check_keeps_selected_local_judge(anti, monkeypatch, tmp_path, use_profile):
+    captured = []
+    def panel(args):
+        captured.append(args)
+        assert args.local_only and args._local_policy['enabled']
+        assert args.judge == 'local:two' and args.model == ['local:one']
+        assert args.timeout == 60 and not args.prompt_parts
+        return 0
+    monkeypatch.setattr(anti, 'command_panel', panel)
+    if use_profile:
+        path = tmp_path / 'profile.json'
+        path.write_text(json.dumps(local_policy.profile('http://127.0.0.1:51122/v1', ['local:one'], 'local:two')))
+        options = ['--local-profile', str(path)]
+    else:
+        options = ['--local-only', '--model', 'local:one', '--judge', 'local:two']
+    assert anti.main(['workflow', 'quick-check', *options, '--scope', 'files', '--file', 'fixture.py', '--no-progress']) == 0
+    assert len(captured) == 1
+
+
+def test_normal_quick_check_retains_preset_judge_without_stray_timeout_text(anti):
+    args = anti.build_parser().parse_args(['workflow', 'quick-check', '--scope', 'files', '--file', 'fixture.py'])
+    expanded = anti.build_parser().parse_args(anti.workflow_expansion(args))
+    assert expanded.judge == 'nemotron-ultra' and expanded.timeout == 60 and not expanded.prompt_parts

@@ -8079,11 +8079,14 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
     elif args.name == "quick-check":
         scope = workflow_scope(args, default="staged")
         # Fast pre-commit gate: cheap models, short timeout, no opus
-        cheap_common = [a for a in common if a not in ("--timeout",)]
-        cheap_common.extend(["--timeout", "60", "--max-prompt-chars", "20000"])
+        cheap_common = list(common)
+        timeout_index = cheap_common.index("--timeout")
+        cheap_common[timeout_index + 1] = "60"
+        cheap_common.extend(["--max-prompt-chars", "20000"])
         argv = ["panel", "--mode", "review", "--scope", scope]
         argv.extend(cheap_common)
-        argv.extend(["--judge", "nemotron-ultra",
+        judge = args.judge if getattr(args, 'local_only', False) else "nemotron-ultra"
+        argv.extend(["--judge", judge,
                       "--judge-output-tokens", "2048",
                       "--max-parallel", "2",
                       "--output", args.output])
