@@ -1,3 +1,4 @@
+from tests.conftest import byte_chunks
 import unittest
 import json
 from unittest.mock import patch
@@ -26,8 +27,11 @@ class TestOpenAIRequestTranslation(unittest.TestCase):
                     yield 'data: ,"extra":true}]}\n'
                     yield "data: [DONE]\n"
 
+                def aiter_bytes(self):
+                    return byte_chunks(self.aiter_text())
+
             events = []
-            async for data in iter_sse_data(Response(), label="OpenAI"):
+            async for data in iter_sse_data(Response(), label="OpenAI", legacy_json_lines=True):
                 events.append(data)
             return events
 
@@ -153,14 +157,16 @@ class TestOpenAIResponseTranslation(unittest.TestCase):
             )
 
     def test_native_responses_rejects_structurally_empty_output_items(self):
-        for output in ([{}], [{"type": "message", "content": []}], [{"type": "function_call"}]):
+        for output, code in (([{}], "unsupported_native_output_item"),
+                             ([{"type": "message", "content": []}], "invalid_native_output"),
+                             ([{"type": "function_call"}], "invalid_native_output")):
             with self.subTest(output=output):
                 response = self.transport.validate_native_response(
                     {"object": "response", "status": "completed", "output": output},
                     display_model="custom:model",
                 )
                 self.assertEqual(response["status"], "failed")
-                self.assertEqual(response["error"]["code"], "empty_response")
+                self.assertEqual(response["error"]["code"], code)
 
 
 class TestChatResponseAccumulator(unittest.TestCase):
@@ -205,6 +211,9 @@ class TestOpenAIStreamingRoute(unittest.IsolatedAsyncioTestCase):
             def aiter_text(self):
                 return AsyncChunks()
 
+            def aiter_bytes(self):
+                return byte_chunks(self.aiter_text())
+
         class StreamContext:
             async def __aenter__(self):
                 return Response()
@@ -242,6 +251,16 @@ class TestOpenAIStreamingRoute(unittest.IsolatedAsyncioTestCase):
         events = await self._events(["data: [DONE]\n"])
         terminal = [event["type"] for event in events if event["type"] in {"response.completed", "response.incomplete", "response.failed"}]
         self.assertEqual(terminal, ["response.failed"])
+
+    async def test_chat_legacy_mode_accepts_padded_done_without_blank_separator(self):
+        for sentinel in ("[DONE]", " [DONE]", "[DONE] \t", " \t[DONE] \t"):
+            with self.subTest(sentinel=sentinel):
+                events = await self._events([
+                    'data: {"choices":[{"delta":{"content":"fixture answer"}}]}\n',
+                    f"data: {sentinel}\n",
+                ])
+                terminal = [event["type"] for event in events if event["type"] in {"response.completed", "response.incomplete", "response.failed"}]
+                self.assertEqual(terminal, ["response.completed"])
 
     async def test_length_stream_is_incomplete(self):
         events = await self._events(

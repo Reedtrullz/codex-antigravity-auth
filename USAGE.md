@@ -207,6 +207,10 @@ codex-antigravity doctor --codex-ready --live --live-model claude-sonnet-4-6
 
 Live readiness requires a completed response with usable text in a completed assistant message. HTTP success alone, failed or incomplete responses (including token-cap exhaustion), refusals, empty output, and malformed responses do not pass. The live probe in `doctor --codex-ready --json` separates `transport_ok` from `generation_ok` and reports `terminal_kind`, `terminal_reason`, and a redacted `error`; `ok` reflects generation success. The check sends one request with the existing token budget and does not retry automatically.
 
+Token refresh and project discovery run outside account-selection and storage locks. A concurrent selection can use another eligible account; a busy refresh never makes an expired token eligible. Each account has one refresh owner per gateway process. The credential snapshot is checked before refresh and before writing back, so removal, changed credentials, and newer token state take precedence. Family cooldowns remain independent of token refresh.
+
+The gateway lifespan starts a refresh-ahead check and repeats checks every 60 seconds while idle, refreshing tokens within five minutes of expiry. At most one refresh-ahead worker runs at a time. Shutdown stops the timer, signals the worker to stop before further discovery/merges/accounts, and waits for the current synchronous call to finish using its existing network timeouts. It does not abandon a live worker thread. This is process-local refresh ownership; multiple gateway processes are not coordinated by a distributed refresh lease.
+
 ## 1. Supported Models & Aliases
 You can use standard, developer-friendly names in your `~/.codex/config.toml` that the gateway automatically translates to the official Google Antigravity backend model definitions:
 
@@ -247,6 +251,12 @@ When multiple Google accounts are registered, the gateway automatically rotates 
 ---
 
 ## 3. High-Fidelity Streaming & Reasoning
+Native Responses content deltas remain streaming, but the final completed/incomplete/failed outcome is committed only after EOF or a detected failure. `[DONE]` does not publish early success: duplicate terminal markers, trailing output, inconsistent supplied identities/sequences, malformed data and interrupted streams produce one failed terminal. Clean EOF after a terminal works without `[DONE]`. Waiting from a candidate terminal to EOF is bounded by the existing OpenAI upstream timeout, including comment-only keepalives. Supplied sequence numbers may have gaps, and compatible providers may omit identity fields or lifecycle events; contradictory supplied values fail. Identity bookkeeping is limited to 10,000 items and 65,536 item-ID characters. Buffered native SSE collection uses the same outcome validation.
+
+Native output preservation and supported item/field limits are documented in [the native Responses contract](codex_antigravity_auth/NATIVE_RESPONSES.md). Reasoning continuation, web-search calls, citations, custom calls and assistant phase survive native routing without using translated-output heuristics. Unsupported item types fail explicitly.
+
+Streaming readers decode UTF-8 incrementally, ignore one leading BOM, and recognize LF, CRLF, and CR line endings. Native Responses events are dispatched at a blank line, with multiple `data:` fields joined by a newline. Malformed UTF-8 is replaced consistently; unfinished data at EOF fails instead of becoming a complete event. Chat Completions and Google retain an explicit legacy JSON-line mode for endpoints that omit blank separators, including multiline JSON continuations; a physical data line must still terminate. Readers retain at most 8 Mi decoded characters and 10,000 data lines per pending frame. These bounds do not impose whole-response or gateway admission limits.
+
 The local server natively isolates explicit thinking blocks and stream envelopes, ensuring standard formatting:
 - **Thinking/Reasoning block**: Emits `response.reasoning_text.delta` for explicit backend thinking parts while preserving regular `thoughtSignature` text as visible output.
 - **SSE Stream**: Formats candidates, function calls, usage metadata, and completion events into Responses API SSE chunks parsed correctly by both Codex CLI and Codex Desktop.
@@ -347,3 +357,7 @@ Legacy gateway/service log files are left untouched; reinstall an existing
 service to stop its old append-only output routing. Account references in runtime
 messages are opaque and change on restart; explicit account-management commands
 still show local account identity. See [the process-log contract](codex_antigravity_auth/PROCESS_LOGS.md).
+
+## Request time budgets
+
+Google, BYOK and native OpenAI requests now share a monotonic 60-second preparation/nonstream deadline. Streaming has separate 60-second event-idle and 30-minute total defaults, including preparation, with validated metadata overrides. Downstream backpressure and resource cleanup are bounded; timeouts never trigger replay after visible output. See [request deadlines and cleanup](codex_antigravity_auth/REQUEST_DEADLINES.md) for overrides, failure outcomes, cleanup grace and cancellation limits.

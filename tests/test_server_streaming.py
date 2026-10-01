@@ -1,3 +1,4 @@
+from tests.conftest import byte_chunks
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 import json
@@ -30,6 +31,9 @@ class TestServerStreaming(unittest.TestCase):
                 yield 'data: {"type":"response.completed","response":{"status":"completed","model":"upstream","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}\n\n'
                 yield "data: [DONE]\n\n"
 
+            def aiter_bytes(self):
+                return byte_chunks(self.aiter_text())
+
         class Context:
             async def __aexit__(self, *args):
                 closed.append("context")
@@ -57,6 +61,9 @@ class TestServerStreaming(unittest.TestCase):
         class Response:
             async def aiter_text(self):
                 yield 'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+
+            def aiter_bytes(self):
+                return byte_chunks(self.aiter_text())
 
         class Context:
             async def __aexit__(self, *args):
@@ -167,6 +174,9 @@ class TestServerStreaming(unittest.TestCase):
             async def aiter_text(self):
                 raise httpx.ConnectError("backend down")
                 yield  # pragma: no cover - async generator shape
+
+            def aiter_bytes(self):
+                return byte_chunks(self.aiter_text())
 
         class StreamContext:
             async def __aenter__(self):
@@ -352,7 +362,7 @@ class TestServerStreaming(unittest.TestCase):
                         raise StopAsyncIteration
                     return self.chunks.pop(0)
             
-            mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(google_sse_chunks))
+            mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(google_sse_chunks)))
             
             class StreamContext:
                 async def __aenter__(self):
@@ -628,7 +638,7 @@ class TestServerStreaming(unittest.TestCase):
             async def receive():
                 nonlocal sent
                 if sent:
-                    return {"type": "http.disconnect"}
+                    await asyncio.Future()  # Still connected during preparation.
                 sent = True
                 return {
                     "type": "http.request",
@@ -653,17 +663,16 @@ class TestServerStreaming(unittest.TestCase):
             )
             response = await create_response(request)
             sent = []
-            received = 0
+            first_body = asyncio.Event()
 
             async def asgi_receive():
-                nonlocal received
-                received += 1
-                if received == 1:
-                    return {"type": "http.request", "body": b"", "more_body": False}
+                await first_body.wait()
                 return {"type": "http.disconnect"}
 
             async def asgi_send(message):
                 sent.append(message)
+                if message["type"] == "http.response.body" and message.get("body"):
+                    first_body.set()
 
             await response(request.scope, asgi_receive, asgi_send)
             return sent
@@ -673,6 +682,9 @@ class TestServerStreaming(unittest.TestCase):
             async def aiter_text(self):
                 yield "data: {\"type\": \"response.created\", \"response\": {\"id\": \"resp-1\"}}\n\n"
                 await asyncio.sleep(10)
+
+            def aiter_bytes(self):
+                return byte_chunks(self.aiter_text())
 
         @asynccontextmanager
         async def mock_stream(request, lease):
@@ -1533,7 +1545,7 @@ class TestServerStreaming(unittest.TestCase):
 
                 response_mock = MagicMock(spec=httpx.Response)
                 response_mock.status_code = 200
-                response_mock.aiter_text = MagicMock(return_value=AsyncText())
+                response_mock.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncText()))
 
                 class StreamContext:
                     async def __aenter__(self):
@@ -1620,7 +1632,7 @@ class TestServerStreaming(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(['data: {"candidates": [}\n', "data: [DONE]\n"]))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(['data: {"candidates": [}\n', "data: [DONE]\n"])))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1704,7 +1716,7 @@ class TestServerStreaming(unittest.TestCase):
                         raise StopAsyncIteration
                     return self.chunks.pop(0)
             
-            mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(google_sse_chunks))
+            mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(google_sse_chunks)))
             
             class StreamContext:
                 async def __aenter__(self):
@@ -1760,10 +1772,10 @@ class TestServerStreaming(unittest.TestCase):
                         raise StopAsyncIteration
                     return self.chunks.pop(0)
 
-            mock_response.aiter_text = MagicMock(return_value=AsyncAiterText([
+            mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText([
                 'data: {"error": {"code": "rate_limit_exceeded", "message": "quota exhausted"}}\n',
                 "data: [DONE]\n",
-            ]))
+            ])))
 
             class StreamContext:
                 async def __aenter__(self):
@@ -1864,10 +1876,10 @@ class TestServerStreaming(unittest.TestCase):
 
                     response = MagicMock(spec=httpx.Response)
                     response.status_code = 200
-                    response.aiter_text = MagicMock(return_value=AsyncAiterText([
+                    response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText([
                         'data: {"candidates": [{"content": {"parts": [{"text": "rotated ok"}]}}]}\n',
                         'data: [DONE]\n',
-                    ]))
+                    ])))
                     return StreamContext(response)
 
                 async def __aenter__(self):
@@ -1954,15 +1966,15 @@ class TestServerStreaming(unittest.TestCase):
                     response = MagicMock(spec=httpx.Response)
                     response.status_code = 200
                     if len(requests) == 1:
-                        response.aiter_text = MagicMock(return_value=AsyncAiterText([
+                        response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText([
                             'data: {"error": {"code": "RESOURCE_EXHAUSTED", "message": "quota exhausted"}}\n',
                             "data: [DONE]\n",
-                        ]))
+                        ])))
                     else:
-                        response.aiter_text = MagicMock(return_value=AsyncAiterText([
+                        response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText([
                             'data: {"candidates": [{"content": {"parts": [{"text": "rotated ok"}]}}]}\n',
                             "data: [DONE]\n",
-                        ]))
+                        ])))
                     return StreamContext(response)
 
                 async def __aenter__(self):
@@ -2048,16 +2060,16 @@ class TestServerStreaming(unittest.TestCase):
                     response = MagicMock(spec=httpx.Response)
                     response.status_code = 200
                     if len(attempts) == 1:
-                        response.aiter_text = MagicMock(return_value=AsyncAiterText([
+                        response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText([
                             'data: {"usageMetadata": {"promptTokenCount": 99, "candidatesTokenCount": 88, "totalTokenCount": 187}}\n',
                             'data: {"error": {"code": "RESOURCE_EXHAUSTED", "message": "quota exhausted"}}\n',
                             "data: [DONE]\n",
-                        ]))
+                        ])))
                     else:
-                        response.aiter_text = MagicMock(return_value=AsyncAiterText([
+                        response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText([
                             'data: {"candidates": [{"content": {"parts": [{"text": "rotated ok"}]}}]}\n',
                             "data: [DONE]\n",
-                        ]))
+                        ])))
                     return StreamContext(response)
 
                 async def __aenter__(self):
@@ -2139,11 +2151,11 @@ class TestServerStreaming(unittest.TestCase):
                     attempts.append(json["project"])
                     response = MagicMock(spec=httpx.Response)
                     response.status_code = 200
-                    response.aiter_text = MagicMock(return_value=AsyncAiterText([
+                    response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText([
                         'data: {"candidates": [{"content": {"parts": [{"text": "partial"}]}}]}\n',
                         'data: {"error": {"code": "RESOURCE_EXHAUSTED", "message": "quota exhausted"}}\n',
                         "data: [DONE]\n",
-                    ]))
+                    ])))
                     return StreamContext(response)
 
                 async def __aenter__(self):

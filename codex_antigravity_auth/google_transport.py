@@ -13,6 +13,8 @@ import uuid
 import httpx
 
 from .endpoint_policy import httpx_client_options, validate_endpoint_url
+from .request_budget import call_sync, owned_context
+from .sse import SSELineError, iter_sse_data
 
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
 from .response_protocol import (
@@ -477,11 +479,11 @@ class GoogleTransport:
 
     async def post(self, request: dict[str, Any], lease: AccountLease) -> httpx.Response:
         url = f"{self.endpoint}/v1internal:generateContent"
-        async with self.client_factory(**httpx_client_options(url, timeout=self.timeout)) as client:
+        async with owned_context(self.client_factory(**httpx_client_options(url, timeout=self.timeout))) as client:
             return await client.post(
                 url,
-                json=self.build_request(request, lease),
-                headers=self.build_headers(lease),
+                json=await call_sync(self.build_request, request, lease),
+                headers=await call_sync(self.build_headers, lease),
             )
 
     async def execute(
@@ -507,13 +509,13 @@ class GoogleTransport:
     @asynccontextmanager
     async def stream(self, request: dict[str, Any], lease: AccountLease):
         url = f"{self.endpoint}/v1internal:streamGenerateContent?alt=sse"
-        async with self.client_factory(**httpx_client_options(url, timeout=self.timeout)) as client:
-            async with client.stream(
+        async with owned_context(self.client_factory(**httpx_client_options(url, timeout=self.timeout))) as client:
+            async with owned_context(client.stream(
                 "POST",
                 url,
-                json=self.build_request(request, lease),
-                headers=self.build_headers(lease),
-            ) as response:
+                json=await call_sync(self.build_request, request, lease),
+                headers=await call_sync(self.build_headers, lease),
+            )) as response:
                 yield response
 
     async def stream_events(
@@ -541,81 +543,25 @@ class GoogleTransport:
                 )
             if not adapter.created_emitted:
                 yield adapter.created()
-            buffer = ""
-            pending: list[str] = []
-
-            async for chunk in response.aiter_text():
-                buffer += chunk
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    stripped = line.strip()
-                    if not stripped:
-                        # SSE event boundary: flush accumulated continuation
-                        # lines as one frame.
-                        if pending:
-                            data = "\n".join(pending)
-                            pending = []
-                            if data == "[DONE]":
-                                adapter.mark_done()
-                                continue
-                            try:
-                                payload = json.loads(data)
-                            except json.JSONDecodeError as exc:
-                                raise GoogleStreamPayloadError(
-                                    "invalid_stream_chunk",
-                                    "The Google provider returned malformed stream JSON.",
-                                ) from exc
-                            if isinstance(payload, list):
-                                payload = payload[0] if payload else {}
-                            for event in adapter.consume(payload):
-                                yield event
-                        continue
-                    if not stripped.startswith("data:"):
-                        continue
-                    data = stripped[5:].strip()
-                    if data == "[DONE]":
+            # Preserve the endpoint's historical newline-delimited JSON mode
+            # explicitly; native Responses uses standard blank-line SSE framing.
+            try:
+                async for data in iter_sse_data(response, label="Google provider", legacy_json_lines=True):
+                    if data.strip() == "[DONE]":
                         adapter.mark_done()
-                        continue
-                    # Parse-or-accumulate: emit standalone JSON frames
-                    # immediately; hold fragments that do not yet parse as
-                    # JSON until their SSE continuation lines arrive. This
-                    # supports both blank-line-separated and bare-\n frames.
-                    if pending:
-                        candidate = "\n".join([*pending, data])
-                        try:
-                            payload = json.loads(candidate)
-                        except json.JSONDecodeError:
-                            pending.append(data)
-                            continue
-                        pending = []
-                        if isinstance(payload, list):
-                            payload = payload[0] if payload else {}
-                        for event in adapter.consume(payload):
-                            yield event
                         continue
                     try:
                         payload = json.loads(data)
-                    except json.JSONDecodeError:
-                        pending.append(data)
-                        continue
+                    except json.JSONDecodeError as exc:
+                        raise GoogleStreamPayloadError(
+                            "invalid_stream_chunk", "The Google provider returned malformed stream JSON.",
+                        ) from exc
                     if isinstance(payload, list):
                         payload = payload[0] if payload else {}
                     for event in adapter.consume(payload):
                         yield event
-            if pending:
-                data = "\n".join(pending)
-                if data == "[DONE]":
-                    adapter.mark_done()
-                else:
-                    raise GoogleStreamPayloadError(
-                        "invalid_stream_chunk",
-                        "The Google provider stream ended with an incomplete SSE frame.",
-                    )
-            if buffer.strip():
-                raise GoogleStreamPayloadError(
-                    "invalid_stream_chunk",
-                    "The Google provider stream ended with an incomplete SSE frame.",
-                )
+            except SSELineError as exc:
+                raise GoogleStreamPayloadError("invalid_stream_chunk", str(exc)) from exc
         for event in adapter.finish():
             yield event
 
