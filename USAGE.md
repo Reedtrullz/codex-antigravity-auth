@@ -190,6 +190,8 @@ codex-antigravity doctor --codex-ready --live --live-model claude-sonnet-4-6
 
 `doctor --live` currently supports Google Antigravity models only. It also performs a once-daily cached package-version check against PyPI and warns when an upgrade is available. Set `CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1` to disable that external metadata lookup.
 
+Google and Chat Completions responses select provider alternative index `0`, consistently across streaming and non-streaming output. Other alternatives cannot contribute text, tools, or terminal reasons. A single unindexed alternative remains supported; ambiguous multi-answer or mixed unindexed/alternative streams fail explicitly. Usage stays the provider-reported aggregate, since per-alternative token usage cannot be inferred.
+
 ## 1. Supported Models & Aliases
 You can use standard, developer-friendly names in your `~/.codex/config.toml` that the gateway automatically translates to the official Google Antigravity backend model definitions:
 

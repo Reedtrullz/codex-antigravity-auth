@@ -22,6 +22,7 @@ from .redaction import redact_secret_text
 
 from .response_protocol import (
     ProviderCapabilities,
+    PrimaryAlternativeSelector,
     ProviderResult,
     ProviderTerminal,
     ResponseEventBuilder,
@@ -194,6 +195,8 @@ class ChatResponseAccumulator:
         self._finish_reason: str | None = None
         self._usage = normalize_usage()
         self._done = False
+        self._malformed = False
+        self._primary = PrimaryAlternativeSelector()
         self._refusal = False
         self._tool_names: dict[int, str] = {}
         self._tool_arguments: dict[int, str] = {}
@@ -211,8 +214,10 @@ class ChatResponseAccumulator:
                 usage.get("completion_tokens", usage.get("output_tokens")),
                 usage.get("total_tokens"),
             )
-        choices = payload.get("choices", [])
-        if not isinstance(choices, list):
+        try:
+            choices = self._primary.select(payload.get("choices", []))
+        except ValueError:
+            self._malformed = True
             return
         for choice in choices:
             if not isinstance(choice, dict):
@@ -291,6 +296,7 @@ class ChatResponseAccumulator:
             output=output,
             finish_reason=self._finish_reason,
             safety_block={"blockReason": "CONTENT_FILTER"} if self._refusal else None,
+            malformed=self._malformed,
         )
         if terminal.kind is TerminalKind.COMPLETED and self._finish_reason is None and not self._done:
             terminal = ProviderTerminal(
@@ -395,9 +401,10 @@ class OpenAICompatibleTransport:
     def parse_chat_response(self, payload: object) -> ProviderResult:
         if not isinstance(payload, dict):
             payload = {}
-        choices = payload.get("choices", [])
-        if not isinstance(choices, list):
-            choices = []
+        try:
+            choices = PrimaryAlternativeSelector().select(payload.get("choices", []))
+        except ValueError as exc:
+            return self._failed_result("invalid_alternatives", str(exc))
         output: list[dict[str, Any]] = []
         finish_reason: str | None = None
         refusal = False
@@ -456,6 +463,7 @@ class OpenAICompatibleTransport:
             created_at=int(time.time()),
         )
         accumulator = ChatResponseAccumulator()
+        primary = PrimaryAlternativeSelector()
         tool_calls: dict[int, dict[str, str]] = {}
         tool_seen_order: list[int] = []
         text_active = False
@@ -525,10 +533,13 @@ class OpenAICompatibleTransport:
                                 async for event in fail(code if isinstance(code, str) and code else "provider_error", "The provider stream failed."):
                                     yield event
                                 return
-                            accumulator.consume(payload)
-                            choices = payload.get("choices", [])
-                            if not isinstance(choices, list):
-                                continue
+                            try:
+                                choices = primary.select(payload.get("choices", []))
+                            except ValueError as exc:
+                                async for event in fail("invalid_alternatives", str(exc)):
+                                    yield event
+                                return
+                            accumulator.consume({**payload, "choices": choices})
                             for choice in choices:
                                 if not isinstance(choice, dict):
                                     continue

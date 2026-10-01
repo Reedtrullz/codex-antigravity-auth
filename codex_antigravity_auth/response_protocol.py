@@ -19,6 +19,37 @@ class TerminalKind(str, Enum):
     FAILED = "failed"
 
 
+class PrimaryAlternativeSelector:
+    """Select index zero without merging provider alternatives across frames.
+
+    A sole unindexed item is the legacy single-answer format. Once a stream
+    contains nonprimary indices, unindexed chunks are ambiguous and rejected.
+    """
+
+    def __init__(self) -> None:
+        self._unindexed_seen = False
+        self._nonprimary_seen = False
+
+    def select(self, alternatives: object) -> list[dict[str, Any]]:
+        if not isinstance(alternatives, list) or any(not isinstance(item, dict) for item in alternatives):
+            raise ValueError("Provider alternatives must be a list of objects")
+        if not alternatives:
+            return []
+        if any("index" not in item for item in alternatives):
+            if len(alternatives) != 1 or self._nonprimary_seen:
+                raise ValueError("Unindexed provider alternatives are ambiguous")
+            self._unindexed_seen = True
+            return alternatives
+        indices = [item["index"] for item in alternatives]
+        if any(type(index) is not int or index < 0 for index in indices) or len(set(indices)) != len(indices):
+            raise ValueError("Provider alternative indices must be unique nonnegative integers")
+        nonprimary = any(index != 0 for index in indices)
+        if nonprimary and self._unindexed_seen:
+            raise ValueError("Mixed indexed and unindexed provider alternatives are ambiguous")
+        self._nonprimary_seen = self._nonprimary_seen or nonprimary
+        return [item for item in alternatives if item["index"] == 0]
+
+
 @dataclass(frozen=True)
 class ProviderTerminal:
     kind: TerminalKind
