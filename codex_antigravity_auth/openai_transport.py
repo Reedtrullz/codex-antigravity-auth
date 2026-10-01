@@ -242,6 +242,8 @@ class ChatResponseAccumulator:
             if not isinstance(choice, dict):
                 continue
             finish_reason = choice.get("finish_reason")
+            if finish_reason is not None and not isinstance(finish_reason, str):
+                self._malformed = True
             if isinstance(finish_reason, str) and finish_reason:
                 self._finish_reason = finish_reason
                 if finish_reason.strip().lower() in POLICY_FINISH_REASONS:
@@ -430,12 +432,15 @@ class OpenAICompatibleTransport:
             return self._failed_result("invalid_alternatives", str(exc), usage=normalized_usage)
         output: list[dict[str, Any]] = []
         finish_reason: str | None = None
+        malformed = False
         blocked = False
         explicit_refusal = False
         for choice in choices:
             if not isinstance(choice, dict):
                 continue
             reason = choice.get("finish_reason")
+            if reason is not None and not isinstance(reason, str):
+                malformed = True
             if isinstance(reason, str) and reason:
                 finish_reason = reason
                 blocked = blocked or reason.strip().lower() in POLICY_FINISH_REASONS
@@ -449,6 +454,7 @@ class OpenAICompatibleTransport:
             output=output,
             finish_reason=finish_reason,
             safety_block={"blockReason": "CONTENT_FILTER"} if blocked else None,
+            malformed=malformed,
         )
         return ProviderResult(output=tuple(output), usage=normalized_usage, terminal=terminal)
 

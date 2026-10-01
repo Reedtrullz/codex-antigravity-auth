@@ -197,6 +197,8 @@ class GoogleResponseAccumulator:
             if not isinstance(candidate, dict):
                 continue
             finish_reason = candidate.get("finishReason")
+            if finish_reason is not None and not isinstance(finish_reason, str):
+                self._malformed = True
             if isinstance(finish_reason, str) and finish_reason:
                 self._finish_reason = finish_reason
                 if finish_reason.strip().lower() in POLICY_FINISH_REASONS:
@@ -654,6 +656,8 @@ class GoogleTransport:
             if not isinstance(candidate, dict):
                 continue
             candidate_reason = candidate.get("finishReason")
+            if candidate_reason is not None and not isinstance(candidate_reason, str):
+                malformed = True
             if isinstance(candidate_reason, str) and candidate_reason:
                 finish_reason = candidate_reason
             transformed = transform_gemini_candidate(candidate)

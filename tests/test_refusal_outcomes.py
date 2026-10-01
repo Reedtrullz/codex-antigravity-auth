@@ -187,3 +187,22 @@ def test_generic_policy_metadata_stays_sanitized_while_explicit_refusal_is_verba
     assert refusal_item(refusal_text=REFUSAL)["content"][0]["refusal"] == REFUSAL
     terminal = classify_terminal(output=[refusal_item(refusal_text=REFUSAL)], finish_reason="stop", safety_block=None)
     assert terminal.kind is TerminalKind.COMPLETED
+
+
+@pytest.mark.parametrize("reason", [True, 123, {}, []])
+def test_invalid_finish_scalar_is_not_treated_as_an_absent_legacy_reason(reason):
+    payload = {"choices": [{"message": {"content": "prefix"}, "finish_reason": reason}]}
+    chat = OpenAICompatibleTransport(timeout=1).parse_chat_response(payload)
+    streamed, _ = chat_stream([{"choices": [{"delta": {"content": "prefix"}, "finish_reason": reason}]}])
+    google_payload = {"candidates": [{"content": {"parts": [{"text": "prefix"}]}, "finishReason": reason}]}
+    google = GoogleTransport(timeout=1).parse_response(google_payload)
+    adapter = GoogleStreamEventAdapter(response_id="fixture", display_model="fixture")
+    adapter.created()
+    adapter.consume(google_payload)
+    google_streamed = next(event["response"] for event in adapter.finish() if isinstance(event, dict) and event.get("type") == "response.failed")
+    for result in (chat, google):
+        assert result.terminal.kind is TerminalKind.FAILED
+        assert semantic_output(result.output)["text"] == ["prefix"]
+    for result in (streamed, google_streamed):
+        assert result["status"] == "failed"
+        assert semantic_output(result["output"])["text"] == ["prefix"]
