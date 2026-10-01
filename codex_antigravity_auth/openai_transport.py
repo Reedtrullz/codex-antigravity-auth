@@ -705,7 +705,7 @@ class NativeResponsesStreamAdapter:
             return False
         if not self._bind_item(event.get("output_index"), item.get("id")):
             return False
-        if event["type"] in self._TERMINAL_TYPES and isinstance(response.get("output"), list):
+        if isinstance(response.get("output"), list):
             for index, output in enumerate(response["output"]):
                 if isinstance(output, dict) and not self._bind_item(index, output.get("id")):
                     return False

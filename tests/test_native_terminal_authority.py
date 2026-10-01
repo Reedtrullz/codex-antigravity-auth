@@ -124,6 +124,23 @@ def test_explicit_identity_contradictions_fail(mutation, error):
     assert final["response"]["error"]["code"] == error
 
 
+@pytest.mark.parametrize("event_type", ["response.created", "response.in_progress"])
+@pytest.mark.parametrize("item_id", ["msg-fixture", "msg-other"])
+def test_every_supplied_response_snapshot_binds_item_identity(event_type, item_id):
+    snapshot = created()
+    snapshot["type"] = event_type
+    snapshot["response"]["output"] = [{"id": item_id, "type": "message", "content": []}]
+    chunks = [wire(snapshot), wire(completed()), DONE]
+    _, final = terminal_result(chunks)
+    buffered = server._collect_openai_sse_terminal(b"".join(chunks), "fixture-model")
+    if item_id == "msg-fixture":
+        assert final["type"] == "response.completed"
+        assert buffered["status"] == "completed"
+    else:
+        assert final["type"] == "response.failed"
+        assert final["response"]["error"]["code"] == buffered["error"]["code"] == "mismatched_item_id"
+
+
 @pytest.mark.parametrize("event,error", [
     (delta(item_id="msg-other", sequence_number=4), "mismatched_item_id"),
     (delta(output_index=1, sequence_number=4), "mismatched_item_id"),
