@@ -226,7 +226,8 @@ class AccountManager:
     def _select_active_account(self, model: str, *, acquire: bool) -> dict[str, Any] | None:
         family = self._model_family(model)
         excluded: set[str] = set()
-        attempted: set[str] = set()
+        attempted: dict[str, list[dict]] = {}
+        refreshed_emails: set[str] = set()
         while True:
             selected = None
             snapshot = None
@@ -263,7 +264,7 @@ class AccountManager:
                         if account.get("accessToken") and (
                             expires_at >= time.time() + 300
                             or (expires_at > time.time() + 10 and (
-                                not account.get("refreshToken") or email in attempted
+                                not account.get("refreshToken") or email in refreshed_emails
                             ))
                         ):
                             selected = copy.deepcopy(account)
@@ -273,7 +274,11 @@ class AccountManager:
                         # re-reads eligibility and acquires only after merge.
                         if acquire:
                             self._state_owner.release(lease)
-                        if email in attempted:
+                        # Retry one changed credential identity, but bound churn
+                        # and never refresh the same snapshot twice per selection.
+                        prior_snapshots = attempted.get(email, [])
+                        if (email in refreshed_emails or len(prior_snapshots) >= 2
+                                or any(self._same_credentials(account, prior) for prior in prior_snapshots)):
                             excluded.add(email)
                             continue
                         if not account.get("refreshToken"):
@@ -289,9 +294,11 @@ class AccountManager:
             if selected is not None or snapshot is None:
                 return selected
             email = str(snapshot["email"])
-            attempted.add(email)
+            attempted.setdefault(email, []).append(snapshot)
             # Neither the manager lock nor the cross-process store lock is held.
             result = self._refresh_snapshot(snapshot, family=family)
+            if result == "refreshed":
+                refreshed_emails.add(email)
             if result in {"busy", "failed", "stopped"}:
                 excluded.add(email)
 

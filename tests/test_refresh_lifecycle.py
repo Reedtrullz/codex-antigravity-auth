@@ -318,3 +318,50 @@ def test_unusable_short_refresh_is_not_selected_or_retried_forever(pool, monkeyp
     assert manager.acquire_account("gemini-3.8-flash")["email"] == "second@example.invalid"
     assert len(calls) == 1
     assert manager.in_flight_count("first@example.invalid") == 0
+
+
+@pytest.mark.parametrize("acquire", [False, True])
+def test_foreground_retries_replaced_credential_before_dispatch(pool, monkeypatch, acquire):
+    data, _update = pool
+    data["accounts"] = data["accounts"][:1]
+    manager = accounts.AccountManager()
+    original_refresh = manager._refresh_snapshot
+    snapshots = []
+    tokens = []
+
+    def rotate_then_refresh(snapshot, **kwargs):
+        snapshots.append(snapshot)
+        if len(snapshots) == 1:
+            data["accounts"][0]["refreshToken"] = "fixture-rotated"
+        return original_refresh(snapshot, **kwargs)
+
+    def refresh(token):
+        tokens.append(token)
+        return {"access_token": "fixture-fresh", "expires_in": 3600}
+
+    monkeypatch.setattr(manager, "_refresh_snapshot", rotate_then_refresh)
+    monkeypatch.setattr(accounts, "refresh_access_token", refresh)
+    select = manager.acquire_account if acquire else manager.select_active_account
+    assert select("gemini-3.8-flash")["accessToken"] == "fixture-fresh"
+    assert tokens == ["fixture-rotated"]
+    assert len(snapshots) == 2
+    assert manager.in_flight_count("first@example.invalid") == int(acquire)
+
+
+def test_repeated_credential_replacement_has_bounded_progress(pool, monkeypatch):
+    data, _update = pool
+    data["accounts"] = data["accounts"][:1]
+    manager = accounts.AccountManager()
+    original_refresh = manager._refresh_snapshot
+    snapshots = []
+
+    def rotate_then_refresh(snapshot, **kwargs):
+        snapshots.append(snapshot)
+        data["accounts"][0]["refreshToken"] = "fixture-rotated-" + str(len(snapshots))
+        return original_refresh(snapshot, **kwargs)
+
+    monkeypatch.setattr(manager, "_refresh_snapshot", rotate_then_refresh)
+    monkeypatch.setattr(accounts, "refresh_access_token", lambda _: pytest.fail("stale credentials dispatched"))
+    assert manager.acquire_account("gemini-3.8-flash") is None
+    assert len(snapshots) == 2
+    assert manager.in_flight_count("first@example.invalid") == 0
