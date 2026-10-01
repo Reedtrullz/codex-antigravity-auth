@@ -844,21 +844,23 @@ def _run_setup(args) -> dict:
     gateway_ids: set[str] | None = None
     if args.start:
         try:
-            stage(args, "gateway", _cli.start_gateway_background,
-                argparse.Namespace(
-                    host=args.host,
-                    port=args.port,
-                    allow_remote=args.allow_remote,
-                    op_env_file=getattr(args, "op_env_file", None),
-                    op_environment=getattr(args, "op_environment", None),
-                    unified_model_picker=unified,
+            def start_and_verify_gateway():
+                _cli.start_gateway_background(
+                    argparse.Namespace(
+                        host=args.host,
+                        port=args.port,
+                        allow_remote=args.allow_remote,
+                        op_env_file=getattr(args, "op_env_file", None),
+                        op_environment=getattr(args, "op_environment", None),
+                        unified_model_picker=unified,
+                    )
                 )
-            )
-            gateway_ids = _cli.wait_for_gateway_model_ids(
-                base_url,
-                timeout=args.gateway_timeout,
-                token_env=args.gateway_token_env,
-            )
+                return _cli.wait_for_gateway_model_ids(
+                    base_url,
+                    timeout=args.gateway_timeout,
+                    token_env=args.gateway_token_env,
+                )
+            gateway_ids = stage(args, "gateway", start_and_verify_gateway)
             _cli._setup_check(checks, "gateway_start", "pass", f"started background gateway on {args.host}:{args.port} and /v1/models is reachable")
             _cli._setup_check(
                 checks,

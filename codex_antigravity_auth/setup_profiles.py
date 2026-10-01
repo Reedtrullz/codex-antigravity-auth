@@ -24,6 +24,14 @@ RUN = re.compile(r"^[0-9a-f]{32}$")
 MAX_BYTES = 32 * 1024 * 1024
 MAX_FILES = 10000
 STAGES = ("credentials", "login", "config", "skill", "gateway", "readiness")
+# Preserve the existing fixed user outcomes without retaining arbitrary callback
+# error strings. Unrecognized exceptions still use class-only receipt evidence.
+PUBLIC_OAUTH_EXITS = {
+    "OAuth authorization failed: consent was denied. Run login again to retry.": "denied",
+    "Timed out waiting for OAuth callback; run login again to retry.": "timeout",
+    "OAuth login cancelled.": "cancelled",
+    "OAuth credential entry was cancelled; Codex config was not modified.": "cancelled",
+}
 
 
 class SetupError(RuntimeError):
@@ -235,6 +243,15 @@ def setup_plan(args, *, profile=None):
         preview = merge_profile_config(text, settings=settings, token_env=profile["secretReferences"]["gatewayTokenEnv"], activate=activate)
     skill = (client_skills_path(getattr(args, "skill_dir", cli.DEFAULT_CODEX_SKILLS_DIR)) / cli.BUNDLED_CODEX_SKILL_NAME).absolute()
     repair = bool(getattr(args, "repair", False))
+    manages_skill = bool(getattr(args, "install_skill", False)) and not repair
+    def overlaps(first, second):
+        return first == second or first in second.parents or second in first.parents
+    targets = [config, *([skill.resolve()] if manages_skill else [])]
+    if manages_skill and overlaps(targets[0], targets[1]):
+        raise SetupError("Config and skill targets must not overlap")
+    metadata_roots = (profile_root().resolve(), receipts_root().resolve())
+    if any(overlaps(target, metadata) for target in targets for metadata in metadata_roots):
+        raise SetupError("Setup targets must not overlap profile or receipt metadata")
     local_only = profile is not None
     flags = {"credentials": not repair and not local_only, "login": not repair and not local_only,
              "config": True, "skill": bool(getattr(args, "install_skill", False)) and not repair,
@@ -311,13 +328,20 @@ class SetupJournal:
                 stage["state"] = "completed"
                 if isinstance(result, dict) and type(result.get("ok")) is bool:
                     stage["checkOk"] = result["ok"]
+                if stage_id == "credentials" and isinstance(result, tuple) and len(result) == 2:
+                    stage["configured"] = bool(result[0] and result[1])
                 self.persist()
                 return result
         except BaseException as exc:
-            stage["state"], stage["errorClass"] = "failed", type(exc).__name__
+            error_class = type(exc).__name__
+            stage["state"] = "failed"
+            stage["errorClass"] = error_class if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", error_class) else "Exception"
             stage["operationStarted"] = began
+            public_outcome = PUBLIC_OAUTH_EXITS.get(str(exc)) if isinstance(exc, SystemExit) and stage_id in {"credentials", "login"} else None
+            if public_outcome:
+                stage["outcome"] = public_outcome
             self.persist()
-            if isinstance(exc, KeyboardInterrupt):
+            if isinstance(exc, KeyboardInterrupt) or public_outcome:
                 raise
             raise SetupError(f"Setup stage {stage_id} failed; inspect receipt {self.id}. No automatic rollback was attempted") from None
 
@@ -356,13 +380,52 @@ def load_receipt(run_id):
     plan = value.get("plan")
     if not isinstance(plan, dict) or any(not isinstance(plan.get(key), str) or not Path(plan[key]).is_absolute() for key in ("config", "configTarget", "skill")):
         raise SetupError("Invalid setup plan")
+    if type(plan.get("schemaVersion")) is not int or plan["schemaVersion"] != 1:
+        raise SetupError("Unsupported setup plan version")
+    if "configBeforeSha256" not in plan:
+        raise SetupError("Setup plan lacks the original config identity")
+    before_hash = plan["configBeforeSha256"]
+    if before_hash is not None and (not isinstance(before_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", before_hash)):
+        raise SetupError("Invalid planned config identity")
+    planned = plan.get("stages")
+    if not isinstance(planned, list) or not all(isinstance(row, dict) for row in planned) or [row.get("id") for row in planned] != list(STAGES):
+        raise SetupError("Invalid planned stages")
+    for planned_row in planned:
+        if type(planned_row.get("requested")) is not bool or planned_row.get("restorable") is not (planned_row["id"] in {"config", "skill"}):
+            raise SetupError("Invalid planned stage ownership")
+        if planned_row.get("state") != ("pending" if planned_row["requested"] else "skipped"):
+            raise SetupError("Invalid planned stage lifecycle")
+    requested = {row["id"]: row["requested"] for row in planned}
+    snapshot_fields = {"before", "after", "target", "backup"}
+    restore_fields = {"restorePaths", "retainedAfterRestore"}
     for row in rows:
-        if not isinstance(row.get("state"), str) or row["state"] not in {"pending", "skipped", "running", "completed", "failed", "restoring", "restored"}:
+        status = row.get("state")
+        if not isinstance(status, str) or status not in {"pending", "skipped", "running", "completed", "failed", "restoring", "restored"}:
             raise SetupError("Unsupported setup stage state")
-        if "operationStarted" in row and type(row["operationStarted"]) is not bool:
-            raise SetupError("Invalid setup operation state")
-        if row.get("operationStarted") is False and row.get("after") is not None:
-            raise SetupError("Unstarted setup stage contains an inconsistent result")
+        if value["state"] == "completed" and status in {"pending", "failed", "running"}:
+            raise SetupError("Setup lifecycle conflicts with its stages")
+        restorable = row["id"] in {"config", "skill"}
+        if type(row.get("requested")) is not bool or row["requested"] != requested[row["id"]] or row.get("restorable") is not restorable:
+            raise SetupError("Invalid setup stage ownership flags")
+        started = row.get("operationStarted")
+        if status in {"pending", "skipped"}:
+            if started not in (None, False) or ("operationStarted" in row and type(started) is not bool) or (snapshot_fields | restore_fields) & row.keys():
+                raise SetupError("Unstarted setup stage contains inconsistent mutation evidence")
+            continue
+        if type(started) is not bool or row["requested"] is not True:
+            raise SetupError("Setup stage lacks explicit operation-start evidence")
+        if status in {"completed", "restoring", "restored"} and not started:
+            raise SetupError("Completed setup stage was not started")
+        if status == "failed" and (not isinstance(row.get("errorClass"), str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", row["errorClass"])):
+            raise SetupError("Failed setup stage lacks its error classification")
+        if status in {"restoring", "restored"} and (not restorable or value["state"] == "running"):
+            raise SetupError("Invalid restoration lifecycle")
+        if status not in {"restoring", "restored"} and restore_fields & row.keys():
+            raise SetupError("Unexpected restore evidence in setup stage")
+        if not restorable:
+            if snapshot_fields & row.keys():
+                raise SetupError("Non-restorable setup stage has snapshot references")
+            continue
         for key in ("before", "after"):
             meta = row.get(key)
             if meta is not None:
@@ -370,16 +433,44 @@ def load_receipt(run_id):
                     raise SetupError("Invalid setup snapshot metadata")
                 if (meta["exists"] and (not isinstance(meta["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", meta["sha256"]))) or (not meta["exists"] and meta["sha256"] is not None):
                     raise SetupError("Invalid setup snapshot identity")
-        if row["id"] in {"config", "skill"} and "target" in row:
+        if (not started or status == "running") and "after" in row:
+            raise SetupError("Unfinished setup stage contains an inconsistent result")
+        if started and (not isinstance(row.get("before"), dict) or not {"target", "backup"} <= row.keys()):
+            raise SetupError("Started setup stage lacks its original snapshot identity")
+        if status in {"completed", "restoring", "restored"} and not isinstance(row.get("after"), dict):
+            raise SetupError("Setup stage lacks a verified post-operation snapshot")
+        if started and row["id"] == "config" and row["before"]["sha256"] != before_hash:
+            raise SetupError("Config snapshot contradicts the original plan")
+        if "target" in row or "backup" in row:
             expected = plan["configTarget"] if row["id"] == "config" else plan["skill"]
-            if row["target"] != expected or row.get("backup") != f"{row['id']}-before":
+            if row.get("target") != expected or row.get("backup") != f"{row['id']}-before":
                 raise SetupError("Setup snapshot references conflict with its plan")
+        if status in {"restoring", "restored"}:
+            target = Path(row["target"])
+            displaced = path.parent / "config-before-restore" if row["id"] == "config" else target.with_name(f".{target.name}.setup-restore-{run_id}")
+            expected_paths = {"target": str(target), "originalBackup": str(path.parent / row["backup"]), "displaced": str(displaced)}
+            if row["before"] == row["after"] or row.get("restorePaths") != expected_paths:
+                raise SetupError("Invalid restore recovery evidence")
+            if row["id"] == "skill" and status == "restored":
+                expected_retained = str(displaced) if row["after"]["exists"] else None
+                if "retainedAfterRestore" not in row or row["retainedAfterRestore"] != expected_retained:
+                    raise SetupError("Invalid retained skill recovery reference")
     return path, value
 
 
 def restore_receipt(run_id, selected, *, write=False):
-    path, _receipt = load_receipt(run_id)
-    with file_lock(path) if write else contextlib.nullcontext():
+    path, receipt = load_receipt(run_id)
+    if not selected or set(selected) - {"config", "skill"}:
+        raise SetupError("Select config and/or skill explicitly; credentials and services cannot be restored")
+    with contextlib.ExitStack() as locks:
+        if write:
+            locks.enter_context(file_lock(path))
+            path, receipt = load_receipt(run_id)
+            targets = {row["target"] for row in receipt["stages"] if row["id"] in selected and isinstance(row.get("target"), str)}
+            for target in sorted(targets):
+                locks.enter_context(file_lock(Path(target)))
+            # Validate every selected stage before changing the first one.
+            _restore_receipt(run_id, selected, write=False)
         return _restore_receipt(run_id, selected, write=write)
 
 

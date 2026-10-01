@@ -43,7 +43,8 @@ unrelated TOML and comments. The optional token-variable name becomes that table
 `env_key`; a profile without a reference removes `env_key` from that selected
 table. Root model/provider selectors change only with `--activate`. Explicit
 `--config` and `--skill-dir` targets are supported; otherwise `CODEX_HOME` owns
-client config and skills independently of the gateway state root.
+client config and skills independently of the gateway state root. Managed config,
+skill and setup-metadata paths must not overlap.
 
 Profiles apply local config and optionally the bundled skill (`--install-skill`,
 with `--force` for a different existing skill). They do not log in, fetch secrets,
@@ -54,7 +55,9 @@ a saved profile does not claim its model or credentials are ready.
 ## Receipts and partial setup
 
 Receipts record requested, pending, running, completed, skipped and failed stages.
-They retain error **classes**, not raw callback errors or credential results.
+They retain error **classes**, not raw callback errors or credential results. Fixed
+OAuth denial, timeout and cancellation messages remain explicit. Gateway startup
+is complete only after its model-endpoint readiness check succeeds.
 For config/skill changes, they record before/after hashes and owner-protected
 backups before the mutation. Plans, receipts and profile operations are local;
 there is no upload or automatic restoration.
@@ -69,7 +72,9 @@ codex-antigravity setup-history restore <receipt-id> --stage skill --write
 
 Restoration always requires an explicit config and/or skill selection. A dry run
 compares the current target with the saved post-setup hash and validates the
-original backup. Changed, missing, symlinked, unsupported or future-version state
+original backup. Stage state, explicit operation-start evidence, snapshot identities
+and recovery references must agree. All selected stages are checked before the
+first restore mutation, under the shared locks when applying. Changed, missing, symlinked, unsupported or future-version state
 is refused. Even a repeated restore checks for subsequent user drift. Unstarted
 stages are reported as not applied. No force flag bypasses these ownership checks.
 

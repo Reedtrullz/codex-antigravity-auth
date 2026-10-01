@@ -268,6 +268,7 @@ def test_backup_tampering_and_uncertain_restore_are_preserved(isolated):
     (root / "config-before").write_text(ORIGINAL)
     data = json.loads((root / "receipt.json").read_text())
     data["stages"][2]["state"] = "restoring"
+    data["stages"][2]["restorePaths"] = {"target": str(target), "originalBackup": str(root / "config-before"), "displaced": str(root / "config-before-restore")}
     (root / "receipt.json").write_text(json.dumps(data))
     before = tree(state), tree(client)
     with pytest.raises(setup.SetupError, match="uncertain"):
@@ -348,3 +349,118 @@ def test_concurrent_profile_switches_refuse_a_stale_plan(isolated, monkeypatch):
         results = list(pool.map(apply, ("first", "second")))
     assert sorted(results) == [False, True]
     assert tomlkit.parse(target.read_text())["model"] in {"claude-sonnet-4-6", "gemini-3.8-flash"}
+
+
+@pytest.mark.parametrize("message,outcome", list(setup.PUBLIC_OAUTH_EXITS.items()))
+def test_fixed_oauth_outcomes_remain_explicit_without_arbitrary_error_text(isolated, message, outcome):
+    journal = setup.SetupJournal(setup.setup_plan(options()))
+    def deny():
+        raise SystemExit(message)
+    with pytest.raises(SystemExit) as error:
+        journal.run("login", deny)
+    assert str(error.value) == message
+    assert journal.data["stages"][1]["outcome"] == outcome
+    assert "error" not in journal.data["stages"][1]
+
+
+@pytest.mark.parametrize("name", ["config", "skill"])
+@pytest.mark.parametrize("mutation", ["missing_started", "false_started", "pending", "skipped", "missing_before", "missing_after", "missing_target", "missing_backup", "bad_restore", "wrong_ownership"])
+def test_incoherent_restore_stage_is_refused_before_any_target_or_receipt_write(isolated, monkeypatch, name, mutation):
+    client, state = isolated
+    existing_config(client)
+    skill = client / "skills/anti"
+    skill.mkdir(parents=True)
+    (skill / "old.txt").write_text("original fixture")
+    def install(parent, **kwargs):
+        (parent / "anti/new.txt").write_text("installed fixture")
+    monkeypatch.setattr(cli, "install_codex_skill", install)
+    setup.create_profile(options(write=True))
+    run_id = setup.apply_profile(options(write=True, install_skill=True, force=True))["receipt"]["id"]
+    path = setup.receipts_root() / run_id / "receipt.json"
+    receipt = json.loads(path.read_text())
+    row = next(item for item in receipt["stages"] if item["id"] == name)
+    if mutation == "missing_started": row.pop("operationStarted")
+    elif mutation == "false_started": row["operationStarted"] = False
+    elif mutation in {"pending", "skipped"}: row["state"] = mutation
+    elif mutation.startswith("missing_"): row.pop(mutation[len("missing_"):])
+    elif mutation == "bad_restore": row["state"] = "restored"
+    else: row["restorable"] = False
+    path.write_text(json.dumps(receipt))
+    before = tree(client), tree(state)
+    with pytest.raises(setup.SetupError):
+        setup.restore_receipt(run_id, [name], write=True)
+    assert (tree(client), tree(state)) == before
+
+
+def test_gateway_stage_fails_when_start_succeeds_but_models_never_become_ready(isolated, monkeypatch, capsys):
+    _client, state = isolated
+    monkeypatch.setattr(cli, "wait_for_gateway_model_ids", Mock(side_effect=RuntimeError(SECRET)))
+    with pytest.raises(SystemExit, match="Next command"):
+        cli_setup.run_setup(options(write=True, start=True))
+    cli.start_gateway_background.assert_called_once()
+    paths = list((state / "setup-receipts").glob("*/receipt.json"))
+    receipt = setup.load_receipt(paths[0].parent.name)[1]
+    states = {stage["id"]: stage["state"] for stage in receipt["stages"]}
+    assert states["config"] == "completed" and states["gateway"] == "failed" and states["readiness"] == "pending"
+    assert receipt["state"] == "failed" and "codex-antigravity status --port 51122" in receipt["nextSteps"]
+    output = capsys.readouterr()
+    assert SECRET not in output.out + output.err + paths[0].read_text()
+
+
+def test_uncertain_selected_skill_prevents_config_restore_before_any_mutation(isolated, monkeypatch):
+    client, state = isolated
+    target = existing_config(client)
+    skill = client / "skills/anti"
+    skill.mkdir(parents=True)
+    (skill / "before.txt").write_text("original")
+    monkeypatch.setattr(cli, "install_codex_skill", lambda parent, **kwargs: (parent / "anti/new.txt").write_text("new"))
+    setup.create_profile(options(write=True))
+    run_id = setup.apply_profile(options(write=True, install_skill=True, force=True))["receipt"]["id"]
+    path = setup.receipts_root() / run_id / "receipt.json"
+    receipt = json.loads(path.read_text())
+    receipt["state"] = "failed"
+    receipt["stages"][3]["state"] = "failed"
+    receipt["stages"][3]["errorClass"] = "RuntimeError"
+    receipt["stages"][3]["after"] = None
+    path.write_text(json.dumps(receipt))
+    before = target.read_bytes(), tree(skill), path.read_bytes()
+    with pytest.raises(setup.SetupError, match="uncertain"):
+        setup.restore_receipt(run_id, ["config", "skill"], write=True)
+    assert (target.read_bytes(), tree(skill), path.read_bytes()) == before
+
+
+@pytest.mark.parametrize("overlap", ["config_in_skill", "config_is_receipts", "state_in_skill"])
+def test_overlapping_owned_targets_are_refused_by_plan_without_creating_state(isolated, monkeypatch, overlap):
+    client, state = isolated
+    changes = dict(install_skill=True)
+    if overlap == "config_in_skill": changes["config"] = str(client / "skills/anti/config.toml")
+    elif overlap == "config_is_receipts": changes["config"] = str(state / "setup-receipts")
+    else: monkeypatch.setenv("ANTIGRAVITY_STATE_HOME", str(client / "skills/anti/state"))
+    with pytest.raises(setup.SetupError, match="overlap"):
+        setup.setup_plan(options(**changes))
+    assert not client.exists() and not state.exists()
+
+
+@pytest.mark.parametrize("mutation", ["version", "missing_identity", "wrong_identity", "changed_request", "pending_complete"])
+def test_plan_and_stage_evidence_must_agree_before_restore(isolated, mutation):
+    client, state = isolated
+    existing_config(client)
+    setup.create_profile(options(write=True))
+    run_id = setup.apply_profile(options(write=True))["receipt"]["id"]
+    path = setup.receipts_root() / run_id / "receipt.json"
+    value = json.loads(path.read_text())
+    if mutation == "version": value["plan"]["schemaVersion"] = 2
+    elif mutation == "missing_identity": value["plan"].pop("configBeforeSha256")
+    elif mutation == "wrong_identity": value["plan"]["configBeforeSha256"] = "0" * 64
+    elif mutation == "changed_request":
+        value["plan"]["stages"][2].update(requested=False, state="skipped")
+    else:
+        row = value["stages"][2]
+        row["state"] = "pending"
+        for key in ("operationStarted", "before", "after", "target", "backup"):
+            row.pop(key, None)
+    path.write_text(json.dumps(value))
+    before = tree(client), tree(state)
+    with pytest.raises(setup.SetupError):
+        setup.restore_receipt(run_id, ["config"], write=True)
+    assert (tree(client), tree(state)) == before
