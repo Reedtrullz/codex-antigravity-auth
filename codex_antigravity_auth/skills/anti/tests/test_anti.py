@@ -954,6 +954,7 @@ class AntiHelperTests(unittest.TestCase):
         calls: list[str] = []
 
         def fake_request_json(method, url, *, payload=None, timeout=10.0, token_env=anti.DEFAULT_TOKEN_ENV):
+            anti.transport_entry_timeout(method, timeout)  # synthetic transport entered
             calls.append(payload["model"])
             if payload["model"] == "claude-opus-4-6-thinking":
                 raise anti.AntiError("request to http://127.0.0.1:51122/v1/responses returned HTTP 502 non-JSON response")
@@ -4374,7 +4375,8 @@ class BugfixRegressionTests(unittest.TestCase):
         metadata = raised.exception.run_metadata
         self.assertEqual(len(calls), 1)
         self.assertEqual(metadata["completed_chunk_count"], 1)
-        self.assertEqual(metadata["failed_chunk_count"], 1)
+        self.assertEqual(metadata["failed_chunk_count"], 0)
+        self.assertEqual(metadata["chunk_generation"][-1]["status"], "not_sent")
         self.assertGreater(metadata["not_sent_chunk_count"], 0)
 
     def test_chunk_prompts_do_not_carry_stale_single_prompt_diff_caveat(self) -> None:

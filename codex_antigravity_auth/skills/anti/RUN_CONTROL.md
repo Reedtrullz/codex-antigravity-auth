@@ -37,6 +37,11 @@ backoff that cannot fit is deferred without sleeping or starting a fallback.
 The control records bounded reason events and aggregate started/released/deferred
 counts; it does not store prompts, output or credentials.
 
+Immediately before entering the HTTP transport, the deadline is rechecked after
+body/header preparation and the timeout is tightened again. Submitted records
+mean transport entry, not remote acceptance; expired preparation is unsent and
+releases any monetary reservation without charging an estimate.
+
 No new provider attempt starts after expiry. HTTP connection/read timeouts and
 gateway timeout hints are tightened for each attempt. Body reads check elapsed
 time between chunks so a continuing body cannot reset the run budget. OS DNS and
@@ -47,7 +52,10 @@ accepted provider work may incur usage even if the client deadline expires.
 
 Completed chunk/lane evidence remains available under the chosen existing
 recording mode when later work or synthesis cannot run. Deferred chunks cannot be
-counted as sent or complete coverage. Failure stays nonzero; run/scope metadata
+counted as sent or failed attempts; plan/review completed, failed and unsent counts
+remain disjoint. Compare stops scheduling and labels all remaining models deferred.
+If a second judge call is deferred, the completed first judge attempt remains in
+structured metadata and its output remains in the full-mode execution ledger. Failure stays nonzero; run/scope metadata
 identifies partial work. Never-mode keeps lifecycle/coverage metadata without
 adding raw prompt or output retention. Full mode can preserve the completed
 execution ledger; summary mode retains its bounded projection. Monetary budget

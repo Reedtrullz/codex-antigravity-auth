@@ -34,6 +34,15 @@ def success(text='A complete synthetic answer with retained evidence.'):
     return {'status':'completed','output':[{'type':'message','role':'assistant','content':[{'type':'output_text','text':text}]}]}
 
 
+def set_transport(monkeypatch, anti, transport):
+    # These fakes replace request_json, so explicitly simulate its final HTTP
+    # entry boundary. Preparation-expiry regressions below use real request_json.
+    def entered(method, url, **kwargs):
+        kwargs['timeout'] = anti.transport_entry_timeout(method, kwargs['timeout'])
+        return transport(method, url, **kwargs)
+    monkeypatch.setattr(anti, 'request_json', entered)
+
+
 @pytest.mark.parametrize('value', [0,-1,float('inf'),float('nan'),86401,True])
 def test_invalid_run_duration_is_rejected_before_transport(anti, value):
     with pytest.raises(anti.AntiError): anti.run_control(args(anti,run_timeout=value))
@@ -55,7 +64,7 @@ def test_multiple_primaries_fallback_to_one_destination_under_shared_cap(anti, m
         time.sleep(.015)
         with lock: active-=1
         return 200, success()
-    monkeypatch.setattr(anti,'request_json',transport)
+    set_transport(monkeypatch,anti,transport)
     control=anti.run_control(settings)
     def lane(model):
         return anti.generate_with_fallback(settings,model=model,prompt='fixture',max_output_tokens=32,purpose='lane',model_ids=models)
@@ -78,7 +87,7 @@ def test_retry_after_beyond_remaining_defers_without_sleep_or_fallback(anti, mon
     def transport(method,url,**kwargs):
         calls.append(kwargs['payload']['model'])
         return 429, {'error':'synthetic busy','_retry_after_seconds':delay}
-    monkeypatch.setattr(anti,'request_json',transport)
+    set_transport(monkeypatch,anti,transport)
     with pytest.raises(anti.RunDeadlineExceeded):
         anti.generate_with_fallback(settings,model='fixture:primary',prompt='fixture',max_output_tokens=32,purpose='lane',model_ids={'fixture:primary','openrouter:fixture'})
     assert calls==['fixture:primary']
@@ -93,7 +102,7 @@ def test_deadline_is_not_reset_by_retry_and_each_attempt_releases_permit(anti, m
     def transport(method,url,**kwargs):
         timeouts.append(kwargs['timeout']);clock[0]+=1
         return (503,{'error':'fixture'}) if len(timeouts)==1 else (200,success())
-    monkeypatch.setattr(anti,'request_json',transport)
+    set_transport(monkeypatch,anti,transport)
     anti.generate_with_fallback(settings,model='fixture:model',prompt='fixture',max_output_tokens=32,purpose='lane',model_ids={'fixture:model'})
     assert timeouts==[5,3.25]
     assert settings._run_control.snapshot()['permits_released']==2
@@ -178,7 +187,7 @@ def test_panel_judge_expiry_preserves_partial_lane_record_without_raw_never_data
     monkeypatch.setattr(anti,'run_control',get)
     def transport(method,url,**kwargs):
         return 200,success('private-fixture-lane-output')
-    monkeypatch.setattr(anti,'request_json',transport)
+    set_transport(monkeypatch,anti,transport)
     build=anti.build_panel_synthesis_prompt
     def expire(**kwargs):
         result=build(**kwargs);clock[0]=2;return result
@@ -205,7 +214,7 @@ def test_chunk_deadline_preserves_completed_coverage_and_counts_unsent_chunk(ant
     def transport(*a,**kwargs):
         calls.append(kwargs['payload'])
         return 200,success()
-    monkeypatch.setattr(anti,'request_json',transport)
+    set_transport(monkeypatch,anti,transport)
     generate=anti.generate_with_fallback
     def expire(*a,**kwargs):
         result=generate(*a,**kwargs);clock[0]=2;return result
@@ -248,7 +257,7 @@ def test_queue_deadline_records_deferred_rows_and_never_claims_complete_scope(an
     monkeypatch.setattr(anti,'run_control',get)
     calls=[]
     def transport(*a,**kwargs):calls.append(1);return 200,success()
-    monkeypatch.setattr(anti,'request_json',transport)
+    set_transport(monkeypatch,anti,transport)
     generate=anti.generate_with_fallback
     def expire(*a,**kwargs):
         result=generate(*a,**kwargs);clock[0]=2;return result
@@ -265,10 +274,149 @@ def test_queue_deadline_records_deferred_rows_and_never_claims_complete_scope(an
                                        (403,{'error':'fixture denial'}), (503,{'error':'fixture unavailable'})])
 def test_terminal_failures_preserve_submitted_attempt_evidence(anti,monkeypatch,status,body):
     settings=args(anti,fallback_model=None)
-    monkeypatch.setattr(anti,'request_json',lambda *a,**k:(status,body))
+    set_transport(monkeypatch,anti,lambda *a,**k:(status,body))
     with pytest.raises(anti.AntiError) as caught:
         anti.generate_with_fallback(settings,model='fixture:model',prompt='fixture',max_output_tokens=32,
                                     purpose='lane',model_ids={'fixture:model'})
     assert caught.value.submitted is True
     assert caught.value.generation_metadata['submitted'] is True
     assert settings._run_control.snapshot()['permits_released']==1
+
+
+@pytest.mark.parametrize('preparation', ['json','request'])
+def test_preparation_expiry_never_enters_transport_or_marks_submitted(anti,monkeypatch,preparation):
+    settings=args(anti, fallback_model=None, budget=1)
+    clock=[0.0]
+    settings._run_control=anti.RunControl(1,caps={},clock=lambda:clock[0],error_type=anti.RunDeadlineExceeded)
+    if preparation=='json':
+        encode=anti.json.dumps
+        def expire(value,*values,**kwargs):
+            result=encode(value,*values,**kwargs)
+            if isinstance(value,dict) and value.get('input')=='fixture':clock[0]=2
+            return result
+        monkeypatch.setattr(anti.json,'dumps',expire)
+    else:
+        request=anti.urllib.request.Request
+        def expire(*values,**kwargs):
+            result=request(*values,**kwargs);clock[0]=2;return result
+        monkeypatch.setattr(anti.urllib.request,'Request',expire)
+    monkeypatch.setattr(anti.urllib.request,'urlopen',lambda *a,**k:pytest.fail('no late POST'))
+    with pytest.raises(anti.RunDeadlineExceeded) as caught:
+        anti.generate_with_fallback(settings,model='claude-sonnet-4-6',prompt='fixture',max_output_tokens=32,
+                                    purpose='preparation',model_ids={'claude-sonnet-4-6'})
+    assert caught.value.submitted is False and caught.value.generation_metadata['submitted'] is False
+    assert settings._run_control.snapshot()['attempts_started']==0
+    assert settings._run_control.snapshot()['permits_released']==1
+    state=anti.budget_metadata(settings)
+    assert state['budget_reserved']==state['budget_committed']==0
+    assert state['budget_attempts'][-1]['status']=='not_sent'
+
+
+def test_transport_timeout_is_rechecked_after_preparation(anti,monkeypatch):
+    import io
+    settings=args(anti,fallback_model=None)
+    clock=[0.0];timeouts=[]
+    settings._run_control=anti.RunControl(1,caps={},clock=lambda:clock[0],error_type=anti.RunDeadlineExceeded)
+    body=json.dumps(success()).encode()
+    request=anti.urllib.request.Request
+    def prepare(*values,**kwargs):
+        result=request(*values,**kwargs);clock[0]=.25;return result
+    monkeypatch.setattr(anti.urllib.request,'Request',prepare)
+    def opened(req,*,timeout):
+        timeouts.append(timeout)
+        response=io.BytesIO(body);response.status=200;return response
+    monkeypatch.setattr(anti.urllib.request,'urlopen',opened)
+    anti.generate_with_fallback(settings,model='fixture:model',prompt='fixture',max_output_tokens=32,
+                                purpose='preparation',model_ids={'fixture:model'})
+    assert timeouts==[.75]
+    assert settings._run_control.snapshot()['attempts_started']==1
+
+
+@pytest.mark.parametrize('retention', ['full','summary','never'])
+def test_deferred_judge_retry_retains_first_judge_evidence_per_policy(anti,monkeypatch,tmp_path,retention):
+    models={'claude-sonnet-4-6','claude-opus-4-6-thinking'}
+    monkeypatch.setattr(anti,'fetch_model_ids',lambda *a,**k:models)
+    monkeypatch.setattr(anti,'_install_run_signal_handlers',lambda args:None)
+    clock=[0.0]
+    control=anti.RunControl(1,caps=anti.PROVIDER_PARALLEL_CAPS,clock=lambda:clock[0],error_type=anti.RunDeadlineExceeded)
+    def get(settings=None):
+        if settings is not None:settings._run_control=control
+        return control
+    monkeypatch.setattr(anti,'run_control',get)
+    calls=[]
+    def transport(*a,**kwargs):
+        calls.append(kwargs['payload'])
+        if 'You are synthesizing an Antigravity multi-model advisory panel' in kwargs['payload']['input']:
+            return 200,success('first-judge-private-fixture malformed output')
+        return 200,success()
+    set_transport(monkeypatch,anti,transport)
+    parse=anti.parse_panel_findings
+    def expire(text):
+        result=parse(text)
+        if text.startswith('first-judge-private-fixture'):clock[0]=2
+        return result
+    monkeypatch.setattr(anti,'parse_panel_findings',expire)
+    assert anti.main(['panel','--mode','ask','--prompt','fixture','--run-id','judge-retry',
+                      '--save-output',retention,'--no-progress'])==1
+    assert len(calls)==3
+    record=json.loads((tmp_path/'runs/judge-retry.json').read_text())
+    assert len(record['metadata']['judge_attempts'])==1
+    assert record['metadata']['synthesis_status']=='not_sent'
+    if retention=='full':
+        judges=[entry for entry in record['execution_ledger'] if entry['stage']=='panel_judge_1']
+        assert len(judges)==1 and judges[0]['output'].startswith('first-judge-private-fixture')
+        assert judges[0]['generation']['submitted'] is True
+    else:
+        assert 'first-judge-private-fixture' not in json.dumps(record)
+
+
+def test_plan_deferred_chunk_has_disjoint_failed_and_not_sent_counts(anti,monkeypatch):
+    settings=anti.build_parser().parse_args(['plan','--prompt','fixture','--chunked','always',
+        '--max-plan-chunks','20','--no-progress'])
+    clock=[0.0]
+    settings._run_control=anti.RunControl(1,caps={},clock=lambda:clock[0],error_type=anti.RunDeadlineExceeded)
+    model='claude-opus-4-6-thinking'
+    monkeypatch.setattr(anti,'fetch_model_ids',lambda *a,**k:{model})
+    calls=[]
+    def transport(*a,**kwargs):calls.append(1);return 200,success()
+    set_transport(monkeypatch,anti,transport)
+    generate=anti.generate_with_fallback
+    def expire(*a,**kwargs):
+        result=generate(*a,**kwargs);clock[0]=2;return result
+    monkeypatch.setattr(anti,'generate_with_fallback',expire)
+    with pytest.raises(anti.RunDeadlineExceeded) as caught:
+        anti.run_chunked_plan(args=settings,prompt='x'*6000,model=model,caveats=[],max_prompt_chars=1200)
+    evidence=caught.value.run_metadata
+    assert len(calls)==1 and evidence['completed_chunk_count']==1
+    assert evidence['failed_chunk_count']==0
+    assert evidence['not_sent_chunk_count']==evidence['planned_chunk_count']-1
+    assert evidence['chunk_generation'][1]['status']=='not_sent'
+    assert evidence['chunk_generation'][1]['submitted'] is False
+
+
+def test_compare_stops_and_labels_remaining_models_deferred(anti,monkeypatch,tmp_path,capsys):
+    models={'fixture:a','fixture:b','fixture:c'}
+    monkeypatch.setattr(anti,'fetch_model_ids',lambda *a,**k:models)
+    monkeypatch.setattr(anti,'ensure_models_available',lambda **kwargs:None)
+    monkeypatch.setattr(anti,'_install_run_signal_handlers',lambda args:None)
+    clock=[0.0]
+    control=anti.RunControl(1,caps={},clock=lambda:clock[0],error_type=anti.RunDeadlineExceeded)
+    def get(settings=None):
+        if settings is not None:settings._run_control=control
+        return control
+    monkeypatch.setattr(anti,'run_control',get)
+    calls=[]
+    def transport(*a,**kwargs):calls.append(1);return 200,success()
+    set_transport(monkeypatch,anti,transport)
+    generate=anti.generate_with_fallback;generation_models=[]
+    def expire(*a,**kwargs):
+        generation_models.append(kwargs['model'])
+        result=generate(*a,**kwargs);clock[0]=2;return result
+    monkeypatch.setattr(anti,'generate_with_fallback',expire)
+    assert anti.main(['compare','--model','fixture:a','--model','fixture:b','--model','fixture:c',
+                      '--prompt','fixture','--run-id','compare-fixture','--json','--no-progress'])==1
+    result=json.loads(capsys.readouterr().out)
+    assert len(calls)==1 and generation_models==['fixture:a','fixture:b']
+    assert [row['status'] for row in result['results']]==['success','deferred','deferred']
+    assert [row['submitted'] for row in result['results']]==[True,False,False]
+    assert result['metadata']['scopeStatus']=='partial'

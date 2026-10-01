@@ -592,13 +592,13 @@ def controlled_command(function):
     return wrapped
 
 
-_CALL_SUBMITTED = ContextVar('anti_call_submitted', default=False)
+_CALL_SUBMITTED = ContextVar('anti_call_submitted', default=None)
 
 
 def controlled_post(function):
     @functools.wraps(function)
     def wrapped(**kwargs):
-        token = _CALL_SUBMITTED.set(False)
+        token = _CALL_SUBMITTED.set(0)
         try:
             with run_control(kwargs.get('budget_args')).bind():
                 return function(**kwargs)
@@ -1465,6 +1465,18 @@ def _retry_after_seconds(value: object) -> float | None:
     return delay
 
 
+def transport_entry_timeout(method, timeout):
+    control = CURRENT_RUN.get()
+    if control is not None:
+        timeout = control.timeout(timeout)
+    submitted_count = _CALL_SUBMITTED.get()
+    if method.upper() == 'POST' and submitted_count is not None:
+        _CALL_SUBMITTED.set(submitted_count + 1)
+        if control is not None:
+            control.mark_submitted()
+    return timeout
+
+
 def request_json(
     method: str,
     url: str,
@@ -1491,7 +1503,7 @@ def request_json(
 
     retry_after_header: object = None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as res:
+        with urllib.request.urlopen(req, timeout=transport_entry_timeout(method, timeout)) as res:
             raw = read_response_body(res, timeout)
             status = int(res.status)
     except urllib.error.HTTPError as exc:
@@ -1823,7 +1835,7 @@ def post_response(
     for attempt in range(1, attempts + 1):
         control.check()
         retry_reservation = None
-        submitted = False
+        submitted_before = _CALL_SUBMITTED.get() or 0
         try:
             with control.attempt(normalize_base_url(base_url), destination_for_model(model)):
                 if budget_args is not None:
@@ -1838,22 +1850,21 @@ def post_response(
                     if value is not None: attempt_metadata[key] = value
                     else: attempt_metadata.pop(key, None)
                 payload['metadata'] = attempt_metadata
-                submitted = True
-                _CALL_SUBMITTED.set(True)
-                control.mark_submitted()
                 status, decoded = request_json(
                     "POST", response_url, payload=payload, timeout=attempt_timeout, token_env=token_env,
                 )
                 control.check(submitted=True)
         except AntiError as exc:
+            submitted = (_CALL_SUBMITTED.get() or 0) > submitted_before
             exc.submitted = submitted  # type: ignore[attr-defined]
-            settle_budget_call(
-                retry_reservation,
-                model=model,
-                generation=None,
-                prompt_chars=len(prompt),
-                max_output_tokens=max_output_tokens,
-            )
+            if submitted:
+                settle_budget_call(retry_reservation, model=model, generation=None,
+                                   prompt_chars=len(prompt), max_output_tokens=max_output_tokens)
+            elif retry_reservation:
+                state = retry_reservation['state']
+                with state['lock']:
+                    state['reserved'] = max(0.0, state['reserved'] - retry_reservation['estimate'])
+                    retry_reservation['entry'].update(status='not_sent', actual_cost=0.0)
             last_error = str(exc)
             if isinstance(exc, DeadlineExceeded) or not submitted:
                 raise
@@ -1898,7 +1909,7 @@ def post_response(
                 eprint(f"[anti] extract_response_text fell back to JSON dump for model {model} "
                        f"(status={decoded.get('status', 'unknown')}); "
                        f"the response may be malformed or empty")
-            response_metadata: dict[str, Any] = {"attempts": attempt}
+            response_metadata: dict[str, Any] = {"attempts": attempt, "submitted": True}
             if isinstance(decoded, dict):
                 upstream_status = decoded.get("status")
                 if isinstance(upstream_status, str):
@@ -4085,7 +4096,6 @@ def run_chunked_plan(
         error: str,
         *,
         failed_chunk: int | None = None,
-        failed_chunk_submitted: bool = False,
         synthesis_status: str | None = None,
     ) -> dict[str, Any]:
         return {
@@ -4094,8 +4104,8 @@ def run_chunked_plan(
             "completed_chunk_count": sum(
                 1 for item in chunk_generation if item.get("status") == "success"
             ),
-            "failed_chunk_count": len(incomplete_chunks),
-            "not_sent_chunk_count": max(0, planned_chunk_count - len(chunk_generation) - (1 if failed_chunk_submitted else 0)),
+            "failed_chunk_count": sum(1 for item in chunk_generation if item.get('submitted') and item.get('status') != 'success'),
+            "not_sent_chunk_count": max(0, planned_chunk_count - sum(1 for item in chunk_generation if item.get('submitted'))),
             "chunk_generation": chunk_generation,
             "synthesis_status": synthesis_status,
             "failed_chunk": failed_chunk,
@@ -4119,7 +4129,6 @@ def run_chunked_plan(
         chunk_prompt = apply_prompt_limit(chunk_prompt, max_prompt_chars, chunk_caveats)
         if chunk_caveats:
             caveats.extend(f"Plan chunk {index}: {caveat}" for caveat in chunk_caveats)
-        sent_chunk_prompt_chars.append(len(chunk_prompt))
         try:
             text, model_used, generation_metadata = generate_with_fallback(
                 args,
@@ -4129,8 +4138,13 @@ def run_chunked_plan(
                 purpose=f"plan chunk {index}/{len(prompt_chunks)}",
             )
         except AntiError as exc:
-            incomplete_chunks.append(index)
-            exc.run_metadata = plan_failure_metadata(str(exc), failed_chunk=index, failed_chunk_submitted=bool(getattr(exc, 'submitted', False)))  # type: ignore[attr-defined]
+            submitted = bool(getattr(exc, 'submitted', False))
+            if submitted:
+                incomplete_chunks.append(index)
+                sent_chunk_prompt_chars.append(len(chunk_prompt))
+            chunk_generation.append({'index':index, 'model_used':model, 'submitted':submitted,
+                                     'status':'failed' if submitted else 'not_sent', 'error':str(exc)})
+            exc.run_metadata = plan_failure_metadata(str(exc), failed_chunk=index)  # type: ignore[attr-defined]
             raise
         chunk_status = lane_output_status(
             text,
@@ -4140,6 +4154,7 @@ def run_chunked_plan(
         )
         if chunk_status != "success":
             incomplete_chunks.append(index)
+        sent_chunk_prompt_chars.append(len(chunk_prompt))
         chunk_outputs.append(text)
         chunk_generation.append({"index": index, "model_used": model_used, "status": chunk_status, "submitted": True, **generation_metadata})
         execution_ledger.append(
@@ -6755,6 +6770,8 @@ def command_panel(args: argparse.Namespace) -> int:
 
     judge_call_prompts: list[str] = []
     judge_call_outputs: list[str] = []
+    completed_judge_calls: list[dict[str, Any]] = []
+    panel_source_prompt = prompt
 
     def run_judge(prompt: str, max_output_tokens: int) -> tuple[str, str, dict[str, Any]]:
         try:
@@ -6767,12 +6784,17 @@ def command_panel(args: argparse.Namespace) -> int:
                 'panel_results':[{key:value for key,value in row.items() if key != 'output_preview'}
                                  for row in panel_results_for_record(panel_results)],
                 'synthesis_status':'not_sent' if not getattr(exc,'submitted',True) else 'failed',
-                '_execution_ledger':[execution_entry(stage=f'panel_lane_{index}', prompt=prompt,
-                    output=str(row.get('output_text') or ''), model=str(row.get('actual_model') or row.get('model')),
-                    generation=row.get('generation') or {}) for index,row in enumerate(panel_results,1)]})
+                'judge_attempts':[dict(call['generation'], attempt=index) for index,call in enumerate(completed_judge_calls,1)],
+                '_execution_ledger':[*(metadata.get('_execution_ledger') or []),
+                    *[execution_entry(stage=f'panel_lane_{index}', prompt=panel_source_prompt,
+                        output=str(row.get('output_text') or ''), model=str(row.get('actual_model') or row.get('model')),
+                        generation=row.get('generation') or {}) for index,row in enumerate(panel_results,1)],
+                    *[execution_entry(stage=f'panel_judge_{index}', **call)
+                      for index,call in enumerate(completed_judge_calls,1)]]})
             raise
         judge_call_prompts.append(prompt)
         judge_call_outputs.append(result[0])
+        completed_judge_calls.append({'prompt':prompt, 'output':result[0], 'model':result[1], 'generation':dict(result[2])})
         return result
 
     judge_cap = args.judge_output_tokens
@@ -7008,7 +7030,7 @@ def command_panel(args: argparse.Namespace) -> int:
                 stage=f"panel_judge_{index}",
                 prompt=call_prompt,
                 output=judge_call_outputs[index - 1],
-                model=str(judge_model_used),
+                model=completed_judge_calls[index - 1]['model'],
                 generation=attempt,
             )
         )
@@ -7870,7 +7892,7 @@ def command_compare(args: argparse.Namespace) -> int:
     prompt = read_prompt(args)
     caveats: list[str] = []
     results: list[dict[str, Any]] = []
-    for model in models:
+    for index, model in enumerate(models):
         progress(args, f"compare: querying {model}")
         entry: dict[str, Any] = {"model": model}
         try:
@@ -7883,10 +7905,17 @@ def command_compare(args: argparse.Namespace) -> int:
                 model_ids=model_ids,
             )
         except AntiError as exc:
-            entry["status"] = "error"
-            entry["error"] = redact_sensitive_text(str(exc))
+            entry['submitted'] = bool(getattr(exc, 'submitted', False))
+            entry['status'] = 'deferred' if isinstance(exc, DeadlineExceeded) else 'error'
+            entry['error'] = redact_sensitive_text(str(exc))
             results.append(entry)
-            caveats.append(f"Compare model {model} failed: {entry['error']}")
+            caveats.append(f"Compare model {model} {entry['status']}: {entry['error']}")
+            if isinstance(exc, DeadlineExceeded):
+                for remaining_model in models[index + 1:]:
+                    run_control(args).note_deferred('compare_not_scheduled_after_deadline')
+                    results.append({'model':remaining_model, 'status':'deferred', 'submitted':False,
+                                    'error':'run deadline prevented scheduling'})
+                break
             continue
         status = lane_output_status(
             text,
@@ -7895,6 +7924,7 @@ def command_compare(args: argparse.Namespace) -> int:
             generation_metadata,
         )
         entry["status"] = status
+        entry["submitted"] = True
         entry["actual_model"] = model_used
         entry["provider"] = provider_for_model(model_used)
         entry["output_chars"] = len(text.strip())
@@ -7916,6 +7946,7 @@ def command_compare(args: argparse.Namespace) -> int:
         **budget_metadata(args),
         "compare_results": results,
     }
+    metadata = scheduling_metadata(metadata)
     if getattr(args, "run_id", None):
         metadata["run_id"] = args.run_id
         metadata["request_log_correlation_id"] = args.run_id
