@@ -935,11 +935,13 @@ def inspect_codex_gateway_config(content: str, *, provider_id: str, expected_bas
     if not provider_table:
         return False, f"missing [model_providers.{provider_id}] table"
     base_url = provider_table.get("base_url")
+    if base_url is not None and not isinstance(base_url, str):
+        return False, "provider base_url must be a string"
     if base_url != expected_base_url:
         return False, f"provider base_url is {base_url or '(unset)'}, expected {expected_base_url}"
     wire_api = provider_table.get("wire_api")
-    if wire_api and wire_api != "responses":
-        return False, f"provider wire_api is {wire_api}, expected responses"
+    if "wire_api" in provider_table and (not isinstance(wire_api, str) or wire_api != "responses"):
+        return False, "provider wire_api must be the string responses"
     return True, "active provider points to this gateway server"
 
 
@@ -957,11 +959,13 @@ def inspect_codex_provider_block_config(content: str, *, provider_id: str, expec
     if not provider_table:
         return False, f"missing [model_providers.{provider_id}] table"
     base_url = provider_table.get("base_url")
+    if base_url is not None and not isinstance(base_url, str):
+        return False, "provider base_url must be a string"
     if base_url != expected_base_url:
         return False, f"provider base_url is {base_url or '(unset)'}, expected {expected_base_url}"
     wire_api = provider_table.get("wire_api")
-    if wire_api and wire_api != "responses":
-        return False, f"provider wire_api is {wire_api}, expected responses"
+    if "wire_api" in provider_table and (not isinstance(wire_api, str) or wire_api != "responses"):
+        return False, "provider wire_api must be the string responses"
     if active_provider == provider_id:
         return True, "provider block is installed and active"
     return True, f"provider block is installed; active model_provider is {active_provider or '(unset)'}"

@@ -329,3 +329,35 @@ cli.write_codex_config(Path(config), provider_id=provider)
     assert set(result["model_providers"]) == {"fixture-0", "fixture-1"}
     assert result["notes"] == "retained" and result["model"] == "gpt-5"
     assert len(list(tmp_path.glob("config.toml.bak-*"))) == 2
+
+
+@pytest.mark.parametrize("inspect", [cli.inspect_codex_gateway_config, cli.inspect_codex_provider_block_config])
+@pytest.mark.parametrize("wire_api", ["false", "0", "[]", "{}", '""', '"chat"', '"responses "', "2026-01-01"])
+def test_readiness_refuses_present_invalid_wire_api_types_and_values(inspect, wire_api):
+    source = ('model_provider = "antigravity"\n[model_providers.antigravity]\n'
+              f'base_url = {json.dumps(cli.DEFAULT_CODEX_BASE_URL)}\nwire_api = {wire_api}\n')
+    table = cli.parse_codex_config(source)["provider_tables"]["antigravity"]
+    assert "wire_api" in table
+    assert table["wire_api"] == parsed(source)["model_providers"]["antigravity"]["wire_api"]
+    ready, reason = inspect(source, provider_id="antigravity", expected_base_url=cli.DEFAULT_CODEX_BASE_URL)
+    assert ready is False and "wire_api" in reason
+
+
+@pytest.mark.parametrize("inspect", [cli.inspect_codex_gateway_config, cli.inspect_codex_provider_block_config])
+@pytest.mark.parametrize("wire_api", [None, '"responses"'])
+def test_readiness_retains_omitted_or_correct_wire_api_compatibility(inspect, wire_api):
+    source = ('model_provider = "antigravity"\n[model_providers.antigravity]\n'
+              f'base_url = {json.dumps(cli.DEFAULT_CODEX_BASE_URL)}\n')
+    if wire_api is not None:
+        source += f"wire_api = {wire_api}\n"
+    ready, _ = inspect(source, provider_id="antigravity", expected_base_url=cli.DEFAULT_CODEX_BASE_URL)
+    assert ready is True
+
+
+@pytest.mark.parametrize("inspect", [cli.inspect_codex_gateway_config, cli.inspect_codex_provider_block_config])
+def test_nonstring_base_url_is_rejected_without_echoing_arbitrary_data(inspect):
+    source = ('model_provider = "antigravity"\n[model_providers.antigravity]\n'
+              'base_url = { token = "synthetic-private-value" }\nwire_api = "responses"\n')
+    ready, reason = inspect(source, provider_id="antigravity", expected_base_url=cli.DEFAULT_CODEX_BASE_URL)
+    assert ready is False
+    assert "base_url" in reason and "synthetic-private-value" not in reason

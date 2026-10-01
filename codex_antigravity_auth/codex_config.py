@@ -85,8 +85,9 @@ def parse_provider_config(content: str) -> dict[str, object]:
     providers = document.get("model_providers", {})
     if not isinstance(providers, Mapping):
         raise ValueError("model_providers must be a TOML table.")
-    tables = {name: {key: value for key, value in table.items() if isinstance(value, str)}
-              for name, table in providers.items() if isinstance(table, Mapping)}
+    # Keep TOML types so inspectors distinguish omitted selectors from invalid
+    # explicit values (for example wire_api = false).
+    tables = {name: dict(table) for name, table in providers.items() if isinstance(table, Mapping)}
     return {
         "active_provider": document.get("model_provider") if isinstance(document.get("model_provider"), str) else "",
         "active_model": document.get("model") if isinstance(document.get("model"), str) else "",
