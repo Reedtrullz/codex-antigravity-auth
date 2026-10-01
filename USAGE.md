@@ -276,6 +276,10 @@ literal `--review-root` / `--exclude-path` selections. Working-tree reviews repo
 excluded untracked files; `--include-untracked` opts in to their content. Staged
 scope stays unchanged. See [review inventory and coverage limits](codex_antigravity_auth/skills/anti/SCOPES.md).
 
+Diff findings retain captured old/new line and blob provenance. Locations outside
+submitted hunks stay unknown; mapping never verifies the finding. See
+[immutable diff locations](codex_antigravity_auth/skills/anti/DIFF_PROVENANCE.md).
+
 `consult`, `review`, `plan`, `compare`, `panel` and `workflow` accept opt-in
 `--data-policy PATH`. Exact gateway/model/stage allowlists and forbidden source
 paths restrict the chosen run. Bounded secret-pattern checks stop a submission

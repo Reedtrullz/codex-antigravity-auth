@@ -3,6 +3,7 @@
   "files": [
     "ARTIFACTS.md",
     "DATA_POLICY.md",
+    "DIFF_PROVENANCE.md",
     "SCOPES.md",
     "SKILL.md",
     "agents/openai.yaml",
@@ -17,6 +18,7 @@
     "scripts/anti_lib/cleanup.py",
     "scripts/anti_lib/context.py",
     "scripts/anti_lib/data_policy.py",
+    "scripts/anti_lib/diff_snapshot.py",
     "scripts/anti_lib/endpoint_policy.py",
     "scripts/anti_lib/finding_verdicts.py",
     "scripts/anti_lib/inventory.py",
