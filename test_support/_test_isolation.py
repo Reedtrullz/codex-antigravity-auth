@@ -48,12 +48,14 @@ def assert_no_violations():
         raise AssertionError("Unexpected test isolation violation(s): " + "; ".join(messages))
 
 
-def allow_listener(sock):
+def allow_listener(sock, host="127.0.0.1"):
     """Bind an owned TCP listener; authorization lives only as long as the fixture."""
     global _binding
+    if host not in {"127.0.0.1", "::1"}:
+        raise ValueError("Owned test listeners require an explicit loopback address")
     _binding = True
     try:
-        sock.bind(("127.0.0.1", 0))
+        sock.bind((host, 0))
     finally:
         _binding = False
     endpoint = sock.getsockname()[:2]

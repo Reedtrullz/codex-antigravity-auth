@@ -26,6 +26,8 @@ from codex_antigravity_auth.unified import OpenAIAuth
 from codex_antigravity_auth.endpoint_policy import open_http_request, validate_endpoint_url
 from codex_antigravity_auth.skills.anti.scripts.anti_lib import endpoint_policy as shared
 from codex_antigravity_auth.skills.anti.tests.test_anti import load_anti
+from _test_isolation import allow_listener, remove_listener
+from standalone import without_installed_packages
 
 
 UNSAFE = [
@@ -225,9 +227,16 @@ def test_real_callers_use_the_no_redirect_handler_chain(monkeypatch, caller):
 def loopback_server(handler, host="127.0.0.1"):
     class IPv6Server(ThreadingHTTPServer):
         address_family = socket.AF_INET6
+    server = None
     try:
-        server = (IPv6Server if ":" in host else ThreadingHTTPServer)((host, 0), handler)
+        server = (IPv6Server if ":" in host else ThreadingHTTPServer)((host, 0), handler, bind_and_activate=False)
+        endpoint = allow_listener(server.socket, host)
+        server.server_address = endpoint
+        server.server_name, server.server_port = "fixture", endpoint[1]
+        server.server_activate()
     except OSError as exc:
+        if server is not None:
+            server.server_close()
         if ":" in host:
             pytest.skip(f"IPv6 loopback unavailable: {exc}")
         raise
@@ -238,6 +247,7 @@ def loopback_server(handler, host="127.0.0.1"):
     finally:
         server.shutdown()
         server.server_close()
+        remove_listener(endpoint)
         thread.join(timeout=2)
         assert not thread.is_alive()
 
@@ -292,6 +302,10 @@ def test_loopback_gateway_requests_keep_working_with_synthetic_authorization(mon
             self.wfile.write(body)
         do_POST = do_GET
     monkeypatch.setenv("ANTIGRAVITY_GATEWAY_TOKEN", "synthetic-token")
+    if host == "localhost":
+        original = socket.getaddrinfo
+        monkeypatch.setattr(socket, "getaddrinfo", lambda address, *a, **kw:
+                            original("127.0.0.1" if address == "localhost" else address, *a, **kw))
     with loopback_server(Handler, "::1" if host == "::1" else "127.0.0.1") as server:
         base = cli.local_gateway_base_url(host, server.server_port)
         assert cli.gateway_model_ids(base) == {"fixture-model"}
@@ -313,7 +327,8 @@ for url in json.load(sys.stdin):
     except ValueError: output.append(None)
 print(json.dumps(output))
 """
-    result = subprocess.run([sys.executable, "-I", "-S", "-c", code, str(tmp_path)], input=json.dumps(SAFE + UNSAFE), text=True, capture_output=True, timeout=10)
+    result = subprocess.run([sys.executable, "-c", without_installed_packages(code), str(tmp_path)], cwd=tmp_path,
+                            input=json.dumps(SAFE + UNSAFE), text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == SAFE + [None] * len(UNSAFE)
 
