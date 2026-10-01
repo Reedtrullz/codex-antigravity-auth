@@ -348,3 +348,158 @@ def test_provider_import_refuses_hidden_case_collisions():
     with pytest.raises(obs.ObservationError, match='case policy'):
         obs.import_discovered('fixture',['DECLARED'])
     assert byok.get_providers_json_path().read_bytes() == before
+
+
+@pytest.mark.parametrize('provider_id,url', [('custom-fixture',None), ('custom-fixture','http://remote.invalid/v1'),
+                                           ('deepseek','https://example.invalid/v1?private-fixture')])
+def test_invalid_stored_endpoints_remain_visible_without_secret_labels(state, monkeypatch, capsys, provider_id, url):
+    raw = {'providers':{provider_id:{'models':['fixture-model'], 'apiKey':'fixture-secret-value',
+                                    'displayName':'fixture-private-label', **({'baseUrl':url} if url is not None else {})}}}
+    # Preserve the malformed fixture on disk; the normal writer intentionally
+    # normalizes inputs, which would erase the condition under test.
+    from codex_antigravity_auth.storage import save_secure_json_file
+    path = byok.get_providers_json_path()
+    save_secure_json_file(path, raw, error_label='synthetic provider fixture')
+    before = path.read_bytes()
+    result = TestClient(server.app).get('/v1/models').json()
+    rows = result['provider_catalog_diagnostics']['providers']
+    assert {'provider':provider_id, 'status':'invalid_configuration', 'omitted_models':1} in rows
+    assert result['provider_catalog_diagnostics']['status'] == 'partial'
+    assert not any(item['id'] == provider_id + ':fixture-model' for item in result['data'])
+    assert any(item['id'] == 'gemini-3.8-flash' for item in result['data'])
+    assert 'fixture-secret-value' not in json.dumps(result) and 'fixture-private-label' not in json.dumps(rows)
+    assert path.read_bytes() == before and capsys.readouterr().err == ''
+
+
+def test_discovery_import_digest_binds_the_complete_observation():
+    stored = provider()
+    byok.save_provider_config({'providers':{'fixture':stored}})
+    record = {**obs._record('discovery',obs.provider_identity('fixture',stored),60), 'models':['added'], 'pages':1}
+    obs.save_observation(record,'fixture')
+    preview = obs.import_discovered('fixture',['added'])
+    obs.save_observation({**record,'models':['added','different-catalog-entry']},'fixture')
+    before = byok.get_providers_json_path().read_bytes()
+    with pytest.raises(obs.ObservationError, match='digest'):
+        obs.import_discovered('fixture',['added'],write=True,accept_digest=preview['digest'])
+    assert byok.get_providers_json_path().read_bytes() == before
+
+
+def test_import_rechecks_source_while_holding_observation_and_store_locks(monkeypatch):
+    from contextlib import contextmanager
+    from codex_antigravity_auth import storage
+    stored = provider()
+    byok.save_provider_config({'providers':{'fixture':stored}})
+    record = {**obs._record('discovery',obs.provider_identity('fixture',stored),60), 'models':['added'], 'pages':1}
+    obs.save_observation(record,'fixture')
+    preview = obs.import_discovered('fixture',['added'])
+    before = byok.get_providers_json_path().read_bytes()
+    original_update, original_read, original_lock = storage.update_secure_json_file, obs.read_observation, obs.file_lock
+    held = {'cache':False,'store':False,'checked':False}
+    @contextmanager
+    def cache_lock(path):
+        assert path == obs.cache_path('discovery','fixture')
+        with original_lock(path):
+            held['cache'] = True
+            try: yield
+            finally: held['cache'] = False
+    def update(path, default, mutate, **kwargs):
+        def under_store_lock(data):
+            held['store'] = True
+            try: return mutate(data)
+            finally: held['store'] = False
+        return original_update(path, default, under_store_lock, **kwargs)
+    def read(*args, **kwargs):
+        if held['store']:
+            assert held['cache']
+            held['checked'] = True
+            # Inject expiry at the last recheck without altering store bytes.
+            return {'state':'stale','record':record}
+        return original_read(*args, **kwargs)
+    monkeypatch.setattr(obs,'file_lock',cache_lock)
+    monkeypatch.setattr(storage,'update_secure_json_file',update)
+    monkeypatch.setattr(obs,'read_observation',read)
+    with pytest.raises(obs.ObservationError, match='observation'):
+        obs.import_discovered('fixture',['added'],write=True,accept_digest=preview['digest'])
+    assert held['checked'] and byok.get_providers_json_path().read_bytes() == before
+
+
+def test_unconfigured_byok_explanation_is_structured_offline_and_not_ready(state, monkeypatch, capsys):
+    monkeypatch.setattr(obs,'providers_read_only',lambda:{})
+    monkeypatch.setattr(obs.httpx,'AsyncClient',Mock(side_effect=AssertionError('no network')))
+    before = list(state.rglob('*'))
+    monkeypatch.setattr(sys,'argv',['codex-antigravity','models','explain','missing:vendor/model','--json'])
+    cli.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result['route'] == 'byok' and result['canonical_id'] == 'missing:vendor/model'
+    assert result['configuration_diagnostics'] == ['provider_not_configured']
+    assert result['declaration'] is None and result['discovery']['state'] == result['probe']['state'] == 'missing'
+    assert result['recent_generation_ok'] is False and result['availability'] == 'unknown'
+    assert list(state.rglob('*')) == before
+
+
+def test_refresh_between_preview_and_cache_lock_cannot_change_import_source(monkeypatch):
+    stored = provider()
+    byok.save_provider_config({'providers':{'fixture':stored}})
+    record = {**obs._record('discovery',obs.provider_identity('fixture',stored),60),'models':['added'],'pages':1}
+    obs.save_observation(record,'fixture')
+    preview = obs.import_discovered('fixture',['added'])
+    before = byok.get_providers_json_path().read_bytes()
+    original_lock = obs.file_lock
+    @contextmanager
+    def refreshed_lock(path):
+        obs.save_observation({**record,'models':['replacement']},'fixture')
+        with original_lock(path): yield
+    monkeypatch.setattr(obs,'file_lock',refreshed_lock)
+    with pytest.raises(obs.ObservationError, match='observation changed'):
+        obs.import_discovered('fixture',['added'],write=True,accept_digest=preview['digest'])
+    assert byok.get_providers_json_path().read_bytes() == before
+
+
+def test_refresh_waits_until_the_reviewed_import_transaction_finishes(monkeypatch):
+    from codex_antigravity_auth import storage
+    stored = provider()
+    byok.save_provider_config({'providers':{'fixture':stored}})
+    record = {**obs._record('discovery',obs.provider_identity('fixture',stored),60),'models':['added'],'pages':1}
+    obs.save_observation(record,'fixture')
+    preview = obs.import_discovered('fixture',['added'])
+    before_update = storage.update_secure_json_file
+    started, finished = threading.Event(), threading.Event()
+    workers, errors = [], []
+    def refresh():
+        started.set()
+        try: obs.save_observation({**record,'models':['replacement']},'fixture')
+        except Exception as exc: errors.append(type(exc).__name__)
+        finally: finished.set()
+    def update(path, default, mutate, **kwargs):
+        def under_lock(data):
+            worker = threading.Thread(target=refresh, daemon=True)
+            workers.append(worker); worker.start()
+            assert started.wait(1)
+            assert not finished.wait(.03)
+            return mutate(data)
+        return before_update(path,default,under_lock,**kwargs)
+    monkeypatch.setattr(storage,'update_secure_json_file',update)
+    try:
+        assert obs.import_discovered('fixture',['added'],write=True,accept_digest=preview['digest'])['saved']
+    finally:
+        for worker in workers: worker.join(2)
+    assert finished.is_set() and not errors and not any(worker.is_alive() for worker in workers)
+    assert 'added' in byok.load_provider_config_read_only()['providers']['fixture']['models']
+    assert obs.discover('fixture')['record']['models'] == ['replacement']
+
+
+def test_builtin_preset_can_supply_its_default_endpoint():
+    from codex_antigravity_auth.storage import save_secure_json_file
+    save_secure_json_file(byok.get_providers_json_path(), {'providers':{'custom':{'models':['fixture-model']}}}, error_label='fixture')
+    result = TestClient(server.app).get('/v1/models').json()
+    assert {'provider':'custom','status':'complete','omitted_models':0} in result['provider_catalog_diagnostics']['providers']
+
+
+@pytest.mark.parametrize('providers', [None, ['invalid'], {'bad': 'fixture-secret-value'}])
+def test_malformed_provider_structure_is_reported_without_echoing_values(providers):
+    from codex_antigravity_auth.storage import save_secure_json_file
+    save_secure_json_file(byok.get_providers_json_path(), {'providers':providers}, error_label='fixture')
+    result = TestClient(server.app).get('/v1/models').json()
+    assert result['provider_catalog_diagnostics']['status'] == 'partial'
+    assert result['provider_catalog_diagnostics']['providers'] == [{'provider':None,'status':'configuration_unreadable','omitted_models':None}]
+    assert result['data'] and 'fixture-secret-value' not in json.dumps(result)

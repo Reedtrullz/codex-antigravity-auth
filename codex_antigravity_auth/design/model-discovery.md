@@ -52,6 +52,11 @@ existing file bytes, including comments. A successful overlay save uses the
 existing managed TOML renderer and atomic store writer. Preview alone writes no
 configuration, key or observation file.
 
+Provider import digests bind the complete discovery observation, including its
+timestamps and catalog contents. Saving holds the observation lock before the
+provider-store lock, rechecks source identity and freshness inside both, and
+prevents a concurrent refresh from replacing the approved source mid-write.
+
 ## Explanation and one-model probes
 
 ```sh
@@ -65,6 +70,8 @@ configuration, and reports discovery as fresh, stale, mismatched, invalid,
 missing or unsupported for routes without an adapter. Native Google and unified
 OpenAI registries remain local declarations; this discovery adapter is for BYOK
 OpenAI-compatible catalogs.
+An unconfigured colon-prefixed BYOK model still returns the structured explanation
+with `provider_not_configured`, absent declarations and no generation claim.
 
 `models probe --network` sends one fixed, nonstreaming text-generation request
 with a 16-token output cap. It records the requested canonical route/model,
@@ -96,6 +103,10 @@ IDs and digests, never raw provider errors or request credentials.
 skip reasons and omitted counts. A provider lookup failure does not erase native
 declarations or imply a generation failure. No upstream discovery is run by the
 picker endpoint.
+Rejected custom endpoints retain only safe diagnostic identity/count information
+in the read-only view; invalid preset URL overrides are also excluded explicitly.
+Malformed provider structures report an unreadable configuration without echoing
+stored values. These diagnostic reads leave the store bytes unchanged.
 
 Tests use synthetic credentials, guarded owned HTTP listeners and temporary
 stores. Live provider acceptance, platform credential-store integration and

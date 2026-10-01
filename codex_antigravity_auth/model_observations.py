@@ -278,30 +278,36 @@ def describe_model(identifier, *, base_url='http://127.0.0.1:51122/v1', configs=
     discovery = {'state':'not_supported', 'record':None}
     if route == 'byok':
         provider_id, backend = byok.split_provider_model(identifier, provider_configs=configs)
-        provider_id, provider = selected_provider(provider_id, configs)
         backend = public_id(byok.normalize_byok_model_id(backend, provider_id))
         canonical = public_id(provider_id + ':' + backend)
-        identity = provider_identity(provider_id, provider)
-        configuration = identity['configuration']
-        discovery = read_observation('discovery', provider_id, identity)
-        try:
-            byok.validate_supported_provider_kind(provider)
-            byok.validate_http_base_url(provider.get('baseUrl'))
-            if not byok.resolve_api_key(provider) and not byok.provider_allows_keyless_local_use(provider): diagnostics.append('missing_credentials')
-            entries = provider.get('models', [])
-            selected = next((entry for entry in entries if byok.normalize_byok_model_id(
-                entry.get('id') if isinstance(entry, dict) else entry, provider_id) == backend), None)
-            if selected is not None:
-                capabilities = byok.provider_capabilities(provider, backend)
-                declared = dict(provider.get('capabilities') or {})
-                if isinstance(selected, dict): declared.update(selected.get('capabilities') or {})
-                declaration = contract(canonical_id=canonical, backend_id=backend, route='byok', family=provider_id,
-                    aliases=[], capabilities=capabilities, context_window=selected.get('context_window', selected.get('contextWindow')) if isinstance(selected, dict) else None,
-                    declaration_source='provider_configuration', declared_capabilities=declared)
-            else: diagnostics.append('model_not_declared')
-        except ValueError:
-            diagnostics.append('invalid_configuration')
-        configuration = digest({'provider':identity, 'declaration':declaration})
+        provider = configs.get(provider_id)
+        if provider is None and provider_id in byok.PROVIDER_PRESETS:
+            provider = byok.merged_provider_config(provider_id)
+        if provider is None:
+            diagnostics.append('provider_not_configured')
+            discovery = {'state':'missing', 'record':None}
+            configuration = digest({'provider':provider_id, 'configured':False})
+        else:
+            identity = provider_identity(provider_id, provider)
+            discovery = read_observation('discovery', provider_id, identity)
+            try:
+                byok.validate_supported_provider_kind(provider)
+                byok.validate_http_base_url(provider.get('baseUrl'))
+                if not byok.resolve_api_key(provider) and not byok.provider_allows_keyless_local_use(provider): diagnostics.append('missing_credentials')
+                entries = provider.get('models', [])
+                selected = next((entry for entry in entries if byok.normalize_byok_model_id(
+                    entry.get('id') if isinstance(entry, dict) else entry, provider_id) == backend), None)
+                if selected is not None:
+                    capabilities = byok.provider_capabilities(provider, backend)
+                    declared = dict(provider.get('capabilities') or {})
+                    if isinstance(selected, dict): declared.update(selected.get('capabilities') or {})
+                    declaration = contract(canonical_id=canonical, backend_id=backend, route='byok', family=provider_id,
+                        aliases=[], capabilities=capabilities, context_window=selected.get('context_window', selected.get('contextWindow')) if isinstance(selected, dict) else None,
+                        declaration_source='provider_configuration', declared_capabilities=declared)
+                else: diagnostics.append('model_not_declared')
+            except ValueError:
+                diagnostics.append('invalid_configuration')
+            configuration = digest({'provider':identity, 'declaration':declaration})
     elif route == 'antigravity':
         definition = models.native_model_definition(identifier)
         if definition:
@@ -387,6 +393,8 @@ def import_discovered(provider_id, selected, *, write=False, accept_digest=None)
     except ValueError:
         raise ObservationError('Provider capability declarations are invalid.') from None
     proposal = {'provider':provider_id, 'add':additions, 'discovery_status':observation['record']['status'],
+                'observation':{'digest':digest(observation['record']), 'observedAt':observation['record']['observedAt'],
+                               'expiresAt':observation['record']['expiresAt']},
                 'capabilities_promoted':False, 'inherited_capabilities':inherited['effective'],
                 'configuration':identity['configuration'],
                 'before':digest({'models':provider.get('models', []),'capabilities':provider.get('capabilities')})}
@@ -394,15 +402,28 @@ def import_discovered(provider_id, selected, *, write=False, accept_digest=None)
     if write:
         if accept_digest != proposal['digest']: raise ObservationError('Saving requires --accept-digest from the matching preview.')
         from .storage import update_secure_json_file
+        def check_observation():
+            latest = read_observation('discovery', provider_id, identity)
+            if latest['state'] != 'fresh' or digest(latest['record']) != proposal['observation']['digest']:
+                raise ObservationError('Discovery observation changed or expired; preview again.')
         def mutate(data):
+            check_observation()
             current = data.setdefault('providers', {}).get(provider_id, {})
             merged = byok.merged_provider_config(provider_id, current)
             if provider_identity(provider_id, merged) != identity: raise ObservationError('Provider changed after preview; preview again.')
             if digest({'models':merged.get('models', []),'capabilities':merged.get('capabilities')}) != proposal['before']:
                 raise ObservationError('Provider models changed after preview; preview again.')
             data['providers'][provider_id] = {**current, 'models':[*merged.get('models', []), *additions]}
-        update_secure_json_file(byok.get_providers_json_path(), byok.default_provider_config, mutate,
-                               normalize=byok.normalize_provider_config, error_label='BYOK providers')
+        # Cache writers use the same observation lock. Always acquire it before
+        # the provider-store lock, and recheck freshness inside both locks.
+        with file_lock(cache_path('discovery', provider_id)):
+            check_observation()
+            try:
+                update_secure_json_file(byok.get_providers_json_path(), byok.default_provider_config, mutate,
+                                       normalize=byok.normalize_provider_config, error_label='BYOK providers')
+            except RuntimeError as exc:
+                if isinstance(exc.__cause__, ObservationError): raise exc.__cause__ from None
+                raise
     return {**proposal, 'saved':write}
 
 

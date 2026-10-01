@@ -33,6 +33,7 @@ from .byok import (
     split_provider_model,
     validate_provider_api_key,
     validate_provider_id,
+    validate_http_base_url,
     validate_supported_provider_kind,
 )
 from .transform import safe_project_id, transform_chat_response, valid_function_name
@@ -632,6 +633,15 @@ def provider_model_catalog(created: int, *, diagnostics: list | None = None) -> 
         configured_models = provider.get("models", [])
         diagnostic = {"provider":label, "status":"complete", "omitted_models":len(configured_models) if isinstance(configured_models, list) else None}
         diagnostics.append(diagnostic)
+        if provider.get("_configuration_error"):
+            count = provider.get("_declared_model_count")
+            diagnostic.update(status="invalid_configuration", omitted_models=count if type(count) is int and count >= 0 else None)
+            continue
+        try:
+            validate_http_base_url(provider.get("baseUrl"))
+        except ValueError:
+            diagnostic["status"] = "invalid_configuration"
+            continue
         try:
             validate_supported_provider_kind(provider)
         except ValueError:

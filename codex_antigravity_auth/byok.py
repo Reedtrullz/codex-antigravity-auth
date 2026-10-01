@@ -484,6 +484,10 @@ def validate_provider_headers(headers: dict[str, Any] | None) -> dict[str, str] 
 
 def normalize_provider_entry(provider: dict[str, Any], *, quiet: bool = False) -> dict[str, Any]:
     normalized = dict(provider)
+    # These markers are computed for read-only diagnostics, never trusted from
+    # stored provider data or retained by a normal write.
+    normalized.pop("_configuration_error", None)
+    normalized.pop("_declared_model_count", None)
 
     if "kind" in normalized:
         kind = _non_empty_string(normalized.get("kind"))
@@ -581,20 +585,30 @@ def normalize_provider_entry(provider: dict[str, Any], *, quiet: bool = False) -
     return normalized
 
 
-def normalize_provider_config(data: dict[str, Any], *, quiet: bool = False) -> dict[str, Any]:
+def normalize_provider_config(data: dict[str, Any], *, quiet: bool = False, retain_invalid: bool = False) -> dict[str, Any]:
     if not isinstance(data, dict):
+        if retain_invalid: raise ValueError("Provider configuration must be an object")
         data = {}
     providers = data.get("providers")
     if not isinstance(providers, dict):
+        if retain_invalid and "providers" in data: raise ValueError("Provider entries must be an object")
         data["providers"] = {}
     else:
         normalized_providers = {}
         for provider_id, provider in providers.items():
             provider_id = str(provider_id)
             if not isinstance(provider, dict) or not PROVIDER_ID_RE.fullmatch(str(provider_id)):
+                if retain_invalid: raise ValueError("Provider entry is malformed")
                 continue
             normalized = normalize_provider_entry(provider, quiet=quiet)
             if provider_id not in PROVIDER_PRESETS and not _non_empty_string(normalized.get("baseUrl")):
+                if retain_invalid:
+                    entries = provider.get("models")
+                    normalized_providers[provider_id] = {
+                        "kind":"openai_chat", "baseUrl":None, "models":[],
+                        "_configuration_error":"invalid_base_url",
+                        "_declared_model_count":len(entries) if isinstance(entries, list) else None,
+                    }
                 continue
             normalized_providers[provider_id] = normalized
         data["providers"] = normalized_providers
@@ -615,7 +629,7 @@ def load_provider_config_read_only() -> dict[str, Any]:
     return load_secure_json_file_read_only(
         providers_json_path_read_only(),
         default_provider_config,
-        normalize=lambda data: normalize_provider_config(data, quiet=True),
+        normalize=lambda data: normalize_provider_config(data, quiet=True, retain_invalid=True),
         error_label="BYOK providers",
     )
 
