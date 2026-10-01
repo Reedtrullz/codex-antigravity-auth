@@ -37,6 +37,7 @@ from anti_lib.chunking import chunk_manifest
 from anti_lib.context import ordered_prompt
 from anti_lib.ledger import execution_entry, prompts_as_text
 from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
+from anti_lib.persistence import PersistenceError, atomic_write_json, file_lock
 from anti_lib.retention import lifecycle_metadata, summary_projection, summary_retention, summary_structure
 from anti_lib.runner import presentable_result
 from anti_lib.verifier import verify_findings
@@ -760,7 +761,51 @@ def check_record_retention(record_id: str, output_mode: str) -> None:
         raise AntiError("run id has artifacts incompatible with retention policy; choose a new run id")
 
 
-def write_run_record(
+_RECORD_WRITES = threading.local()
+
+
+def write_run_record(args: argparse.Namespace, **kwargs: Any) -> Path | None:
+    """Serialize one invocation's run; a terminal record never regresses."""
+    output_mode = save_output_mode(args)
+    record_id = getattr(args, "run_id", None)
+    if not record_id and output_mode == "never":
+        return None
+    record_id = str(record_id or new_run_id())
+    if not RUN_ID_RE.fullmatch(record_id):
+        raise AntiError("run id must contain only letters, numbers, '_' or '-'")
+    args.run_id = record_id
+    check_record_retention(record_id, output_mode)
+    if not getattr(args, "_anti_writer_id", None):
+        args._anti_writer_id = uuid.uuid4().hex
+    if RUNS_DIR.is_symlink():
+        raise AntiError("refusing to write Anti run record through symlinked directory")
+    RUNS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(RUNS_DIR, 0o700)
+    path = RUNS_DIR / f"{record_id}.json"
+    _RECORD_WRITES.depth = getattr(_RECORD_WRITES, "depth", 0) + 1
+    try:
+        with file_lock(path):
+            check_record_retention(record_id, output_mode)
+            if path.exists():
+                previous = json.loads(path.read_text(encoding="utf-8"))
+                if previous.get("id") != record_id or previous.get("writerId") != args._anti_writer_id:
+                    raise AntiError("run id belongs to another writer or legacy record; choose a new run id")
+                if previous.get("status") not in {"running", "success", "partial", "failed", "error", "interrupted"}:
+                    raise AntiError("unknown saved run state; preserve the record and choose a new run id")
+                if previous["status"] != "running":
+                    args.run_record_written = True
+                    return path
+            return _write_run_record_unlocked(args, **kwargs)
+    finally:
+        _RECORD_WRITES.depth -= 1
+        if not _RECORD_WRITES.depth:
+            pending = getattr(_RECORD_WRITES, "pending_signal", None)
+            _RECORD_WRITES.pending_signal = None
+            if pending is not None:
+                _handle_run_signal(*pending)
+
+
+def _write_run_record_unlocked(
     args: argparse.Namespace,
     *,
     mode: str,
@@ -820,21 +865,9 @@ def write_run_record(
         record_path = RUNS_DIR / f"{record['id']}.json"
         if record_path.exists() and record_path.is_symlink():
             raise AntiError(f"refusing to overwrite symlinked run record: {record_path}")
-        tmp_path = record_path.with_suffix(record_path.suffix + ".tmp")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        try:
-            fd = os.open(tmp_path, flags, 0o600)
-        except FileExistsError:
-            if tmp_path.is_symlink():
-                raise
-            tmp_path.unlink()
-            fd = os.open(tmp_path, flags, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+        record["writerId"] = args._anti_writer_id
+        atomic_write_json(record_path, record)
         args.run_record_written = status != "running"
-        os.replace(tmp_path, record_path)
         return record_path
 
     if RUNS_DIR.is_symlink():
@@ -926,20 +959,7 @@ def write_run_record(
     if output_mode == "full" and execution_ledger:
         for index, entry in enumerate(execution_ledger, start=1):
             lane_path = artifact_dir / f"lane-{index:04d}.json"
-            lane_tmp = lane_path.with_suffix(lane_path.suffix + ".tmp")
-            lane_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            if hasattr(os, "O_NOFOLLOW"):
-                lane_flags |= os.O_NOFOLLOW
-            try:
-                lane_fd = os.open(lane_tmp, lane_flags, 0o600)
-            except FileExistsError:
-                if lane_tmp.is_symlink():
-                    raise
-                lane_tmp.unlink()
-                lane_fd = os.open(lane_tmp, lane_flags, 0o600)
-            with os.fdopen(lane_fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(sanitize_json(entry), indent=2, sort_keys=True) + "\n")
-            os.replace(lane_tmp, lane_path)
+            atomic_write_json(lane_path, sanitize_json(entry))
             raw_lane_paths.append(str(lane_path))
     artifact_scope_status = record.get("scopeStatus") or ("complete" if status == "success" else "partial")
     artifact_metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
@@ -1036,41 +1056,13 @@ def write_run_record(
         record["id"] = str(record_id)
         if "metadata" in record:
             record["metadata"]["request_log_correlation_id"] = str(record_id)
-    artifact_tmp = artifact_path.with_suffix(artifact_path.suffix + ".tmp")
-    artifact_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        artifact_flags |= os.O_NOFOLLOW
-    try:
-        artifact_fd = os.open(artifact_tmp, artifact_flags, 0o600)
-    except FileExistsError:
-        if artifact_tmp.is_symlink():
-            raise
-        artifact_tmp.unlink()
-        artifact_fd = os.open(artifact_tmp, artifact_flags, 0o600)
-    with os.fdopen(artifact_fd, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
-    os.replace(artifact_tmp, artifact_path)
+    artifact["writerId"] = args._anti_writer_id
+    atomic_write_json(artifact_path, artifact)
     record["resultPath"] = str(artifact_path)
+    record["writerId"] = args._anti_writer_id
     path = run_record_path
-    if path.exists() and path.is_symlink():
-        raise AntiError(f"refusing to overwrite symlinked run record: {path}")
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        fd = os.open(tmp_path, flags, 0o600)
-    except FileExistsError:
-        if tmp_path.is_symlink():
-            raise
-        tmp_path.unlink()
-        fd = os.open(tmp_path, flags, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
-    # A 'running' placeholder is not a final record; lifecycle handlers may
-    # still overwrite it with interrupted/error/failed status.
+    atomic_write_json(path, record)
     args.run_record_written = status != "running"
-    os.replace(tmp_path, path)
     progress(args, f"saved sanitized run record: {path}")
     return path
 
@@ -7000,8 +6992,8 @@ def command_panel(args: argparse.Namespace) -> int:
             run_id=getattr(args, "run_id", None),
             save_output=save_output_mode(args),
         )
-    except Exception:
-        pass  # Reflection recording is best-effort
+    except Exception as exc:
+        eprint("[anti] Reflection history was not updated: " + redact_sensitive_text(str(exc)))
     print_panel_result(
         panel_mode=args.mode,
         base_url=args.base_url,
@@ -7389,8 +7381,8 @@ def command_review(args: argparse.Namespace) -> int:
             run_id=getattr(args, "run_id", None),
             save_output=save_output_mode(args),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        eprint("[anti] Reflection history was not updated: " + redact_sensitive_text(str(exc)))
     print_result(
         mode="review",
         model=str(model_used),
@@ -8003,27 +7995,31 @@ def command_doctor(args: argparse.Namespace) -> int:
     return run_cli(cli_args)
 
 
+def _handle_run_signal(args: argparse.Namespace, signum: int) -> None:
+    # A Python signal can interrupt us while we own a non-reentrant OS lock.
+    # Finish/unwind the current atomic publication, then record interruption.
+    if getattr(_RECORD_WRITES, "depth", 0):
+        _RECORD_WRITES.pending_signal = (args, signum)
+        return
+    if not getattr(args, "run_record_written", False):
+        try:
+            write_run_record(
+                args, mode=getattr(args, "command", "unknown"), status="interrupted",
+                models=[], base_url=getattr(args, "base_url", None),
+                metadata={"request_log_correlation_id": getattr(args, "run_id", None)},
+                error=f"terminated by signal {signum}",
+            )
+        except Exception:
+            pass
+    raise SystemExit(128 + signum)
+
+
 def _install_run_signal_handlers(args: argparse.Namespace) -> None:
-    """Write an interrupted record (over the running placeholder) on SIGTERM/SIGHUP."""
+    """Persist interruption without recursively acquiring a held record lock."""
     if not hasattr(args, "save_output"):
         return
-
     def handler(signum: int, _frame: Any) -> None:
-        if not getattr(args, "run_record_written", False):
-            try:
-                write_run_record(
-                    args,
-                    mode=getattr(args, "command", "unknown"),
-                    status="interrupted",
-                    models=[],
-                    base_url=getattr(args, "base_url", None),
-                    metadata={"request_log_correlation_id": getattr(args, "run_id", None)},
-                    error=f"terminated by signal {signum}",
-                )
-            except Exception:
-                pass
-        raise SystemExit(128 + signum)
-
+        _handle_run_signal(args, signum)
     for signum in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
         if signum is None:
             continue
@@ -8341,6 +8337,8 @@ def command_workflow(args: argparse.Namespace) -> int:
     parser = build_parser()
     expanded_args = parser.parse_args(expanded)
     expanded_args.workflow_name = args.name
+    if getattr(args, "_anti_writer_id", None):
+        expanded_args._anti_writer_id = args._anti_writer_id
     if not getattr(expanded_args, "run_label", None):
         expanded_args.run_label = args.run_label or args.name
     if hasattr(expanded_args, "base_url") and expanded_args.base_url is not None:
@@ -8354,6 +8352,8 @@ def command_workflow(args: argparse.Namespace) -> int:
     finally:
         # Propagate the inner run id so lifecycle handlers on the outer args
         # overwrite the same placeholder instead of orphaning it (B5).
+        if getattr(expanded_args, "_anti_writer_id", None):
+            args._anti_writer_id = expanded_args._anti_writer_id
         if getattr(expanded_args, "run_id", None):
             args.run_id = expanded_args.run_id
         if getattr(expanded_args, "run_record_written", False):
@@ -8992,7 +8992,7 @@ def main(argv: list[str] | None = None) -> int:
                 pass
         eprint("Interrupted")
         return 130
-    except AntiError as exc:
+    except (AntiError, PersistenceError) as exc:
         if hasattr(args, "save_output") and not getattr(args, "run_record_written", False):
             try:
                 run_id = getattr(args, "run_id", None)
