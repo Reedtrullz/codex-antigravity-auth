@@ -64,7 +64,7 @@ def unknown_inputs(request):
         value = pending.pop()
         if isinstance(value, dict):
             kind = value.get('type')
-            if isinstance(kind, str) and kind in {'input_image', 'image_url', 'input_audio', 'input_video', 'input_file'}:
+            if isinstance(kind, str) and kind in {'image', 'input_image', 'image_url', 'input_audio', 'input_video', 'input_file'}:
                 reasons.add('media_token_cost')
             if any(key in value for key in ('inlineData', 'fileData', 'encrypted_content')):
                 reasons.add('media_or_opaque_token_cost')
@@ -77,17 +77,21 @@ def unknown_inputs(request):
 
 
 def assess(request, *, declared_tokens=None, binding=None, evidence=None):
-    """Assess every supplied field, without modifying or retaining its content."""
+    """Assess the model-context request view; metadata is gateway-only control.
+
+    Use this same projection before or after the gateway removes metadata and
+    before or after Anti updates per-attempt timeout hints. Preserve the caller's
+    complete request and let compatible counters handle provider translation.
+    """
+    request = {key: value for key, value in request.items() if key != 'metadata'}
     sizes = components(request)
     wire_bytes = len(encoded(request))
     estimated_input = wire_bytes + FRAMING_ESTIMATE
     output = positive_int(request.get('max_output_tokens'))
     unknown = unknown_inputs(request)
-    unknown.update({'compatible_tokenizer', 'adapter_framing', 'verified_context_limit'})
+    unknown.update({'compatible_tokenizer', 'adapter_framing', 'verified_context_limit', 'reasoning_reservation'})
     if output is None:
         unknown.add('output_reservation')
-    if request.get('reasoning'):
-        unknown.add('reasoning_reservation')
     declared = positive_int(declared_tokens)
     verified = (isinstance(evidence, VerifiedContext) and isinstance(binding, str)
                 and evidence.binding == binding and isinstance(evidence.source, str) and bool(evidence.source.strip())
@@ -125,6 +129,7 @@ def assess(request, *, declared_tokens=None, binding=None, evidence=None):
     if declared is not None and output is not None:
         comparison = 'estimate_exceeds_declaration' if estimated_input + output > declared else 'estimate_within_declaration'
     return {'version': VERSION, 'status': status, 'reason': reason,
+            'measurement_boundary': 'validated_responses_without_gateway_metadata',
             'limit': {'verified_tokens': limit, 'declared_tokens': declared, 'basis': source},
             'input': {'exact_tokens': exact_input, 'estimated_tokens': estimated_input,
                       'estimate_basis': 'one_unit_per_serialized_utf8_byte_plus_2048_framing_units',

@@ -1,5 +1,8 @@
 """Context evidence is synthetic; no real tokenizer/limit/provider is certified."""
 from copy import deepcopy
+import argparse
+import io
+from urllib.parse import urlsplit
 import importlib.util
 import json
 from pathlib import Path
@@ -41,6 +44,8 @@ def test_whole_request_inventory_counts_tools_instructions_format_and_unicode_wi
 
 
 @pytest.mark.parametrize('item', [
+    {'type':'image','source':{'type':'base64','media_type':'image/png','data':'fixture'}},
+    {'type':'image','image_url':'https://fixture.invalid/image.png'},
     {'type':'input_image','image_url':'data:image/png;base64,fixture'},
     {'type':'input_image','image_url':'https://fixture.invalid/image.png'},
     {'type':'reasoning','encrypted_content':'fixture'},
@@ -231,3 +236,64 @@ def test_generation_binding_uses_the_already_selected_route(gateway,monkeypatch)
     context_preflight.VERIFIED_CONTEXTS[binding] = proof(binding=binding)
     monkeypatch.setattr(context_preflight, 'classify_route', lambda *a,**k:pytest.fail('do not reclassify a selected route'))
     assert context_preflight.inspect(request, gateway, deployment=deployment, route='openai')['status'] == 'reject'
+
+
+def test_default_reasoning_remains_unknown_until_verified_cap_semantics_clear_it():
+    request = {'input':'fixture','max_output_tokens':10}
+    assert 'reasoning_reservation' in assess(request)['unknown_components']
+    report = assess(request, binding='fixture-binding', evidence=proof())
+    assert report['status'] == 'fit' and 'reasoning_reservation' not in report['unknown_components']
+
+
+def test_metadata_projection_preserves_the_original_request_and_counter_view():
+    base = {'input':'fixture','max_output_tokens':10}
+    value = {**base,'metadata':{'run_id':'private-fixture','antigravity_backend_timeout_seconds':30}}
+    before = deepcopy(value)
+    assert assess(value) == assess(base)
+    assert value == before
+    def counter(request):
+        assert request == base and 'metadata' not in request
+        return 20
+    assert assess(value, binding='fixture-binding', evidence=proof(counter=counter))['status'] == 'fit'
+
+
+def test_preflight_generation_and_anti_retry_reports_use_one_context_projection(gateway,monkeypatch,tmp_path):
+    import codex_antigravity_auth
+    script = Path(codex_antigravity_auth.__file__).parent/'skills/anti/scripts/anti.py'
+    spec = importlib.util.spec_from_file_location('anti_context_parity_fixture',script)
+    anti = importlib.util.module_from_spec(spec);spec.loader.exec_module(anti)
+    monkeypatch.setattr(anti, 'RUNS_DIR', tmp_path/'runs')
+    reports = []
+    enforce = context_preflight.enforce
+    def capture(request,providers,**kwargs):
+        result = enforce(request,providers,**kwargs)
+        reports.append(result)
+        return result
+    monkeypatch.setattr(context_preflight,'enforce',capture)
+    client = TestClient(server.app)
+    sent = []
+    def opened(request,*,timeout,payload=None,body=None):
+        path = urlsplit(request.full_url).path
+        timeout = anti.transport_entry_timeout(request.get_method(), timeout, payload=payload, body=body, url=request.full_url)
+        if request.get_method() == 'POST':sent.append(json.loads(body))
+        result = client.request(request.get_method(),path,content=body,headers={'Content-Type':'application/json'})
+        wire = io.BytesIO(result.content);wire.status=result.status_code;wire.headers=result.headers
+        return wire
+    monkeypatch.setattr(anti,'open_gateway_request',opened)
+    clock = [0.0]
+    control = anti.RunControl(20,caps={},clock=lambda:clock[0],error_type=anti.RunDeadlineExceeded)
+    control.sleep = lambda delay:clock.__setitem__(0,clock[0]+3)
+    args = argparse.Namespace(timeout=30, _run_control=control)
+    reply = {'choices':[{'index':0,'message':{'role':'assistant','content':'Synthetic answer.'},'finish_reason':'stop'}]}
+    with upstream((503,{'Content-Type':'application/json'},b'{"error":"synthetic busy"}'),
+                  (200,{'Content-Type':'application/json'},json.dumps(reply).encode())) as (base,seen):
+        gateway['fixture'] = provider(base+'/v1')
+        result = anti.post_response(base_url='http://127.0.0.1:51122/v1',model='fixture:arbitrary-unknown',
+            prompt='fixture prompt',max_output_tokens=20,timeout=30,token_env='FIXTURE',retries=1,
+            run_id='fixture-run',budget_args=args)
+        expected = client.post('/v1/context/preflight',json=sent[-1]).json()
+    assert len(sent) == len(reports) == len(seen) == 2
+    assert sent[0]['metadata'] != sent[1]['metadata']
+    assert reports[0] == reports[1] == expected == result.response_metadata['context_preflight']
+    assert expected['measurement_boundary'] == 'validated_responses_without_gateway_metadata'
+    assert 'fixture-run' not in json.dumps(expected)

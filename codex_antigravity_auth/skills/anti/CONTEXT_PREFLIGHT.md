@@ -38,8 +38,11 @@ source trim or an automatic rejection of that model.
 
 ## Estimate basis
 
-The shared estimator serializes every supplied request field as compact JSON and
-counts UTF-8 bytes. It reports groups for input/history, instructions, tools/tool
+The shared estimator uses the validated Responses request with gateway-only
+`metadata` removed, then serializes that projection as compact JSON and counts
+UTF-8 bytes. `measurement_boundary` names this projection. Gateway run IDs and
+timeout hints do not enter model context; removing or updating them cannot
+change the assessment. All three entry points use this same rule. It reports groups for input/history, instructions, tools/tool
 choice, output-format/schema and all remaining controls. Its input estimate is
 one unit per serialized byte plus 2,048 framing units. This deliberately cautious
 planning estimate is **not a proven upper bound or compatible tokenizer count**.
@@ -68,8 +71,9 @@ responses, with a second header explicitly labeling the estimate. Detailed
 inspection uses the preflight endpoint. Its observation does not reserve a route
 or promise configuration stays unchanged until a later generation call.
 
-Anti independently assesses its complete assembled request after catalog/model
-selection. Successful call metadata contains `context_preflight` and
+Anti independently assesses its assembled model-context request after
+catalog/model selection. Per-retry mutations are confined to gateway-only
+metadata and therefore leave the context projection unchanged. Successful call metadata contains `context_preflight` and
 `context_calibration`. Reported input usage is compared with the estimate as
 calibration evidence only; absent usage stays unknown. These observations do not
 verify a model limit, prove a tokenizer, or establish billing. Full retention
