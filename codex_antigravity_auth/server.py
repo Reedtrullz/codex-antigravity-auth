@@ -1679,6 +1679,9 @@ async def _create_response(request: Request, budget: RequestBudget):
     try:
         await budget.sync(validate_request_shapes, codex_req, route="byok" if provider_id is not None else "google")
     except ValueError as exc:
+        await log_request("failed", model=model, route="byok" if provider_id is not None else "google",
+                          provider=provider_id, stream=stream, http_status=400, error_class="invalid_request",
+                          error="Request shape is unsupported for this route.", attempt_count=0)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if provider_id is not None:
         # Normalize self-referential prefixes (openrouter:openrouter/x ->
