@@ -205,7 +205,8 @@ def test_partial_connected_request_cannot_outlive_callback_deadline(drip):
     worker.start()
     try:
         with socket.create_connection(server.server_address, timeout=1) as client:
-            client.sendall(b"GET /oauth-callback HTTP/1.1\r\nHost: ")
+            query = urlencode({"code": "synthetic-code", "state": oauth.encode_state({"id": "synthetic-state"})})
+            client.sendall(f"GET /oauth-callback?{query} HTTP/1.1\r\nHost: ".encode())
             if drip:
                 for _ in range(40):
                     if finished.wait(0.01):

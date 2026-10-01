@@ -118,8 +118,10 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         remaining = deadline - time.monotonic() if deadline is not None else 1.0
         timeout = max(0.001, min(1.0, remaining))
         self.connection.settimeout(timeout)
+        self._request_expired = False
 
         def stop_request():
+            self._request_expired = True
             try:
                 self.connection.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -154,6 +156,9 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         self._write_html(status, body.encode("utf-8"))
 
     def do_GET(self):
+        deadline = getattr(self.server, "callback_deadline", None)
+        if self._request_expired or (deadline is not None and time.monotonic() >= deadline):
+            return
         parsed = urlparse(self.path)
         if parsed.path != "/oauth-callback":
             self._page(404, "Not found", "Use the registered OAuth callback path.")
