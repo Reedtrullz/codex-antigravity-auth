@@ -34,6 +34,8 @@ from .byok import (
     split_provider_model,
     validate_provider_api_key,
     validate_provider_id,
+    validate_http_base_url,
+    validate_supported_provider_kind,
 )
 from .transform import safe_project_id, transform_chat_response, valid_function_name
 from .constants import get_platform, is_loopback_host, validate_gateway_token_strength
@@ -673,20 +675,50 @@ def native_model_catalog_with_input_modalities() -> list[dict]:
     return native_model_catalog()
 
 
-def provider_model_catalog(created: int) -> list[dict]:
+def provider_diagnostic_id(provider_id) -> str:
+    from .model_observations import public_id, ObservationError
+    try:
+        return public_id(provider_id)
+    except ObservationError:
+        return "redacted"
+
+
+def provider_model_catalog(created: int, *, diagnostics: list | None = None) -> list[dict]:
     byok_models = []
+    diagnostics = diagnostics if diagnostics is not None else []
     seen_model_ids: set[str] = set()
     try:
         providers = all_provider_configs_read_only()
     except Exception:
+        diagnostics.append({"provider":None, "status":"configuration_unreadable", "omitted_models":None})
         return byok_models
     for provider_id, provider in providers.items():
+        label = provider_diagnostic_id(provider_id)
+        configured_models = provider.get("models", [])
+        diagnostic = {"provider":label, "status":"complete", "omitted_models":len(configured_models) if isinstance(configured_models, list) else None}
+        diagnostics.append(diagnostic)
+        if provider.get("_configuration_error"):
+            count = provider.get("_declared_model_count")
+            diagnostic.update(status="invalid_configuration", omitted_models=count if type(count) is int and count >= 0 else None)
+            continue
+        try:
+            validate_http_base_url(provider.get("baseUrl"))
+        except ValueError:
+            diagnostic["status"] = "invalid_configuration"
+            continue
+        try:
+            validate_supported_provider_kind(provider)
+        except ValueError:
+            diagnostic["status"] = "unsupported_route"
+            continue
         try:
             usable = provider_has_usable_key(provider)
         except Exception:
             usable = False
         if not usable:
+            diagnostic["status"] = "unusable_configuration"
             continue
+        diagnostic["omitted_models"] = 0
         for model_entry in provider.get("models", []):
             if isinstance(model_entry, dict):
                 provider_model = model_entry.get("id")
@@ -697,6 +729,8 @@ def provider_model_catalog(created: int) -> list[dict]:
                 display_name = provider_model
                 context_window = None
             if not provider_model:
+                diagnostic["status"] = "partial"
+                diagnostic["omitted_models"] += 1
                 continue
             catalog_model_id = normalize_byok_model_id(provider_model, provider_id)
             model_id = f"{provider_id}:{catalog_model_id}"
@@ -706,6 +740,8 @@ def provider_model_catalog(created: int) -> list[dict]:
             try:
                 capabilities = provider_capabilities(provider, provider_model)
             except ValueError:
+                diagnostic["status"] = "partial"
+                diagnostic["omitted_models"] += 1
                 continue
             display_name = display_name if display_name != provider_model else catalog_model_id
             byok_models.append(
@@ -731,14 +767,20 @@ def provider_model_catalog(created: int) -> list[dict]:
     return byok_models
 
 
-async def provider_model_catalog_fail_soft(created: int) -> list[dict]:
+async def provider_model_catalog_fail_soft(created: int, *, with_diagnostics: bool = False):
+    diagnostics = []
     try:
-        return await asyncio.wait_for(
-            run_in_threadpool(provider_model_catalog, created),
+        models = await asyncio.wait_for(
+            run_in_threadpool(provider_model_catalog, created, diagnostics=diagnostics),
             timeout=MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS,
         )
+        state = "partial" if any(item["status"] != "complete" for item in diagnostics) else "complete"
+        report = {"status":state, "providers":diagnostics}
+    except asyncio.TimeoutError:
+        models, report = [], {"status":"timeout", "providers":[]}
     except Exception:
-        return []
+        models, report = [], {"status":"error", "providers":[]}
+    return (models, report) if with_diagnostics else models
 
 
 def provider_health_catalog() -> list[dict]:
@@ -749,16 +791,20 @@ def provider_health_catalog() -> list[dict]:
         return providers
     for provider_id, provider in provider_configs.items():
         models = provider.get("models", [])
+        count = len(models) if isinstance(models, list) else 0
+        if provider.get("_configuration_error"):
+            declared = provider.get("_declared_model_count")
+            count = declared if type(declared) is int and declared >= 0 else None
         try:
             usable = provider_has_usable_key(provider)
         except Exception:
             usable = False
         providers.append(
             {
-                "id": provider_id,
+                "id": provider_diagnostic_id(provider_id),
                 "kind": provider.get("kind"),
                 "usable": usable,
-                "model_count": len(models) if isinstance(models, list) else 0,
+                "model_count": count,
             }
         )
     return providers
@@ -781,7 +827,7 @@ async def provider_health_catalog_fail_soft() -> tuple[list[dict], str]:
 async def list_models():
     """Return model catalog so Codex Desktop can populate its picker dropdown."""
     created = int(time.time())
-    byok_models = await provider_model_catalog_fail_soft(created)
+    byok_models, catalog_diagnostics = await provider_model_catalog_fail_soft(created, with_diagnostics=True)
     models = [
         codex_model_metadata(
             m["id"],
@@ -844,6 +890,7 @@ async def list_models():
     models = list(unique.values())
     return {
         "capability_catalog_version": CATALOG_VERSION,
+        "provider_catalog_diagnostics": catalog_diagnostics,
         "collision_policy": "native definitions precede OpenAI registry entries; first canonical catalog identity wins",
         "object": "list",
         "data": models,
@@ -1601,6 +1648,21 @@ async def _create_response(request: Request, budget: RequestBudget):
             )
             raise HTTPException(status_code=404, detail=f"BYOK provider '{provider_id}' is not configured")
         try:
+            validate_supported_provider_kind(provider)
+        except ValueError as exc:
+            detail = safe_error_detail(exc)
+            await log_request(
+                "failed",
+                model=model,
+                route="byok",
+                provider=provider_id,
+                stream=stream,
+                http_status=400,
+                error_class="unsupported_provider_kind",
+                error=detail,
+            )
+            raise HTTPException(status_code=400, detail=detail) from exc
+        try:
             validate_capabilities(
                 codex_req,
                 provider_capabilities(provider, provider_model),
@@ -1617,19 +1679,6 @@ async def _create_response(request: Request, budget: RequestBudget):
                 error=safe_error_detail(exc),
             )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        provider_kind = provider.get("kind")
-        if provider_kind != "openai_chat":
-            await log_request(
-                "failed",
-                model=model,
-                route="byok",
-                provider=provider_id,
-                stream=stream,
-                http_status=500,
-                error_class="unsupported_provider_kind",
-                error=f"Unsupported BYOK provider kind: {provider_kind}",
-            )
-            raise HTTPException(status_code=500, detail=f"Unsupported BYOK provider kind: {provider_kind}")
         if stream:
             payload, url, headers, timeout = await budget.sync(prepare_openai_compatible_request, codex_req, provider, provider_model, stream=True)
             await log_request("stream_started", model=model, route="byok", provider=provider_id, stream=True)

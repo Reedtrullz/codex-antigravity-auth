@@ -181,6 +181,8 @@ The current presets are API-key based. xAI uses `XAI_API_KEY` and exposes `xai:g
 BYOK provider ids may contain only letters, numbers, underscores, and hyphens. Provider model ids may contain `/` or `:`, but not whitespace or control characters. Unknown `provider:model` prefixes are rejected as BYOK routing errors before any Google account selection. Non-preset custom BYOK providers must provide a base URL, and the generic `custom` preset is not auto-enabled until `provider set custom ...` is run. `--api-key-env` is preferred because it avoids persisting keys; `--api-key` stores a key in encrypted provider config. Stored/env BYOK keys and extra provider header values must be printable ASCII without control characters. Model-picker display names must not contain control characters. Provider API-key env var names must contain only letters, numbers, and underscores and must not start with a number. Custom provider and Codex gateway base URLs must be absolute `http` or `https` URLs without embedded credentials, whitespace/control characters, query strings, fragments, invalid ports, or malformed bracketed hosts. Plain `http` base URLs are accepted only for loopback/local hosts; remote providers and remote gateway URLs must use `https`. Extra BYOK provider headers may not override gateway-managed auth, content, host, or transport headers; malformed provider config is rejected before it is written and before streaming begins. Key-optional providers are only keyless on loopback/local hosts; remote custom or cloud URLs need a stored/env API key before they appear in Codex's picker or route requests. BYOK streams surface provider error frames as failed Responses API streams, ignore never-named tool-call deltas, and wait for complete streamed function names before emitting function-call items.
 Models configured with `--api-key-env` remain hidden from `/v1/models` until the env var exists in the gateway process environment. `doctor --byok-only` fails when configured BYOK providers have missing or malformed keys, and `doctor --config /path/to/config.toml` can verify non-default Codex config files.
 
+BYOK dispatch supports `kind: openai_chat` only. Providers configured with `openai_responses` or another unsupported kind remain visible in configuration diagnostics, but their models are excluded from `/v1/models`. Doctor and setup preflight report the unsupported kind; direct requests fail with HTTP 400 before contacting a provider. Use an endpoint supporting Chat Completions with `kind: openai_chat`, or remove the unsupported provider. This restriction does not affect the separate unified OpenAI upstream route.
+
 For 1Password-backed BYOK keys, store secret references in a local env file and let the gateway process run under `op run`:
 
 ```dotenv
@@ -324,3 +326,12 @@ paths restrict the chosen run. Bounded secret-pattern checks stop a submission
 until resolved or explicitly acknowledged for its exact prompt hash. Policy
 dry runs write nothing and report hashes instead of source. See the bundled
 [policy contract](codex_antigravity_auth/skills/anti/DATA_POLICY.md).
+
+## Model discovery and recent readiness
+
+`provider discover NAME` reads cached evidence; `--network` explicitly fetches a
+bounded optional catalog. `models explain ID --json` stays offline, while
+`models probe ID --network` records one expiring text-generation check. Imports
+are preview-first and require `--write --accept-digest` to save. See the
+[discovery and readiness contract](codex_antigravity_auth/design/model-discovery.md)
+for supported pagination, limits, cache semantics and configuration diagnostics.
