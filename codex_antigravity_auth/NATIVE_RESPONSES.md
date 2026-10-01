@@ -42,11 +42,13 @@ model/client supports opaque-only answers.
 
 The same validation applies to JSON, buffered native SSE and streaming SSE.
 Supported content, reasoning, custom/function argument and web-search lifecycle
-events are forwarded; unsupported event families fail explicitly. Final outcome
+events are forwarded, including nullable annotation-added events; unsupported
+event families fail explicitly. Final outcome
 still waits for EOF under the native terminal-authority rules.
 
 Complete `response.output_item.done` snapshots are retained within bounded memory.
-They may supply missing terminal items/fields. Supplied terminal identity, type
+They may supply missing terminal items/fields, including omitted nested object
+fields at matching list positions. Supplied list lengths must agree. Supplied terminal identity, type
 and non-null fields must agree with the complete snapshot; conflicts fail rather
 than selecting one possible continuation. In particular, encrypted content from
 an `output_item.added` event is never treated as the complete reasoning item.

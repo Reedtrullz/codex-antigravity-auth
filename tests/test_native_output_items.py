@@ -310,3 +310,61 @@ def test_provider_failure_keeps_safe_code_but_never_raw_message():
     result = native.validate_response(payload, display_model="fixture")
     assert result["error"]["code"] == "server_error"
     assert OPAQUE not in json.dumps(result)
+
+
+@pytest.mark.parametrize("field,bad", [("input_tokens", 10**400), ("output_tokens", 10**400),
+                                      ("total_tokens", 10**400), ("input_tokens", "9" * 1000)])
+def test_validation_failure_handles_untrusted_usage_without_overflow(field, bad):
+    payload = response()
+    payload["output"][0]["type"] = "future_tool_call"
+    payload["usage"][field] = bad
+    direct = native.validate_response(payload, display_model="fixture")
+    assert direct["status"] == "failed"
+    assert direct["usage"][field] != bad
+    assert all(type(value) is int and 0 <= value <= 2**63 - 1 for value in direct["usage"].values())
+    streamed = collect([terminal(payload)])[-1]
+    buffered = server._collect_openai_sse_terminal(frame(terminal(payload)), "fixture")
+    assert streamed["type"] == "response.failed" and buffered["status"] == "failed"
+    assert OPAQUE not in json.dumps(direct) + json.dumps(streamed) + json.dumps(buffered)
+
+
+@pytest.mark.parametrize("omission", ["annotations", "logprobs", "queries", "sources", "source_url", "citation_title"])
+def test_done_snapshots_supply_omitted_nested_fields(omission):
+    output = items()
+    output[2]["content"][0]["logprobs"] = [{"token": "Fixture", "bytes": [70], "logprob": -0.1}]
+    snapshot = deepcopy(output)
+    if omission in {"annotations", "logprobs"}:
+        del snapshot[2]["content"][0][omission]
+    elif omission == "queries":
+        del snapshot[1]["action"]["queries"]
+    elif omission == "sources":
+        del snapshot[1]["action"]["sources"]
+    elif omission == "source_url":
+        del snapshot[1]["action"]["sources"][0]["url"]
+    else:
+        del snapshot[2]["content"][0]["annotations"][0]["title"]
+    final = collect(stream_events(output, snapshot))[-1]
+    assert final["type"] == "response.completed"
+    assert final["response"]["output"] == output
+    assert server._collect_openai_sse_terminal(b"".join(map(frame, stream_events(output, snapshot))), "fixture")["output"] == output
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda output: output[2]["content"][0]["annotations"][0].update(title="conflicting title"),
+    lambda output: output[2]["content"][0].update(annotations=[]),
+    lambda output: output[1]["action"].update(queries=["conflicting query"]),
+])
+def test_nested_disagreement_still_fails(mutate):
+    snapshot = items()
+    mutate(snapshot)
+    assert collect(stream_events(terminal_output=snapshot))[-1]["response"]["error"]["code"] == "conflicting_native_item"
+
+
+def test_nullable_annotation_event_is_forwarded_without_loss():
+    event = {"type": "response.output_text.annotation.added", "item_id": "msg_fixture", "output_index": 0,
+             "content_index": 0, "annotation_index": 0, "annotation": None}
+    output = [items()[2]]
+    emitted = collect([event, terminal(response(output))])
+    assert emitted[0] == event
+    assert emitted[-1]["type"] == "response.completed"
+    assert emitted[-1]["response"]["output"] == output

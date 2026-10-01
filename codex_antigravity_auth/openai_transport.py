@@ -745,7 +745,8 @@ class NativeResponsesStreamAdapter:
                 supplied.append((index, expected_item))
             snapshot = event.get("response")
             if isinstance(snapshot, dict) and isinstance(snapshot.get("output"), list):
-                supplied.extend((offset, item["type"]) for offset, item in enumerate(snapshot["output"]))
+                supplied.extend((offset, item["type"]) for offset, item in enumerate(snapshot["output"])
+                                if isinstance(item, dict) and isinstance(item.get("type"), str))
             for offset, item_type in supplied:
                 if offset in self._native_types and self._native_types[offset] != item_type:
                     raise NativeOutputError("conflicting_native_item")

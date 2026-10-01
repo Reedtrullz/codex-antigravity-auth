@@ -6,8 +6,6 @@ import math
 import re
 from urllib.parse import urlsplit
 
-from .response_protocol import normalize_usage
-
 CONTRACT_VERSION = 1
 MAX_ITEMS = 10000
 MAX_NODES = 100000
@@ -283,7 +281,16 @@ def failed_response(payload, display_model, code):
                 pass
         if type(payload.get("usage")) is dict:
             usage = payload["usage"]
-            response["usage"] = normalize_usage(usage.get("input_tokens"), usage.get("output_tokens"), usage.get("total_tokens"))
+            # Do not reparse rejected numbers through float(): oversized JSON
+            # integers can overflow while constructing the error response.
+            def count(name):
+                value = usage.get(name)
+                return value if type(value) is int and 0 <= value <= 2**63 - 1 else 0
+            incoming, outgoing = count("input_tokens"), count("output_tokens")
+            response["usage"] = {
+                "input_tokens": incoming, "output_tokens": outgoing,
+                "total_tokens": min(2**63 - 1, max(count("total_tokens"), incoming + outgoing)),
+            }
     return response
 
 
@@ -324,7 +331,7 @@ def validate_event(event):
     if response is not None:
         _require(type(response) is dict)
         check_json(response)
-        if "output" in response:
+        if "output" in response and kind not in {"response.completed", "response.incomplete", "response.failed"}:
             validate_output(response["output"], partial=True)
     for key in ("output_index", "content_index", "summary_index", "annotation_index"):
         if key in event:
@@ -357,7 +364,9 @@ def validate_event(event):
     elif kind.startswith("response.output_text."):
         expected_item = "message"
         if kind.endswith("annotation.added"):
-            validate_annotation(event.get("annotation"))
+            _require("annotation" in event)
+            if event["annotation"] is not None:
+                validate_annotation(event["annotation"])
         else:
             _text(event.get("delta" if kind.endswith(".delta") else "text"))
     elif kind.startswith("response.refusal."):
@@ -366,20 +375,38 @@ def validate_event(event):
     return expected_item
 
 
+def _merge_snapshot(complete, supplied):
+    """Fill omitted nested fields; supplied list positions and facts must agree."""
+    if supplied is None:
+        return deepcopy(complete)
+    if complete is None:
+        return deepcopy(supplied)
+    _require(type(complete) is type(supplied), "conflicting_native_item")
+    if type(complete) is dict:
+        merged = deepcopy(complete)
+        for key, value in supplied.items():
+            merged[key] = _merge_snapshot(complete[key], value) if key in complete else deepcopy(value)
+        return merged
+    if type(complete) is list:
+        _require(len(complete) == len(supplied), "conflicting_native_item")
+        return [_merge_snapshot(left, right) for left, right in zip(complete, supplied)]
+    _require(complete == supplied, "conflicting_native_item")
+    return deepcopy(supplied)
+
+
 def reconcile_output(output, completed):
     """Use complete item snapshots, never partial encrypted data from added events."""
     if output is None:
         output = []
     _require(type(output) is list)
-    result = validate_output(output, partial=True)
+    # Validate the merged terminal shape below: even required nested fields
+    # may be omitted here when a complete done snapshot already supplies them.
+    check_json(output)
+    result = deepcopy(output)
     for index, item in sorted(completed.items()):
         _require(index <= len(result), "incomplete_native_output")
         if index == len(result):
             result.append(deepcopy(item))
             continue
-        supplied = result[index]
-        for key in item.keys() & supplied.keys():
-            if item[key] is not None and supplied[key] is not None:
-                _require(item[key] == supplied[key], "conflicting_native_item")
-        result[index] = {**deepcopy(item), **{key: value for key, value in supplied.items() if value is not None or key not in item}}
+        result[index] = _merge_snapshot(item, result[index])
     return validate_output(result)
