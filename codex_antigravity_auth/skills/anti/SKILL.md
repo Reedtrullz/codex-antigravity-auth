@@ -5,6 +5,11 @@ description: Use the optional Anti helper after Antigravity Claude Opus/Sonnet i
 
 # Anti
 
+Explicit local PNG/JPEG attachments use repeatable `--image PATH` and require
+gateway-declared image support at every stage. Read [attachments](ATTACHMENTS.md)
+for limits, unscanned pixels/metadata, retention, and the unmet real-media release
+gate. Do not infer image support from a model name or replace images with text.
+
 Use this skill to ask the local `codex-antigravity-auth` gateway for an external Antigravity review, consult, deep work plan, named workflow preset, or bounded multi-model panel while native Codex remains the primary agent.
 
 V3's primary product is native Claude in Codex through `codex-antigravity setup`; `$anti` is an optional helper for review and planning after the gateway and Codex model picker are already working.

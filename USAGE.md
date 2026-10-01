@@ -362,3 +362,12 @@ requires the original source/task identity, reuses verified completed chunks and
 always resynthesizes. Failed/truncated chunks need explicit `--rerun-chunk N`.
 See [chunk resume](codex_antigravity_auth/skills/anti/CHUNK_RESUME.md) for retention,
 route receipts, coverage, combined reporting and per-invocation allowance scope.
+
+### Experimental Anti image attachments
+
+Use repeatable `--image PATH` for explicit bounded PNG/JPEG files on generation
+commands. Each selected lane, judge and active fallback must declare image support
+in the gateway catalog. Exact bytes are forwarded; pixels and embedded metadata
+are not secret-scanned. Real-media evaluation is still an unmet release gate.
+See [attachments](codex_antigravity_auth/skills/anti/ATTACHMENTS.md) for examples,
+recording behavior, scope separation and the synthetic-only evidence boundary.

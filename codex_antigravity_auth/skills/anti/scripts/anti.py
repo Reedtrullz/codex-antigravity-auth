@@ -43,6 +43,7 @@ from anti_lib.capabilities import CapabilityRegistry
 from anti_lib import local_policy as local_workflow
 from anti_lib.context_budget import assess as assess_context, calibration as context_calibration
 from anti_lib import checkpoints as chunk_checkpoints
+from anti_lib import media as image_attachments
 
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
@@ -624,6 +625,15 @@ def run_control(args=None):
                     raise AntiError('Invalid attempt admission configuration: check numeric limits and pricing-file fields') from exc
     if local_settings is not None:
         current.local_policy = local_settings
+    if args is not None and (getattr(args, 'image', None) or getattr(args, '_media_session', None)):
+        with _BUDGET_STATE_INIT_LOCK:
+            if not hasattr(args, '_media_session'):
+                args._media_session = image_attachments.capture(args.image, policy=data_policy(args))
+            previous = getattr(current, 'media', None)
+            if previous is not None and previous is not args._media_session:
+                raise AntiError('Attachment capture cannot change during a run')
+            current.media = args._media_session
+        current.check()
     if args is not None:
         args._run_control = current
     return current
@@ -680,6 +690,8 @@ def scheduling_metadata(metadata=None, control=None):
     if control is not None:
         snapshot = control.snapshot()
         metadata['run_control'] = snapshot
+        if getattr(control, 'media', None) is not None:
+            metadata['media_coverage'] = control.media.report()
         local = getattr(control, 'local_policy', None)
         if local is not None:
             metadata['local_policy'] = {'enabled':True, 'destination_scope':'declared_loopback',
@@ -754,12 +766,32 @@ def policy_paths(args, root, paths):
         session.check_paths(paths, root=root)
 
 
+def captured_media(args=None):
+    control = getattr(args, '_run_control', None) or CURRENT_RUN.get()
+    return getattr(control, 'media', None)
+
+
+def media_preflight(args, routes):
+    session = captured_media(args)
+    if session is None:
+        return
+    for model, stage in routes:
+        session.require(CAPABILITY_REGISTRY, model, stage)
+    if getattr(args, 'fallback_model', None) and getattr(args, 'fallback_policy', 'never') != 'never':
+        session.require(CAPABILITY_REGISTRY, resolve_model(args.fallback_model, default=args.fallback_model), 'fallback')
+
+
+def media_policy_args(args):
+    session = captured_media(args)
+    return {'media': session.identity()} if session is not None else {}
+
+
 def policy_submit(args, *, model, prompt, base_url, fallback=False):
     session = data_policy(args)
     if session:
-        session.check(model=model, prompt=prompt, base_url=base_url, stage=_POLICY_STAGE.get())
+        session.check(model=model, prompt=prompt, base_url=base_url, stage=_POLICY_STAGE.get(), **media_policy_args(args))
         if fallback:
-            session.check(model=model, prompt=prompt, base_url=base_url, stage="fallback")
+            session.check(model=model, prompt=prompt, base_url=base_url, stage="fallback", **media_policy_args(args))
 
 
 def policy_generate(args, *, stage, **kwargs):
@@ -776,13 +808,14 @@ def policy_preflight(args, prompt, routes):
         return False
     fallback = getattr(args, "fallback_model", None)
     for model, stage in routes:
-        session.check(model=model, prompt=prompt, base_url=args.base_url, stage=stage)
+        session.check(model=model, prompt=prompt, base_url=args.base_url, stage=stage, **media_policy_args(args))
         if fallback and getattr(args, "fallback_policy", "never") != "never":
             resolved = resolve_model(fallback, default=fallback)
-            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage=stage)
-            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage="fallback")
+            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage=stage, **media_policy_args(args))
+            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage="fallback", **media_policy_args(args))
     if getattr(args, "dry_run", False):
-        print(json.dumps({"dryRun": True, "dataPolicy": session.audit(), "noContentSubmitted": True}, indent=2))
+        print(json.dumps({"dryRun": True, "dataPolicy": session.audit(), "noContentSubmitted": True,
+                         **({"media_coverage": captured_media(args).report()} if captured_media(args) else {})}, indent=2))
         return True
     return False
 
@@ -1387,6 +1420,9 @@ def transport_entry_timeout(method, timeout, *, payload=None, body=None, url=Non
         timeout = control.timeout(timeout)
     submitted_count = _CALL_SUBMITTED.get()
     if method.upper() == 'POST' and submitted_count is not None:
+        media = getattr(control, 'media', None)
+        if media is not None:
+            media.verify_payload(payload)
         policy = getattr(control, 'spend_control', None)
         if policy is not None and policy.enabled:
             if not isinstance(payload, dict) or not isinstance(body, bytes) or type(payload.get('max_output_tokens')) is not int:
@@ -1400,6 +1436,8 @@ def transport_entry_timeout(method, timeout, *, payload=None, body=None, url=Non
         _CALL_SUBMITTED.set(submitted_count + 1)
         if control is not None:
             control.mark_submitted()
+        if media is not None:
+            media.submitted(payload.get("model"), _POLICY_STAGE.get())
     return timeout
 
 
@@ -1763,9 +1801,12 @@ def post_response(
         if not data_policy(budget_args):
             eprint(f"[anti] model alias {model!r} matched catalog id {matched_model!r}; forwarding the catalog id")
         model = matched_model
+    media = captured_media(budget_args)
+    if media is not None:
+        media.require(CAPABILITY_REGISTRY, model, "fallback" if policy_fallback else _POLICY_STAGE.get())
     payload = {
         "model": model,
-        "input": prompt,
+        "input": media.input(prompt) if media is not None else prompt,
         "max_output_tokens": max_output_tokens,
         "stream": False,
     }
@@ -1810,9 +1851,10 @@ def post_response(
                     if value is not None: attempt_metadata[key] = value
                     else: attempt_metadata.pop(key, None)
                 payload['metadata'] = attempt_metadata
-                status, decoded = request_json(
-                    "POST", response_url, payload=payload, timeout=attempt_timeout, token_env=token_env,
-                )
+                with image_attachments.submission_context(policy_fallback):
+                    status, decoded = request_json(
+                        "POST", response_url, payload=payload, timeout=attempt_timeout, token_env=token_env,
+                    )
                 control.check(submitted=True)
         except AntiError as exc:
             submitted = (_CALL_SUBMITTED.get() or 0) > submitted_before
@@ -1895,6 +1937,9 @@ def post_response(
                 response_metadata["backend_model"] = response_model
             if isinstance(decoded.get('_gateway_routing_identity'), str):
                 response_metadata['gateway_routing_identity'] = decoded['_gateway_routing_identity']
+            if media is not None:
+                response_metadata['request_content_sha256'] = media.content_sha256(prompt)
+                response_metadata['image_count'] = len(media.images)
             response_metadata['context_preflight'] = context_report
             response_metadata['context_calibration'] = context_calibration(context_report, extract_usage(decoded))
             control.check(submitted=True)
@@ -1951,6 +1996,7 @@ def _pre_flight_cost_suggestion(
     alternatives = [
         m for m in model_ids
         if model_cost_tier(m) == "free" and model_quality_rank(m) >= quality - 15
+        and (captured_media(args) is None or image_attachments.supports(CAPABILITY_REGISTRY, m))
     ]
     if not alternatives:
         return
@@ -1989,6 +2035,10 @@ def generate_with_fallback(
         local_workflow.require_model(CAPABILITY_REGISTRY, model, stage=_POLICY_STAGE.get())
         if fallback_model and fallback_policy != 'never':
             local_workflow.require_model(CAPABILITY_REGISTRY, fallback_model, stage='fallback')
+    if captured_media(args) is not None:
+        if model_ids is None:
+            model_ids = fetch_model_ids(args.base_url, timeout=args.timeout, token_env=args.gateway_token_env)
+        media_preflight(args, [(model, _POLICY_STAGE.get())])
     _pre_flight_cost_suggestion(args, model, model_ids, prompt)
     failures: list[dict[str, Any]] = []
 
@@ -2118,7 +2168,7 @@ def generate_with_fallback(
                     run_id=getattr(args, "run_id", None),
                     budget_args=args,
                     budget_purpose=f"{purpose} fallback",
-                    **({"policy_fallback": True} if data_policy(args) else {}),
+                    **({"policy_fallback": True} if data_policy(args) or captured_media(args) else {}),
                 )
         except AntiError as fallback_exc:
             fallback_error = redact_sensitive_text(str(fallback_exc))
@@ -3352,6 +3402,7 @@ def prepare_chunk_checkpoint(args, *, kind, prompts, model, source):
     quote = admission.snapshot().get('currency') if admission is not None else None
     recipe = chunk_checkpoints.digest({'version':1,'kind':kind,'source':source,
         'helper':helper,'catalog':entries,'gateway':normalize_base_url(args.base_url),
+        'media':captured_media(args).identity() if captured_media(args) else None,
         'policy':policy.identity if policy else None,
         'acknowledgements':sorted(getattr(args,'acknowledge_secret_hash',None) or []),
         'local_policy':getattr(args,'_local_policy',None),'quote':quote,
@@ -4377,6 +4428,10 @@ def format_dry_run(
         "possible_retries": sum(int(stage.get("possible_retries", 0) or 0) for stage in stages),
         "budget_limit": budget_limit,
     }
+    media = captured_media()
+    if media is not None:
+        payload['media_coverage'] = media.report()
+        payload['unknowns'].append('image costs and provider acceptance are unknown; displayed token estimates cover text only')
     if output_json:
         return json.dumps(payload, indent=2, sort_keys=True)
     lines = [
@@ -4391,6 +4446,8 @@ def format_dry_run(
     lines.append(f"  stages: {json.dumps(stages, sort_keys=True)}")
     lines.append(f"  possible retries: {payload['possible_retries']}; pricing: heuristic tiers only (provider prices unknown)")
     lines.append("  unknowns: provider billing and missing runtime usage")
+    if media is not None:
+        lines.append("  images: captured, not sent; image costs and provider acceptance unknown; token estimates cover text only")
     if budget_limit is not None:
         lines.append(f"  heuristic-unit budget: {float(budget_limit):.4f}")
     return "\n".join(lines)
@@ -6330,6 +6387,9 @@ def command_panel(args: argparse.Namespace) -> int:
             stage_plan=metadata["execution_plan"], budget_limit=args.budget))
         return 0
     if args.print_prompt:
+        if captured_media(args) is not None:
+            metadata["media_coverage"] = captured_media(args).report()
+            eprint("[anti] Image bytes are captured but omitted from prompt preview; no content submitted")
         payload = {"prompt": prompt, "metadata": metadata, "caveats": caveats}
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
@@ -6366,6 +6426,8 @@ def command_panel(args: argparse.Namespace) -> int:
         model_ids = ensure_models_available(
             base_url=args.base_url, models=required_models, timeout=args.timeout, token_env=args.gateway_token_env,
         )
+    media_preflight(args, [(value, 'reviewer') for value in panel_models] + [(judge_model, 'judge')]
+                    + [(panel_review_summary_model(panel_models), 'summary')])
     def _catalog_member(model_id: str) -> str | None:
         return next(
             (candidate for candidate in model_ids if catalog_model_matches(model_id, candidate)),
@@ -7833,6 +7895,7 @@ def command_compare(args: argparse.Namespace) -> int:
         raise AntiError("compare requires at least one --model")
     model_ids = fetch_model_ids(args.base_url, timeout=args.timeout, token_env=args.gateway_token_env)
     ensure_models_available(base_url=args.base_url, models=models, timeout=args.timeout, token_env=args.gateway_token_env)
+    media_preflight(args, [(model, "primary") for model in models])
     prompt = read_prompt(args)
     caveats: list[str] = []
     results: list[dict[str, Any]] = []
@@ -8385,6 +8448,8 @@ def command_workflow(args: argparse.Namespace) -> int:
     expanded_args._local_policy = local_workflow.prepare_args(args)
     expanded_args.local_only = expanded_args._local_policy is not None
     expanded_args._run_control = run_control(args)
+    if captured_media(args) is not None:
+        expanded_args._media_session = captured_media(args)
     expanded_args.run_timeout = expanded_args._run_control.limit
 
     expanded_args.data_policy = getattr(args, "data_policy", None)
@@ -8614,12 +8679,13 @@ def add_generation_control_args(
     *,
     default_save_output: str = "never",
 ) -> None:
+    parser.add_argument('--image', action='append', help='Attach an explicit local PNG/JPEG unchanged to every stage; at most 4 images, 2 MiB each, 4 MiB total')
     parser.add_argument('--local-only', action='store_true', help='Require local-only gateway enforcement and loopback routes at every stage')
     parser.add_argument('--local-profile', help='Explicit non-secret local settings profile; excludes separate gateway/model/judge/fallback flags')
     parser.add_argument("--run-timeout", type=float, default=1800.0, help="Whole-run provider deadline in seconds (default: 1800; maximum: 86400)")
 
     parser.add_argument("--data-policy", help="Explicit path to a version 1 restrictive repository submission policy")
-    parser.add_argument("--acknowledge-secret-hash", action="append", help="Explicitly acknowledge this exact assembled prompt SHA-256; repeatable")
+    parser.add_argument("--acknowledge-secret-hash", action="append", help="Explicitly acknowledge this exact assembled text-and-image identity SHA-256; repeatable")
     parser.add_argument("--auto-route", action="store_true", help="Automatically pick the cheapest adequate model based on diff size and risk")
     parser.add_argument("--fallback-model", help="Fallback model alias/id for retryable or timeout failures")
     parser.add_argument(
