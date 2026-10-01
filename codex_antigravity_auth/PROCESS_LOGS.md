@@ -45,7 +45,8 @@ traces include exception type and a bounded list of basename/line/function frame
 without exception values, source code, locals or full paths. Raw unstructured
 Python stdout/stderr fragments are suppressed with a one-time notice per stream;
 fragments can split sensitive values and cannot be safely treated as independent
-messages. Uvicorn URL access logging is disabled; use sanitized structured request
+messages. Text and binary `.buffer` writes are discarded; stream descriptors
+refer to the null device and close when the runtime context exits. Uvicorn URL access logging is disabled; use sanitized structured request
 telemetry for requests. Arbitrary values that do not match credential/email forms
 are not promised to be discoverable as secrets; runtime call sites avoid emitting
 raw provider bodies, account IDs, project IDs and exception values.
@@ -60,6 +61,8 @@ are read to configure logging.
 
 `codex-antigravity status --json` and `service status --json` distinguish
 `process_log` from `request_log`, report the limits and preserved legacy paths,
-and never include raw process-log contents. These commands do not bundle logs.
+and never include raw process-log contents. Service diagnostics resolve the target
+service user's home, including `SUDO_USER`, and generated service commands bind
+their process-log path to that same home. These commands do not bundle logs.
 Do not attach legacy/raw process logs to support reports; report the structured
 request evidence and fixed runtime error category instead.

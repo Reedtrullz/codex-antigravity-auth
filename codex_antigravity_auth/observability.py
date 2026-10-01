@@ -48,8 +48,8 @@ def request_log_path() -> Path:
     return _codex_home_read_only() / REQUEST_LOG_FILE
 
 
-def request_log_info() -> dict[str, Any]:
-    path = request_log_path()
+def request_log_info(*, home: Path | None = None) -> dict[str, Any]:
+    path = request_log_path() if home is None else home / REQUEST_LOG_FILE
     rotated = path.with_suffix(path.suffix + ".1")
     return {
         "path": str(path),

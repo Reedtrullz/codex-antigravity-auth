@@ -189,17 +189,62 @@ class BoundedProcessHandler(logging.Handler):
             self.dropped += 1
 
 
+class _SuppressedBinaryStream(io.RawIOBase):
+    def __init__(self, owner):
+        self.owner = owner
+
+    def write(self, value):
+        if self.closed:
+            raise ValueError("write to closed stream")
+        size = memoryview(value).nbytes
+        self.owner._notice(size)
+        return size
+
+    def writable(self):
+        return True
+
+    def fileno(self):
+        if self.closed:
+            raise ValueError("operation on closed stream")
+        return self.owner.fileno()
+
+
 class SuppressedRuntimeStream(io.TextIOBase):
     """Raw writes have no complete-message boundary, so never persist their content."""
     def __init__(self, label):
         self.label = label
         self.reported = False
+        self.buffer = _SuppressedBinaryStream(self)
+        self._null_descriptor = None
 
-    def write(self, value):
-        if value and not self.reported:
+    def _notice(self, size):
+        if self.closed:
+            raise ValueError("write to closed stream")
+        if size and not self.reported:
             self.reported = True
             logging.getLogger(__name__).warning("Unstructured %s output suppressed", self.label)
+
+    def write(self, value):
+        if not isinstance(value, str):
+            raise TypeError("text stream requires str")
+        self._notice(len(value))
         return len(value)
+
+    def writable(self):
+        return True
+
+    def fileno(self):
+        self._notice(1)
+        if self._null_descriptor is None:
+            self._null_descriptor = os.open(os.devnull, os.O_WRONLY)
+        return self._null_descriptor
+
+    def close(self):
+        if self._null_descriptor is not None:
+            os.close(self._null_descriptor)
+            self._null_descriptor = None
+        self.buffer.close()
+        super().close()
 
     def flush(self):
         pass
@@ -207,6 +252,10 @@ class SuppressedRuntimeStream(io.TextIOBase):
     @property
     def encoding(self):
         return "utf-8"
+
+    @property
+    def errors(self):
+        return "replace"
 
 
 @contextmanager
@@ -218,6 +267,7 @@ def runtime_logging(path: Path, *, console=True):
         logging.getLogger(name)
     loggers = [root] + [item for item in logging.Logger.manager.loggerDict.values() if isinstance(item, logging.Logger)]
     saved = [(item, list(item.handlers), item.level, item.propagate, item.disabled) for item in loggers]
+    streams = (SuppressedRuntimeStream("stdout"), SuppressedRuntimeStream("stderr"))
     try:
         for item in loggers:
             item.handlers = []
@@ -227,10 +277,15 @@ def runtime_logging(path: Path, *, console=True):
         root.setLevel(logging.INFO)
         for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
             logging.getLogger(name).setLevel(logging.INFO)
-        sys.stdout, sys.stderr = SuppressedRuntimeStream("stdout"), SuppressedRuntimeStream("stderr")
+        sys.stdout, sys.stderr = streams
         yield handler
     finally:
         sys.stdout, sys.stderr = old_stdout, old_stderr
+        for stream in streams:
+            try:
+                stream.close()
+            except OSError:
+                pass
         for item, handlers, level, propagate, disabled in saved:
             item.handlers, item.level, item.propagate, item.disabled = handlers, level, propagate, disabled
         handler.close()

@@ -104,6 +104,13 @@ def service_log_paths(port: int) -> tuple[Path, Path]:
     return home / f"antigravity-service-{port}.out.log", home / f"antigravity-service-{port}.err.log"
 
 
+def service_log_info(port: int) -> dict[str, Any]:
+    from .observability import request_log_info
+    from .process_logs import process_log_info
+    home = _codex_home_read_only()
+    return {"process_log": process_log_info(home, port), "request_log": request_log_info(home=home)}
+
+
 def service_command(
     port: int,
     host: str,
@@ -112,12 +119,15 @@ def service_command(
     op_environment: str | None = None,
     unified_model_picker: bool = False,
 ) -> list[str]:
+    from .process_logs import log_path
     command = [
         sys.executable,
         "-m",
         "codex_antigravity_auth.cli",
         "start",
         "--quiet-runtime-console",
+        "--process-log",
+        str(log_path(_codex_home_read_only(), port)),
         "--port",
         str(int(port)),
         "--host",

@@ -241,3 +241,61 @@ def test_concurrent_port_initialization_publishes_one_owned_policy(tmp_path):
     directory = tmp_path / logs.DIRECTORY
     assert (directory / ".policy-v1").read_bytes() == logs.POLICY
     assert len(list(directory.glob("gateway-*.log"))) == 4
+
+
+def test_runtime_stream_binary_writes_and_descriptors_are_discarded_and_closed(tmp_path):
+    path = logs.log_path(tmp_path, 51122)
+    captured, descriptors = [], []
+    with logs.runtime_logging(path, console=False):
+        for stream in (sys.stdout, sys.stderr):
+            captured.append(stream)
+            assert stream.writable() and stream.buffer.writable()
+            assert not stream.isatty() and not stream.buffer.isatty()
+            payload = b'person@example.invalid password="fixture-binary-secret"\xff\n'
+            assert stream.buffer.write(payload) == len(payload)
+            assert stream.buffer.write(bytearray(payload)) == len(payload)
+            assert stream.buffer.write(memoryview(payload)) == len(payload)
+            stream.buffer.writelines([payload, payload])
+            stream.buffer.flush()
+            descriptor = stream.fileno()
+            assert stream.buffer.fileno() == descriptor
+            descriptors.append(descriptor)
+            assert os.write(descriptor, payload) == len(payload)
+            assert stream.write("fixture-text-secret\n") == 20
+        logging.getLogger("fixture.runtime").info("request work continues")
+    output = path.read_text()
+    assert "request work continues" in output
+    assert output.count("Unstructured stdout output suppressed") == 1
+    assert output.count("Unstructured stderr output suppressed") == 1
+    assert all(value not in output for value in ("person@example.invalid", "fixture-binary-secret", "fixture-text-secret"))
+    for stream, descriptor in zip(captured, descriptors):
+        assert stream.closed and stream.buffer.closed
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_service_log_paths_bind_target_user_under_synthetic_sudo(tmp_path, monkeypatch, capsys):
+    import json
+    from types import SimpleNamespace
+    from codex_antigravity_auth import cli_service
+    invoking = tmp_path / "invoking-root"
+    target = tmp_path / "service-owner"
+    monkeypatch.setenv("HOME", str(invoking))
+    monkeypatch.setenv("USERPROFILE", str(invoking))
+    monkeypatch.setenv("SUDO_USER", "synthetic-service-owner")
+    lookup = Mock(return_value=SimpleNamespace(pw_dir=str(target)))
+    monkeypatch.setitem(sys.modules, "pwd", SimpleNamespace(getpwnam=lookup))
+    monkeypatch.setattr(cli, "service_status", lambda _: {"installed": True, "active": True})
+    monkeypatch.setattr(cli, "reachable_gateway_status_info", lambda *args, **kwargs: {"reachable": False, "status": "stopped"})
+    result = cli_service.run_service_command(SimpleNamespace(service_command="status", port=51122, json=True))
+    assert json.loads(capsys.readouterr().out) == result
+    expected = logs.log_path(target / ".codex", 51122)
+    assert result["process_log"]["path"] == str(expected)
+    assert all(str(target) in item for item in result["process_log"]["legacy_paths"])
+    assert result["request_log"]["path"] == str(target / ".codex/antigravity-requests.jsonl")
+    command = service.service_command(51122, "127.0.0.1")
+    assert command[command.index("--process-log") + 1] == str(expected)
+    assert str(expected) in service.render_linux_systemd_unit(51122, "127.0.0.1")
+    assert str(expected) in service.render_macos_launch_agent(51122, "127.0.0.1")
+    assert not invoking.exists() and not target.exists()
+    assert all(call.args == ("synthetic-service-owner",) for call in lookup.call_args_list)

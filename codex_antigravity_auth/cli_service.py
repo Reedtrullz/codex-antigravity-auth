@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import cli as _cli
 from .process_logs import process_log_info, prepare_log
+from .service import service_log_info
 
 
 def _codex_home_read_only() -> Path:
@@ -343,9 +344,7 @@ def run_service_command(args) -> dict:
         error=info.get("error"),
     ).to_dict()
     info = {**info, **observed}
-    result = {"service": info, "gateway": gateway,
-              "process_log": process_log_info(_codex_home_read_only(), args.port),
-              "request_log": _cli.request_log_info()}
+    result = {"service": info, "gateway": gateway, **service_log_info(args.port)}
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2))
     else:
