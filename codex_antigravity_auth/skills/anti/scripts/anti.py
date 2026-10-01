@@ -8494,7 +8494,7 @@ def command_runs(args: argparse.Namespace) -> int:
                 print(f"[*] {row['action']}: {label} ({row['reason']})")
                 if row.get("recovery"):
                     print("    " + row["recovery"])
-                    print("    Retained paths: " + json.dumps([row["recordPath"], row["artifactPath"]]))
+                    print("    Retained paths: " + json.dumps([row["recordPath"], row["artifactPath"], row["markerPath"]]))
             removed = sum(row["action"] in {"remove", "resume", "removed"} for row in report["rows"])
             verb = "Would remove" if args.dry_run else "Removed"
             print(f"[+] {verb} {removed} Anti run record(s) older than {args.older_than} day(s)")

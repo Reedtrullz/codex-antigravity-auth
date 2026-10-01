@@ -224,3 +224,62 @@ def test_cli_json_plan_and_error_exit_are_explicit(sandbox, monkeypatch, capsys)
     report = json.loads(capsys.readouterr().out)
     assert report["errors"] == 1
     assert (root / "fixture.json").exists()
+
+
+@pytest.mark.parametrize("failure", ["changed", "orphan", "invalid"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_explicit_unsafe_resume_fails_with_paths_and_preserves_bytes(sandbox, monkeypatch, capsys, failure, dry_run):
+    anti, cleanup, root = sandbox
+    path = record(root)
+    artifact = root / "fixture"
+    artifact.mkdir()
+    (artifact / "retained").write_text("synthetic retained output")
+    def fail(_):
+        raise PermissionError("synthetic interrupted cleanup")
+    with monkeypatch.context() as patch:
+        patch.setattr(cleanup.shutil, "rmtree", fail)
+        assert clean(cleanup, root)["errors"] == 1
+    marker = root / ".deleted/fixture.json"
+    if failure == "changed":
+        record(root, status="running")
+    elif failure == "orphan":
+        path.unlink()
+    else:
+        marker.write_bytes(b"synthetic invalid marker")
+    before = snapshot(root)
+    argv = ["runs", "clean", "--older-than", "1", "--resume-cleanup", "--json"]
+    if dry_run:
+        argv.append("--dry-run")
+    assert anti.main(argv) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["errors"] == 1
+    row = report["rows"][0]
+    assert row["action"] == "error"
+    assert row["recordPath"] == str(path)
+    assert row["artifactPath"] == str(artifact)
+    assert row["markerPath"] == str(marker)
+    assert "manual recovery" in row["recovery"]
+    assert snapshot(root) == before
+
+
+def test_marker_removed_between_resume_plan_and_lock_is_incomplete(sandbox, monkeypatch):
+    _, cleanup, root = sandbox
+    path = record(root)
+    (root / "fixture").mkdir()
+    def fail(_):
+        raise PermissionError("synthetic")
+    with monkeypatch.context() as patch:
+        patch.setattr(cleanup.shutil, "rmtree", fail)
+        clean(cleanup, root)
+    marker = root / ".deleted/fixture.json"
+    lock = cleanup.file_lock
+    @contextmanager
+    def changed_before_lock(path_to_lock):
+        marker.unlink()
+        with lock(path_to_lock):
+            yield
+    monkeypatch.setattr(cleanup, "file_lock", changed_before_lock)
+    result = clean(cleanup, root, resume=True)
+    assert result["errors"] == 1
+    assert result["rows"][0]["reason"] == "pending_marker_missing"
+    assert path.exists() and (root / "fixture").exists()

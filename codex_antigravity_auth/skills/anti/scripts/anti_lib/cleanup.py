@@ -87,6 +87,26 @@ def _marker(root: Path, run_id: str) -> dict[str, Any] | None:
     return value
 
 
+def _pending_problem(root: Path, run_id: str, marker: dict[str, Any], cutoff: float) -> str | None:
+    path = root / f"{run_id}.json"
+    artifact = root / run_id
+    if path.exists() or path.is_symlink():
+        current = _candidate(root, run_id, cutoff)
+        if (current["action"] != "remove" or current["sha256"] != marker["sourceSha256"]
+                or current["mtime_ns"] != marker["sourceMtimeNs"]):
+            return "pending_record_changed"
+    elif artifact.exists() or artifact.is_symlink():
+        return "orphan_artifact_after_cleanup"
+    return None
+
+
+def _incomplete(root: Path, run_id: str, reason: str) -> dict[str, Any]:
+    return {"id": run_id, "action": "error", "reason": reason,
+            "recordPath": str(root / f"{run_id}.json"), "artifactPath": str(root / run_id),
+            "markerPath": str(root / ".deleted" / f"{run_id}.json"),
+            "recovery": "Preserve and inspect the retained paths for manual recovery; resume only after the inconsistency is resolved."}
+
+
 def plan_cleanup(root: Path, cutoff: float, *, resume: bool = False) -> list[dict[str, Any]]:
     """A read-only snapshot. Execution always repeats the decision under lock."""
     if root.is_symlink():
@@ -114,7 +134,8 @@ def plan_cleanup(root: Path, cutoff: float, *, resume: bool = False) -> list[dic
                 if (root / f"{run_id}.json").exists() or (root / run_id).exists():
                     rows.append({"id": run_id, "action": "skip", "reason": "reserved_id_reappeared"})
                 continue
-            row = {"id": run_id, "action": "resume" if resume else "skip", "reason": "pending_cleanup"}
+            problem = _pending_problem(root, run_id, marker, cutoff) if resume else None
+            row = {"id": run_id, "action": "resume" if resume and not problem else "skip", "reason": problem or "pending_cleanup"}
         else:
             row = _candidate(root, run_id, cutoff)
         rows.append(row)
@@ -134,16 +155,18 @@ def _remove_locked(root: Path, row: dict[str, Any], cutoff: float, *, resume: bo
         raise PersistenceError("Unsafe cleanup directory")
     marker = _marker(root, run_id)
     if marker:
-        if marker["state"] != "deleting" or not resume:
+        if marker["state"] == "deleted":
+            if path.exists() or path.is_symlink() or artifact.exists() or artifact.is_symlink():
+                return {"id": run_id, "action": "skip", "reason": "reserved_id_reappeared"}
+            return {"id": run_id, "action": "skip", "reason": "cleanup_already_complete"}
+        if not resume:
             return {"id": run_id, "action": "skip", "reason": "cleanup_state_changed"}
-        if path.exists() or path.is_symlink():
-            current = _candidate(root, run_id, cutoff)
-            if (current["action"] != "remove" or current["sha256"] != marker["sourceSha256"]
-                    or current["mtime_ns"] != marker["sourceMtimeNs"]):
-                return {"id": run_id, "action": "skip", "reason": "pending_record_changed"}
-        elif artifact.exists() or artifact.is_symlink():
-            return {"id": run_id, "action": "skip", "reason": "orphan_artifact_after_cleanup"}
+        problem = _pending_problem(root, run_id, marker, cutoff)
+        if problem:
+            return {"id": run_id, "action": "skip", "reason": problem}
     else:
+        if row["action"] == "resume":
+            return {"id": run_id, "action": "skip", "reason": "pending_marker_missing"}
         current = _candidate(root, run_id, cutoff)
         if current["action"] != "remove":
             return current
@@ -168,13 +191,18 @@ def _remove_locked(root: Path, row: dict[str, Any], cutoff: float, *, resume: bo
 
 
 def clean_runs(root: Path, cutoff: float, *, dry_run: bool = False, resume: bool = False) -> dict[str, Any]:
-    def public(rows):
-        return [{key: value for key, value in row.items() if key not in {"sha256", "mtime_ns"}} for row in rows]
+    def report(rows):
+        failures = {"pending_record_changed", "orphan_artifact_after_cleanup", "invalid_cleanup_marker",
+                    "reserved_id_reappeared", "pending_marker_missing"}
+        rows = [_incomplete(root, row["id"], row["reason"]) if resume and row["reason"] in failures else row
+                for row in rows]
+        public = [{key: value for key, value in row.items() if key not in {"sha256", "mtime_ns"}} for row in rows]
+        return {"dryRun": dry_run, "rows": public, "reflections": "retained",
+                "errors": sum(row["action"] == "error" for row in rows)}
     rows = plan_cleanup(root, cutoff, resume=resume)
     if dry_run:
-        return {"dryRun": True, "rows": public(rows), "reflections": "retained", "errors": 0}
+        return report(rows)
     results = []
-    errors = 0
     for row in rows:
         if row["action"] not in {"remove", "resume"}:
             results.append(row)
@@ -183,9 +211,6 @@ def clean_runs(root: Path, cutoff: float, *, dry_run: bool = False, resume: bool
             with file_lock(root / f"{row['id']}.json"):
                 results.append(_remove_locked(root, row, cutoff, resume=resume))
         except (OSError, PersistenceError):
-            errors += 1
             # Do not embed raw error/record text in a shareable cleanup report.
-            results.append({"id": row["id"], "action": "error", "reason": "cleanup_incomplete",
-                            "recordPath": str(root / f"{row['id']}.json"), "artifactPath": str(root / row["id"]),
-                            "recovery": "Inspect retained paths, then use --resume-cleanup; preserve invalid markers for manual recovery."})
-    return {"dryRun": False, "rows": public(results), "reflections": "retained", "errors": errors}
+            results.append(_incomplete(root, row["id"], "cleanup_incomplete"))
+    return report(results)
