@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 import json
 import os
@@ -2142,7 +2143,7 @@ class TestV3NativeSetup(unittest.TestCase):
                                             )
 
             pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
-            log_file = Path(tmp) / "antigravity-gateway-51122.log"
+            log_file = Path(tmp) / "antigravity-process-logs/gateway-51122.log"
             self.assertEqual(pid_file.read_text(encoding="utf-8"), "12345\n")
             assert_mode_if_posix(self, log_file, 0o600)
             self.assertEqual(info["pid_file"], str(pid_file))
@@ -2196,8 +2197,11 @@ class TestV3NativeSetup(unittest.TestCase):
             cmd = popen.call_args.args[0]
             self.assertEqual(cmd[:4], ["/usr/local/bin/op", "run", "--env-file", str(env_file)])
             self.assertIn("--", cmd)
-            self.assertIn("uvicorn", cmd)
-            self.assertIn("codex_antigravity_auth.server:app", cmd)
+            self.assertIn("codex_antigravity_auth.cli", cmd)
+            self.assertIn("start", cmd)
+            self.assertIn("--process-log", cmd)
+            self.assertEqual(popen.call_args.kwargs["stdout"], subprocess.DEVNULL)
+            self.assertEqual(popen.call_args.kwargs["stderr"], subprocess.DEVNULL)
 
     def test_start_background_rejects_onepassword_when_op_missing_before_popen(self):
         proc = MagicMock()

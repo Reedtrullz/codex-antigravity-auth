@@ -235,3 +235,14 @@ When multiple Google accounts are registered, the gateway automatically rotates 
 The local server natively isolates explicit thinking blocks and stream envelopes, ensuring standard formatting:
 - **Thinking/Reasoning block**: Emits `response.reasoning_text.delta` for explicit backend thinking parts while preserving regular `thoughtSignature` text as visible output.
 - **SSE Stream**: Formats candidates, function calls, usage metadata, and completion events into Responses API SSE chunks parsed correctly by both Codex CLI and Codex Desktop.
+
+### Gateway process-log privacy and retention
+
+`start`, `start --background` and newly installed services write bounded,
+sanitized process logs separately from structured request telemetry. Per port,
+retain at most 2 MiB active plus two 2 MiB backups. `status --json` and
+`service status --json` report both log kinds without including their contents.
+Legacy gateway/service log files are left untouched; reinstall an existing
+service to stop its old append-only output routing. Account references in runtime
+messages are opaque and change on restart; explicit account-management commands
+still show local account identity. See [the process-log contract](codex_antigravity_auth/PROCESS_LOGS.md).

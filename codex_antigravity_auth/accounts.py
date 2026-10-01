@@ -8,6 +8,7 @@ from typing import Any, Callable
 from .account_state import AccountState
 from .oauth import refresh_access_token, token_expires_in_seconds
 from .redaction import redact_secret_text
+from .process_logs import account_ref
 from .response_protocol import AttemptOutcome
 from .storage import (
     accounts_json_path_read_only,
@@ -67,7 +68,7 @@ def _apply_token_refresh(account: dict, refresh_token: str, *, wait: bool = True
         # on a background refresh here: fail closed and let selection rotate.
         acquired = lock.acquire(blocking=False)
     if not acquired:
-        _log.warning("Refresh lock busy for %s; refusing stale-token selection", email)
+        _log.warning("Refresh lock busy for %s; refusing stale-token selection", account_ref(email))
         return False
     try:
         refreshed = refresh_access_token(refresh_token)
@@ -83,11 +84,11 @@ def _apply_token_refresh(account: dict, refresh_token: str, *, wait: bool = True
                 project_id = discover_project_id(refreshed["access_token"])
                 if project_id:
                     account["projectId"] = project_id
-                    _log.info("Discovered project ID %s for %s", project_id, email)
+                    _log.info("Discovered project for %s", account_ref(email))
                 else:
-                    _log.warning("Project discovery returned empty for %s", email)
+                    _log.warning("Project discovery returned empty for %s", account_ref(email))
             except Exception as exc:
-                _log.warning("Project discovery failed for %s: %s", email, redact_secret_text(str(exc)))
+                _log.warning("Project discovery failed for %s: %s", account_ref(email), type(exc).__name__)
         return True
     finally:
         lock.release()
@@ -238,10 +239,7 @@ class AccountManager:
                                 AttemptOutcome(scope="account", category="auth"),
                             )
                             dirty = True
-                            print(
-                                f"[*] Soft refresh failed for {email}, cooling down. Reason: "
-                                f"{redact_secret_text(str(exc))}"
-                            )
+                            _log.warning("Soft refresh failed for %s, cooling down: %s", account_ref(email), type(exc).__name__)
                             continue
                         selected = account
                         return dirty
@@ -267,10 +265,7 @@ class AccountManager:
                             AttemptOutcome(scope="account", category="auth"),
                         )
                         dirty = True
-                        print(
-                            f"[*] Account {email} flagged as cooling down. Reason: "
-                            f"{redact_secret_text(str(exc))}"
-                        )
+                        _log.warning("Account %s cooling down: %s", account_ref(email), type(exc).__name__)
 
             update_accounts(mutate)
             return selected
@@ -325,10 +320,8 @@ class AccountManager:
                 duration = state.apply_cooldown(email, family, outcome)
 
             self._mutate_state(mutation)
-            print(
-                f"[*] Account {email} flagged as cooling down for {duration}s. "
-                f"Reason: {redact_secret_text(reason)}"
-            )
+            _log.warning("Account %s cooling down for %ss (scope=%s category=%s)",
+                         account_ref(email), duration, outcome.scope, outcome.category)
 
     def record_attempt(
         self,
@@ -439,7 +432,7 @@ class AccountManager:
                                 from .oauth import discover_project_id
                                 discovered_project = discover_project_id(new_access_token)
                             except Exception:
-                                _log.warning("Project discovery failed for %s during refresh", email)
+                                _log.warning("Project discovery failed for %s during refresh", account_ref(email))
 
                         merged = False
                         with self._lock:

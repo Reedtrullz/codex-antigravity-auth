@@ -117,6 +117,7 @@ def service_command(
         "-m",
         "codex_antigravity_auth.cli",
         "start",
+        "--quiet-runtime-console",
         "--port",
         str(int(port)),
         "--host",
@@ -143,7 +144,6 @@ def render_macos_launch_agent(
     op_environment: str | None = None,
     unified_model_picker: bool = False,
 ) -> str:
-    stdout, stderr = service_log_paths(port)
     args = "\n".join(
         f"    <string>{_xml_escape(arg)}</string>"
         for arg in service_command(
@@ -168,9 +168,9 @@ def render_macos_launch_agent(
     <false/>
   </dict>
   <key>StandardOutPath</key>
-  <string>{_xml_escape(str(stdout))}</string>
+  <string>/dev/null</string>
   <key>StandardErrorPath</key>
-  <string>{_xml_escape(str(stderr))}</string>
+  <string>/dev/null</string>
 </dict>
 </plist>
 """
@@ -184,7 +184,6 @@ def render_linux_systemd_unit(
     op_environment: str | None = None,
     unified_model_picker: bool = False,
 ) -> str:
-    stdout, stderr = service_log_paths(port)
     command = " ".join(
         shlex.quote(part).replace('%', '%%')
         for part in service_command(
@@ -200,8 +199,8 @@ Type=simple
 ExecStart={command}
 Restart=on-failure
 RestartSec=2
-StandardOutput=append:{stdout}
-StandardError=append:{stderr}
+StandardOutput=null
+StandardError=null
 
 [Install]
 WantedBy=default.target
