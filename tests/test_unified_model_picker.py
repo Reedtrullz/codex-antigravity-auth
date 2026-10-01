@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.conftest import byte_chunks
+
 import json
 import unittest
 from unittest.mock import MagicMock, patch
@@ -270,6 +272,9 @@ class TestUnifiedResponsesRouting(unittest.TestCase):
                         yield chunk
 
                 return iterator()
+
+            def aiter_bytes(self):
+                return byte_chunks(self.aiter_text())
 
         class FakeStreamContext:
             def __init__(self, response):

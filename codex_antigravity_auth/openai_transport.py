@@ -20,6 +20,10 @@ from .byok import (
 )
 
 from .redaction import redact_secret_text
+from .native_output import (
+    MAX_ITEMS, NativeOutputError, check_json, reconcile_output,
+    validate_event, validate_output, validate_response,
+)
 
 from .response_protocol import (
     ProviderCapabilities,
@@ -29,7 +33,6 @@ from .response_protocol import (
     ResponseEventBuilder,
     TerminalKind,
     classify_terminal,
-    meaningful_output_items,
     normalize_usage,
     refusal_item,
 )
@@ -37,74 +40,7 @@ from .transform import function_call_arguments_string, valid_function_name
 from .transform import transform_request_to_chat
 
 
-class SSELineError(RuntimeError):
-    """Raised when an SSE stream produces a malformed or truncated line."""
-
-
-async def iter_sse_data(response, *, label: str = "provider") -> AsyncIterator[str]:
-    buffer = ""
-    pending: list[str] = []
-
-    async for chunk in response.aiter_text():
-        buffer += chunk
-        while "\n" in buffer:
-            line, buffer = buffer.split("\n", 1)
-            stripped = line.strip()
-            if not stripped:
-                # SSE event boundary: flush any accumulated data lines.
-                if pending:
-                    payload = "\n".join(pending)
-                    pending = []
-                    yield payload
-                continue
-            if not stripped.startswith("data:"):
-                # Non-data metadata lines (event:, id:, retry:) are ignored;
-                # a pending frame is flushed at the next event boundary.
-                continue
-            payload = stripped[5:].strip()
-            # SSE continuation lines join with "\n". Parse-or-accumulate:
-            # a standalone line is emitted immediately, and a fragment that
-            # does not yet parse as JSON waits for its continuation lines so
-            # both blank-line-separated and bare-\n frames work.
-            if pending:
-                if payload == "[DONE]":
-                    # A [DONE] marker is never a JSON continuation: flush the
-                    # incomplete fragment (the caller reports it as malformed)
-                    # and deliver the marker on its own.
-                    yield "\n".join(pending)
-                    pending = []
-                    yield payload
-                    continue
-                candidate = "\n".join([*pending, payload])
-                try:
-                    json.loads(candidate)
-                except json.JSONDecodeError:
-                    pending.append(payload)
-                    continue
-                pending = []
-                yield candidate
-                continue
-            if payload == "[DONE]":
-                yield payload
-                continue
-            try:
-                json.loads(payload)
-            except json.JSONDecodeError:
-                pending.append(payload)
-                continue
-            yield payload
-    if buffer.strip():
-        stripped = buffer.strip()
-        if stripped.startswith("data:"):
-            payload = stripped[5:].strip()
-            if pending:
-                yield "\n".join([*pending, payload])
-            else:
-                yield payload
-        else:
-            raise SSELineError(f"The {label} stream ended with an incomplete SSE frame.")
-    elif pending:
-        yield "\n".join(pending)
+from .sse import SSEDecoder, SSELineError, iter_sse_data
 
 
 def parse_sse_payload(data: str, *, label: str = "provider") -> dict[str, Any]:
@@ -502,7 +438,7 @@ class OpenAICompatibleTransport:
                             yield event
                         return
                     try:
-                        async for data in iter_sse_data(response, label="OpenAI"):
+                        async for data in iter_sse_data(response, label="OpenAI", legacy_json_lines=True):
                             if data == "[DONE]":
                                 if provider_done:
                                     async for event in fail("duplicate_done", "The provider emitted [DONE] more than once."):
@@ -630,36 +566,8 @@ class OpenAICompatibleTransport:
         *,
         display_model: str,
     ) -> dict[str, Any]:
-        if not isinstance(payload, dict):
-            raise ValueError("native Responses payload must be an object")
-        status = payload.get("status")
-        if status is not None and status not in {"completed", "incomplete", "failed"}:
-            raise ValueError("native Responses payload has an invalid status")
-        output = payload.get("output")
-        if not isinstance(output, list):
-            raise ValueError("native Responses payload output must be a list")
-        response = dict(payload)
-        response["model"] = display_model
-        if status is None:
-            status = "completed" if output else "failed"
-            response["status"] = status
-        meaningful_output = meaningful_output_items(output)
-        if status in {"completed", "incomplete"}:
-            response["output"] = list(meaningful_output)
-        if status == "completed" and not meaningful_output:
-            response["status"] = "failed"
-            response["error"] = {
-                "code": "empty_response",
-                "message": "The provider returned no meaningful output.",
-            }
-        elif status == "failed":
-            error = payload.get("error")
-            code = error.get("code") if isinstance(error, dict) else None
-            response["error"] = {
-                "code": code if isinstance(code, str) and code else "provider_error",
-                "message": "The provider request failed.",
-            }
-        return response
+        return validate_response(payload, display_model=display_model)
+
 
 
 class NativeResponsesStreamAdapter:
@@ -669,16 +577,33 @@ class NativeResponsesStreamAdapter:
 
     def __init__(self, *, display_model: str) -> None:
         self.display_model = display_model
-        self._buffer = ""
+        self._decoder = SSEDecoder()
         self._terminal_event: dict[str, Any] | None = None
         self._terminal_emitted = False
         self._provider_done = False
         self._visible_output_started = False
         self._response_id = f"resp_{uuid.uuid4().hex[:12]}"
+        self._provider_response_id: str | None = None
+        self._protocol_error = False
+        self._last_sequence: int | None = None
+        self._items: dict[int, str] = {}
+        self._item_indices: dict[str, int] = {}
+        self._identity_chars = 0
+        self._native_types: dict[int, str] = {}
+        self._completed_items: dict[int, dict] = {}
+        self._completed_budget = [0, 0]
 
     @property
     def visible_output_started(self) -> bool:
         return self._visible_output_started
+
+    @property
+    def awaiting_eof(self) -> bool:
+        return self._terminal_event is not None or self._provider_done
+
+    @property
+    def protocol_failed(self) -> bool:
+        return self._protocol_error
 
     def _failure(self, code: str, message: str) -> dict[str, Any]:
         return {
@@ -694,7 +619,82 @@ class NativeResponsesStreamAdapter:
         }
 
     def _set_failure(self, code: str, message: str) -> None:
+        if self._terminal_emitted or self._protocol_error:
+            return
+        self._protocol_error = True
         self._terminal_event = self._failure(code, message)
+
+    def _valid_id(self, value: object) -> bool:
+        if not isinstance(value, str) or not value:
+            self._set_failure("invalid_stream_identity", "The provider returned an invalid stream identifier.")
+            return False
+        try:
+            value.encode("utf-8")
+        except UnicodeError:
+            self._set_failure("invalid_stream_identity", "The provider returned an invalid stream identifier.")
+            return False
+        if len(value) > 65536:
+            self._set_failure("stream_identity_limit", "The provider exceeded the stream identity limit.")
+            return False
+        return True
+
+    def _bind_item(self, index: object, item_id: object) -> bool:
+        if index is not None and (type(index) is not int or index < 0):
+            self._set_failure("invalid_output_index", "The provider returned an invalid output index.")
+            return False
+        if item_id is None:
+            return True
+        if not self._valid_id(item_id):
+            return False
+        if index is None:
+            return True
+        if (index in self._items and self._items[index] != item_id) or (
+            item_id in self._item_indices and self._item_indices[item_id] != index
+        ):
+            self._set_failure("mismatched_item_id", "The provider contradicted an output item's identity.")
+            return False
+        if index not in self._items:
+            if len(self._items) >= 10000 or self._identity_chars + len(item_id) > 65536:
+                self._set_failure("stream_identity_limit", "The provider exceeded the stream identity limit.")
+                return False
+            self._identity_chars += len(item_id)
+            self._items[index] = item_id
+            self._item_indices[item_id] = index
+        return True
+
+    def _validate_identity(self, event: dict[str, Any]) -> bool:
+        # Compatible providers may omit these fields or lifecycle events. Check
+        # supplied facts for contradictions without inventing missing state.
+        if "sequence_number" in event:
+            sequence = event["sequence_number"]
+            if type(sequence) is not int or sequence < 0 or (
+                self._last_sequence is not None and sequence <= self._last_sequence
+            ):
+                self._set_failure("invalid_stream_sequence", "The provider returned invalid or out-of-order sequence numbers.")
+                return False
+            self._last_sequence = sequence
+        response = event.get("response")
+        response = response if isinstance(response, dict) else {}
+        for response_id in (event.get("response_id"), response.get("id")):
+            if response_id is None:
+                continue
+            if not self._valid_id(response_id):
+                return False
+            if self._provider_response_id is not None and response_id != self._provider_response_id:
+                self._set_failure("mismatched_response_id", "The provider contradicted the response identity.")
+                return False
+            self._provider_response_id = self._response_id = response_id
+        item = event.get("item")
+        item = item if isinstance(item, dict) else {}
+        if not self._bind_item(event.get("output_index"), event.get("item_id")):
+            return False
+        if not self._bind_item(event.get("output_index"), item.get("id")):
+            return False
+        if isinstance(response.get("output"), list):
+            for index, output in enumerate(response["output"]):
+                if isinstance(output, dict) and not self._bind_item(index, output.get("id")):
+                    return False
+        return True
 
     def _release_terminal(self) -> list[dict[str, Any]]:
         if self._terminal_event is None or self._terminal_emitted:
@@ -702,11 +702,10 @@ class NativeResponsesStreamAdapter:
         self._terminal_emitted = True
         return [self._terminal_event]
 
-    def _consume_line(self, line: str) -> list[dict[str, Any]]:
-        stripped = line.strip()
-        if not stripped or stripped.startswith(":") or not stripped.startswith("data:"):
+    def _consume_payload(self, data: str) -> list[dict[str, Any]]:
+        if self._terminal_emitted or self._protocol_error:
             return []
-        data = stripped[5:].strip()
+        data = data.strip()
         if data == "[DONE]":
             if self._provider_done:
                 self._set_failure("duplicate_done", "The provider emitted [DONE] more than once.")
@@ -716,23 +715,55 @@ class NativeResponsesStreamAdapter:
                     "missing_terminal_signal",
                     "The provider stream ended without a terminal response event.",
                 )
-            return self._release_terminal()
+            return []
         if self._provider_done:
             self._set_failure("output_after_done", "The provider emitted output after [DONE].")
-            return self._release_terminal()
+            return []
         try:
             event = json.loads(data)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             self._set_failure("invalid_stream_chunk", "The provider returned malformed stream JSON.")
             return []
         if not isinstance(event, dict) or not isinstance(event.get("type"), str):
             self._set_failure("invalid_stream_event", "The provider returned an invalid stream event.")
             return []
         event_type = event["type"]
-        if event_type in self._TERMINAL_TYPES:
-            if self._terminal_event is not None:
+        if not self._validate_identity(event):
+            return []
+        if event_type == "error":
+            self._set_failure("provider_error", "The provider reported a stream error.")
+            return []
+        if self._terminal_event is not None:
+            if event_type in self._TERMINAL_TYPES:
                 self._set_failure("duplicate_terminal", "The provider emitted more than one terminal event.")
-                return []
+            else:
+                self._set_failure("output_after_terminal", "The provider emitted output after its terminal event.")
+            return []
+        try:
+            expected_item = validate_event(event)
+            index = event.get("output_index")
+            supplied = []
+            if expected_item is not None and index is not None:
+                supplied.append((index, expected_item))
+            snapshot = event.get("response")
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("output"), list):
+                supplied.extend((offset, item["type"]) for offset, item in enumerate(snapshot["output"])
+                                if isinstance(item, dict) and isinstance(item.get("type"), str))
+            for offset, item_type in supplied:
+                if offset in self._native_types and self._native_types[offset] != item_type:
+                    raise NativeOutputError("conflicting_native_item")
+                if len(self._native_types) >= MAX_ITEMS and offset not in self._native_types:
+                    raise NativeOutputError("native_output_limit")
+                self._native_types[offset] = item_type
+            if event_type == "response.output_item.done":
+                if index in self._completed_items:
+                    raise NativeOutputError("duplicate_native_item")
+                check_json(event["item"], budget=self._completed_budget)
+                self._completed_items[index] = validate_output([event["item"]])[0]
+        except NativeOutputError as exc:
+            self._set_failure(exc.code, str(exc))
+            return []
+        if event_type in self._TERMINAL_TYPES:
             response = event.get("response")
             if not isinstance(response, dict):
                 self._set_failure("invalid_terminal_event", "The provider returned an invalid terminal event.")
@@ -742,29 +773,17 @@ class NativeResponsesStreamAdapter:
             if provider_status is not None and provider_status != expected_status:
                 self._set_failure("invalid_terminal_event", "The provider terminal status did not match its event type.")
                 return []
-            normalized = {**response, "status": expected_status, "model": self.display_model}
-            output = response.get("output")
-            meaningful = meaningful_output_items(output) if isinstance(output, list) else ()
-            if expected_status in {"completed", "incomplete"}:
-                if meaningful:
-                    normalized["output"] = list(meaningful)
-                elif self._visible_output_started:
-                    normalized.setdefault("output", [])
-                else:
-                    self._set_failure("empty_response", "The provider returned no meaningful output.")
-                    return []
-            if expected_status == "failed":
-                error = response.get("error")
-                code = error.get("code") if isinstance(error, dict) else None
-                normalized["error"] = {
-                    "code": code if isinstance(code, str) and code else "provider_error",
-                    "message": "The provider request failed.",
-                }
+            try:
+                output = reconcile_output(response.get("output"), self._completed_items)
+                if any(index >= len(output) for index in self._native_types):
+                    raise NativeOutputError("incomplete_native_output")
+                normalized = validate_response({**response, "status": expected_status, "output": output}, display_model=self.display_model)
+            except (NativeOutputError, ValueError) as exc:
+                self._set_failure(getattr(exc, "code", "invalid_native_output"), "The provider returned an invalid native terminal snapshot.")
+                return []
+            expected_status = normalized["status"]
             normalized_type = f"response.{expected_status}"
             self._terminal_event = {"type": normalized_type, "response": normalized}
-            return []
-        if self._terminal_event is not None:
-            self._set_failure("output_after_terminal", "The provider emitted output after its terminal event.")
             return []
         if event_type.startswith("response.output") or event_type.startswith("response.reasoning"):
             self._visible_output_started = True
@@ -774,21 +793,25 @@ class NativeResponsesStreamAdapter:
         return [event]
 
     def consume_bytes(self, chunk: bytes) -> list[dict[str, Any]]:
-        if not isinstance(chunk, bytes):
-            self._set_failure("invalid_stream_chunk", "The provider returned a non-byte stream chunk.")
+        if self._terminal_emitted or self._protocol_error:
             return []
-        self._buffer += chunk.decode("utf-8", errors="replace")
         events: list[dict[str, Any]] = []
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            events.extend(self._consume_line(line))
+        try:
+            for data in self._decoder.feed(chunk):
+                events.extend(self._consume_payload(data))
+        except SSELineError as exc:
+            self._set_failure("invalid_stream_chunk", str(exc))
         return events
 
     def finish(self) -> list[dict[str, Any]]:
+        if self._terminal_emitted:
+            return []
         events: list[dict[str, Any]] = []
-        if self._buffer.strip():
-            events.extend(self._consume_line(self._buffer))
-        self._buffer = ""
+        try:
+            for data in self._decoder.finish():
+                events.extend(self._consume_payload(data))
+        except SSELineError as exc:
+            self._set_failure("invalid_stream_chunk", str(exc))
         if self._terminal_event is None:
             self._set_failure(
                 "missing_terminal_signal",
@@ -796,3 +819,7 @@ class NativeResponsesStreamAdapter:
             )
         events.extend(self._release_terminal())
         return events
+
+    def abort(self, code: str, message: str) -> list[dict[str, Any]]:
+        self._set_failure(code, message)
+        return self.finish()

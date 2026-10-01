@@ -54,6 +54,7 @@ codex_antigravity_auth = [
   "skill_assets.json",
   "design/request-shapes.md",
   "design/capabilities.md",
+  "NATIVE_RESPONSES.md",
   "skills/anti/SKILL.md",
   "skills/anti/agents/*.yaml",
   "skills/anti/scripts/*.py",

@@ -1,3 +1,4 @@
+from tests.conftest import byte_chunks
 import json
 import os
 import io
@@ -1303,7 +1304,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1395,7 +1396,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1461,7 +1462,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1526,7 +1527,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1584,7 +1585,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(['data: {"choices": [}\n', "data: [DONE]\n"]))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(['data: {"choices": [}\n', "data: [DONE]\n"])))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1655,7 +1656,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1733,7 +1734,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1814,7 +1815,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1890,7 +1891,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):

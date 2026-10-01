@@ -1,3 +1,4 @@
+from tests.conftest import byte_chunks
 import unittest
 from unittest.mock import patch
 import math
@@ -448,6 +449,9 @@ class TestGoogleRouteTerminalFidelity(unittest.TestCase):
 
             def aiter_text(self):
                 return AsyncChunks()
+
+            def aiter_bytes(self):
+                return byte_chunks(self.aiter_text())
 
         class StreamContext:
             async def __aenter__(self):
