@@ -255,3 +255,26 @@ def test_exhausted_preview_budget_preserves_result_structure_and_reflection_coun
     assert saved["save_output"] == "summary"
     assert reflections.get_summary(root)["total_findings"] == 80
     assert all(LONG not in text for text in all_files(root).values())
+
+
+def test_full_redaction_budget_failure_does_not_publish_invalid_json(isolated_anti):
+    anti, reflections, root = isolated_anti
+    with pytest.raises(anti.AntiError, match="structured redaction limit"):
+        write(anti, "full", metadata={"large": [LONG] * 200})
+    assert not (root / "runs" / "fixture-run.json").exists()
+    assert not (root / "runs" / "fixture-run" / "result.json").exists()
+    with pytest.raises(reflections.PersistenceError, match="structured redaction limit"):
+        reflections.record_review(repo_path=root, findings=[{"claim": LONG}] * 200,
+                                  models=[], panel_status="complete", mode="panel", save_output="full")
+    assert not list((root / "reflections").glob("*.json"))
+
+
+@pytest.mark.parametrize("mode", ["summary", "full"])
+def test_validated_artifact_identity_survives_shared_privacy_redaction(isolated_anti, mode):
+    anti, _, root = isolated_anti
+    path = anti.write_run_record(args(mode, "user_12345678"), mode="panel", status="success", output_text="fixture answer")
+    record = json.loads(path.read_text())
+    artifact = json.loads(Path(record["resultPath"]).read_text())
+    assert artifact["runId"] == record["id"] == "user_12345678"
+    assert artifact["resultPath"] == artifact["artifacts"]["resultPath"] == record["resultPath"]
+    assert Path(artifact["artifacts"]["runRecordPath"]) == path

@@ -117,15 +117,17 @@ def ready_cli(monkeypatch, tmp_path):
 def test_doctor_exit_and_diagnostics(monkeypatch, capsys, ready_cli, flags, payload, kind, ok):
     mock_response(monkeypatch, payload)
     monkeypatch.setattr(sys, "argv", ["codex-antigravity", "doctor", "--live", "--config", str(ready_cli), *flags])
-    if ok:
+    if ok and "--json" not in flags:
         cli.main()
     else:
         with pytest.raises(SystemExit) as exc:
             cli.main()
-        assert exc.value.code == 1
+        assert exc.value.code == (0 if ok else 1)
     output = capsys.readouterr().out
     if "--json" in flags:
-        report = json.loads(output)
+        envelope = json.loads(output)
+        assert envelope["schemaVersion"] == 1 and envelope["exitCode"] == (0 if ok else 1)
+        report = envelope["data"]
         live = next(check for check in report["checks"] if check["name"] == "live_generation")
         assert live["status"] == ("pass" if ok else "fail")
         assert live["probe"]["terminal_kind"] == kind

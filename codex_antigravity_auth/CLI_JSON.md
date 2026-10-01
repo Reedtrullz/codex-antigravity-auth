@@ -24,8 +24,9 @@ and [schemas/support-bundle-v1.json](schemas/support-bundle-v1.json).
 | Invalid invocation | failed / 2 | Correct arguments before retrying |
 | Cancelled collection | failed / 130 | No successful result claimed |
 
-An unreachable `status`/`service status` observation is informational; failed
-readiness is blocking. Check-level detail remains in `data.checks`; envelope
+An unreachable `status`/`service status` observation and an absent/inactive
+service are informational warnings. An observed failed service or failed
+readiness is blocking, even when a separate gateway remains reachable. Check-level detail remains in `data.checks`; envelope
 codes are stable categories. Exceptions never become raw error messages in JSON.
 `logs --json --follow` is refused because it cannot produce a single result.
 JSON log inspection is bounded; summary retains the requested-window gap flag.
@@ -52,7 +53,8 @@ partial file; inspect/remove it explicitly before retrying. There is no upload.
 Bundles contain package/Python/platform versions, config structure and selected
 provider protocol/endpoint category, account/provider store readability (without
 decryption), aggregate request counts, requested-window gaps and optionally
-selected sanitized request events. Route observation is structural/offline: no
+selected sanitized request events, including started/attempt/terminal lifecycle
+phases. Route observation is structural/offline: no
 claim of authentication or live provider readiness. No provider, gateway, update
 service, keyring or OAuth request is made. Empty namespaces are not created.
 Reading existing request history uses its cooperating file lock; lock metadata
@@ -63,8 +65,9 @@ enter a bundle. Config values, source files, prompts, raw process logs, provider
 URLs/names, account emails, auth stores and keys are excluded. Store files are
 opened for metadata verification but their bytes are not read. Config is bounded
 to 1 MiB; history to 2 MiB and 2,000 rows; selected requests to 20 IDs and 100
-rows; serialized bundles to 256 KiB. An oversized history segment is omitted as
-a whole, with an explicit gap. Unknown/omitted coverage never becomes a complete
+rows; serialized bundles to 256 KiB. Bounded reads select the newest rows across retained segments, restore
+chronological order, and flag older omitted bytes/rows as a gap; a clipped
+leading record is discarded. One boundary byte may be read for alignment. Unknown/omitted coverage never becomes a complete
 window claim. The tool does not recursively collect arbitrary files.
 
 Selected IDs are matched locally and replaced with per-bundle keyed references;

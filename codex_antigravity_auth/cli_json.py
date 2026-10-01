@@ -119,7 +119,7 @@ def _collect(args):
     raise JSONUsageError("unsupported JSON operation")
 
 
-def _outcome(command, data):
+def _outcome(command, data, action=None):
     warnings, errors = [], []
     if type(data) is dict:
         checks = data.get("checks", [])
@@ -130,8 +130,17 @@ def _outcome(command, data):
             errors.append("operation_failed")
         if command == "status" and not data.get("reachable"):
             warnings.append("gateway_unreachable")
-        if command == "service" and not data.get("gateway", {}).get("reachable"):
-            warnings.append("gateway_unreachable")
+        if command in {"service", "status"}:
+            service = data.get("service", {})
+            if service.get("state") == "failed":
+                errors.append("service_failed")
+            elif action == "status" or command == "status":
+                if service.get("state") == "not_installed":
+                    warnings.append("service_not_installed")
+                elif service.get("state") == "installed_inactive":
+                    warnings.append("service_inactive")
+            if command == "service" and not data.get("gateway", {}).get("reachable"):
+                warnings.append("gateway_unreachable")
         if command == "logs":
             if (data.get("requested_window_incomplete") or data.get("malformed_records") or data.get("omitted_records")
                     or any(row.get("status") in {"malformed", "log_gap"} for row in data.get("records", []) if isinstance(row, dict))):
@@ -153,7 +162,7 @@ def run(args):
     try:
         with redirect_stdout(capture), redirect_stderr(capture):
             data = _collect(args)
-        warnings, errors = _outcome(command, data)
+        warnings, errors = _outcome(command, data, action)
         sanitized = redact_secrets(data)
         if data is not None and not isinstance(sanitized, dict):
             raise ValueError("result exceeds redaction limits")
