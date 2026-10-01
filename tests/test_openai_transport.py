@@ -250,6 +250,16 @@ class TestOpenAIStreamingRoute(unittest.IsolatedAsyncioTestCase):
         terminal = [event["type"] for event in events if event["type"] in {"response.completed", "response.incomplete", "response.failed"}]
         self.assertEqual(terminal, ["response.failed"])
 
+    async def test_chat_legacy_mode_accepts_padded_done_without_blank_separator(self):
+        for sentinel in ("[DONE]", " [DONE]", "[DONE] \t", " \t[DONE] \t"):
+            with self.subTest(sentinel=sentinel):
+                events = await self._events([
+                    'data: {"choices":[{"delta":{"content":"fixture answer"}}]}\n',
+                    f"data: {sentinel}\n",
+                ])
+                terminal = [event["type"] for event in events if event["type"] in {"response.completed", "response.incomplete", "response.failed"}]
+                self.assertEqual(terminal, ["response.completed"])
+
     async def test_length_stream_is_incomplete(self):
         events = await self._events(
             [

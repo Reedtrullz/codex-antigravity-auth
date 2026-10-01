@@ -69,8 +69,12 @@ class SSEDecoder:
             return
         if separator and value.startswith(" "):
             value = value[1:]
-        if self._legacy and value == "[DONE]" and self._data:
-            yield from self._flush()
+        if self._legacy and value.strip() == "[DONE]":
+            # Historical JSON-line callers accepted padded sentinels. Do not
+            # trim ordinary data or standard SSE field values.
+            value = "[DONE]"
+            if self._data:
+                yield from self._flush()
         self._check_limit(len(value) + 1)
         if len(self._data) >= MAX_SSE_DATA_LINES:
             raise SSELineError("The provider stream exceeded the SSE data-line limit.")

@@ -103,6 +103,13 @@ def test_legacy_json_lines_is_explicit_and_emits_deltas_before_completion():
     assert list(decoder.finish()) == []
 
 
+def test_legacy_sentinel_normalization_preserves_standard_data_and_pending_json():
+    wire = b"data:  [DONE] \t\n"
+    assert decode([wire], legacy_json_lines=True) == ["[DONE]"]
+    assert decode([wire + b"\n"]) == [" [DONE] \t"]
+    assert decode([b"data: {\n" + wire], legacy_json_lines=True) == ["{", "[DONE]"]
+
+
 def test_native_delta_is_visible_at_event_boundary_without_waiting_for_eof():
     adapter = NativeResponsesStreamAdapter(display_model="fixture")
     assert adapter.consume_bytes(b'data: {"type":"response.output_text.delta","delta":"first"}\n') == []
@@ -162,9 +169,10 @@ def test_large_chunk_with_many_small_events_does_not_accumulate_stream_history()
     assert decode([b"data: {}\n\n" * 10000], max_buffer_chars=64) == ["{}"] * 10000
 
 
-def test_google_compatibility_path_uses_byte_framing(monkeypatch):
+@pytest.mark.parametrize("sentinel", ["[DONE]", " [DONE]", "[DONE] \t", " \t[DONE] \t"])
+def test_google_compatibility_path_uses_byte_framing(monkeypatch, sentinel):
     payload = {"candidates": [{"content": {"parts": [{"text": "café 💡"}]}, "finishReason": "STOP"}]}
-    wire = ("data: " + json.dumps(payload, ensure_ascii=False) + "\r\n" + "data: [DONE]\r\n").encode()
+    wire = ("data: " + json.dumps(payload, ensure_ascii=False) + "\r\n" + f"data: {sentinel}\r\n").encode()
     @asynccontextmanager
     async def stream(*args):
         yield Response([bytes([value]) for value in wire])
