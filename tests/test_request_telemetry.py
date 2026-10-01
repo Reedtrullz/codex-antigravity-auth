@@ -49,9 +49,13 @@ def route_fixture(monkeypatch):
 def test_route_stream_matrix_has_one_semantic_terminal(monkeypatch, records, route_fixture, route, stream, status):
     response = normalized_response(status)
     monkeypatch.setattr(server, "classify_route", lambda *args, **kwargs: route)
-    async def nonstream(*args, **kwargs):
+    async def nonstream(*args, telemetry=None, **kwargs):
+        if telemetry is not None:
+            telemetry["http_status"] = 200
         return copy.deepcopy(response)
-    async def opened(*args, **kwargs):
+    async def opened(*args, telemetry=None, **kwargs):
+        if telemetry is not None:
+            telemetry["http_status"] = 200
         return (None, None, None)
     async def proxy_stream(*args, telemetry=None, **kwargs):
         if telemetry is not None:
@@ -63,7 +67,9 @@ def test_route_stream_matrix_has_one_semantic_terminal(monkeypatch, records, rou
         if status != "failed":
             payload["candidates"] = [{"finishReason": "MAX_TOKENS" if status == "incomplete" else "STOP", "content": {"parts": [{"text": "synthetic output"}]}}]
         return httpx.Response(200, json=payload)
-    async def google_stream(*args, **kwargs):
+    async def google_stream(*args, telemetry=None, **kwargs):
+        if telemetry is not None:
+            telemetry["http_status"] = 200
         yield {"type": f"response.{status}", "response": response}
         yield "[DONE]"
     monkeypatch.setattr(server, "create_openai_upstream_response", nonstream)
@@ -95,7 +101,9 @@ def test_route_stream_matrix_has_one_semantic_terminal(monkeypatch, records, rou
 @pytest.mark.parametrize("route", ["openai", "byok"])
 def test_proxy_cancellation_records_one_cancelled_terminal(monkeypatch, records, route_fixture, route):
     monkeypatch.setattr(server, "classify_route", lambda *args, **kwargs: route)
-    async def opened(*args, **kwargs):
+    async def opened(*args, telemetry=None, **kwargs):
+        if telemetry is not None:
+            telemetry["http_status"] = 200
         return (None, None, None)
     async def stream(*args, telemetry=None, **kwargs):
         if telemetry is not None:
@@ -129,6 +137,8 @@ def test_boundary_validation_is_logged_without_request_content(records, body):
     assert records[0]["terminal_kind"] == "failed"
     assert records[0]["error_class"] == "invalid_request"
     assert records[0]["attempt_count"] == 0
+    assert records[0]["provider_accepted"] is None
+    assert records[0]["upstream_http_status"] is None
 
 
 def event(request_id, status, **values):
@@ -207,3 +217,96 @@ def test_summary_tolerates_invalid_numeric_and_scalar_log_values(monkeypatch):
     group = logs.request_log_summary(since="all")["groups"]["byok/fixture"]
     assert group["request_count"] == group["failure_count"] == group["provider_acceptance_unknown_count"] == 1
     assert group["usage"]["total_tokens"] == 0 and group["p50_latency_ms"] is None
+
+
+def test_last_terminal_does_not_borrow_discarded_terminal_metrics(monkeypatch):
+    rows = [event("same", "success", usage={"total_tokens": 5}, latency_ms=900, attempt_count=7, rotation_count=6, provider_accepted=True, upstream_http_status=200), event("same", "cancelled", cancelled=True, lifecycle_phase="terminal")]
+    monkeypatch.setattr(logs, "iter_request_records", lambda: rows)
+    group = logs.request_log_summary(since="all")["groups"]["byok/fixture"]
+    assert group["request_count"] == group["cancellation_count"] == 1
+    assert group["usage"]["total_tokens"] == group["rotation_count"] == 0
+    assert group["p50_latency_ms"] is None and group["attempt_count"] == 1
+    assert group["provider_accepted_count"] == 0 and group["provider_acceptance_unknown_count"] == 1
+
+
+def test_legacy_gateway_status_does_not_certify_provider_acceptance(monkeypatch):
+    monkeypatch.setattr(logs, "iter_request_records", lambda: [event("local", "failed", http_status=400)])
+    group = logs.request_log_summary(since="all")["groups"]["byok/fixture"]
+    assert group["provider_accepted_count"] == 0
+    assert group["provider_acceptance_unknown_count"] == 1
+
+
+@pytest.mark.parametrize("route", ["google", "byok", "openai", "openai_oauth"])
+def test_upstream_http_200_is_preserved_when_gateway_maps_an_error(monkeypatch, records, route_fixture, route):
+    monkeypatch.setattr(server, "classify_route", lambda *args, **kwargs: "openai" if route == "openai_oauth" else route)
+    if route == "openai_oauth":
+        monkeypatch.setattr(server, "resolve_openai_auth", lambda: SimpleNamespace(kind="codex_oauth"))
+    monkeypatch.setattr(server, "openai_request_headers", lambda auth: {})
+    monkeypatch.setattr(server, "openai_responses_url", lambda auth: "https://example.invalid/responses")
+    original_client = httpx.AsyncClient
+    def respond(request):
+        if route == "google":
+            return httpx.Response(200, json={"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "synthetic quota"}})
+        return httpx.Response(200, content=b"synthetic invalid JSON")
+    monkeypatch.setattr(server.httpx, "AsyncClient", lambda **kwargs: original_client(transport=httpx.MockTransport(respond), **kwargs))
+    model = "fixture:model" if route == "byok" else "gemini-3.8-flash"
+    response = TestClient(server.app).post("/v1/responses", json={"model": model, "input": "synthetic", "stream": False})
+    assert response.status_code >= 400
+    terminal = records[-1]
+    assert terminal["status"] == "failed"
+    assert terminal["http_status"] == response.status_code
+    assert terminal["upstream_http_status"] == 200 and terminal["provider_accepted"] is True
+
+
+def test_google_stream_http_429_remains_a_known_rejection(monkeypatch, records, route_fixture):
+    monkeypatch.setattr(server, "classify_route", lambda *args, **kwargs: "google")
+    async def reject(*args, **kwargs):
+        raise server.GoogleHTTPError(429, server.outcome_for_http_status(429), httpx.Response(429))
+        yield  # Make this an asynchronous event source.
+    monkeypatch.setattr(server.GoogleTransport, "stream_events", reject)
+    response = TestClient(server.app).post("/v1/responses", json={"model": "gemini-3.8-flash", "input": "synthetic", "stream": True})
+    assert response.status_code == 200
+    terminal = records[-1]
+    assert terminal["upstream_http_status"] == terminal["http_status"] == 429
+    assert terminal["provider_accepted"] is False
+    monkeypatch.setattr(logs, "iter_request_records", lambda: records)
+    assert logs.request_log_summary(since="all")["groups"]["google/gemini"]["rate_limit_count"] == 1
+
+
+@pytest.mark.parametrize("route", ["google", "openai", "byok"])
+@pytest.mark.parametrize("status", ["completed", "incomplete", "failed"])
+def test_disconnect_after_terminal_does_not_reclassify_it_as_cancelled(monkeypatch, records, route_fixture, route, status):
+    monkeypatch.setattr(server, "classify_route", lambda *args, **kwargs: route)
+    payload = normalized_response(status)
+    async def opened(*args, telemetry=None, **kwargs):
+        if telemetry is not None:
+            telemetry["http_status"] = 200
+        return (None, None, None)
+    async def proxy(*args, telemetry=None, **kwargs):
+        if telemetry is not None:
+            telemetry["http_status"] = 200
+        yield "data: " + json.dumps({"type": f"response.{status}", "response": payload}) + "\n\n"
+        await asyncio.Future()
+    async def google(*args, telemetry=None, **kwargs):
+        if telemetry is not None:
+            telemetry["http_status"] = 200
+        yield {"type": f"response.{status}", "response": payload}
+        await asyncio.Future()
+    monkeypatch.setattr(server, "_open_openai_upstream_stream", opened)
+    monkeypatch.setattr(server, "openai_upstream_sse_generator", proxy)
+    monkeypatch.setattr(server, "openai_compatible_sse_generator", proxy)
+    monkeypatch.setattr(server.GoogleTransport, "stream_events", google)
+    async def receive():
+        return {"type": "http.request", "body": json.dumps({"model": "fixture:model" if route == "byok" else "gemini-3.8-flash", "input": "fixture", "stream": True}).encode(), "more_body": False}
+    async def scenario():
+        request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": [], "query_string": b"", "client": ("testserver", 80)}, receive)
+        response = await server.create_response(request)
+        await response.body_iterator.__anext__()
+        await response.body_iterator.aclose()
+    asyncio.run(scenario())
+    terminal = [record for record in records if record["lifecycle_phase"] == "terminal"]
+    assert len(terminal) == 1
+    assert terminal[0]["terminal_kind"] == status
+    assert terminal[0]["status"] == ("success" if status == "completed" else status)
+    assert terminal[0]["cancelled"] is False
+    assert terminal[0]["usage"]["total_tokens"] == 5
