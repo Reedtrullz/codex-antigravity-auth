@@ -394,7 +394,7 @@ def _merge_snapshot(complete, supplied):
     return deepcopy(supplied)
 
 
-def reconcile_output(output, completed):
+def reconcile_output(output, completed, *, validate=True):
     """Use complete item snapshots, never partial encrypted data from added events."""
     if output is None:
         output = []
@@ -409,4 +409,4 @@ def reconcile_output(output, completed):
             result.append(deepcopy(item))
             continue
         result[index] = _merge_snapshot(item, result[index])
-    return validate_output(result)
+    return validate_output(result) if validate else result

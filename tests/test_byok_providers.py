@@ -1330,7 +1330,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = []
@@ -1422,7 +1422,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ") and line != "data: [DONE]"]
@@ -1488,7 +1488,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'first'}, {'type': 'function', 'name': 'second'}]},
                 )
 
         events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ") and line != "data: [DONE]"]
@@ -1618,7 +1618,7 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertIn("invalid_stream_chunk", response.text)
         self.assertNotIn("response.completed", response.text)
 
-    def test_streaming_byok_ignores_malformed_tool_call_deltas(self):
+    def test_streaming_byok_reports_malformed_tool_call_deltas(self):
         provider = {
             "id": "xai",
             "displayName": "xAI",
@@ -1690,15 +1690,15 @@ class TestBYOKProviders(unittest.TestCase):
             if line.startswith("data: ") and line != "data: [DONE]":
                 events.append(json.loads(line[6:]))
 
-        self.assertFalse([e for e in events if e.get("type") == "error"])
+        self.assertTrue([e for e in events if e.get("type") == "error"])
         deltas = [e["delta"] for e in events if e.get("type") == "response.output_text.delta"]
         arg_done = [e for e in events if e.get("type") == "response.function_call_arguments.done"]
         tool_done = [e["item"] for e in events if e.get("type") == "response.output_item.done" and e["item"]["type"] == "function_call"]
-        completed = [e for e in events if e.get("type") == "response.completed"]
+        completed = [e for e in events if e.get("type") == "response.failed"]
 
         self.assertEqual("".join(deltas), "ok")
-        self.assertEqual([e["arguments"] for e in arg_done], ["{}"])
-        self.assertEqual(tool_done[0]["name"], "lookup")
+        self.assertEqual(arg_done, [])
+        self.assertEqual(tool_done, [])
         self.assertTrue(completed)
         self.assertEqual(completed[0]["response"]["usage"], {"input_tokens": 0, "output_tokens": 5, "total_tokens": 5})
 
@@ -1760,7 +1760,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = []
@@ -1841,7 +1841,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = []
@@ -1917,7 +1917,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = []

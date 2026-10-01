@@ -53,6 +53,7 @@ include = ["codex_antigravity_auth*"]
 codex_antigravity_auth = [
   "skill_assets.json",
   "design/request-shapes.md",
+  "design/tool-calls.md",
   "design/capabilities.md",
   "NATIVE_RESPONSES.md",
   "skills/anti/SKILL.md",

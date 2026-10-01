@@ -864,6 +864,11 @@ def validate_response_request_body(value: object) -> dict:
         validate_request_shapes(value)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    from .tool_calls import FunctionCallValidator, ToolCallError
+    try:
+        FunctionCallValidator(value)  # Check rule containers before auth/account work.
+    except ToolCallError as exc:
+        raise HTTPException(status_code=400, detail="tools: function declarations cannot be validated") from exc
     try:
         validate_capabilities(value, REQUEST_BOUNDARY_CAPABILITIES)
     except CapabilityError as exc:
@@ -2014,7 +2019,7 @@ async def create_response(request: Request):
                             rotation_attempted=rotation_attempted,
                         ),
                     )
-                provider_result = google_transport.parse_response(gemini_resp)
+                provider_result = google_transport.parse_response(gemini_resp, request=codex_req)
                 codex_resp = response_from_result(
                     provider_result,
                     response_id=provider_result.provider_response_id or f"resp_{secrets.token_hex(6)}",
@@ -2157,7 +2162,7 @@ async def create_response(request: Request):
     async def sse_generator() -> AsyncGenerator[str, None]:
         import uuid
         response_id = f"resp_{uuid.uuid4().hex[:12]}"
-        adapter = GoogleStreamEventAdapter(response_id=response_id, display_model=model)
+        adapter = GoogleStreamEventAdapter(response_id=response_id, display_model=model, request=codex_req)
         attempt_num = 0
 
         def serialize_transport_event(event: dict | str) -> str:
@@ -2420,7 +2425,7 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
                 status_code=status_code_from_backend_error(code, message),
                 detail=f"{provider['id']} API error: {safe_error_detail(message)}",
             )
-        return transform_chat_response(chat_resp, display_model)
+        return transform_chat_response(chat_resp, display_model, request=codex_req)
     except HTTPException:
         raise
     except Exception as e:
@@ -2461,7 +2466,7 @@ async def create_openai_upstream_response(
                 detail=openai_failure_detail(display_model, f"OpenAI upstream error: {safe_error_detail(res.text)}"),
             )
         try:
-            terminal = _collect_openai_sse_terminal(res.content, display_model)
+            terminal = _collect_openai_sse_terminal(res.content, display_model, request=codex_req)
         except Exception as exc:
             raise HTTPException(
                 status_code=502,
@@ -2504,15 +2509,15 @@ async def create_openai_upstream_response(
             detail=openai_failure_detail(display_model, f"OpenAI returned non-JSON data: {exc}"),
         ) from exc
     try:
-        return OpenAICompatibleTransport(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS).validate_native_response(data, display_model=display_model)
+        return OpenAICompatibleTransport(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS).validate_native_response(data, display_model=display_model, request=codex_req)
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=openai_failure_detail(display_model, "OpenAI returned an invalid native response.")) from exc
 
 
-def _collect_openai_sse_terminal(sse_text: str | bytes, display_model: str) -> dict:
+def _collect_openai_sse_terminal(sse_text: str | bytes, display_model: str, *, request=None) -> dict:
     """Apply the same terminal authority to buffered and streamed native SSE."""
     wire = sse_text.encode("utf-8") if isinstance(sse_text, str) else sse_text
-    adapter = NativeResponsesStreamAdapter(display_model=display_model)
+    adapter = NativeResponsesStreamAdapter(display_model=display_model, request=request)
     for offset in range(0, len(wire), 65536):
         adapter.consume_bytes(wire[offset:offset + 65536])
         if adapter.protocol_failed:
@@ -2624,7 +2629,7 @@ async def openai_upstream_sse_generator(
             return
 
     client, stream_context, response = stream_state
-    adapter = NativeResponsesStreamAdapter(display_model=display_model)
+    adapter = NativeResponsesStreamAdapter(display_model=display_model, request=codex_req)
     tail_deadline = None
     try:
         iterator = response.aiter_bytes().__aiter__()

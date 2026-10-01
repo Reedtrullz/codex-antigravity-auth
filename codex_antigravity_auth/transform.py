@@ -85,33 +85,20 @@ def _valid_tool_call_id(value: Any) -> bool:
 
 
 def clean_function_call_args(value: Any) -> dict[str, Any]:
-    args = value if isinstance(value, dict) else {}
-    if INTERNAL_PLACEHOLDER_ARGUMENT in args:
-        # The schema layer injects a required _placeholder marker into every
-        # root object tool schema so the model always emits a callable shape;
-        # it must never reach Codex as a real argument, even when the model
-        # also emitted legitimate arguments alongside it.
-        args = {key: item for key, item in args.items() if key != INTERNAL_PLACEHOLDER_ARGUMENT}
-    return args
+    # No request provenance is available here, so user keys must be preserved.
+    from .tool_calls import parse_arguments
+    return parse_arguments(value, object_allowed=True)
 
 
 def function_call_arguments_json(value: Any) -> str:
-    return json.dumps(clean_function_call_args(value))
+    from .tool_calls import dump_arguments
+    return dump_arguments(clean_function_call_args(value))
 
 
 def function_call_arguments_string(value: Any) -> str:
-    if isinstance(value, dict):
-        return function_call_arguments_json(value)
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except Exception:
-            return value
-        if isinstance(parsed, dict):
-            cleaned = clean_function_call_args(parsed)
-            return function_call_arguments_json(cleaned) if cleaned != parsed else value
-        return value
-    return "{}"
+    from .tool_calls import parse_arguments, dump_arguments
+    parsed = parse_arguments(value, object_allowed=True)
+    return value if isinstance(value, str) else dump_arguments(parsed)
 
 
 def safe_project_id(value: Any) -> str | None:
@@ -536,7 +523,7 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     
     return envelope
 
-def transform_gemini_candidate(candidate: dict) -> dict:
+def transform_gemini_candidate(candidate: dict, *, tool_validator=None) -> dict:
     """Extract standard Codex message / content parts from a Gemini candidate."""
     if not isinstance(candidate, dict):
         candidate = {}
@@ -560,6 +547,10 @@ def transform_gemini_candidate(candidate: dict) -> dict:
     if role == "model":
         role = "assistant"
     
+    from .tool_calls import FunctionCallValidator, ToolCallError, google_arguments
+    tool_validator = tool_validator or FunctionCallValidator()
+    tool_error = None
+    partial_ids, partial_names = set(), set()
     output_parts = []
     function_calls = []
     reasoning_text = ""
@@ -591,11 +582,17 @@ def transform_gemini_candidate(candidate: dict) -> dict:
         # dropped just because the text was emitted first).
         if "functionCall" in part:
             fc = part["functionCall"]
-            if not isinstance(fc, dict):
+            try:
+                arguments = google_arguments(fc, tool_validator)
+            except ToolCallError as exc:
+                tool_error = tool_error or exc.code
+                if isinstance(fc, dict) and exc.code == "unsupported_partial_function_call":
+                    if isinstance(fc.get("id"), str) and fc["id"]:
+                        partial_ids.add(fc["id"])
+                    elif valid_function_name(fc.get("name")):
+                        partial_names.add(fc["name"])
                 continue
-            name = _stream_text(fc.get("name"))
-            if not valid_function_name(name):
-                continue
+            name = fc["name"]
             # Auto-generate a call ID if missing so Codex can execute it
             call_id = _stream_text(fc.get("id")) or f"call_{uuid.uuid4().hex[:8]}"
             function_calls.append({
@@ -603,7 +600,7 @@ def transform_gemini_candidate(candidate: dict) -> dict:
                 "id": f"fc_{uuid.uuid4().hex[:8]}",
                 "call_id": call_id,
                 "name": name,
-                "arguments": function_call_arguments_string(fc.get("args", {})),
+                "arguments": arguments,
             })
             
     # Assemble structured Responses API message output
@@ -618,6 +615,11 @@ def transform_gemini_candidate(candidate: dict) -> dict:
     result = {
         "message": message_item
     }
+    if tool_error:
+        result["tool_error"] = tool_error
+    if partial_ids: result["partial_call_ids"] = sorted(partial_ids)
+    if partial_names: result["partial_call_names"] = sorted(partial_names)
+    function_calls = [item for item in function_calls if item["call_id"] not in partial_ids and item["name"] not in partial_names]
     if function_calls:
         result["function_calls"] = function_calls
     if reasoning_text:
@@ -861,13 +863,13 @@ def transform_request_to_chat(codex_req: dict, provider_model: str, *, capabilit
     return payload
 
 
-def transform_chat_response(chat_resp: dict, model: str) -> dict:
+def transform_chat_response(chat_resp: dict, model: str, *, request=None) -> dict:
     """Compatibility wrapper around the shared OpenAI terminal contract."""
     from .openai_transport import OpenAICompatibleTransport
     from .response_protocol import response_from_result
 
     payload = chat_resp if isinstance(chat_resp, dict) else {}
-    result = OpenAICompatibleTransport(timeout=0).parse_chat_response(payload)
+    result = OpenAICompatibleTransport(timeout=0).parse_chat_response(payload, request=request)
     return response_from_result(
         result,
         response_id=result.provider_response_id or f"resp_{uuid.uuid4().hex[:12]}",
