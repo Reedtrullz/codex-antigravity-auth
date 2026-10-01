@@ -157,8 +157,8 @@ def existing_key() -> tuple[str | None, str | None, str | None]:
     require_no_transition()
     recorded = selection()
     environment = environment_key()
-    if environment:
-        if recorded and key_id(environment) != recorded["keyId"]:
+    if environment and recorded:
+        if key_id(environment) != recorded["keyId"]:
             raise StorageKeyError("key_mismatch", "Environment key differs from the recorded store key; use explicit recovery/re-encryption")
         return environment, "environment", None
     if recorded:
@@ -177,6 +177,8 @@ def existing_key() -> tuple[str | None, str | None, str | None]:
         raise StorageKeyError("invalid_key_source", "An existing encryption-key source is invalid or unreadable")
     if local and ring and key_id(local) != key_id(ring):
         raise StorageKeyError("key_conflict", "Existing file and keyring keys conflict; use explicit backup-first re-encryption")
+    if environment:
+        return environment, "environment", None
     if ring:
         return ring, "keyring", "legacy"
     if local:
@@ -250,6 +252,14 @@ def get_key(*, create: bool) -> str | None:
     with storage._exclusive_file_lock(storage.get_codex_home() / "antigravity-storage-key-init"):
         key, backend, slot = existing_key()
         if key is not None:
+            if backend == "file":
+                try:
+                    storage._ensure_private_file(home() / storage.FALLBACK_KEY_FILE)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    raise StorageKeyError("unsafe_key_file", "The selected key file could not be protected") from exc
+                protected, _status = file_key()
+                if protected is None or key_id(protected) != key_id(key):
+                    raise StorageKeyError("state_changed", "Selected file-key identity changed during protection; retry")
             if selection() is None:
                 for path in managed_paths().values():
                     raw = read_bytes(path, limit=None)

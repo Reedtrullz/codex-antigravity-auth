@@ -10,7 +10,9 @@ a backend (`environment`, `file`, `keyring`), a SHA-256 identity of decoded key
 bytes, and an optional keyring slot (`legacy` or `id`). Ordinary use records an
 existing compatible identity or initializes a new identity only when no encrypted
 store requires an unavailable key. Conflicting unrecorded file/keyring material
-is refused. Environment keys must match a recorded identity; removing a required
+is refused even when an environment key is supplied. Ordinary file-key use
+protects the existing key file and rechecks its identity before returning it;
+read-only inspection never changes permissions. Environment keys must match a recorded identity; removing a required
 environment key never silently selects another backend.
 
 Existing legacy keyring entries remain readable. New keyring entries use
@@ -32,7 +34,9 @@ chmod, migrate or reset files or keyring entries. It checks whether available
 material decrypts the managed stores, but does not claim provider generation
 readiness. An absent namespace remains absent. Unsafe paths, unsupported
 selection metadata, conflicting identities and interrupted transitions are
-reported explicitly.
+reported explicitly. The ordinary `doctor` encryption check uses the same
+read-only selected-backend report, so inactive legacy keys cannot mask a missing
+or mismatched selected key.
 
 ## Backup and re-encryption
 

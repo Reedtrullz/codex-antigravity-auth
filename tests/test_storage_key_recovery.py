@@ -269,14 +269,18 @@ def test_cli_diagnostics_and_dry_run_never_emit_credentials(vault, monkeypatch, 
     assert tree(root) == before and not output.exists()
 
 
-def test_first_environment_key_binds_identity_without_keyring_access(vault, monkeypatch):
+def test_recorded_environment_key_keeps_no_keyring_fast_path(vault, monkeypatch):
     root, _ring, _ = vault
     monkeypatch.setenv("ANTIGRAVITY_STORAGE_KEY", A)
-    get = Mock(side_effect=AssertionError("environment selection must not inspect keyring"))
+    get = Mock(return_value=None)
     monkeypatch.setattr(storage.keyring, "get_password", get)
     monkeypatch.setattr(Fernet, "generate_key", lambda: pytest.fail("no generated key"))
     assert storage._get_encryption_key() == A
     assert keys.selection()["backend"] == "environment"
+    get.assert_called_once_with(storage.KEYRING_SERVICE_NAME, storage.KEYRING_KEY_NAME)
+    get.reset_mock()
+    get.side_effect = AssertionError("recorded environment selection must not inspect keyring")
+    assert storage._get_encryption_key() == storage._peek_encryption_key() == A
     monkeypatch.setenv("ANTIGRAVITY_STORAGE_KEY", B)
     with pytest.raises(keys.StorageKeyError, match="differs"):
         storage._get_encryption_key()
@@ -285,6 +289,105 @@ def test_first_environment_key_binds_identity_without_keyring_access(vault, monk
         storage._get_encryption_key()
     get.assert_not_called()
     assert not (root / storage.FALLBACK_KEY_FILE).exists()
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+def test_ordinary_file_key_use_repairs_permissions_but_inspection_does_not(vault, recorded):
+    root, _ring, _ = vault
+    root.mkdir()
+    path = root / storage.FALLBACK_KEY_FILE
+    path.write_text(A)
+    if recorded:
+        keys.write_selection(A, "file")
+    path.chmod(0o644)
+    before = tree(root)
+    assert keys.key_diagnostics()["selectedBackend"] == "file"
+    assert storage._peek_encryption_key() == A
+    assert tree(root) == before
+    assert storage._get_encryption_key() == A
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
+    assert path.read_text() == A
+    assert keys.selection() == {"schemaVersion": 1, "backend": "file", "keyId": keys.key_id(A), "slot": None}
+
+
+@pytest.mark.parametrize("change", ["protection_failure", "identity_change"])
+def test_file_key_is_not_returned_when_protection_fails_or_identity_changes(vault, monkeypatch, change):
+    root, _ring, _ = vault
+    root.mkdir()
+    path = root / storage.FALLBACK_KEY_FILE
+    path.write_text(A)
+    def protect(target):
+        assert target == path
+        if change == "protection_failure":
+            raise OSError("synthetic permission failure")
+        target.write_text(B)
+    monkeypatch.setattr(storage, "_ensure_private_file", protect)
+    with pytest.raises(keys.StorageKeyError) as error:
+        storage._get_encryption_key()
+    assert error.value.code == ("unsafe_key_file" if change == "protection_failure" else "state_changed")
+    assert not (root / keys.SELECTION_FILE).exists()
+
+
+@pytest.mark.parametrize("environment", [A, B, C])
+def test_environment_key_cannot_bypass_unrecorded_backend_conflict(vault, monkeypatch, environment):
+    root, ring, _ = vault
+    _bodies, raw = seed(vault, split=True)
+    monkeypatch.setenv("ANTIGRAVITY_STORAGE_KEY", environment)
+    before = tree(root)
+    for operation in (storage._peek_encryption_key, storage._get_encryption_key):
+        with pytest.raises(keys.StorageKeyError) as error:
+            operation()
+        assert error.value.code == "key_conflict"
+    report = keys.key_diagnostics()
+    assert report["error_class"] == "key_conflict" and report["ready"] is False
+    assert not (root / keys.SELECTION_FILE).exists() and ring["writes"] == []
+    # Only the initialization lock may be created by the ordinary-use attempt.
+    assert all(tree(root)[name] == snapshot for name, snapshot in before.items())
+    assert all(path.read_bytes() == raw[name] for name, path in keys.managed_paths().items())
+    assert all(key not in json.dumps(report) for key in (A, B, C))
+
+
+@pytest.mark.parametrize("selected_state", ["available", "missing", "mismatched", "environment", "uninitialized"])
+def test_doctor_reports_selected_backend_without_creating_or_repairing_keys(vault, monkeypatch, capsys, selected_state):
+    root, ring, tmp = vault
+    config = tmp / "config.toml"
+    config.write_text(cli.render_codex_config_snippet(
+        model="claude-sonnet-4-6", provider_id="antigravity", provider_name="Fixture",
+        base_url="http://localhost:51122/v1", activate=True,
+    ))
+    if selected_state in {"available", "missing", "mismatched"}:
+        seed(vault)
+        keys.write_selection(A, "file")
+        ring["entries"][storage.KEYRING_KEY_NAME] = B
+        key_path = root / storage.FALLBACK_KEY_FILE
+        if selected_state == "missing":
+            key_path.unlink()
+        elif selected_state == "mismatched":
+            key_path.write_text(C)
+        else:
+            key_path.chmod(0o644)
+    elif selected_state == "environment":
+        monkeypatch.setenv("ANTIGRAVITY_STORAGE_KEY", A)
+    monkeypatch.setattr(cli, "_diagnostic_all_provider_configs", lambda: {"fixture": {"baseUrl": "https://example.invalid/v1", "models": []}})
+    monkeypatch.setattr(cli, "provider_key_status", lambda *a, **kw: "key OK")
+    monkeypatch.setattr(cli, "version_check_result", lambda: {"status": "skip", "detail": "synthetic test"})
+    before = tree(root)
+    result = cli.run_doctor(byok_only=True, config=str(config))
+    output = capsys.readouterr().out
+    if selected_state in {"available", "environment"}:
+        assert result is True
+        backend = "file" if selected_state == "available" else "environment"
+        assert f"Token Storage Encryption: AVAILABLE (selected {backend} key)" in output
+    elif selected_state == "uninitialized":
+        assert "Token Storage Encryption: NOT INITIALIZED" in output
+    else:
+        assert result is False
+        code = "key_unavailable" if selected_state == "missing" else "key_mismatch"
+        assert f"Token Storage Encryption: UNAVAILABLE ({code})" in output
+    assert "OS Keyring Integrated" not in output and "selected OS keyring" not in output
+    assert all(key not in output for key in (A, B, C))
+    assert tree(root) == before and ring["writes"] == []
 
 
 def test_wrong_environment_key_cannot_bootstrap_over_existing_ciphertext(vault, monkeypatch):
