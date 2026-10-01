@@ -83,6 +83,9 @@ _QUOTED_FIELD_RE = re.compile(r'''(?P<key>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')\s
 _SINGLE_QUOTED_VALUE_RE = re.compile(r"'(?:\\.|[^'\\])*'")
 _RAW_SECRET_NAMES = "|".join(sorted(set(_SECRET_KEY_FRAGMENTS) | _EXACT_SECRET_KEYS | {"x-api-key", "x-goog-api-key", "set-cookie"}, key=len, reverse=True))
 _RAW_SECRET_RE = re.compile(rf"(?i)\b(?P<key>{_RAW_SECRET_NAMES})\s*[=:]\s*(?P<value>[^\s,;}}&]+)")
+_UNQUOTED_FIELD_RE = re.compile(r"(?<![\w\"'])\b(?P<key>[A-Za-z_][\w.-]*)\s*[=:]\s*(?![=:])")
+_DOUBLE_QUOTED_VALUE_RE = re.compile(r'"(?:\\.|[^"\\])*"')
+_BARE_VALUE_RE = re.compile(r"[^\s,;}&]+")
 _GOOGLE_VALIDATION_URL_RE = re.compile(
     r'(?i)(https://accounts\.google\.com/[^\s"<>]+)[?][^\s"<>]*'
 )
@@ -191,6 +194,36 @@ def _redact_raw_value(match: re.Match[str]) -> str:
     return f"{key}={REDACTED}"
 
 
+def _redact_unquoted_fields(text: str) -> str:
+    pieces = []
+    cursor = search_at = 0
+    while match := _UNQUOTED_FIELD_RE.search(text, search_at):
+        key, start = match.group("key"), match.end()
+        search_at = start
+        if not _is_secret_key(key):
+            continue
+        if text[start:start + 1] in {'"', "'"}:
+            pattern = _DOUBLE_QUOTED_VALUE_RE if text[start] == '"' else _SINGLE_QUOTED_VALUE_RE
+            value = pattern.match(text, start)
+            # No reliable end delimiter: discard the remaining diagnostic tail.
+            end = value.end() if value else len(text)
+        else:
+            value = _BARE_VALUE_RE.match(text, start)
+            end = value.end() if value else start
+        raw = text[start:end].strip('"\'')
+        if key.lower() == "code":
+            try:
+                if 100 <= float(raw) <= 599:
+                    search_at = end
+                    continue
+            except ValueError:
+                pass
+        pieces.extend((text[cursor:start], REDACTED))
+        cursor = search_at = end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def _redact_text(text: str, depth: int = 0) -> str:
     """Redact token-shaped values from free-form text."""
     if len(text) > MAX_TEXT_CHARS or depth > MAX_DEPTH:
@@ -208,6 +241,7 @@ def _redact_text(text: str, depth: int = 0) -> str:
             sanitized = _redact_tree(parsed, depth + 1, [MAX_ITEMS, MAX_TEXT_CHARS])
             return json.dumps(sanitized, ensure_ascii=False) if sanitized != parsed else text
     text = _redact_quoted_fields(text, depth)
+    text = _redact_unquoted_fields(text)
     text = _PROVIDER_KEY_RE.sub(REDACTED, text)
     text = _GOOGLE_TOKEN_RE.sub(REDACTED, text)
     text = _URL_USERINFO_RE.sub(lambda m: m.group(1) + REDACTED + "@", text)

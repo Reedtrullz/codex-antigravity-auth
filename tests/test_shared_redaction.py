@@ -24,6 +24,12 @@ CORPUS = [
     ('{"pass\\u0077ord":"fixture-unicode-key"}', ["fixture-unicode-key"]),
     ('{"password":987654321,"code":400}', ["987654321"]),
     ("password=fixture-form&status=bad", ["fixture-form"]),
+    ('password="fixture first second"', ["fixture", "first", "second"]),
+    ('private_key="-----BEGIN PRIVATE KEY-----\nfixture-key-body\n-----END PRIVATE KEY-----"', ["fixture-key-body", "PRIVATE KEY"]),
+    ('password="fixture first\\\" second"', ["fixture", "first", "second"]),
+    ('password="fixture first\nsecond', ["fixture", "first", "second"]),
+    ("database_password=fixture-compound-secret", ["fixture-compound-secret"]),
+    ("provider_api_key=fixture-provider-secret", ["fixture-provider-secret"]),
     ("password: fixture-unquoted", ["fixture-unquoted"]),
     ("Authorization: Basic Zml4dHVyZTpwYXNzd29yZA==\nstatus=401", ["Zml4dHVyZTpwYXNzd29yZA=="]),
     ("Authorization: Bearer fixture-token\nstatus=403", ["fixture-token"]),
@@ -69,6 +75,16 @@ def test_structured_policy_preserves_telemetry_ids_and_bounds_private_values():
         assert rendered["accessTokenExpiresAt"] == 123
         assert "fixture-password" not in json.dumps(rendered) and "fixture-key" not in json.dumps(rendered)
     assert value["password"] == "fixture-password"
+
+
+@pytest.mark.parametrize("text", [
+    '{"request\\u005fid":"req-fixture-123"}',
+    '{"nested":{"user\\u005fid":"req-fixture-123"}}',
+    json.dumps({"message": '{"request\\u005fid":"req-fixture-123"}'}),
+])
+def test_standalone_decodes_private_identifier_keys_without_changing_gateway_ids(text):
+    assert "req-fixture-123" not in anti.redact_sensitive_text(text)
+    assert "req-fixture-123" in redaction.redact_secret_text(text)
 
 
 def test_input_limits_replace_oversize_deep_cyclic_and_wide_data():
