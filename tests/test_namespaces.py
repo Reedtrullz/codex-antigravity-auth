@@ -130,7 +130,9 @@ def test_service_definitions_freeze_both_selected_roots(roots, monkeypatch):
     assert command[command.index("--state-home") + 1] == str(state)
     agent = plistlib.loads(service.render_macos_launch_agent(51122, "127.0.0.1").encode())
     assert agent["ProgramArguments"] == command
-    assert Path(agent["StandardOutPath"]).parent == state
+    assert agent["StandardOutPath"] == "/dev/null"
+    from codex_antigravity_auth.process_logs import log_path
+    assert command[command.index("--process-log") + 1] == str(log_path(state, 51122))
     unit = service.render_linux_systemd_unit(51122, "127.0.0.1")
     assert f"--client-home {client}" in unit and f"--state-home {state}" in unit
     assert not client.exists() and not state.exists()
@@ -272,7 +274,7 @@ def test_start_arguments_capture_service_namespace_without_starting_server(roots
     monkeypatch.setenv("ANTIGRAVITY_STATE_HOME", str(state))
     monkeypatch.setattr(sys, "argv", ["codex-antigravity", "start", "--client-home", str(client), "--state-home", str(state)])
     calls = []
-    monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: calls.append((client_home(), gateway_home())))
+    monkeypatch.setattr("codex_antigravity_auth.process_logs.run_gateway", lambda *args, **kwargs: calls.append((client_home(), gateway_home())))
     cli.main()
     assert calls == [(client, state)]
     assert not client.exists() and not state.exists()
