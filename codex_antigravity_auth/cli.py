@@ -1236,7 +1236,8 @@ def run_configure_codex(args) -> None:
 
 def main():
     _ensure_split_modules()
-    parser = argparse.ArgumentParser(description="Codex Antigravity Auth CLI Utility")
+    from .cli_json import JSONArgumentParser
+    parser = JSONArgumentParser(description="Codex Antigravity Auth CLI Utility")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # login
@@ -1352,7 +1353,7 @@ def main():
     doctor_parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path to verify")
     doctor_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id to verify")
     doctor_parser.add_argument("--codex-ready", action="store_true", help="Run native Codex model-picker readiness diagnostics")
-    doctor_parser.add_argument("--json", action="store_true", help="Print doctor status as JSON when used with --codex-ready")
+    doctor_parser.add_argument("--json", action="store_true", help="Print versioned readiness JSON (implies --codex-ready)")
     doctor_parser.add_argument("--gateway-timeout", type=float, default=2.0, help="Gateway model-catalog timeout")
     doctor_parser.add_argument("--live", action="store_true", help="Run an explicit Google /v1/responses live generation smoke")
     doctor_parser.add_argument("--live-model", help="Google model to use for --live; defaults to the selected Codex model")
@@ -1366,7 +1367,7 @@ def main():
     # accounts
     accounts_parser = subparsers.add_parser("accounts", help="List or manage configured Google accounts")
     accounts_sub = accounts_parser.add_subparsers(dest="accounts_action")
-    accounts_sub.add_parser("list", help="List configured Google accounts")
+    accounts_sub.add_parser("list", help="List configured Google accounts").add_argument("--json", action="store_true", help="Print versioned account metadata")
     accounts_remove = accounts_sub.add_parser("remove", help="Remove a Google account from the encrypted rotation store")
     accounts_remove.add_argument("email", help="Google account email to remove")
     accounts_remove.add_argument("--yes", action="store_true", help="Confirm removal without prompting")
@@ -1467,8 +1468,8 @@ def main():
 
     provider_parser = subparsers.add_parser("provider", help="Manage BYOK OpenAI-compatible providers")
     provider_sub = provider_parser.add_subparsers(dest="provider_command", required=True)
-    provider_sub.add_parser("list", help="List BYOK providers")
-    provider_sub.add_parser("presets", help="List built-in BYOK provider presets")
+    provider_sub.add_parser("list", help="List BYOK providers").add_argument("--json", action="store_true", help="Print versioned provider metadata")
+    provider_sub.add_parser("presets", help="List built-in BYOK provider presets").add_argument("--json", action="store_true", help="Print versioned presets")
     provider_set = provider_sub.add_parser("set", help="Configure a BYOK provider")
     provider_set.add_argument("provider", help="Provider id, e.g. openrouter, deepseek, xai, kimi, ollama, opencode, custom")
     provider_set.add_argument("--api-key", help="API key to store encrypted")
@@ -1528,9 +1529,19 @@ def main():
     status_parser.add_argument("--port", type=int, default=51122, help="Gateway server port (default: 51122)")
     status_parser.add_argument("--json", action="store_true", help="Print status as JSON")
 
+    support = subparsers.add_parser("support-bundle", help="Preview or explicitly export allowlisted local diagnostics")
+    support.add_argument("--config", default="~/.codex/config.toml")
+    support.add_argument("--since", default="24h")
+    support.add_argument("--request-id", action="append", default=[], help="Select a request ID; exported references are unlinkable hashes")
+    support.add_argument("--output", help="New local JSON file; never overwrites")
+    support.add_argument("--write", action="store_true", help="Create the explicit output file (default is dry run)")
+    support.add_argument("--json", action="store_true", help="JSON is always used for this command")
     from .setup_profiles import add_parsers
     add_parsers(subparsers)
     args = parser.parse_args()
+    if getattr(args, "json", False) or args.command == "support-bundle":
+        from .cli_json import run as run_json
+        raise SystemExit(run_json(args))
     if args.command == "start":
         overrides = {}
         for option, name in (("client_home", "CODEX_HOME"), ("state_home", "ANTIGRAVITY_STATE_HOME")):

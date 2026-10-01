@@ -36,6 +36,7 @@ dependencies = [
 dev = [
   "pytest>=8.0",
   "pyyaml>=6.0",
+  "jsonschema>=4.23",
 ]
 
 [project.scripts]
@@ -51,6 +52,8 @@ include = ["codex_antigravity_auth*"]
 
 [tool.setuptools.package-data]
 codex_antigravity_auth = [
+  "CLI_JSON.md",
+  "schemas/*.json",
   "SETUP.md",
   "skills/anti/SKILL.md",
   "skills/anti/agents/*.yaml",

@@ -662,6 +662,7 @@ def _run_setup(args) -> dict:
             live_timeout=getattr(args, "live_timeout", 30.0),
             selected_model=model,
             require_active_provider=getattr(args, "activate", False),
+            include_version_check=not getattr(args, "json", False),
         )
         checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
         ok = all(check["status"] != "fail" for check in checks)
@@ -786,6 +787,7 @@ def _run_setup(args) -> dict:
             live_timeout=getattr(args, "live_timeout", 30.0),
             selected_model=model,
             require_active_provider=getattr(args, "activate", False),
+            include_version_check=not getattr(args, "json", False),
         )
         checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
         ok = all(check["status"] != "fail" for check in checks)
