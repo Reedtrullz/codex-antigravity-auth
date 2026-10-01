@@ -617,6 +617,14 @@ def native_model_catalog_with_input_modalities() -> list[dict]:
     return native_model_catalog()
 
 
+def provider_diagnostic_id(provider_id) -> str:
+    from .model_observations import public_id, ObservationError
+    try:
+        return public_id(provider_id)
+    except ObservationError:
+        return "redacted"
+
+
 def provider_model_catalog(created: int, *, diagnostics: list | None = None) -> list[dict]:
     byok_models = []
     diagnostics = diagnostics if diagnostics is not None else []
@@ -627,9 +635,7 @@ def provider_model_catalog(created: int, *, diagnostics: list | None = None) -> 
         diagnostics.append({"provider":None, "status":"configuration_unreadable", "omitted_models":None})
         return byok_models
     for provider_id, provider in providers.items():
-        from .model_observations import public_id, ObservationError
-        try: label = public_id(provider_id)
-        except ObservationError: label = "redacted"
+        label = provider_diagnostic_id(provider_id)
         configured_models = provider.get("models", [])
         diagnostic = {"provider":label, "status":"complete", "omitted_models":len(configured_models) if isinstance(configured_models, list) else None}
         diagnostics.append(diagnostic)
@@ -727,16 +733,20 @@ def provider_health_catalog() -> list[dict]:
         return providers
     for provider_id, provider in provider_configs.items():
         models = provider.get("models", [])
+        count = len(models) if isinstance(models, list) else 0
+        if provider.get("_configuration_error"):
+            declared = provider.get("_declared_model_count")
+            count = declared if type(declared) is int and declared >= 0 else None
         try:
             usable = provider_has_usable_key(provider)
         except Exception:
             usable = False
         providers.append(
             {
-                "id": provider_id,
+                "id": provider_diagnostic_id(provider_id),
                 "kind": provider.get("kind"),
                 "usable": usable,
-                "model_count": len(models) if isinstance(models, list) else 0,
+                "model_count": count,
             }
         )
     return providers

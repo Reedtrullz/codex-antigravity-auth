@@ -503,3 +503,21 @@ def test_malformed_provider_structure_is_reported_without_echoing_values(provide
     assert result['provider_catalog_diagnostics']['status'] == 'partial'
     assert result['provider_catalog_diagnostics']['providers'] == [{'provider':None,'status':'configuration_unreadable','omitted_models':None}]
     assert result['data'] and 'fixture-secret-value' not in json.dumps(result)
+
+
+def test_health_redacts_invalid_provider_identity_and_retains_declared_count(monkeypatch):
+    from codex_antigravity_auth.storage import save_secure_json_file
+    private_id = 'sk-fixtureabcdefghijklmnopqrstuv'
+    raw = {'providers':{private_id:{'models':['one','two'], 'apiKey':'fixture-private-key'}}}
+    path = byok.get_providers_json_path()
+    save_secure_json_file(path, raw, error_label='synthetic provider')
+    before = path.read_bytes()
+    monkeypatch.setattr(server,'is_unified_mode_enabled',lambda:False)
+    monkeypatch.setattr(server,'account_health_summary',lambda:{})
+    monkeypatch.setattr(server,'request_log_info',lambda:{})
+    response = TestClient(server.app, base_url='http://127.0.0.1').get('/health')
+    assert response.status_code == 200
+    body = response.json()
+    assert private_id not in json.dumps(body) and 'fixture-private-key' not in json.dumps(body)
+    assert {'id':'redacted','kind':'openai_chat','usable':False,'model_count':2} in body['configured_route_families']['byok']
+    assert path.read_bytes() == before
