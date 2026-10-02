@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 from standalone import without_installed_packages
 
+from standalone import without_installed_packages
+
 SCRIPT = Path(__file__).resolve().parents[1] / "codex_antigravity_auth/skills/anti/scripts/anti.py"
 
 

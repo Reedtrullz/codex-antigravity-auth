@@ -158,6 +158,26 @@ def _result_shape(result: dict[str, Any], run_id: str, record: dict[str, Any], *
         _require(isinstance(verification["requiredChecks"], list) and all(isinstance(v, str) for v in verification["requiredChecks"]), "Invalid required checks")
     if "evidence" in verification:
         _require(isinstance(verification["evidence"], list), "Invalid verification evidence")
+    if "checks" in verification:
+        checks = verification["checks"]
+        _require(isinstance(checks, list) and all(isinstance(check, dict) for check in checks), "Invalid file check records")
+        for check in checks:
+            _require(isinstance(check.get("status"), str) and check["status"] in {"passed", "failed", "skipped", "error"}, "Invalid file check status")
+            _require(isinstance(check.get("checkId"), str) and bool(re.fullmatch(r"[0-9a-f]{24}", check["checkId"])), "Invalid file check identity")
+            _require("file" in check and (check["file"] is None or isinstance(check["file"], str)), "Invalid checked file path")
+            _require("fileHash" in check, "Missing checked file hash field")
+            _require(check.get("fileHash") is None or (isinstance(check["fileHash"], str) and bool(re.fullmatch(r"[0-9a-f]{64}", check["fileHash"]))), "Invalid checked file hash")
+            for field in ("check", "reason", "cwd", "output"):
+                _require(isinstance(check.get(field), str), "Invalid file check scalar")
+            _require(len(check["output"]) <= 2000, "File check output exceeds preview limit")
+            _require(type(check.get("durationMs")) is int and check["durationMs"] >= 0, "Invalid file check duration")
+            _require(isinstance(check.get("command"), list) and all(isinstance(arg, str) for arg in check["command"]), "Invalid file check command identity")
+            if check["check"] == "eslint":
+                identity = check.get("identityContext")
+                _require(isinstance(identity, dict) and identity.get("scope") == "invocation"
+                         and identity.get("effectiveTool") == "unknown" and identity.get("effectiveConfig") == "unknown"
+                         and isinstance(identity.get("observationId"), str) and bool(re.fullmatch(r"[0-9a-f]{32}", identity["observationId"]))
+                         and check.get("comparableAcrossRuns") is False, "ESLint identity must disclose its invocation-scoped uncertainty")
     _require(not current or "lanes" in result, "Result lane collection is missing")
     lanes = result.get("lanes", [])
     _require(isinstance(lanes, list) and all(isinstance(lane, dict) for lane in lanes), "Invalid result lanes")

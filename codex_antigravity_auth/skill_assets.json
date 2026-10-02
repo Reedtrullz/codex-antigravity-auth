@@ -21,6 +21,7 @@
     "scripts/anti_lib/persistence.py",
     "scripts/anti_lib/cleanup.py",
     "scripts/anti_lib/artifacts.py",
+    "scripts/anti_lib/windows_job.py",
     "scripts/anti_lib/runner.py",
     "scripts/anti_lib/verifier.py",
     "schemas/raw-lane-v1.json",
