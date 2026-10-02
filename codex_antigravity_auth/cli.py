@@ -106,7 +106,7 @@ DEFAULT_CODEX_SKILLS_DIR = "~/.codex/skills"
 BUNDLED_CODEX_SKILL_NAME = "anti"
 CODEX_PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 GATEWAY_PID_TEMPLATE = "antigravity-gateway-{port}.pid"
-GATEWAY_LOG_TEMPLATE = "antigravity-gateway-{port}.log"
+GATEWAY_LOG_TEMPLATE = "antigravity-process-logs/gateway-{port}.log"
 GATEWAY_READY_TIMEOUT_SECONDS = 10.0
 GATEWAY_READY_RETRY_INTERVAL_SECONDS = 0.25
 VERSION_CACHE_FILE = "antigravity-version-check.json"
@@ -482,6 +482,17 @@ def _confirm_account_mutation(prompt: str, *, yes: bool, non_interactive_error: 
 
 def run_accounts_command(args) -> None:
     action = getattr(args, "accounts_action", None) or "list"
+    if action == "explain":
+        from .account_diagnostics import account_eligibility_lines, account_eligibility_report
+        report = account_eligibility_report(args.model)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            for line in account_eligibility_lines(report):
+                print(line)
+        if not report["ok"]:
+            raise SystemExit(1)
+        return
     if action == "list":
         data = load_accounts()
         accounts = data.get("accounts", [])
@@ -1377,6 +1388,9 @@ def _main():
     accounts_parser = subparsers.add_parser("accounts", help="List or manage configured Google accounts")
     accounts_sub = accounts_parser.add_subparsers(dest="accounts_action")
     accounts_sub.add_parser("list", help="List configured Google accounts")
+    accounts_explain = accounts_sub.add_parser("explain", help="Explain local Google eligibility without refreshing or changing state")
+    accounts_explain.add_argument("--model", required=True, help="Google model whose family to inspect")
+    accounts_explain.add_argument("--json", action="store_true", help="Print sanitized eligibility as JSON")
     accounts_remove = accounts_sub.add_parser("remove", help="Remove a Google account from the encrypted rotation store")
     accounts_remove.add_argument("email", help="Google account email to remove")
     accounts_remove.add_argument("--yes", action="store_true", help="Confirm removal without prompting")
@@ -1516,6 +1530,8 @@ def _main():
         action="store_true",
         help="Require bearer authentication for all clients, including loopback; allow non-loopback binds with a strong ANTIGRAVITY_GATEWAY_TOKEN",
     )
+    start_parser.add_argument("--process-log", help=argparse.SUPPRESS)
+    start_parser.add_argument("--quiet-runtime-console", action="store_true", help=argparse.SUPPRESS)
     start_parser.add_argument("--background", action="store_true", help="Start the gateway as a background process with pid/log files")
     start_parser.add_argument(
         "--op-env-file",
@@ -1692,12 +1708,10 @@ def _main():
         else:
             if getattr(args, "op_env_file", None) or getattr(args, "op_environment", None):
                 raise SystemExit("1Password gateway options require `codex-antigravity start --background`.")
-            import uvicorn
+            from .process_logs import run_gateway
             require_safe_gateway_host(args.host, args.allow_remote)
-            if is_unified_model_picker_arg(args):
-                print("[*] Unified model picker enabled: OpenAI + Antigravity + BYOK via one provider.")
-            print(f"[*] Starting local Responses API compatible gateway server on {args.host}:{args.port}...")
-            uvicorn.run("codex_antigravity_auth.server:app", host=args.host, port=args.port, log_level="info", proxy_headers=False)
+            process_path = Path(args.process_log) if args.process_log else gateway_runtime_paths(args.port)[1]
+            run_gateway(args.host, args.port, path=process_path, console=not args.quiet_runtime_console)
     elif args.command == "stop":
         stop_gateway(args)
     elif args.command == "status":

@@ -105,6 +105,13 @@ def service_log_paths(port: int) -> tuple[Path, Path]:
     return home / f"antigravity-service-{port}.out.log", home / f"antigravity-service-{port}.err.log"
 
 
+def service_log_info(port: int) -> dict[str, Any]:
+    from .observability import request_log_info
+    from .process_logs import process_log_info
+    home = _codex_home_read_only()
+    return {"process_log": process_log_info(home, port), "request_log": request_log_info(home=home)}
+
+
 def service_command(
     port: int,
     host: str,
@@ -113,11 +120,15 @@ def service_command(
     op_environment: str | None = None,
     unified_model_picker: bool = False,
 ) -> list[str]:
+    from .process_logs import log_path
     command = [
         sys.executable,
         "-m",
         "codex_antigravity_auth.cli",
         "start",
+        "--quiet-runtime-console",
+        "--process-log",
+        str(log_path(_codex_home_read_only(), port)),
         "--port",
         str(int(port)),
         "--host",
@@ -146,7 +157,6 @@ def render_macos_launch_agent(
     op_environment: str | None = None,
     unified_model_picker: bool = False,
 ) -> str:
-    stdout, stderr = service_log_paths(port)
     args = "\n".join(
         f"    <string>{_xml_escape(arg)}</string>"
         for arg in service_command(
@@ -171,9 +181,9 @@ def render_macos_launch_agent(
     <false/>
   </dict>
   <key>StandardOutPath</key>
-  <string>{_xml_escape(str(stdout))}</string>
+  <string>/dev/null</string>
   <key>StandardErrorPath</key>
-  <string>{_xml_escape(str(stderr))}</string>
+  <string>/dev/null</string>
 </dict>
 </plist>
 """
@@ -187,7 +197,6 @@ def render_linux_systemd_unit(
     op_environment: str | None = None,
     unified_model_picker: bool = False,
 ) -> str:
-    stdout, stderr = service_log_paths(port)
     command = " ".join(
         shlex.quote(part).replace('%', '%%')
         for part in service_command(
@@ -203,8 +212,8 @@ Type=simple
 ExecStart={command}
 Restart=on-failure
 RestartSec=2
-StandardOutput=append:{stdout}
-StandardError=append:{stderr}
+StandardOutput=null
+StandardError=null
 
 [Install]
 WantedBy=default.target

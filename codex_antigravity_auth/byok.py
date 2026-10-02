@@ -1,8 +1,8 @@
 from .console import console_print as print
+import logging
 import os
 import re
 import math
-import sys
 from pathlib import Path
 from .namespaces import gateway_file
 from typing import Any
@@ -510,7 +510,7 @@ def validate_provider_headers(headers: dict[str, Any] | None) -> dict[str, str] 
     return normalized or None
 
 
-def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
+def normalize_provider_entry(provider: dict[str, Any], *, quiet: bool = False) -> dict[str, Any]:
     normalized = dict(provider)
 
     if "kind" in normalized:
@@ -561,12 +561,10 @@ def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
         else:
             normalized.pop("apiKey", None)
             provider_label = normalized.get("displayName") or normalized.get("id") or "unknown"
-            if provider_label not in _warned_invalid_provider_keys:
+            if not quiet and provider_label not in _warned_invalid_provider_keys:
                 _warned_invalid_provider_keys.add(provider_label)
-                print(
-                    f"[gateway] BYOK provider {provider_label}: stored apiKey failed validation "
-                    "and was dropped (control characters or non-ASCII); fix the provider config",
-                    file=sys.stderr,
+                logging.getLogger(__name__).warning(
+                    "BYOK provider stored apiKey failed validation and was dropped; fix the provider config"
                 )
     aliases = normalized.get("apiKeyEnvAliases")
     if "apiKeyEnvAliases" in normalized:
@@ -611,7 +609,7 @@ def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def normalize_provider_config(data: dict[str, Any]) -> dict[str, Any]:
+def normalize_provider_config(data: dict[str, Any], *, quiet: bool = False) -> dict[str, Any]:
     if not isinstance(data, dict):
         data = {}
     providers = data.get("providers")
@@ -623,7 +621,7 @@ def normalize_provider_config(data: dict[str, Any]) -> dict[str, Any]:
             provider_id = str(provider_id)
             if not isinstance(provider, dict) or not PROVIDER_ID_RE.fullmatch(str(provider_id)):
                 continue
-            normalized = normalize_provider_entry(provider)
+            normalized = normalize_provider_entry(provider, quiet=quiet)
             if provider_id not in PROVIDER_PRESETS and not _non_empty_string(normalized.get("baseUrl")):
                 continue
             normalized_providers[provider_id] = normalized
@@ -645,7 +643,7 @@ def load_provider_config_read_only() -> dict[str, Any]:
     return load_secure_json_file_read_only(
         providers_json_path_read_only(),
         default_provider_config,
-        normalize=normalize_provider_config,
+        normalize=lambda data: normalize_provider_config(data, quiet=True),
         error_label="BYOK providers",
     )
 
@@ -860,7 +858,7 @@ def remove_provider_config(provider_id: str) -> bool:
     ))
 
 
-def split_provider_model(model: str) -> tuple[str | None, str]:
+def split_provider_model(model: str, *, read_only: bool = False) -> tuple[str | None, str]:
     model = str(model)
     colon_index = model.find(":")
     slash_index = model.find("/")
@@ -871,7 +869,8 @@ def split_provider_model(model: str) -> tuple[str | None, str]:
         provider_id, provider_model = model.split("/", 1)
         if provider_id in RESERVED_SLASH_PROVIDER_PREFIXES:
             return None, model
-        if provider_id in PROVIDER_PRESETS or provider_id in all_provider_configs(include_env_enabled=False):
+        configs = all_provider_configs_read_only if read_only else all_provider_configs
+        if provider_id in PROVIDER_PRESETS or provider_id in configs(include_env_enabled=False):
             return provider_id, provider_model
     return None, model
 

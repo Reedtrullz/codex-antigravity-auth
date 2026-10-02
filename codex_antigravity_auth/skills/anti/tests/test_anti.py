@@ -1278,7 +1278,7 @@ class AntiHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
             anti.RUNS_DIR = Path(tmp)
             record_path = anti.RUNS_DIR / "run-1.json"
-            record_path.write_text(json.dumps({"id": "run-1"}), encoding="utf-8")
+            record_path.write_text(json.dumps({"id": "run-1", "status": "success"}), encoding="utf-8")
             old = time.time() - 3 * 86400
             os.utime(record_path, (old, old))
             output = io.StringIO()
@@ -4120,7 +4120,7 @@ class BugfixRegressionTests(unittest.TestCase):
         self.assertEqual(record["status"], "partial")
         self.assertEqual(record["runStatus"], "partial")
         self.assertNotIn("output_text", record)
-        self.assertIn("answer that ends mid-sentence", artifact["output_text"])
+        self.assertIn("answer that ends mid-sentence", artifact["output_preview"])
         self.assertIn("consult_attempts", record["metadata"])
         self.assertEqual(len(record["metadata"]["consult_attempts"]), 2)
 
@@ -4170,7 +4170,7 @@ class BugfixRegressionTests(unittest.TestCase):
             self.assertTrue(rows[0]["interrupted"])
             self.assertEqual(rows[0]["size"], 0)
 
-    def test_runs_clean_removes_stale_tmp_files(self) -> None:
+    def test_runs_clean_preserves_stale_tmp_files(self) -> None:
         anti = load_anti()
         with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
             anti.RUNS_DIR = Path(tmp)
@@ -4182,8 +4182,9 @@ class BugfixRegressionTests(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 rc = anti.main(["runs", "clean", "--older-than", "1"])
             self.assertEqual(rc, 0)
-            self.assertFalse(tmp_path.exists())
-            self.assertIn("Removed 1", output.getvalue())
+            self.assertTrue(tmp_path.exists())
+            self.assertIn("Removed 0", output.getvalue())
+            self.assertIn("temporary_ownership_unknown", output.getvalue())
 
     # --- B6: provider identifier redaction ---
 
@@ -4989,7 +4990,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                             "review", "--scope", "files", "--file", "fixture.py",
                             "--max-prompt-chars", str(cap), "--max-review-chunks", "0",
                             "--chunked", "always", "--run-id", run_id,
-                            "--save-output", "summary", "--json", "--no-progress",
+                            "--save-output", "full", "--json", "--no-progress",
                         ])
 
                     artifact = json.loads((anti.RUNS_DIR / run_id / "result.json").read_text(encoding="utf-8"))
@@ -5546,7 +5547,9 @@ class ScopeIntegrityContractTests(unittest.TestCase):
             summary_record = json.loads(summary_record_path.read_text())
             summary_artifact = json.loads(Path(summary_record["resultPath"]).read_text())
         self.assertNotIn("output_text", summary_record)
-        self.assertEqual(summary_artifact["output_text"], "answer-" + "x" * 2000)
+        self.assertNotIn("output_text", summary_artifact)
+        self.assertEqual(summary_artifact["output_preview"], ("answer-" + "x" * 2000)[:1600])
+        self.assertFalse(summary_artifact["retention"]["contentComplete"])
         self.assertEqual(summary_artifact["artifacts"]["rawLanePaths"], [])
 
 
@@ -5888,7 +5891,7 @@ class AntiHardeningTests(unittest.TestCase):
             try:
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
-                    rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json", "--no-progress"])
+                    rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json", "--no-progress", "--save-output", "summary"])
                 self.assertEqual(rc, 0, output.getvalue())
                 parsed = json.loads(output.getvalue())
                 run_id = parsed["metadata"]["run_id"]
