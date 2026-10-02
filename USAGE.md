@@ -356,3 +356,18 @@ Legacy gateway/service log files are left untouched; reinstall an existing
 service to stop its old append-only output routing. Account references in runtime
 messages are opaque and change on restart; explicit account-management commands
 still show local account identity. See [the process-log contract](codex_antigravity_auth/PROCESS_LOGS.md).
+## Local finding verdicts and report export
+
+```sh
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --run-id RUN_ID --format json
+python3 ~/.codex/skills/anti/scripts/anti.py runs finding --repo . --run-id RUN_ID --finding FINDING_KEY --verdict rejected --author reviewer --source-file src/example.py --evidence-file local-evidence.txt
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --run-id RUN_ID --format sarif --output review.sarif
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --format markdown --output reviews.md
+```
+
+Use `findingKey` from the first export. Local verdicts require explicit evidence
+and record the inspected file hash; model claims and passing file checks remain
+unverified. Rejected and unresolved findings remain visible. Existing output
+files are never overwritten, and these commands never publish to GitHub. Retained
+content and provenance limits follow the
+[review export contract](codex_antigravity_auth/skills/anti/ARTIFACTS.md#finding-adjudication-and-review-exports).

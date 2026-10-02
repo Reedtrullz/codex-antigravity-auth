@@ -38,6 +38,7 @@ dev = [
   "pyyaml>=6.0",
   "ruff>=0.16.9",
   "tomli>=2.0.1; python_version < '3.11'",
+  "jsonschema>=4.18",
 ]
 
 quality = ["pip-audit>=2.10.1"]
