@@ -607,6 +607,12 @@ def codex_ready_report(
                 else:
                     add("google_rotation", "fail", f"No Google accounts configured for {family}", **rotation)
 
+    if route in {"google", "unknown"}:
+        credential_warnings: list[str] = []
+        _cli.resolve_oauth_credentials(read_only=True, warnings=credential_warnings)
+        for warning in credential_warnings:
+            add("google_oauth_credentials_file", "warn", _cli.redact_secret_text(warning))
+
     if live:
         probe_model = live_model or selected_for_catalog or _cli.DEFAULT_CODEX_MODEL_ID
         probe_model, live_model_error = _cli._validate_google_live_model(probe_model)
@@ -789,7 +795,10 @@ def run_doctor(
     if byok_only:
         print("[INFO] Google OAuth Client Credentials: skipped (--byok-only)")
     else:
-        cid, csec = _cli.resolve_oauth_credentials()
+        credential_warnings: list[str] = []
+        cid, csec = _cli.resolve_oauth_credentials(read_only=True, warnings=credential_warnings)
+        for warning in credential_warnings:
+            print(f"[WARN] Google OAuth Client Credentials: {_cli.redact_secret_text(warning)}")
         if cid and csec:
             print(f"[PASS] Google OAuth Client Credentials: Configured (Client ID: ...{cid[-15:]})")
         else:
