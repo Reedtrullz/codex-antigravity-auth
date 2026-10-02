@@ -137,6 +137,8 @@ python3 ~/.codex/skills/anti/scripts/anti.py runs list
 
 Workflow presets save sanitized summaries under `~/.codex/anti-runs` by default. Primitive commands default to `--save-output never`: only a content-free lifecycle/correlation record is retained, with no findings or reflection history. Opt into `summary` for bounded previews across all saved payloads, or redacted `full` for detailed results and lane files. Summary artifacts are explicitly marked `retention.contentComplete=false`; they are not complete saved answers. See the bundled [recording policy](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks) for bounds. Saved runs include a run id; Anti sends it to the gateway as `metadata.run_id`, and the sanitized request JSONL log records it for correlation without forwarding it to Google or BYOK providers. With `--chunked auto`, Opus/Sonnet plan and review calls use a conservative Claude safety budget and split broad context into bounded chunk calls before synthesis; use `--chunked off` only when you intentionally want one large request, including when `--max-prompt-chars 0` would otherwise mean unlimited. Use `--fallback-model sonnet --fallback-policy on-retryable` for long Opus calls that should degrade after retryable backend failures, and `--progress` to print model/chunk progress to stderr.
 
+Finding checks default to in-memory Python syntax and credential-pattern checks, with structured outcomes and no project writes. Opt into trusted project ESLint with `panel --check-profile eslint` (also forwarded by workflow commands), or skip all checks with `--no-verify`. These checks never execute model-supplied `verify` text or establish a finding's semantic truth. Detailed check records appear in live JSON/full retention; summaries keep counts. See the bundled [check policy](codex_antigravity_auth/skills/anti/SKILL.md#new-flags).
+
 Saved results use immutable revisions referenced by the run index; `anti.py runs show <id>` validates checksums and status consistency before returning `resultPath`. Legacy records are explicitly unverified. See the [artifact contract](codex_antigravity_auth/skills/anti/ARTIFACTS.md).
 
 Each run ID has one writer; use a new ID for a new invocation or when a previous record's ownership is unknown. Corrupt or unreadable reflection files are preserved, with backup/recovery guidance instead of silently replacing history. See the bundled [persistence contract](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks).
@@ -378,8 +380,10 @@ process-default owner (for example an elevated token's default owner group).
 Protection sets the current user as owner, applies a protected current-user-only
 full-control DACL, then verifies owner, ACE type/count/access mask and inheritance
 on the opened object. Files are protected before secret bytes are written;
-private directories use an exclusive handle to avoid rewriting unrelated child
-ACLs. Each managed child is protected independently before its content is written. If required ACL,
+private directories open a `MAXIMUM_ALLOWED` handle so changes do not propagate
+to existing child ACLs. Their owner-only ACE inherits to newly created files and
+directories; managed files then receive a protected, non-inheriting ACE before
+content is written. If required ACL,
 handle or filesystem facilities are unavailable, access fails explicitly.
 Administrators' backup/ownership privileges remain outside this boundary.
 
@@ -391,3 +395,19 @@ and [SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi
 contracts. Native Windows tests inspect temporary-file security descriptors through
 read-only Win32 APIs; non-Windows runs skip that check and exercise synthetic refusal paths.
 No Windows ACL success is inferred from POSIX mode bits or mocked tests.
+
+## Local finding verdicts and report export
+
+```sh
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --run-id RUN_ID --format json
+python3 ~/.codex/skills/anti/scripts/anti.py runs finding --repo . --run-id RUN_ID --finding FINDING_KEY --verdict rejected --author reviewer --source-file src/example.py --evidence-file local-evidence.txt
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --run-id RUN_ID --format sarif --output review.sarif
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --format markdown --output reviews.md
+```
+
+Use `findingKey` from the first export. Local verdicts require explicit evidence
+and record the inspected file hash; model claims and passing file checks remain
+unverified. Rejected and unresolved findings remain visible. Existing output
+files are never overwritten, and these commands never publish to GitHub. Retained
+content and provenance limits follow the
+[review export contract](codex_antigravity_auth/skills/anti/ARTIFACTS.md#finding-adjudication-and-review-exports).
