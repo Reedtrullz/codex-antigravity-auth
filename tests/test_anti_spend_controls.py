@@ -271,6 +271,8 @@ def test_automatic_token_cap_retry_respects_output_allowance(anti,monkeypatch,tm
     record=json.loads((tmp_path/'runs/cap-retry.json').read_text())
     admission=record['metadata']['admission_controls']
     assert admission['committed']['output_tokens']==6 and admission['refused_attempts']==1
+    assert admission['attemptsRetained'] is False and 'attempts' not in admission
+    assert 'fixture:model' not in json.dumps(record)
 
 
 def test_currency_quote_must_cover_gateway_internal_attempts(anti,tmp_path):
@@ -359,3 +361,19 @@ def test_pricing_opener_preparation_cannot_move_dispatch_past_deadline(anti,monk
     assert caught.value.submitted is False
     assert control.snapshot()['attempts_started']==0
     assert control.spend_control.snapshot()['reserved']['calls']==0
+
+
+def test_spend_lifecycle_projection_omits_attempt_and_quote_content(anti):
+    projected=anti.lifecycle_metadata({'admission_controls':{
+        'enabled':True,'billing_guarantee':False,'token_limit_guarantee':False,
+        'refused_attempts':1,'attempts_omitted':False,
+        'committed':{'calls':1,'input_tokens':True,'output_tokens':6},
+        'currency':{'currency':'USD','sha256':'a'*64,'gateway':'private-fixture',
+                    'source':'private-fixture','provider_price_verified':False,
+                    'basis':'user_declared_complete_attempt_ceiling'},
+        'attempts':[{'model':'private-fixture'}],
+    }})['admission_controls']
+    assert projected['committed']=={'calls':1,'output_tokens':6}
+    assert projected['attemptsRetained'] is False and 'attempts' not in projected
+    assert 'attempts_omitted' not in projected
+    assert 'private-fixture' not in json.dumps(projected)

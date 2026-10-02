@@ -162,23 +162,7 @@ def control_metadata(source: dict[str, Any]) -> dict[str, Any]:
 def lifecycle_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     """Allow only known numeric counters and fixed enums in never mode."""
     source = metadata if isinstance(metadata, dict) else {}
-    result = {}
-    runtime = source.get("run_control")
-    if isinstance(runtime, dict):
-        projected = {"eventsRetained": False}
-        for key in ("attempts_started", "permits_acquired", "permits_released", "deferred_calls", "events_omitted"):
-            value = runtime.get(key)
-            if type(value) is int and 0 <= value <= 2**63 - 1:
-                projected[key] = value
-        for key in ("limit_seconds", "elapsed_seconds", "remaining_seconds"):
-            value = runtime.get(key)
-            if type(value) in (int, float) and 0 <= value <= 2**63 - 1 and math.isfinite(value):
-                projected[key] = value
-        if runtime.get("scope") == "process_local":
-            projected["scope"] = "process_local"
-        if type(runtime.get("deadline_exceeded")) is bool:
-            projected["deadline_exceeded"] = runtime["deadline_exceeded"]
-        result["run_control"] = projected
+    result = control_metadata(source)
     policy = audit_projection(source.get("dataPolicy"))
     if policy is not None:
         result["dataPolicy"] = policy
