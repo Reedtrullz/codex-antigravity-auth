@@ -252,6 +252,7 @@ def test_upstream_http_200_is_preserved_when_gateway_maps_an_error(monkeypatch, 
     model = "fixture:model" if route == "byok" else "gemini-3.8-flash"
     response = TestClient(server.app).post("/v1/responses", json={"model": model, "input": "synthetic", "stream": False})
     if route == "openai_oauth":
+        # Keep the exact failed terminal reason: upstream HTTP 200 is not terminal success.
         assert response.status_code == 200
         assert response.json()["status"] == "failed"
         assert response.json()["error"]["code"] == "missing_terminal_signal"

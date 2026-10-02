@@ -13,6 +13,7 @@ import uuid
 import httpx
 
 from .endpoint_policy import httpx_client_options, validate_endpoint_url
+from .request_budget import call_sync, owned_context
 from .sse import SSELineError, iter_sse_data
 
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
@@ -465,13 +466,10 @@ class GoogleTransport:
 
     async def post(self, request: dict[str, Any], lease: AccountLease) -> httpx.Response:
         url = f"{self.endpoint}/v1internal:generateContent"
-        payload = self.build_request(request, lease)
-        async with self.client_factory(**httpx_client_options(url, timeout=self.timeout)) as client:
-            return await client.post(
-                url,
-                json=payload,
-                headers=self.build_headers(lease),
-            )
+        payload = await call_sync(self.build_request, request, lease)
+        headers = await call_sync(self.build_headers, lease)
+        async with owned_context(self.client_factory(**httpx_client_options(url, timeout=self.timeout))) as client:
+            return await client.post(url, json=payload, headers=headers)
 
     async def execute(
         self,
@@ -496,14 +494,10 @@ class GoogleTransport:
     @asynccontextmanager
     async def stream(self, request: dict[str, Any], lease: AccountLease):
         url = f"{self.endpoint}/v1internal:streamGenerateContent?alt=sse"
-        payload = self.build_request(request, lease)
-        async with self.client_factory(**httpx_client_options(url, timeout=self.timeout)) as client:
-            async with client.stream(
-                "POST",
-                url,
-                json=payload,
-                headers=self.build_headers(lease),
-            ) as response:
+        payload = await call_sync(self.build_request, request, lease)
+        headers = await call_sync(self.build_headers, lease)
+        async with owned_context(self.client_factory(**httpx_client_options(url, timeout=self.timeout))) as client:
+            async with owned_context(client.stream("POST", url, json=payload, headers=headers)) as response:
                 yield response
 
     async def stream_events(
