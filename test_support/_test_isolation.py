@@ -7,6 +7,7 @@ from __future__ import annotations
 import atexit
 import base64
 from contextlib import contextmanager
+from contextvars import ContextVar
 import os
 from pathlib import Path
 import shutil
@@ -21,6 +22,7 @@ _allowed_endpoints: set[tuple[str, int]] = set()
 _binding = False
 _violations: list[str] = []
 _protected_paths: list[Path] = []
+_validated_spawn = ContextVar("validated_test_spawn", default=None)
 _SAFE_ENV = {"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL",
              "TMPDIR", "TEMP", "TMP", "VIRTUAL_ENV"}
 _STORAGE_KEY = base64.urlsafe_b64encode(b"\0" * 32).decode("ascii")
@@ -172,7 +174,11 @@ def install():
             else:
                 _deny("test subprocess must be the guarded Python interpreter or local Git")
             kwargs["env"] = env
-            super().__init__(argv, **kwargs)
+            token = _validated_spawn.set((argv[0], argv, env))
+            try:
+                super().__init__(argv, **kwargs)
+            finally:
+                _validated_spawn.reset(token)
 
     subprocess.Popen = IsolatedPopen
 
@@ -188,6 +194,10 @@ def install():
             if not _binding:
                 _deny("test listener must be created by the fake-upstream fixture")
         elif event in {"os.system", "os.exec", "os.posix_spawn", "os.spawn"}:
+            if event == "os.posix_spawn" and _validated_spawn.get() is not None:
+                executable, argv, env = args
+                if (os.fsdecode(executable), [os.fsdecode(a) for a in argv], env) == _validated_spawn.get():
+                    return
             _deny("unguarded subprocess creation is forbidden in tests")
         elif event in {"open", "os.remove", "os.rmdir", "os.mkdir", "os.rename", "os.chmod", "os.chown", "os.truncate", "os.listdir", "os.scandir", "os.link", "os.symlink"}:
             paths = args[:2] if event in {"os.rename", "os.link", "os.symlink"} else args[:1]

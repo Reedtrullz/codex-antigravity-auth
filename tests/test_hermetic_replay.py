@@ -97,6 +97,31 @@ else:
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.skipif(not hasattr(os, "posix_spawn"), reason="POSIX spawn is unavailable")
+def test_validated_python_posix_spawn_preserves_isolation():
+    code = """
+import os, socket
+from _test_isolation import expected_denial
+assert os.environ['ANTIGRAVITY_TEST_ROOT']
+assert os.environ.get('OPENAI_API_KEY') is None
+with expected_denial():
+    try:
+        socket.create_connection(('127.0.0.1', 51122))
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError('network escaped')
+"""
+    result = subprocess.run([sys.executable, "-c", code], close_fds=False,
+                            env={"OPENAI_API_KEY": "synthetic-canary"},
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    with expected_denial(), pytest.raises(AssertionError, match="unguarded subprocess"):
+        os.posix_spawn(sys.executable, [sys.executable, "-c", "pass"], dict(os.environ))
+    with expected_denial(), pytest.raises(AssertionError, match="guarded Python"):
+        subprocess.run(["unvalidated-test-executable"])
+
+
 def test_tool_round_trip_uses_real_http(monkeypatch):
     first = {"choices": [{"finish_reason": "tool_calls", "message": {"tool_calls": [{"id": "call_fixture", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]}}]}
     second = {"choices": [{"finish_reason": "stop", "message": {"content": "answer"}}]}
