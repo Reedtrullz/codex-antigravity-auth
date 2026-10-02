@@ -382,8 +382,9 @@ process-default owner (for example an elevated token's default owner group).
 Protection sets the current user as owner, applies a protected current-user-only
 full-control DACL, then verifies owner, ACE type/count/access mask and inheritance
 on the opened object. Files are protected before secret bytes are written;
-private directories open a `MAXIMUM_ALLOWED` handle so changes do not propagate
-to existing child ACLs. Their owner-only ACE inherits to newly created files and
+private directories use a pinned handle and `NtSetSecurityObject` to preserve
+existing child descriptors. Read/write sharing permits in-use directories while
+delete sharing remains denied. Their owner-only ACE inherits to newly created files and
 directories; managed files then receive a protected, non-inheriting ACE before
 content is written. If required ACL,
 handle or filesystem facilities are unavailable, access fails explicitly.
@@ -393,7 +394,8 @@ The Windows implementation follows Microsoft's
 [ReOpenFile](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile),
 [GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo),
 [FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info)
-and [SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo)
+[SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo),
+and [NtSetSecurityObject](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetsecurityobject)
 contracts. Native Windows tests inspect temporary-file security descriptors through
 read-only Win32 APIs; non-Windows runs skip that check and exercise synthetic refusal paths.
 No Windows ACL success is inferred from POSIX mode bits or mocked tests.
