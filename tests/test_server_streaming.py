@@ -638,7 +638,7 @@ class TestServerStreaming(unittest.TestCase):
             async def receive():
                 nonlocal sent
                 if sent:
-                    return {"type": "http.disconnect"}
+                    await asyncio.Future()  # Still connected during preparation.
                 sent = True
                 return {
                     "type": "http.request",
@@ -663,17 +663,16 @@ class TestServerStreaming(unittest.TestCase):
             )
             response = await create_response(request)
             sent = []
-            received = 0
+            first_body = asyncio.Event()
 
             async def asgi_receive():
-                nonlocal received
-                received += 1
-                if received == 1:
-                    return {"type": "http.request", "body": b"", "more_body": False}
+                await first_body.wait()
                 return {"type": "http.disconnect"}
 
             async def asgi_send(message):
                 sent.append(message)
+                if message["type"] == "http.response.body" and message.get("body"):
+                    first_body.set()
 
             await response(request.scope, asgi_receive, asgi_send)
             return sent

@@ -382,3 +382,6 @@ paths restrict the chosen run. Bounded secret-pattern checks stop a submission
 until resolved or explicitly acknowledged for its exact prompt hash. Policy
 dry runs write nothing and report hashes instead of source. See the bundled
 [policy contract](codex_antigravity_auth/skills/anti/DATA_POLICY.md).
+## Request time budgets
+
+Google, BYOK and native OpenAI requests now share a monotonic 60-second preparation/nonstream deadline. Streaming has separate 60-second event-idle and 30-minute total defaults, including preparation, with validated metadata overrides. Downstream backpressure and resource cleanup are bounded; timeouts never trigger replay after visible output. See [request deadlines and cleanup](codex_antigravity_auth/REQUEST_DEADLINES.md) for overrides, failure outcomes, cleanup grace and cancellation limits.

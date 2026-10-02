@@ -12,6 +12,7 @@ import uuid
 import httpx
 
 from .endpoint_policy import httpx_client_options
+from .request_budget import owned_context
 
 from .byok import (
     provider_capabilities,
@@ -21,6 +22,7 @@ from .byok import (
     validate_provider_headers,
 )
 
+from .request_budget import owned_context
 from .redaction import redact_secret_text
 from .native_output import (
     MAX_ITEMS, NativeOutputError, check_json, reconcile_output,
@@ -450,13 +452,13 @@ class OpenAICompatibleTransport:
             yield builder.done_marker()
 
         try:
-            async with self.client_factory(**httpx_client_options(prepared.url, timeout=prepared.timeout)) as client:
-                async with client.stream(
+            async with owned_context(self.client_factory(**httpx_client_options(prepared.url, timeout=prepared.timeout))) as client:
+                async with owned_context(client.stream(
                     "POST",
                     prepared.url,
                     json=prepared.payload,
                     headers=prepared.headers,
-                ) as response:
+                )) as response:
                     if telemetry is not None:
                         telemetry["http_status"] = response.status_code
                     if response.status_code != 200:
