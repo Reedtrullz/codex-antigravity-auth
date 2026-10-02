@@ -189,7 +189,7 @@ except anti.AntiError:
 '''
     guarded_code = without_installed_packages(code)
     processes = [subprocess.Popen([sys.executable, "-c", guarded_code, str(SCRIPT.parent), str(anti.RUNS_DIR)],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(4)]
+                                  cwd=SCRIPT.parent, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(4)]
     codes = []
     for process in processes:
         _, stderr = process.communicate(timeout=15)
