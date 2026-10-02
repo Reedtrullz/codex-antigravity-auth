@@ -358,6 +358,16 @@ Legacy gateway/service log files are left untouched; reinstall an existing
 service to stop its old append-only output routing. Account references in runtime
 messages are opaque and change on restart; explicit account-management commands
 still show local account identity. See [the process-log contract](codex_antigravity_auth/PROCESS_LOGS.md).
+
+## Model discovery and recent readiness
+
+`provider discover NAME` reads cached evidence; `--network` explicitly fetches a
+bounded optional catalog. `models explain ID --json` stays offline, while
+`models probe ID --network` records one expiring text-generation check. Imports
+are preview-first and require `--write --accept-digest` to save. See the
+[discovery and readiness contract](codex_antigravity_auth/design/model-discovery.md)
+for supported pagination, limits, cache semantics and configuration diagnostics.
+
 ## Local finding verdicts and report export
 
 ```sh

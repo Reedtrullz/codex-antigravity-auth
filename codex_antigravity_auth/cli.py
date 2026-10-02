@@ -545,7 +545,38 @@ def run_accounts_command(args) -> None:
     raise SystemExit(f"Unsupported accounts action: {action}")
 
 
+def run_model_observation_command(args) -> None:
+    from . import model_observations as observations
+    operation = args.models_command if args.command == "models" else args.provider_command
+    failed = False
+    try:
+        if operation == "explain":
+            result = observations.describe_model(args.id, base_url=args.base_url)
+        elif operation == "probe":
+            result = observations.probe(args.id, network=args.network, base_url=args.base_url,
+                token_env=args.gateway_token_env, timeout=args.timeout)
+            failed = not result["generationOk"]
+        elif operation == "discover":
+            result = observations.discover(args.provider, network=args.network, timeout=args.timeout)
+            failed = result["state"] == "invalid" or bool(args.network and result["record"]["status"] != "complete")
+        elif operation == "import-discovery":
+            result = observations.import_discovered(args.provider, args.model, write=args.write, accept_digest=args.accept_digest)
+        else:
+            result = observations.import_overlay(args.path, write=args.write, accept_digest=args.accept_digest)
+    except (ValueError, OSError, RuntimeError) as exc:
+        message = str(exc) if isinstance(exc, observations.ObservationError) else "Model operation failed: configuration or input is invalid."
+        result = {"status":"error", "message":message}
+        failed = True
+    output = {"schemaVersion":1, "operation":operation, **result}
+    # JSON is also the concise text preview: it shows the entire proposal and
+    # digest without hiding fields behind an implicit save or a live probe.
+    print(json.dumps(output, indent=2, sort_keys=True))
+    if failed: raise SystemExit(1)
+
+
 def run_models_command(args) -> None:
+    if args.models_command in {"explain", "probe", "import"}:
+        return run_model_observation_command(args)
     if args.models_command == "list":
         try:
             overlays = load_model_overlays(strict=True)
@@ -1489,11 +1520,38 @@ def _main():
     models_remove = models_sub.add_parser("remove", help="Remove a local model catalog overlay")
     models_remove.add_argument("id")
     models_sub.add_parser("doctor", help="Validate model overlay and runtime definitions")
+    explain = models_sub.add_parser("explain", help="Explain declared capabilities, cached discovery and recent probe evidence without network access")
+    explain.add_argument("id")
+    explain.add_argument("--base-url", default="http://127.0.0.1:51122/v1", help="Gateway identity used to match prior probe evidence")
+    explain.add_argument("--json", action="store_true")
+    probe = models_sub.add_parser("probe", help="Explicitly test one model's text generation and record a short-lived observation")
+    probe.add_argument("id")
+    probe.add_argument("--network", action="store_true", help="Allow this one bounded generation request")
+    probe.add_argument("--base-url", default="http://127.0.0.1:51122/v1")
+    probe.add_argument("--gateway-token-env", default="ANTIGRAVITY_GATEWAY_TOKEN")
+    probe.add_argument("--timeout", type=float, default=10)
+    probe.add_argument("--json", action="store_true")
+    overlay_import = models_sub.add_parser("import", help="Preview a local TOML overlay import before explicitly saving it")
+    overlay_import.add_argument("path")
+    overlay_import.add_argument("--write", action="store_true")
+    overlay_import.add_argument("--accept-digest", help="Exact digest printed by the reviewed preview")
+    overlay_import.add_argument("--json", action="store_true")
 
     provider_parser = subparsers.add_parser("provider", help="Manage BYOK OpenAI-compatible providers")
     provider_sub = provider_parser.add_subparsers(dest="provider_command", required=True)
     provider_sub.add_parser("list", help="List BYOK providers")
     provider_sub.add_parser("presets", help="List built-in BYOK provider presets")
+    discover = provider_sub.add_parser("discover", help="Read cached discovery, or explicitly fetch the provider's optional model catalog")
+    discover.add_argument("provider")
+    discover.add_argument("--network", action="store_true", help="Fetch a bounded catalog; never probe generation or save declarations")
+    discover.add_argument("--timeout", type=float, default=10)
+    discover.add_argument("--json", action="store_true")
+    discovered_import = provider_sub.add_parser("import-discovery", help="Preview selected discovered IDs before explicitly saving declarations")
+    discovered_import.add_argument("provider")
+    discovered_import.add_argument("--model", action="append", required=True)
+    discovered_import.add_argument("--write", action="store_true")
+    discovered_import.add_argument("--accept-digest", help="Exact digest printed by the reviewed preview")
+    discovered_import.add_argument("--json", action="store_true")
     provider_set = provider_sub.add_parser("set", help="Configure a BYOK provider")
     provider_set.add_argument("provider", help="Provider id, e.g. openrouter, deepseek, xai, kimi, ollama, opencode, custom")
     provider_set.add_argument("--api-key", help="API key to store encrypted")
@@ -1615,6 +1673,8 @@ def _main():
     elif args.command == "models":
         run_models_command(args)
     elif args.command == "provider":
+        if args.provider_command in {"discover", "import-discovery"}:
+            return run_model_observation_command(args)
         if args.provider_command == "presets":
             print("[*] Built-in BYOK provider presets:")
             for provider_id, preset in PROVIDER_PRESETS.items():
