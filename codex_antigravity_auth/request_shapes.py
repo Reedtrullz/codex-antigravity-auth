@@ -182,6 +182,9 @@ def validate_request_shapes(request, *, route=None):
         if not isinstance(parameters, dict):
             reject(path + '.parameters', 'expected a schema object')
         _schema(parameters, path + '.parameters', google=route == 'google')
+        if (route == 'google' and parameters.get('type') == 'object' and not parameters.get('required')
+                and '_placeholder' in parameters.get('properties', {})):
+            reject(path + '.parameters.properties._placeholder', 'internal placeholder injection would collide with this property')
     choice = request.get('tool_choice')
     if isinstance(choice, dict) and 'name' in choice and 'function' in choice:
         reject('tool_choice', 'conflicting flat and nested function choices')
