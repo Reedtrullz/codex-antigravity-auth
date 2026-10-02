@@ -15,6 +15,8 @@
     "scripts/anti_lib/redaction.py",
     "scripts/anti_lib/secret_redaction.py",
     "scripts/anti_lib/reflections.py",
+    "scripts/anti_lib/file_protection.py",
+    "scripts/anti_lib/windows_file_security.py",
     "scripts/anti_lib/retention.py",
     "scripts/anti_lib/persistence.py",
     "scripts/anti_lib/cleanup.py",
