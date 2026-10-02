@@ -233,6 +233,9 @@ Google and Chat Completions responses select provider alternative index `0`, con
 Token refresh and project discovery run outside account-selection and storage locks. A concurrent selection can use another eligible account; a busy refresh never makes an expired token eligible. Each account has one refresh owner per gateway process. The credential snapshot is checked before refresh and before writing back, so removal, changed credentials, and newer token state take precedence. Family cooldowns remain independent of token refresh.
 
 The gateway lifespan starts a refresh-ahead check and repeats checks every 60 seconds while idle, refreshing tokens within five minutes of expiry. At most one refresh-ahead worker runs at a time. Shutdown stops the timer, signals the worker to stop before further discovery/merges/accounts, and waits for the current synchronous call to finish using its existing network timeouts. It does not abandon a live worker thread. This is process-local refresh ownership; multiple gateway processes are not coordinated by a distributed refresh lease.
+
+Live readiness requires a completed response with usable text in a completed assistant message. HTTP success alone, failed or incomplete responses (including token-cap exhaustion), refusals, empty output, and malformed responses do not pass. The live probe in `doctor --codex-ready --json` separates `transport_ok` from `generation_ok` and reports `terminal_kind`, `terminal_reason`, and a redacted `error`; `ok` reflects generation success. The check sends one request with the existing token budget and does not retry automatically.
+
 ## 1. Supported Models & Aliases
 You can use standard, developer-friendly names in your `~/.codex/config.toml` that the gateway automatically translates to the official Google Antigravity backend model definitions:
 
@@ -280,6 +283,8 @@ The view reports route classification for both classic and unified gateway modes
 
 ## 3. High-Fidelity Streaming & Reasoning
 Streaming readers decode UTF-8 incrementally, ignore one leading BOM, and recognize LF, CRLF, and CR line endings. Native Responses events are dispatched at a blank line, with multiple `data:` fields joined by a newline. Malformed UTF-8 is replaced consistently; unfinished data at EOF fails instead of becoming a complete event. Chat Completions and Google retain an explicit legacy JSON-line mode for endpoints that omit blank separators, including multiline JSON continuations; a physical data line must still terminate. Readers retain at most 8 Mi decoded characters and 10,000 data lines per pending frame. These bounds do not impose whole-response or gateway admission limits.
+
+Explicit provider refusal text is retained as refusal content even alongside an answer prefix or tool call. A refusal-only response can be `completed`, while readiness still reports it as refused. Filtered responses with ordinary text or tools are `incomplete` with reason `content_filter`; token-limit responses use `max_output_tokens`. Known technical or unknown finish reasons fail explicitly while retaining supported partial output. Policy metadata without user-facing refusal text produces a generic refusal notice, and safety ratings without an explicit block do not imply refusal. Streaming and non-streaming normalization use the same outcome rules.
 
 The local server natively isolates explicit thinking blocks and stream envelopes, ensuring standard formatting:
 - **Thinking/Reasoning block**: Emits `response.reasoning_text.delta` for explicit backend thinking parts while preserving regular `thoughtSignature` text as visible output.
