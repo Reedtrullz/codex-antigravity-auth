@@ -471,13 +471,18 @@ def codex_ready_report(
     parsed_gateway = urlparse(expected_base_url)
     gateway_port = parsed_gateway.port or 51122
 
+    parsed = {}
+    if not config_error:
+        try:
+            parsed = _cli.parse_codex_config(config_content or "")
+        except ValueError as exc:
+            config_error = str(exc)
     if config_error:
         add("codex_config", "fail", config_error)
     else:
         inspector = _cli.inspect_codex_gateway_config if require_active_provider else _cli.inspect_codex_provider_block_config
         ready, reason = inspector(config_content or "", provider_id=provider_id, expected_base_url=expected_base_url)
         add("codex_config", "pass" if ready else "fail", reason, path=str(config_path))
-        parsed = _cli.parse_codex_config(config_content or "")
         active_model = str(selected_model or parsed.get("active_model") or "")
         try:
             canonical_model = _cli.validate_codex_model_id(active_model)
