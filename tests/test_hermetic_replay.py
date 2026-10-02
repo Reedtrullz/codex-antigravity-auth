@@ -69,6 +69,17 @@ def test_unowned_loopback_and_external_network_are_denied():
         socket.getaddrinfo("example.invalid", 443)
 
 
+def test_guard_denial_receipt_identifies_caller_without_command_content():
+    import _test_isolation as isolation
+
+    with expected_denial():
+        with pytest.raises(AssertionError, match="explicit argv"):
+            subprocess.Popen("synthetic-private-command", shell=True)
+        receipt = isolation._violations[-1]
+        assert "test_guard_denial_receipt_identifies_caller" in receipt
+        assert "synthetic-private-command" not in receipt
+
+
 def test_home_resolution_remains_private_when_environment_is_cleared():
     from pathlib import Path
     from unittest.mock import patch
