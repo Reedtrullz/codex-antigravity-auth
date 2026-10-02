@@ -13,6 +13,8 @@ import pytest
 
 from codex_antigravity_auth import observability as logs
 
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+
 
 @pytest.fixture
 def log_path(monkeypatch, tmp_path):
@@ -90,12 +92,15 @@ def test_cross_process_append_rotation_serializes(log_path):
     code = """
 import sys
 from pathlib import Path
+import _test_isolation
+assert _test_isolation._installed
+sys.path.insert(0, sys.argv[3])
 from codex_antigravity_auth import observability as logs
 logs.get_codex_home = lambda: Path(sys.argv[1])
 for index in range(25):
     logs.write_request_record({'request_id': f'{sys.argv[2]}-{index}', 'status':'success'}, max_bytes=4096, backup_count=5)
 """
-    processes = [subprocess.Popen([sys.executable, "-I", "-c", code, str(log_path.parent), str(index)], cwd=log_path.parent, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for index in range(3)]
+    processes = [subprocess.Popen([sys.executable, "-c", code, str(log_path.parent), str(index), str(SOURCE_ROOT)], cwd=log_path.parent, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for index in range(3)]
     try:
         for process in processes:
             stdout, stderr = process.communicate(timeout=10)
