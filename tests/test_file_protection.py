@@ -169,7 +169,7 @@ with file_lock(Path(sys.argv[2])):
             child.communicate(timeout=5)
 
 
-def _native_acl_snapshot(path):
+def _native_acl_snapshot(path, *, directory=False):
     import ctypes
     from ctypes import wintypes as w
 
@@ -191,11 +191,35 @@ def _native_acl_snapshot(path):
         pointer, w.DWORD, w.DWORD, ctypes.POINTER(w.LPWSTR), ctypes.POINTER(w.DWORD),
     ]
     advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = w.BOOL
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        w.LPCWSTR, w.DWORD, ctypes.POINTER(pointer), ctypes.POINTER(w.DWORD),
+    ]
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = w.BOOL
     kernel.GetCurrentProcess.restype = w.HANDLE
     kernel.LocalFree.argtypes = [pointer]
     kernel.LocalFree.restype = pointer
     kernel.CloseHandle.argtypes = [w.HANDLE]
     kernel.CloseHandle.restype = w.BOOL
+
+    def canonical_sddl(value):
+        expected_descriptor = pointer()
+        if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            value, 1, ctypes.byref(expected_descriptor), None
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            serialized = w.LPWSTR()
+            length = w.DWORD()
+            if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                expected_descriptor, 1, 0x1 | 0x4, ctypes.byref(serialized), ctypes.byref(length)
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                return serialized.value
+            finally:
+                kernel.LocalFree(ctypes.cast(serialized, pointer))
+        finally:
+            kernel.LocalFree(expected_descriptor)
 
     token = w.HANDLE()
     if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
@@ -238,7 +262,19 @@ def _native_acl_snapshot(path):
         ):
             raise ctypes.WinError(ctypes.get_last_error())
         try:
-            return {"Current": current_sid, "Sddl": sddl.value}
+            return {
+                "Current": current_sid,
+                "Sddl": sddl.value,
+                # Windows may serialize a well-known SID as LA/BA, and may
+                # report SE_DACL_AUTO_INHERITED. Compare canonical descriptors
+                # while requiring a protected DACL and the exact owner ACE.
+                "ExpectedSddl": {
+                    canonical_sddl(
+                        f"O:{current_sid}D:{control}(A;{'OICI' if directory else ''};FA;;;{current_sid})"
+                    )
+                    for control in ("P", "PAI")
+                },
+            }
         finally:
             kernel.LocalFree(ctypes.cast(sddl, pointer))
     finally:
@@ -250,9 +286,9 @@ def test_native_windows_file_dacl_is_current_user_only_and_protected(tmp_path):
     path = tmp_path / "private" / "fixture.json"
     secure_store.SecureStore().atomic_write_text(path, "synthetic private payload")
     acl = _native_acl_snapshot(path)
-    # Exact SDDL asserts current-user ownership and a protected DACL with one
-    # explicit, non-inheriting full-control ACE for only that SID.
-    assert acl["Sddl"] == f"O:{acl['Current']}D:P(A;;FA;;;{acl['Current']})"
+    # Canonical SDDL asserts current-user ownership and one protected,
+    # non-inheriting full-control ACE for only that SID.
+    assert acl["Sddl"] in acl["ExpectedSddl"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows child ACL inspection")
@@ -263,8 +299,15 @@ def test_native_windows_directory_protection_preserves_unrelated_child_acl(tmp_p
     child.write_bytes(b"synthetic unrelated content")
     before = _native_acl_snapshot(child)
     protection.ensure_private_directory(directory, enforce_existing=True)
+    parent_acl = _native_acl_snapshot(directory, directory=True)
+    assert parent_acl["Sddl"] in parent_acl["ExpectedSddl"]
     assert _native_acl_snapshot(child) == before
     assert child.read_bytes() == b"synthetic unrelated content"
+    new_child = directory / "new-child"
+    new_child.mkdir()
+    new_file = new_child / "new-fixture"
+    new_file.write_bytes(b"synthetic inherited access")
+    assert new_file.read_bytes() == b"synthetic inherited access"
 
 
 @pytest.mark.parametrize("failure", ["foreign_owner", "null_dacl", "verification"])
@@ -303,13 +346,14 @@ def test_windows_acl_control_refuses_unsafe_owner_null_acl_or_unverified_result(
     assert security.kernel.LocalFree.call_count == (1 if failure == "foreign_owner" else 2)
 
 
-def test_windows_directory_protection_uses_exclusive_handle_to_prevent_propagation():
+def test_windows_directory_protection_uses_maximum_allowed_exclusive_handle():
     from codex_antigravity_auth.skills.anti.scripts.anti_lib.windows_file_security import WindowsFileSecurity
     security = WindowsFileSecurity.__new__(WindowsFileSecurity)
     security.kernel = Mock()
     security.kernel.CreateFileW.return_value = 123
     security._protect = Mock()
     security.protect_directory(Path("fixture-directory"))
+    assert security.kernel.CreateFileW.call_args.args[1] == 0x02000000
     assert security.kernel.CreateFileW.call_args.args[2] == 0
     security._protect.assert_called_once_with(123, directory=True)
     security.kernel.CloseHandle.assert_called_once_with(123)
