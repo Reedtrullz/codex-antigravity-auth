@@ -21,6 +21,28 @@ FAMILIES = ("claude", "gemini")
 BAN_STRIKE_LIMIT = 3
 
 
+class UnsupportedAccountStateVersion(ValueError):
+    """The account-state format cannot safely be interpreted by this process."""
+
+
+def account_state_version(data: dict[str, Any]) -> int | None:
+    """Validate the format before touching state; None is unversioned legacy."""
+    state = data.get("accountState") if isinstance(data, dict) else None
+    if not isinstance(state, dict) or "schemaVersion" not in state:
+        return None
+    version = state["schemaVersion"]
+    if type(version) is not int or version != SCHEMA_VERSION:
+        # Invalid scalar values could contain secrets; report only their type.
+        label = str(version) if type(version) is int else f"invalid {type(version).__name__} value"
+        raise UnsupportedAccountStateVersion(
+            f"Unsupported accountState.schemaVersion: {label}. This version of the gateway "
+            f"supports unversioned legacy state and version {SCHEMA_VERSION} only. "
+            "Use a compatible gateway version or restore a matching backup with the "
+            "gateway stopped; do not reset or overwrite the account store."
+        )
+    return version
+
+
 def _number(value: Any) -> float:
     if isinstance(value, bool):
         return 0
@@ -111,6 +133,7 @@ def _strike_entries(value: object, *, emails: set[str]) -> dict[str, int]:
 
 
 def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str, Any], bool]:
+    version = account_state_version(data)
     original = copy.deepcopy(data)
     normalized = copy.deepcopy(data) if isinstance(data, dict) else {}
     accounts = normalized.get("accounts")
@@ -122,7 +145,7 @@ def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str
     }
     raw_state = normalized.get("accountState")
     raw_state = raw_state if isinstance(raw_state, dict) else {}
-    legacy = not isinstance(raw_state.get("schemaVersion"), int)
+    legacy = version is None
 
     failures = {}
     raw_failures = raw_state.get("failures")
@@ -155,6 +178,7 @@ def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str
                 counters[email] = clean
 
     normalized["accountState"] = {
+        **raw_state,
         "schemaVersion": SCHEMA_VERSION,
         "failures": failures,
         "cooldowns": cooldowns,
@@ -162,9 +186,13 @@ def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str
     }
     if strikes:
         normalized["accountState"]["authStrikes"] = strikes
+    else:
+        normalized["accountState"].pop("authStrikes", None)
     disabled = _disabled_entries(raw_state.get("disabled"), emails=emails)
     if disabled:
         normalized["accountState"]["disabled"] = disabled
+    else:
+        normalized["accountState"].pop("disabled", None)
     return normalized, normalized != original
 
 
