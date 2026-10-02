@@ -273,6 +273,8 @@ When multiple Google accounts are registered, the gateway automatically rotates 
 ---
 
 ## 3. High-Fidelity Streaming & Reasoning
+Native Responses content deltas remain streaming, but the final completed/incomplete/failed outcome is committed only after EOF or a detected failure. `[DONE]` does not publish early success: duplicate terminal markers, trailing output, inconsistent supplied identities/sequences, malformed data and interrupted streams produce one failed terminal. Clean EOF after a terminal works without `[DONE]`. Waiting from a candidate terminal to EOF is bounded by the existing OpenAI upstream timeout, including comment-only keepalives. Supplied sequence numbers may have gaps, and compatible providers may omit identity fields or lifecycle events; contradictory supplied values fail. Identity bookkeeping is limited to 10,000 items and 65,536 item-ID characters. Buffered native SSE collection uses the same outcome validation.
+
 Streaming readers decode UTF-8 incrementally, ignore one leading BOM, and recognize LF, CRLF, and CR line endings. Native Responses events are dispatched at a blank line, with multiple `data:` fields joined by a newline. Malformed UTF-8 is replaced consistently; unfinished data at EOF fails instead of becoming a complete event. Chat Completions and Google retain an explicit legacy JSON-line mode for endpoints that omit blank separators, including multiline JSON continuations; a physical data line must still terminate. Readers retain at most 8 Mi decoded characters and 10,000 data lines per pending frame. These bounds do not impose whole-response or gateway admission limits.
 
 The local server natively isolates explicit thinking blocks and stream envelopes, ensuring standard formatting:
