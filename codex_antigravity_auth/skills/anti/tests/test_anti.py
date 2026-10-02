@@ -5121,6 +5121,8 @@ class ScopeIntegrityContractTests(unittest.TestCase):
             artifact = json.loads(
                 Path(anti.load_run_record(anti.RUNS_DIR / "synthesis-failure.json")["resultPath"]).read_text(encoding="utf-8")
             )
+            raw_lane_paths = artifact["artifacts"]["rawLanePaths"]
+            ledger = [json.loads(Path(path).read_text(encoding="utf-8")) for path in raw_lane_paths]
 
         self.assertEqual(rc, 1)
         coverage = artifact["coverage"]
@@ -5132,9 +5134,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertEqual(coverage["chunksFailed"], 0)
         self.assertEqual(coverage["files"][0]["contentStatus"], "complete")
         self.assertEqual(coverage["files"][0]["bytesReviewed"], len(source.encode("utf-8")))
-        raw_lane_paths = artifact["artifacts"]["rawLanePaths"]
         self.assertEqual(len(raw_lane_paths), 3)
-        ledger = [json.loads(Path(path).read_text(encoding="utf-8")) for path in raw_lane_paths]
         self.assertEqual([entry["stage"] for entry in ledger], [
             "review_chunk_1", "review_chunk_2", "review_chunk_3",
         ])
