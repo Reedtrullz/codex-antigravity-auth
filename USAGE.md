@@ -1,5 +1,7 @@
 # Google Antigravity Auth for OpenAI Codex Usage Guide
 
+Start with [current source contracts](STATUS.md) and [verification boundaries](VERIFICATION.md).
+
 This guide describes real-world examples, advanced configurations, and diagnostics routines to run Google Antigravity models inside OpenAI Codex efficiently.
 
 ## 0. Quick Codex Setup
