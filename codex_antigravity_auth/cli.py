@@ -789,13 +789,13 @@ def reset_google_account_state(email: str | None = None, *, all_accounts: bool =
 
 
 def require_safe_gateway_host(host: str, allow_remote: bool) -> None:
-    if is_loopback_host(host):
-        return
-    if not allow_remote:
+    if not is_loopback_host(host) and not allow_remote:
         raise SystemExit(
             "Refusing to bind the unauthenticated gateway to a non-loopback host. "
             "Use --allow-remote with ANTIGRAVITY_GATEWAY_TOKEN set to opt in."
         )
+    if not allow_remote and os.environ.get("ANTIGRAVITY_ALLOW_REMOTE") != "1":
+        return
     try:
         token = validate_gateway_token_strength(os.environ.get("ANTIGRAVITY_GATEWAY_TOKEN"))
     except ValueError as e:
@@ -1401,7 +1401,7 @@ def main():
     setup_parser.add_argument(
         "--allow-remote",
         action="store_true",
-        help="Allow non-loopback gateway clients when starting with a strong ANTIGRAVITY_GATEWAY_TOKEN",
+        help="Require bearer authentication (including loopback) and allow non-loopback clients with a strong ANTIGRAVITY_GATEWAY_TOKEN",
     )
     setup_parser.add_argument("--gateway-timeout", type=float, default=2.0, help="Gateway model-catalog timeout")
     setup_parser.add_argument("--live", action="store_true", help="Run an explicit Google /v1/responses live generation smoke")
@@ -1609,7 +1609,7 @@ def main():
     start_parser.add_argument(
         "--allow-remote",
         action="store_true",
-        help="Allow non-loopback clients when ANTIGRAVITY_GATEWAY_TOKEN is set to at least 32 visible ASCII characters",
+        help="Require bearer authentication for all clients, including loopback; allow non-loopback binds with a strong ANTIGRAVITY_GATEWAY_TOKEN",
     )
     start_parser.add_argument("--background", action="store_true", help="Start the gateway as a background process with pid/log files")
     start_parser.add_argument(
@@ -1770,7 +1770,7 @@ def main():
             if is_unified_model_picker_arg(args):
                 print("[*] Unified model picker enabled: OpenAI + Antigravity + BYOK via one provider.")
             print(f"[*] Starting local Responses API compatible gateway server on {args.host}:{args.port}...")
-            uvicorn.run("codex_antigravity_auth.server:app", host=args.host, port=args.port, log_level="info")
+            uvicorn.run("codex_antigravity_auth.server:app", host=args.host, port=args.port, log_level="info", proxy_headers=False)
     elif args.command == "stop":
         stop_gateway(args)
     elif args.command == "status":

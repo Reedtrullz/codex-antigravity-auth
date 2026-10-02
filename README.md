@@ -425,7 +425,7 @@ codex-antigravity models doctor
 codex-antigravity doctor --codex-ready --live --live-model claude-sonnet-4-6
 ```
 
-The gateway binds to `127.0.0.1` by default. Binding to a non-loopback host requires both `--allow-remote` and an `ANTIGRAVITY_GATEWAY_TOKEN` of at least 32 visible ASCII characters; remote callers must send `Authorization: Bearer <token>`. The built-in server still speaks plain HTTP, so use remote mode only behind a trusted tunnel, local network boundary, or TLS-terminating proxy.
+The gateway binds to `127.0.0.1` by default. Reverse proxies require authenticated mode even with a loopback backend: `--allow-remote` requires a strong `ANTIGRAVITY_GATEWAY_TOKEN` and bearer authentication on every request, including local health checks. Launchers disable forwarded-header interpretation. See [Gateway access and reverse proxies](USAGE.md#gateway-access-and-reverse-proxies) for the access boundary and deployment requirements.
 
 And execute full unit test coverage:
 ```bash
