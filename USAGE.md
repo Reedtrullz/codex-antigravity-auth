@@ -408,3 +408,7 @@ Google, BYOK and native OpenAI requests now share a monotonic 60-second preparat
 Completed tool arguments must encode JSON objects and satisfy the available declared identity and supported schema checks. Invalid calls cannot become executable completion events; usable sibling output is retained with an explicit failed/incomplete result. Google’s internal `_placeholder` is removed only with per-tool injection provenance. See [final-call validation and limits](codex_antigravity_auth/design/tool-calls.md).
 
 Google generated-media parts produce an explicit failure while retaining supported sibling output. The image-generation backend is recognized but excluded from advertised models and rejected before account selection; image input on supported text models remains available. See [Google output support](codex_antigravity_auth/design/google-output.md).
+
+## Resource limits and overload
+
+Generation admission defaults to 32 in-flight requests per process and 16 per backend route. Excess requests receive HTTP503 with Retry-After. Incoming bodies default to32MiB, inline attachments have separate decoded limits, and JSON/schema/SSE/provider accumulation are bounded without accepting clipped requests as complete. Set operator environment overrides for larger contexts or images; increasing the in-flight ceiling above its startup value requires a gateway restart. See [resource limits and admission](codex_antigravity_auth/RESOURCE_LIMITS.md) for units, ranges, failure codes and ownership.

@@ -526,7 +526,7 @@ class ResponseEventBuilder:
             self._text_state = {
                 "id": f"msg_{uuid.uuid4().hex[:12]}",
                 "output_index": self._next_output_index,
-                "text": "",
+                "fragments": [],
                 "finished": False,
             }
             self._next_output_index += 1
@@ -555,7 +555,7 @@ class ResponseEventBuilder:
             )
         if self._text_state["finished"]:
             raise ProtocolStateError("text output has already been finished")
-        self._text_state["text"] += delta
+        self._text_state["fragments"].append(delta)
         events.append(
             self._event(
                 "response.output_text.delta",
@@ -572,7 +572,7 @@ class ResponseEventBuilder:
         if self._text_state is None or self._text_state["finished"]:
             raise ProtocolStateError("text output is not active")
         self._text_state["finished"] = True
-        text = self._text_state["text"]
+        text = "".join(self._text_state.pop("fragments"))
         part = {"type": "output_text", "text": text, "annotations": []}
         item = {
             "type": "message",
@@ -606,7 +606,7 @@ class ResponseEventBuilder:
             self._reasoning_state = {
                 "id": f"rs_{uuid.uuid4().hex[:12]}",
                 "output_index": self._next_output_index,
-                "text": "",
+                "fragments": [],
                 "finished": False,
             }
             self._next_output_index += 1
@@ -623,7 +623,7 @@ class ResponseEventBuilder:
             )
         if self._reasoning_state["finished"]:
             raise ProtocolStateError("reasoning output has already been finished")
-        self._reasoning_state["text"] += delta
+        self._reasoning_state["fragments"].append(delta)
         events.append(
             self._event(
                 "response.reasoning_text.delta",
@@ -639,10 +639,12 @@ class ResponseEventBuilder:
         if self._reasoning_state is None or self._reasoning_state["finished"]:
             raise ProtocolStateError("reasoning output is not active")
         self._reasoning_state["finished"] = True
+        text = "".join(self._reasoning_state.pop("fragments"))
         item = {
             "type": "reasoning",
             "id": self._reasoning_state["id"],
-            "step_by_step_summary": self._reasoning_state["text"],
+            "encrypted_content": "",
+            "step_by_step_summary": text,
         }
         self._completed_items[self._reasoning_state["output_index"]] = dict(item)
         return [
@@ -650,7 +652,7 @@ class ResponseEventBuilder:
                 "response.reasoning_text.done",
                 item_id=self._reasoning_state["id"],
                 output_index=self._reasoning_state["output_index"],
-                text=self._reasoning_state["text"],
+                text=text,
             ),
             self._event(
                 "response.output_item.done",

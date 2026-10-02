@@ -65,6 +65,7 @@ codex_antigravity_auth = [
   "PROCESS_LOGS.md",
   "REQUEST_DEADLINES.md",
   "design/model-discovery.md",
+  "RESOURCE_LIMITS.md",
   "skills/anti/SKILL.md",
   "skills/anti/ARTIFACTS.md",
   "skills/anti/DATA_POLICY.md",
