@@ -279,6 +279,11 @@ def normalize_chat_response_format(value: Any) -> dict[str, Any]:
 def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     """Translate standard Codex Responses API request body to Antigravity format."""
     model = codex_req.get("model", DEFAULT_GEMINI_MODEL_ID)
+    from .models import native_model_capabilities
+    from .input_fidelity import image_source
+    from .response_protocol import validate_capabilities
+    capabilities = native_model_capabilities(model)
+    validate_capabilities(codex_req, capabilities)
     backend_model = resolve_backend_model(model)
     
     # 1. Parse Codex input.
@@ -305,34 +310,10 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
             text = _stream_text(part.get("text"))
             return [{"text": text}] if text is not None else []
         if part_type in ("input_image", "image"):
-            image_url = part.get("image_url") or part.get("url")
-            if isinstance(image_url, dict):
-                image_url = image_url.get("url")
-            if isinstance(image_url, str) and image_url.startswith("data:"):
-                header, _, payload = image_url.partition(",")
-                payload = "".join(payload.split())
-                if payload:
-                    mime_type = header[5:].split(";", 1)[0] or "application/octet-stream"
-                    try:
-                        base64.b64decode(payload, validate=True)
-                        return [{"inlineData": {"mimeType": mime_type, "data": payload}}]
-                    except Exception:
-                        pass
-            if isinstance(image_url, str) and image_url and not image_url.startswith("data:"):
-                return [{"fileData": {"mimeType": part.get("mime_type", "image/*"), "fileUri": image_url}}]
-            if part.get("filename") or part.get("file_id"):
-                # Some Responses clients send image parts with only a file_id
-                # reference (no URL we can fetch). Mirror the input_file
-                # fallback so the part is not silently dropped.
-                return [{"text": json.dumps({k: v for k, v in part.items() if k != "type"})}]
-        if part_type in ("input_file", "file"):
-            file_url = part.get("file_url") or part.get("url")
-            if isinstance(file_url, dict):
-                file_url = file_url.get("url")
-            if isinstance(file_url, str) and file_url:
-                return [{"fileData": {"mimeType": part.get("mime_type", "application/octet-stream"), "fileUri": file_url}}]
-            if part.get("filename") or part.get("file_id"):
-                return [{"text": json.dumps({k: v for k, v in part.items() if k != "type"})}]
+            image_url, mime_type, payload = image_source(part, "input.image")
+            if payload is not None:
+                return [{"inlineData": {"mimeType": mime_type, "data": payload}}]
+            return [{"fileData": {"mimeType": part.get("mime_type", "image/*"), "fileUri": image_url}}]
         if part_type == "tool_use":
             call_id = part.get("id") or part.get("call_id")
             name = part.get("name")
@@ -641,13 +622,19 @@ def transform_gemini_candidate(candidate: dict) -> dict:
         result["reasoning"] = {
             "type": "reasoning",
             "id": f"rs_{uuid.uuid4().hex[:8]}",
-            "encrypted_content": "", # dummy
             "step_by_step_summary": reasoning_text
         }
     return result
 
-def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
+def transform_request_to_chat(codex_req: dict, provider_model: str, *, capabilities=None) -> dict:
     """Translate Responses API input into OpenAI-compatible Chat Completions."""
+    from .input_fidelity import validate_input, image_source
+    validate_input(codex_req, {"text", "image"})
+    if capabilities is not None:
+        from .response_protocol import validate_capabilities
+        validate_capabilities(codex_req, capabilities)
+    elif codex_req.get("reasoning") is not None:
+        raise ValueError("reasoning requires an explicit provider/model mapping")
     messages = []
     system_texts = []
     function_names_by_call_id = {}
@@ -664,18 +651,13 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
             text = _stream_text(part.get("text"))
             return [{"type": "text", "text": text}] if text is not None else []
         if part_type in ("input_image", "image"):
-            image_url = part.get("image_url") or part.get("url")
-            if isinstance(image_url, dict):
-                image_url = image_url.get("url")
-            if isinstance(image_url, str) and image_url:
-                return [{"type": "image_url", "image_url": {"url": image_url}}]
-        if part_type in ("input_file", "file"):
-            file_url = part.get("file_url") or part.get("url")
-            if isinstance(file_url, dict):
-                file_url = file_url.get("url")
-            if isinstance(file_url, str) and file_url:
-                return [{"type": "text", "text": f"[file] {file_url}"}]
-            return [{"type": "text", "text": json.dumps({k: v for k, v in part.items() if k != "type"})}]
+            image_url, _, _ = image_source(part, "input.image")
+            image = {"url": image_url}
+            nested = part.get("image_url")
+            detail = part.get("detail", nested.get("detail") if isinstance(nested, dict) else None)
+            if detail is not None:
+                image["detail"] = detail
+            return [{"type": "image_url", "image_url": image}]
         return []
 
     def tool_output_part_to_chat_message(part: dict) -> dict | None:
@@ -837,6 +819,10 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
     if codex_req.get("stream"):
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
+    if capabilities is not None and capabilities.reasoning_effort_parameter and isinstance(codex_req.get("reasoning"), dict):
+        effort = codex_req["reasoning"].get("effort")
+        if effort is not None:
+            payload["reasoning"] = {"effort": effort}
     if "temperature" in codex_req:
         payload["temperature"] = codex_req["temperature"]
     if "max_output_tokens" in codex_req:

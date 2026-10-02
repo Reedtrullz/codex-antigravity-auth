@@ -32,6 +32,7 @@ PROVIDER_CAPABILITY_FIELDS = frozenset(
         "structured_output",
         "stop_sequences",
         "reasoning",
+        "reasoning_replay",
         "streaming_usage",
     }
 )
@@ -265,7 +266,8 @@ def provider_capabilities(
         "parallel_tool_calls": True,
         "structured_output": True,
         "stop_sequences": True,
-        "reasoning": True,
+        "reasoning": False,
+        "reasoning_replay": False,
         "streaming_usage": True,
     }
     overrides: list[object] = [provider.get("capabilities")]
@@ -281,14 +283,49 @@ def provider_capabilities(
                 break
 
     tool_choice_modes = PROVIDER_TOOL_CHOICE_MODES
+    input_modalities = frozenset({"text"})
+    image_forms = frozenset({"url", "data_url"})
+    reasoning_parameter = None
+    reasoning_levels = ()
+    reasoning_switch = None
     for raw_overrides in overrides:
         if raw_overrides is None:
             continue
         if not isinstance(raw_overrides, dict):
             raise ValueError("provider capabilities must be an object")
-        unknown = set(raw_overrides) - PROVIDER_CAPABILITY_FIELDS - {"tool_choice_modes"}
+        unknown = set(raw_overrides) - PROVIDER_CAPABILITY_FIELDS - {"tool_choice_modes", "input_modalities", "image_forms", "reasoning_effort"}
         if unknown:
             raise ValueError(f"unknown provider capability: {sorted(unknown)[0]}")
+        if "reasoning" in raw_overrides:
+            reasoning_switch = raw_overrides["reasoning"]
+        if "reasoning_effort" in raw_overrides:
+            mapping = raw_overrides["reasoning_effort"]
+            if mapping is None:
+                reasoning_parameter, reasoning_levels = None, ()
+            else:
+                if not isinstance(mapping, dict) or set(mapping) != {"parameter", "levels"}:
+                    raise ValueError("reasoning_effort requires parameter and levels")
+                # Documented OpenRouter chat mapping; never infer support from
+                # provider ID or model name. Other wire contracts need evidence.
+                if mapping["parameter"] != "reasoning.effort":
+                    raise ValueError("unsupported reasoning_effort parameter")
+                levels = mapping["levels"]
+                allowed = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+                if not isinstance(levels, list) or not levels or not all(isinstance(v, str) and v in allowed for v in levels):
+                    raise ValueError("reasoning_effort levels must be a non-empty list of supported efforts")
+                reasoning_parameter = mapping["parameter"]
+                reasoning_levels = tuple(dict.fromkeys(levels))
+        for name, allowed in (("input_modalities", {"text", "image"}), ("image_forms", {"url", "data_url"})):
+            if name in raw_overrides:
+                values = raw_overrides[name]
+                if not isinstance(values, list) or not all(isinstance(v, str) and v in allowed for v in values):
+                    raise ValueError(f"{name} contains an unsupported value")
+                if name == "input_modalities":
+                    if "text" not in values:
+                        raise ValueError("input_modalities must include text")
+                    input_modalities = frozenset(values)
+                else:
+                    image_forms = frozenset(values)
         for field_name in PROVIDER_CAPABILITY_FIELDS:
             if field_name not in raw_overrides:
                 continue
@@ -305,7 +342,8 @@ def provider_capabilities(
                 raise ValueError("tool_choice_modes contains an unsupported mode")
             tool_choice_modes = normalized_modes
 
-    return ProviderCapabilities(**defaults, tool_choice_modes=tool_choice_modes)
+    defaults["reasoning"] = reasoning_parameter is not None and reasoning_switch is not False
+    return ProviderCapabilities(**defaults, tool_choice_modes=tool_choice_modes, input_modalities=input_modalities, image_forms=image_forms, reasoning_effort_parameter=reasoning_parameter, reasoning_effort_levels=reasoning_levels if defaults["reasoning"] else ())
 
 
 def provider_oauth_unsupported_message(provider_id: str) -> str:
