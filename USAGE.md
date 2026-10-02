@@ -400,6 +400,15 @@ contracts. Native Windows tests inspect temporary-file security descriptors thro
 read-only Win32 APIs; non-Windows runs skip that check and exercise synthetic refusal paths.
 No Windows ACL success is inferred from POSIX mode bits or mocked tests.
 
+## Model discovery and recent readiness
+
+`provider discover NAME` reads cached evidence; `--network` explicitly fetches a
+bounded optional catalog. `models explain ID --json` stays offline, while
+`models probe ID --network` records one expiring text-generation check. Imports
+are preview-first and require `--write --accept-digest` to save. See the
+[discovery and readiness contract](codex_antigravity_auth/design/model-discovery.md)
+for supported pagination, limits, cache semantics and configuration diagnostics.
+
 ## Local finding verdicts and report export
 
 ```sh
