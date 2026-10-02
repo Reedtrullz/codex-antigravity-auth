@@ -4993,7 +4993,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                             "--save-output", "full", "--json", "--no-progress",
                         ])
 
-                    artifact = json.loads((anti.RUNS_DIR / run_id / "result.json").read_text(encoding="utf-8"))
+                    artifact = json.loads(Path(anti.load_run_record(anti.RUNS_DIR / f"{run_id}.json")["resultPath"]).read_text(encoding="utf-8"))
                     planned = chunk_stage["planned_calls"]
                     if cap == 1000:
                         self.assertEqual(rc, 1)
@@ -5111,7 +5111,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 os.chdir(old_cwd)
 
             artifact = json.loads(
-                (anti.RUNS_DIR / "synthesis-failure" / "result.json").read_text(encoding="utf-8")
+                Path(anti.load_run_record(anti.RUNS_DIR / "synthesis-failure.json")["resultPath"]).read_text(encoding="utf-8")
             )
 
         self.assertEqual(rc, 1)
@@ -5163,7 +5163,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 os.chdir(old_cwd)
 
             artifact = json.loads(
-                (anti.RUNS_DIR / "incomplete-synthesis" / "result.json").read_text(encoding="utf-8")
+                Path(anti.load_run_record(anti.RUNS_DIR / "incomplete-synthesis.json")["resultPath"]).read_text(encoding="utf-8")
             )
 
         self.assertEqual(rc, 1)
@@ -5376,13 +5376,13 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 },
             )
             assert record_path is not None
-            artifact_path = Path(tmp) / "scope-test" / "result.json"
+            artifact_path = Path(anti.load_run_record(record_path)["resultPath"])
             self.assertTrue(artifact_path.exists())
             record = json.loads(record_path.read_text(encoding="utf-8"))
             artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
 
         self.assertEqual(record["resultPath"], str(artifact_path))
-        self.assertEqual(artifact["schemaVersion"], 1)
+        self.assertEqual(artifact["schemaVersion"], 2)
         self.assertEqual(artifact["runId"], "scope-test")
         self.assertEqual(artifact["runStatus"], "partial")
         self.assertEqual(artifact["scopeStatus"], "partial")
