@@ -37,6 +37,7 @@ from .byok import (
     validate_http_base_url,
     validate_provider_api_key,
     validate_provider_id,
+    validate_supported_provider_kind,
 )
 from .models import (
     DEFAULT_CODEX_MODEL_ID,
@@ -745,6 +746,10 @@ def require_safe_gateway_host(host: str, allow_remote: bool) -> None:
 
 
 def provider_key_status(provider: dict, *, configured_label: str) -> str:
+    try:
+        validate_supported_provider_kind(provider)
+    except ValueError as exc:
+        return redact_secret_text(str(exc))
     if provider_auth_mode(provider) == "oauth":
         return "unsupported oauth"
     try:
