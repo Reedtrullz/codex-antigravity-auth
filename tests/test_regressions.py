@@ -52,6 +52,11 @@ from tests.conftest import _legacy_transform_response as transform_response
 
 
 class TestRegressionFixes(unittest.TestCase):
+    def setUp(self):
+        discovery = patch("codex_antigravity_auth.oauth.discover_project_id", return_value="fixture-project")
+        discovery.start()
+        self.addCleanup(discovery.stop)
+
     def test_current_gemini_flash_catalog_entry_routes_to_tiered_backend(self):
         self.assertEqual(DEFAULT_GEMINI_MODEL_ID, "gemini-3.8-flash")
         entry = next(model for model in native_model_catalog() if model["id"] == "gemini-3.8-flash")

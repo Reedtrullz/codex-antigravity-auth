@@ -35,6 +35,7 @@ dependencies = [
 dev = [
   "pytest>=8.0",
   "pyyaml>=6.0",
+  "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.scripts]
@@ -50,6 +51,7 @@ include = ["codex_antigravity_auth*"]
 
 [tool.setuptools.package-data]
 codex_antigravity_auth = [
+  "skill_assets.json",
   "skills/anti/SKILL.md",
   "skills/anti/agents/*.yaml",
   "skills/anti/scripts/*.py",

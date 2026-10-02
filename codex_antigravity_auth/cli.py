@@ -195,7 +195,17 @@ def bundled_skill_root():
     root = files("codex_antigravity_auth").joinpath("skills", BUNDLED_CODEX_SKILL_NAME)
     if not root.is_dir():
         raise RuntimeError(f"Bundled Codex skill '{BUNDLED_CODEX_SKILL_NAME}' is missing from this install.")
+    missing = [name for name in bundled_skill_asset_names() if not root.joinpath(name).is_file()]
+    if missing:
+        raise RuntimeError(f"Bundled Anti assets missing: {missing}")
     return root
+
+
+def bundled_skill_asset_names() -> tuple[str, ...]:
+    manifest = json.loads(files("codex_antigravity_auth").joinpath("skill_assets.json").read_text(encoding="utf-8"))
+    if manifest.get("version") != 1:
+        raise RuntimeError("Unsupported bundled skill asset manifest version")
+    return tuple(manifest["files"])
 
 
 def _resource_tree_manifest(root, prefix: str = "") -> dict[str, bytes]:
@@ -312,12 +322,7 @@ def _skill_manifest_hash(manifest: dict[str, bytes]) -> str:
 
 
 def verify_codex_skill(skill_path: Path) -> bool:
-    required = [
-        skill_path / "SKILL.md",
-        skill_path / "agents" / "openai.yaml",
-        skill_path / "scripts" / "anti.py",
-        skill_path / "tests" / "test_anti.py",
-    ]
+    required = [skill_path / name for name in bundled_skill_asset_names()]
     missing = [path for path in required if not path.is_file()]
     if missing:
         for path in missing:
