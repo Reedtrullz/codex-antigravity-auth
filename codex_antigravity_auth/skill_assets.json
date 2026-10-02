@@ -2,6 +2,7 @@
   "version": 1,
   "files": [
     "SKILL.md",
+    "ARTIFACTS.md",
     "agents/openai.yaml",
     "scripts/anti.py",
     "scripts/anti_lib/__init__.py",
@@ -19,8 +20,13 @@
     "scripts/anti_lib/retention.py",
     "scripts/anti_lib/persistence.py",
     "scripts/anti_lib/cleanup.py",
+    "scripts/anti_lib/artifacts.py",
+    "scripts/anti_lib/windows_job.py",
     "scripts/anti_lib/runner.py",
     "scripts/anti_lib/verifier.py",
+    "schemas/raw-lane-v1.json",
+    "schemas/run-index-v1.json",
+    "schemas/saved-result-v2.json",
     "tests/fixtures/v5-lane-opus.json",
     "tests/fixtures/v5-lane-sonnet.json",
     "tests/test_anti.py"

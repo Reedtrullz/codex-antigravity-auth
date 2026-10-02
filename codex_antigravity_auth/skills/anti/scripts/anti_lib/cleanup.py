@@ -50,6 +50,13 @@ def _candidate(root: Path, run_id: str, cutoff: float) -> dict[str, Any]:
         value = json.loads(raw)
         if not isinstance(value, dict) or value.get("id") != run_id:
             return {**row, "reason": "unknown_identity"}
+        if "recordSchemaVersion" in value:
+            # Lazy import avoids a module cycle with shared run-id validation.
+            from .artifacts import ArtifactError, validate_record
+            try:
+                validate_record(value, path)
+            except ArtifactError:
+                return {**row, "reason": "invalid_publication"}
         state = value.get("status")
         if state == "running":
             return {**row, "reason": "running_or_uncertain"}

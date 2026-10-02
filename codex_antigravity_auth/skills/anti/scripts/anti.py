@@ -35,13 +35,17 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from anti_lib.capabilities import CapabilityRegistry
+from anti_lib.artifacts import (
+    ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
+    file_reference, read_record, validate_record, coverage_has_loss,
+)
 from anti_lib.chunking import chunk_manifest
 from anti_lib.cleanup import RUN_ID_RE, assert_not_deleted, clean_runs
 from anti_lib.context import ordered_prompt
 from anti_lib.ledger import execution_entry, prompts_as_text
 from anti_lib.endpoint_policy import open_http_request, validate_endpoint_url
 from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
-from anti_lib.persistence import PersistenceError, atomic_write_json, file_lock
+from anti_lib.persistence import PersistenceError, atomic_write_json, file_lock, fsync_directory
 from anti_lib.retention import lifecycle_metadata, summary_projection, summary_retention, summary_structure
 from anti_lib.runner import presentable_result
 from anti_lib.verifier import verify_findings
@@ -763,7 +767,7 @@ def write_run_record(args: argparse.Namespace, **kwargs: Any) -> Path | None:
         with file_lock(path):
             check_record_retention(record_id, output_mode)
             if path.exists():
-                previous = json.loads(path.read_text(encoding="utf-8"))
+                previous = read_record(path)
                 if previous.get("id") != record_id or previous.get("writerId") != args._anti_writer_id:
                     raise AntiError("run id belongs to another writer or legacy record; choose a new run id")
                 if previous.get("status") not in {"running", "success", "partial", "failed", "error", "interrupted"}:
@@ -842,6 +846,8 @@ def _write_run_record_unlocked(
         if record_path.exists() and record_path.is_symlink():
             raise AntiError(f"refusing to overwrite symlinked run record: {record_path}")
         record["writerId"] = args._anti_writer_id
+        record["recordSchemaVersion"] = RECORD_SCHEMA_VERSION
+        validate_record(record, record_path)
         atomic_write_json(record_path, record)
         args.run_record_written = status != "running"
         return record_path
@@ -914,6 +920,24 @@ def _write_run_record_unlocked(
             record["execution_ledger"] = execution_ledger
 
     if output_mode == "summary":
+        # Keep structured check counts and identities, but omit the potentially
+        # large check descriptors from persisted summaries before clipping.
+        summary_metadata = dict(record.get("metadata") or {})
+        verification_metadata = summary_metadata.get("verification")
+        if isinstance(verification_metadata, dict) and "checks" in verification_metadata:
+            summary_metadata["verification"] = {key: value for key, value in verification_metadata.items() if key != "checks"}
+            summary_metadata["verification"]["checksRetained"] = False
+        findings_metadata = summary_metadata.get("findings")
+        if isinstance(findings_metadata, dict) and isinstance(findings_metadata.get("findings"), list):
+            findings_metadata = dict(findings_metadata)
+            findings_metadata["findings"] = [
+                {key: value for key, value in finding.items() if key != "checks"}
+                if isinstance(finding, dict) else finding
+                for finding in findings_metadata["findings"]
+            ]
+            summary_metadata["findings"] = findings_metadata
+        metadata = summary_metadata
+        record["metadata"] = summary_metadata
         # Preserve fixed lifecycle fields and the metadata consumed by the
         # result artifact before applying the shared content budget. Large
         # panel transcripts must not exhaust that budget ahead of checks and
@@ -943,22 +967,23 @@ def _write_run_record_unlocked(
     if record.get("metadata", {}).get("request_log_correlation_id") is not None:
         record["metadata"]["request_log_correlation_id"] = str(record_id)
     run_record_path = RUNS_DIR / f"{record['id']}.json"
-    artifact_dir = RUNS_DIR / str(record_id)
-    if artifact_dir.exists() and artifact_dir.is_symlink():
-        raise AntiError(f"refusing to write result artifact through symlink: {artifact_dir}")
-    artifact_dir.mkdir(mode=0o700, exist_ok=True)
-    try:
-        os.chmod(artifact_dir, 0o700)
-    except OSError:
-        pass
+    run_dir = RUNS_DIR / str(record_id)
+    revisions_dir = run_dir / "revisions"
+    for directory in (run_dir, revisions_dir):
+        if directory.is_symlink():
+            raise AntiError("refusing to publish artifacts through a symlink")
+        directory.mkdir(mode=0o700, exist_ok=True)
+    revision_id = uuid.uuid4().hex
+    artifact_dir = revisions_dir / revision_id
+    artifact_dir.mkdir(mode=0o700)  # Never overwrite an existing revision.
     artifact_path = artifact_dir / "result.json"
-    if artifact_path.exists() and artifact_path.is_symlink():
-        raise AntiError(f"refusing to overwrite symlinked result artifact: {artifact_path}")
     raw_lane_paths: list[str] = []
     if output_mode == "full" and execution_ledger:
         for index, entry in enumerate(execution_ledger, start=1):
             lane_path = artifact_dir / f"lane-{index:04d}.json"
-            atomic_write_json(lane_path, sanitize_json(entry))
+            lane = sanitize_json(entry)
+            lane.update({"laneSchemaVersion": LANE_SCHEMA_VERSION, "runId": str(record_id), "revisionId": revision_id})
+            atomic_write_json(lane_path, lane)
             raw_lane_paths.append(str(lane_path))
     artifact_scope_status = record.get("scopeStatus") or ("complete" if status == "success" else "partial")
     artifact_metadata = metadata if isinstance(metadata, dict) else {}
@@ -967,7 +992,7 @@ def _write_run_record_unlocked(
     if not isinstance(finding_contract, dict):
         finding_contract = {}
     artifact = {
-        "schemaVersion": RESULT_SCHEMA_VERSION,
+        "schemaVersion": SAVED_RESULT_SCHEMA_VERSION,
         "runId": str(record_id),
         "createdAt": record["created_at"],
         "sourceCommit": artifact_metadata.get("sourceCommit") or artifact_metadata.get("source_commit"),
@@ -1006,25 +1031,27 @@ def _write_run_record_unlocked(
         },
         "resultPath": str(artifact_path),
     }
+    if coverage_has_loss(artifact["coverage"]):
+        artifact["coverage"]["status"] = "partial"
+    if artifact["coverage"]["status"] == "partial" or record.get("omittedFileCount", 0) or record.get("omittedChunkCount", 0):
+        record["scopeStatus"] = artifact["scopeStatus"] = "partial"
     if output_mode == "summary":
         artifact.pop("output_text", None)
         artifact["output_preview"] = redact_sensitive_text(output_text or "")[:RUN_OUTPUT_PREVIEW_CHARS]
         artifact["output_chars"] = output_chars
-        # Fixed-size structural fields survive exhaustion of the content budget.
         structure = summary_structure(artifact, (
             "schemaVersion", "runId", "createdAt", "mode", "runStatus", "scopeStatus", "panelStatus", "output_chars",
         ))
-        coverage = artifact["coverage"]
-        coverage_structure = summary_structure(coverage, (
+        coverage_structure = summary_structure(artifact["coverage"], (
             "status", "chunksExpected", "chunksCompleted", "chunksFailed", "chunksOmitted", "chunksNotSent",
         ))
         verification = artifact.get("verification")
         verification = verification if isinstance(verification, dict) else {"status": "unknown"}
         verification_structure = summary_structure(verification, ("status", "performedBy", "evidenceCount"))
         pointers = artifact["artifacts"]
-        # Give verification and the primary answer first access to content space.
         ordered_artifact = {key: artifact[key] for key in ("verification", "output_preview")}
-        ordered_artifact.update({key: value for key, value in artifact.items() if key not in structure and key not in {"artifacts", "resultPath"}})
+        ordered_artifact.update({key: value for key, value in artifact.items()
+                                 if key not in structure and key not in {"artifacts", "resultPath"}})
         artifact = summary_projection(ordered_artifact)
         artifact.update(structure)
         artifact["runId"] = str(record_id)
@@ -1033,12 +1060,31 @@ def _write_run_record_unlocked(
         artifact["artifacts"] = pointers
         artifact["resultPath"] = str(artifact_path)
         artifact["retention"] = summary_retention()
+    if output_mode == "full":
+        artifact["retention"] = record["retention"] = {"mode": "full", "contentComplete": True}
     artifact = sanitize_json(artifact)
     artifact["writerId"] = args._anti_writer_id
+    artifact["runId"] = str(record_id)
+    artifact["revisionId"] = revision_id
+    artifact.setdefault("lanes", [])
+    # Preview clipping must not redact trusted publication identity/path aliases.
+    artifact["artifacts"] = {"runRecordPath": str(run_record_path), "resultPath": str(artifact_path), "rawLanePaths": raw_lane_paths}
+    artifact["resultPath"] = str(artifact_path)
     atomic_write_json(artifact_path, artifact)
     record["resultPath"] = str(artifact_path)
     record["writerId"] = args._anti_writer_id
+    record["recordSchemaVersion"] = RECORD_SCHEMA_VERSION
+    record["publication"] = {
+        "revision": revision_id,
+        "result": file_reference(RUNS_DIR, artifact_path),
+        "lanes": [file_reference(RUNS_DIR, Path(path)) for path in raw_lane_paths],
+    }
     path = run_record_path
+    validate_record(record, path)
+    fsync_directory(revisions_dir)
+    fsync_directory(run_dir)
+    # This is the publication commit. Earlier immutable files alone grant no
+    # terminal authority; an interrupted replacement leaves the old index valid.
     atomic_write_json(path, record)
     args.run_record_written = status != "running"
     progress(args, f"saved sanitized run record: {path}")
@@ -6942,17 +6988,24 @@ def command_panel(args: argparse.Namespace) -> int:
         workspace = Path((review_context or {}).get("workspace_root") or Path.cwd())
         raw_findings = findings.get("findings", [])
         if isinstance(raw_findings, list):
-            verified = verify_findings(raw_findings, workspace)
+            verified = verify_findings(raw_findings, workspace, profiles=getattr(args, "check_profile", []))
             findings["findings"] = verified
-            verified_count = sum(1 for f in verified if f.get("evidence", "unverified") != "unverified")
+            checks = {check["checkId"]: check for finding in verified for check in finding.get("checks", [])}
+            counts = {state: sum(check["status"] == state for check in checks.values())
+                      for state in ("passed", "failed", "skipped", "error")}
             metadata["verification"] = {
-                "status": "completed_no_evidence" if not verified_count else "tool_checks",
+                "status": "tool_checks" if counts["passed"] + counts["failed"] else "completed_no_evidence",
                 "performedBy": "anti",
                 "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
-                "evidenceCount": verified_count,
+                "evidenceCount": counts["passed"] + counts["failed"],
+                "checkCounts": counts,
+                "checks": list(checks.values()),
+                "claimVerdict": "unverified",
             }
-            if verified_count:
-                caveats.append(f"Verification: {verified_count}/{len(verified)} findings received tool-backed evidence")
+            caveats.append(
+                f"File checks: {counts['passed']} passed, {counts['failed']} failed, "
+                f"{counts['skipped']} skipped, {counts['error']} errors; finding claims remain unverified."
+            )
     if metadata.get("findings_status") == "parsed" and isinstance(findings, dict):
         display_text = render_panel_findings(findings, [])
 
@@ -8138,6 +8191,8 @@ def _panel_argv(
         argv.append("--no-anonymize")
     if getattr(args, "no_verify", False):
         argv.append("--no-verify")
+    for profile in getattr(args, "check_profile", []) or []:
+        argv.extend(["--check-profile", profile])
     return argv
 
 
@@ -8417,13 +8472,7 @@ def iter_run_records() -> list[Path]:
 
 
 def load_run_record(path: Path) -> dict[str, Any]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise AntiError(f"could not read run record {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise AntiError(f"run record {path} is not a JSON object")
-    return data
+    return read_record(path)
 
 
 def resolve_run_record_path(run_id: str) -> Path:
@@ -8441,14 +8490,18 @@ def resolve_run_record_path(run_id: str) -> Path:
         if len(matches) == 1:
             path = matches[0]
     if not path.exists():
+        if (RUNS_DIR / run_id).exists():
+            raise ArtifactError("incomplete_publication", "Run artifacts exist without a committed index")
         raise AntiError(f"run record not found: {run_id}")
+    if path.is_symlink():
+        raise ArtifactError("invalid_reference", "Run index is a symlink")
 
     resolved = path.resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:
         raise AntiError(f"run record path escaped Anti run directory: {run_id}") from exc
-    return resolved
+    return path
 
 
 def command_runs(args: argparse.Namespace) -> int:
@@ -8474,13 +8527,14 @@ def command_runs(args: argparse.Namespace) -> int:
                 continue
             try:
                 data = load_run_record(path)
-            except AntiError:
+            except (AntiError, ArtifactError) as exc:
                 rows.append(
                     {
                         "id": path.stem,
                         "created_at": None,
                         "mode": None,
                         "status": "corrupt",
+                        "publicationStatus": getattr(exc, "code", "invalid_artifact"),
                         "workflow": None,
                         "models": [],
                         "run_label": None,
@@ -8495,6 +8549,7 @@ def command_runs(args: argparse.Namespace) -> int:
                     "created_at": data.get("created_at"),
                     "mode": data.get("mode"),
                     "status": data.get("status"),
+                    "publicationStatus": data.get("publicationStatus"),
                     "workflow": data.get("workflow"),
                     "models": data.get("models", []),
                     "run_label": data.get("run_label"),
@@ -8708,7 +8763,9 @@ def build_parser() -> argparse.ArgumentParser:
     panel.add_argument("--print-prompt", action="store_true", help="Print assembled source prompt without contacting gateway")
     panel.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
     panel.add_argument("--no-anonymize", action="store_true", help="Do not anonymize lane labels before judge synthesis")
-    panel.add_argument("--no-verify", action="store_true", help="Skip evidence-linked verification of findings")
+    panel_checks = panel.add_mutually_exclusive_group()
+    panel_checks.add_argument("--no-verify", action="store_true", help="Skip all finding file checks")
+    panel_checks.add_argument("--check-profile", choices=["eslint"], action="append", default=[], help="Opt into an installed trusted checker and project config (no fixes or installs)")
     panel.add_argument("prompt_parts", nargs="*", help="Positional ask/planning prompt text")
     panel.set_defaults(func=command_panel)
 
@@ -8830,7 +8887,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workflow.add_argument("--panel-mode", choices=["review", "plan", "ask"], default="review", help="Panel mode for collaboration workflows")
     workflow.add_argument("--no-anonymize", action="store_true", help="Do not anonymize lane labels before judge synthesis")
-    workflow.add_argument("--no-verify", action="store_true", help="Skip evidence-linked verification of findings")
+    workflow_checks = workflow.add_mutually_exclusive_group()
+    workflow_checks.add_argument("--no-verify", action="store_true", help="Skip all finding file checks")
+    workflow_checks.add_argument("--check-profile", choices=["eslint"], action="append", default=[], help="Opt into an installed trusted checker and project config (no fixes or installs)")
     workflow.add_argument("--model", action="append", help="Model alias/id for the workflow; repeatable for panels")
     workflow.add_argument(
         "--model-free",
