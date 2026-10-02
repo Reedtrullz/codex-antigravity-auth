@@ -57,12 +57,14 @@ include = ["codex_antigravity_auth*"]
 [tool.setuptools.package-data]
 codex_antigravity_auth = [
   "skill_assets.json",
+  "NATIVE_RESPONSES.md",
   "design/request-shapes.md",
   "design/capabilities.md",
   "PROCESS_LOGS.md",
   "design/model-discovery.md",
   "skills/anti/SKILL.md",
   "skills/anti/ARTIFACTS.md",
+  "skills/anti/DATA_POLICY.md",
   "skills/anti/schemas/*.json",
   "skills/anti/agents/*.yaml",
   "skills/anti/scripts/*.py",

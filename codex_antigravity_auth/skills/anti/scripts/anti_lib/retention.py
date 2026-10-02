@@ -5,6 +5,7 @@ import math
 from itertools import islice
 from typing import Any
 
+from .data_policy import audit_projection
 from .redaction import REDACTION_MARKER, key_looks_secret, redact_sensitive_text
 
 SUMMARY_STRING_CHARS = 1600
@@ -101,6 +102,9 @@ def lifecycle_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     """Allow only known numeric counters and fixed enums in never mode."""
     source = metadata if isinstance(metadata, dict) else {}
     result = {}
+    policy = audit_projection(source.get("dataPolicy"))
+    if policy is not None:
+        result["dataPolicy"] = policy
     for key in ("prompt_chars", "output_chars", "omitted_file_count", "omitted_chunk_count", "finding_count", "attempt_count"):
         value = source.get(key)
         if type(value) is int and 0 <= value <= 2**63 - 1:

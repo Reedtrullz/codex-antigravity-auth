@@ -157,14 +157,16 @@ class TestOpenAIResponseTranslation(unittest.TestCase):
             )
 
     def test_native_responses_rejects_structurally_empty_output_items(self):
-        for output in ([{}], [{"type": "message", "content": []}], [{"type": "function_call"}]):
+        for output, code in (([{}], "unsupported_native_output_item"),
+                             ([{"type": "message", "content": []}], "invalid_native_output"),
+                             ([{"type": "function_call"}], "invalid_native_output")):
             with self.subTest(output=output):
                 response = self.transport.validate_native_response(
                     {"object": "response", "status": "completed", "output": output},
                     display_model="custom:model",
                 )
                 self.assertEqual(response["status"], "failed")
-                self.assertEqual(response["error"]["code"], "empty_response")
+                self.assertEqual(response["error"]["code"], code)
 
 
 class TestChatResponseAccumulator(unittest.TestCase):

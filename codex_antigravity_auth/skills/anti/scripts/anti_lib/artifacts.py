@@ -11,6 +11,7 @@ from typing import Any
 from .cleanup import RUN_ID_RE
 from .persistence import PersistenceError
 from .retention import lifecycle_metadata
+from .data_policy import audit_projection
 
 RECORD_SCHEMA_VERSION = 1
 SAVED_RESULT_SCHEMA_VERSION = 2
@@ -223,6 +224,8 @@ def validate_record(record: dict[str, Any], path: Path) -> dict[str, Any]:
     _require(isinstance(owner, str) and bool(re.fullmatch(r"[0-9a-f]{32}", owner)), "Invalid writer identity")
     mode = record.get("save_output")
     _require(mode in ("never", "summary", "full"), "Invalid retention mode")
+    if isinstance(record.get("metadata"), dict) and "dataPolicy" in record["metadata"]:
+        _require(audit_projection(record["metadata"]["dataPolicy"]) is not None, "Invalid content-free policy audit")
     if mode == "never":
         _require(set(record) <= NEVER_FIELDS, "Never-mode index contains non-lifecycle fields")
         for key in ("command", "mode"):
