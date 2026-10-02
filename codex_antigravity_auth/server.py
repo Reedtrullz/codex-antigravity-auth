@@ -1507,7 +1507,6 @@ async def _create_response(request: Request, budget: RequestBudget):
             budget.deadline = min(budget.deadline, budget.started + budget.stream_total)
         budget.check_deadline()
 
-        reject_unsupported_previous_response(codex_req)
         model = await budget.sync(response_model_id, codex_req)
         codex_req["model"] = model
     except HTTPException as exc:
