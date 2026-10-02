@@ -1,6 +1,7 @@
 {
   "version": 1,
   "files": [
+    "RUN_CONTROL.md",
     "SKILL.md",
     "ARTIFACTS.md",
     "DATA_POLICY.md",
@@ -26,6 +27,7 @@
     "scripts/anti_lib/artifacts.py",
     "scripts/anti_lib/data_policy.py",
     "scripts/anti_lib/windows_job.py",
+    "scripts/anti_lib/run_control.py",
     "scripts/anti_lib/runner.py",
     "scripts/anti_lib/verifier.py",
     "schemas/raw-lane-v1.json",
