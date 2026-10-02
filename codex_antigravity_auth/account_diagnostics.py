@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -13,6 +12,7 @@ from . import constants, storage
 from .account_state import AccountState, UnsupportedAccountStateVersion
 from .accounts import AccountManager
 from .models import canonical_model_id
+from .namespaces import gateway_file
 from .unified import classify_route
 
 
@@ -103,7 +103,7 @@ def _display_path(path: Path, default_name: str) -> str:
 def account_eligibility_report(model: str) -> dict[str, Any]:
     namespace = {
         "account_store": _display_path(storage.accounts_json_path_read_only(), "antigravity-accounts.json"),
-        "oauth_client_file": _display_path(Path(os.path.expanduser(constants.CREDENTIALS_FILE)), "antigravity-credentials.json"),
+        "oauth_client_file": _display_path(gateway_file(constants.CREDENTIALS_FILE, "antigravity-credentials.json"), "antigravity-credentials.json"),
         "oauth_client_environment": ["ANTIGRAVITY_CLIENT_ID", "ANTIGRAVITY_CLIENT_SECRET"],
         "keyring_service": storage.KEYRING_SERVICE_NAME,
         "keyring_key": storage.KEYRING_KEY_NAME,
