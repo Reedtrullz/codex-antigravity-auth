@@ -311,12 +311,13 @@ def test_native_windows_directory_protection_preserves_unrelated_child_acl(tmp_p
 
 
 @pytest.mark.parametrize("failure", ["foreign_owner", "null_dacl", "verification"])
-def test_windows_acl_control_refuses_unsafe_owner_null_acl_or_unverified_result(monkeypatch, failure):
+@pytest.mark.parametrize("directory", [False, True])
+def test_windows_acl_control_refuses_unsafe_owner_null_acl_or_unverified_result(monkeypatch, failure, directory):
     import ctypes
     from ctypes import wintypes as w
     from codex_antigravity_auth.skills.anti.scripts.anti_lib.windows_file_security import WindowsFileSecurity
     security = WindowsFileSecurity.__new__(WindowsFileSecurity)
-    security.kernel, security.advapi = Mock(), Mock()
+    security.kernel, security.advapi, security.ntdll = Mock(), Mock(), Mock()
     security.user_sid, security.default_owner_sid = "fixture-user", "fixture-owner-group"
     security._check_object = Mock()
     security._descriptor = Mock(return_value=(ctypes.c_void_p(1), ctypes.c_void_p(2), ctypes.c_void_p(3)))
@@ -335,26 +336,29 @@ def test_windows_acl_control_refuses_unsafe_owner_null_acl_or_unverified_result(
     security.advapi.GetSecurityDescriptorDacl.side_effect = dacl
     security.advapi.GetSecurityDescriptorOwner.side_effect = owner
     security.advapi.SetSecurityInfo.return_value = 0
+    security.ntdll.NtSetSecurityObject.return_value = 0
     security.verify = Mock(side_effect=OSError("synthetic verification refusal"))
     with pytest.raises(OSError):
-        security._protect(123)
+        security._protect(123, directory=directory)
     if failure in {"foreign_owner", "null_dacl"}:
         security.advapi.SetSecurityInfo.assert_not_called()
+        security.ntdll.NtSetSecurityObject.assert_not_called()
     else:
-        security.advapi.SetSecurityInfo.assert_called_once()
-        security.verify.assert_called_once_with(123, directory=False)
+        setter = security.ntdll.NtSetSecurityObject if directory else security.advapi.SetSecurityInfo
+        setter.assert_called_once()
+        security.verify.assert_called_once_with(123, directory=directory)
     assert security.kernel.LocalFree.call_count == (1 if failure == "foreign_owner" else 2)
 
 
-def test_windows_directory_protection_uses_maximum_allowed_exclusive_handle():
+def test_windows_directory_protection_uses_pinned_acl_handle():
     from codex_antigravity_auth.skills.anti.scripts.anti_lib.windows_file_security import WindowsFileSecurity
     security = WindowsFileSecurity.__new__(WindowsFileSecurity)
     security.kernel = Mock()
     security.kernel.CreateFileW.return_value = 123
     security._protect = Mock()
     security.protect_directory(Path("fixture-directory"))
-    assert security.kernel.CreateFileW.call_args.args[1] == 0x02000000
-    assert security.kernel.CreateFileW.call_args.args[2] == 0
+    assert security.kernel.CreateFileW.call_args.args[1] == 0x000E0080
+    assert security.kernel.CreateFileW.call_args.args[2] == 0x3
     security._protect.assert_called_once_with(123, directory=True)
     security.kernel.CloseHandle.assert_called_once_with(123)
 

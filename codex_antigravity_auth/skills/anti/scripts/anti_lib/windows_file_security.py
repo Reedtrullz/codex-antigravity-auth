@@ -14,6 +14,7 @@ class WindowsFileSecurity:
     def __init__(self):
         self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         self.advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        self.ntdll = ctypes.WinDLL("ntdll")
         pointer = ctypes.c_void_p
         pp = ctypes.POINTER(pointer)
         self._bind(self.kernel, "GetCurrentProcess", [], w.HANDLE)
@@ -29,6 +30,8 @@ class WindowsFileSecurity:
         self._bind(self.advapi, "ConvertSidToStringSidW", [pointer, ctypes.POINTER(w.LPWSTR)], w.BOOL)
         self._bind(self.advapi, "GetSecurityInfo", [w.HANDLE, w.DWORD, w.DWORD, pp, pp, pp, pp, pp], w.DWORD)
         self._bind(self.advapi, "SetSecurityInfo", [w.HANDLE, w.DWORD, w.DWORD, pointer, pointer, pointer, pointer], w.DWORD)
+        self._bind(self.ntdll, "NtSetSecurityObject", [w.HANDLE, w.DWORD, pointer], w.LONG)
+        self._bind(self.ntdll, "RtlNtStatusToDosError", [w.LONG], w.ULONG)
         self._bind(self.advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorW", [w.LPCWSTR, w.DWORD, pp, ctypes.POINTER(w.DWORD)], w.BOOL)
         self._bind(self.advapi, "GetSecurityDescriptorDacl", [pointer, ctypes.POINTER(w.BOOL), pp, ctypes.POINTER(w.BOOL)], w.BOOL)
         self._bind(self.advapi, "GetSecurityDescriptorOwner", [pointer, pp, ctypes.POINTER(w.BOOL)], w.BOOL)
@@ -138,8 +141,8 @@ class WindowsFileSecurity:
             self.kernel.LocalFree(old_descriptor)
         descriptor = ctypes.c_void_p()
         # Directories grant the owner access inherited by newly created children.
-        # MAXIMUM_ALLOWED on protect_directory's handle prevents SetSecurityInfo
-        # from rewriting existing children; each existing object is protected on use.
+        # The directory setter updates this handle without Advapi's automatic
+        # child-inheritance conversion; each existing object is protected on use.
         flags = "OICI" if directory else ""
         sddl = f"O:{self.user_sid}D:P(A;{flags};FA;;;{self.user_sid})"
         self._ok(self.advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None))
@@ -153,9 +156,14 @@ class WindowsFileSecurity:
             self._ok(self.advapi.GetSecurityDescriptorOwner(descriptor, ctypes.byref(new_owner), ctypes.byref(defaulted)))
             if not new_owner or self._sid_text(new_owner) != self.user_sid:
                 raise OSError("Cannot establish the current user as storage owner")
-            code = self.advapi.SetSecurityInfo(handle, 1, 0x80000005, new_owner, None, dacl, None)
-            if code:
-                raise ctypes.WinError(code)
+            if directory:
+                status = self.ntdll.NtSetSecurityObject(handle, 0x80000005, descriptor)
+                if status:
+                    raise ctypes.WinError(self.ntdll.RtlNtStatusToDosError(status))
+            else:
+                code = self.advapi.SetSecurityInfo(handle, 1, 0x80000005, new_owner, None, dacl, None)
+                if code:
+                    raise ctypes.WinError(code)
         finally:
             self.kernel.LocalFree(descriptor)
         self.verify(handle, directory=directory)
@@ -197,12 +205,13 @@ class WindowsFileSecurity:
             self.kernel.CloseHandle(handle)
 
     def protect_directory(self, path):
-        # MAXIMUM_ALLOWED prevents SetSecurityInfo from propagating ACE changes
-        # to existing children. Exclusive sharing remains an additional guard.
+        # Set the descriptor directly on this handle to avoid SetSecurityInfo's
+        # automatic child-inheritance conversion. Deny delete sharing while
+        # allowing the current-directory and ordinary read/write handles.
         deadline = time.monotonic() + 2.0
         while True:
             try:
-                handle = self._handle(self.kernel.CreateFileW(str(path), 0x02000000, 0, None, 3, 0x02200000, None))
+                handle = self._handle(self.kernel.CreateFileW(str(path), 0x000E0080, 0x3, None, 3, 0x02200000, None))
                 break
             except OSError as exc:
                 if getattr(exc, "winerror", None) != 32 or time.monotonic() >= deadline:
