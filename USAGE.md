@@ -134,6 +134,8 @@ python3 ~/.codex/skills/anti/scripts/anti.py runs list
 
 Workflow presets save sanitized summaries under `~/.codex/anti-runs` by default. Primitive commands default to `--save-output never`: only a content-free lifecycle/correlation record is retained, with no findings or reflection history. Opt into `summary` for bounded previews across all saved payloads, or redacted `full` for detailed results and lane files. Summary artifacts are explicitly marked `retention.contentComplete=false`; they are not complete saved answers. See the bundled [recording policy](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks) for bounds. Saved runs include a run id; Anti sends it to the gateway as `metadata.run_id`, and the sanitized request JSONL log records it for correlation without forwarding it to Google or BYOK providers. With `--chunked auto`, Opus/Sonnet plan and review calls use a conservative Claude safety budget and split broad context into bounded chunk calls before synthesis; use `--chunked off` only when you intentionally want one large request, including when `--max-prompt-chars 0` would otherwise mean unlimited. Use `--fallback-model sonnet --fallback-policy on-retryable` for long Opus calls that should degrade after retryable backend failures, and `--progress` to print model/chunk progress to stderr.
 
+Each run ID has one writer; use a new ID for a new invocation or when a previous record's ownership is unknown. Corrupt or unreadable reflection files are preserved, with backup/recovery guidance instead of silently replacing history. See the bundled [persistence contract](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks).
+
 For the older Google-only OAuth setup, use:
 
 ```bash

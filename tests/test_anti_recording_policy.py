@@ -58,7 +58,7 @@ def test_never_records_only_allowlisted_lifecycle(isolated_anti, status):
     assert reflections.record_review(repo_path=root, findings=[{"claim": LONG}], models=[LONG],
                                      panel_status=LONG, mode=LONG, save_output="never") is None
     files = all_files(root)
-    assert list(files) == [path]
+    assert [p for p in files if p.suffix == ".json"] == [path]
     assert SENTINEL not in files[path]
     record = json.loads(files[path])
     assert record["status"] == status
@@ -167,7 +167,7 @@ def test_panel_command_propagates_mode_to_every_store(isolated_anti, monkeypatch
     assert SENTINEL in capsys.readouterr().out  # Content remains visible even in never mode.
     files = all_files(root)
     if retention == "never":
-        assert len(files) == 1
+        assert len([p for p in files if p.suffix == ".json"]) == 1
         assert all(SENTINEL not in text for text in files.values())
         assert not reflections.REFLECTIONS_DIR.exists()
     elif retention == "summary":
