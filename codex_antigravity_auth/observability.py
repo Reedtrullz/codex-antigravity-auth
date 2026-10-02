@@ -101,8 +101,8 @@ def _log_lock(path: Path, *, existing_only: bool = False):
         yield True
 
 
-def request_log_info() -> dict[str, Any]:
-    path = request_log_path()
+def request_log_info(*, home: Path | None = None) -> dict[str, Any]:
+    path = request_log_path() if home is None else home / REQUEST_LOG_FILE
     maximum, backups, warnings = _retention_settings()
     segments = []
     try:

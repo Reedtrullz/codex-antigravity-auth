@@ -236,7 +236,7 @@ codex-antigravity start
 codex-antigravity start --background
 ```
 
-Background mode writes pid/log files under `~/.codex/`. The log file is append-only and created with private permissions; remove or rotate it manually if it grows too large.
+Gateway process logs are sanitized and bounded: `~/.codex/antigravity-process-logs/gateway-<port>.log` retains at most 2 MiB plus two 2 MiB backups per port. Foreground, background and newly installed services use this same writer. Existing append-only logs are preserved; reinstall services to adopt the new policy. `status --json` distinguishes process logs from structured request logs. See [process-log privacy and retention](codex_antigravity_auth/PROCESS_LOGS.md).
 
 Request diagnostics are written to a sanitized capped JSONL file under `~/.codex/antigravity-requests.jsonl`. The log records request ids, model/route metadata, latency, status, retry/rotation hints, HTTP status, usage totals when available, and redacted error classes/messages. It never stores prompts, request bodies, OAuth material, provider keys, or account emails.
 

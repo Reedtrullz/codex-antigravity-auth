@@ -335,3 +335,13 @@ starts a separate history. Log in through Codex with the selected `CODEX_HOME`
 when a new client identity is needed. Finally set `ANTIGRAVITY_STATE_HOME` to the
 new root and reinstall any service to capture the selection. Neither the copy
 command nor diagnostics changes the current environment or service automatically.
+### Gateway process-log privacy and retention
+
+`start`, `start --background` and newly installed services write bounded,
+sanitized process logs separately from structured request telemetry. Per port,
+retain at most 2 MiB active plus two 2 MiB backups. `status --json` and
+`service status --json` report both log kinds without including their contents.
+Legacy gateway/service log files are left untouched; reinstall an existing
+service to stop its old append-only output routing. Account references in runtime
+messages are opaque and change on restart; explicit account-management commands
+still show local account identity. See [the process-log contract](codex_antigravity_auth/PROCESS_LOGS.md).

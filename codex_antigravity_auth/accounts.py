@@ -9,6 +9,7 @@ from typing import Any, Callable
 from .account_state import AccountState, scoped_cooldown_expiry
 from .oauth import OAuthRefreshError, refresh_access_token, token_expires_in_seconds
 from .redaction import redact_secret_text
+from .process_logs import account_ref
 from .response_protocol import AttemptOutcome
 from .storage import (
     accounts_json_path_read_only,
@@ -202,8 +203,10 @@ class AccountManager:
                     try:
                         from .oauth import discover_project_id
                         discovered_project = discover_project_id(token)
-                    except Exception:
-                        _log.warning("Project discovery failed during token refresh")
+                        if discovered_project:
+                            _log.info("Discovered project for %s", account_ref(email))
+                    except Exception as exc:
+                        _log.warning("Project discovery failed for %s: %s", account_ref(email), type(exc).__name__)
             except Exception as exc:
                 failure_outcome = _refresh_failure_outcome(exc)
 
@@ -368,10 +371,8 @@ class AccountManager:
                 duration = state.apply_cooldown(email, family, outcome)
 
             self._mutate_state(mutation)
-            print(
-                f"[*] Account {email} flagged as cooling down for {duration}s. "
-                f"Reason: {redact_secret_text(reason)}"
-            )
+            _log.warning("Account %s cooling down for %ss (scope=%s category=%s)",
+                         account_ref(email), duration, outcome.scope, outcome.category)
 
     def record_attempt(
         self,
