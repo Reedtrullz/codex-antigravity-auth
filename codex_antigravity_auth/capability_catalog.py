@@ -1,7 +1,7 @@
 """Versioned public route/transport metadata; contains no credentials or probes."""
 from __future__ import annotations
 
-from .models import NATIVE_MODELS, NativeModel, capabilities_for_native_definition, alias_map_for_models
+from .models import NATIVE_MODELS, NativeModel, capabilities_for_native_definition, alias_map_for_models, required_output_bridge
 from .response_protocol import ProviderCapabilities
 
 CATALOG_VERSION = 1
@@ -74,6 +74,10 @@ def native_contract(model: NativeModel, *, source="builtin", aliases=None) -> di
                       family=model.family, aliases=aliases if aliases is not None else (*model.aliases, model.backend_id),
                       capabilities=capabilities, context_window=model.context_window,
                       declaration_source=source)
+    bridge = required_output_bridge(model)
+    result["gateway_generation"] = {"supported":not bool(bridge), "required_output_bridge":bridge}
+    if bridge:
+        result["effective"]["output_types"] = []
     return result
 
 
@@ -82,4 +86,5 @@ def standalone_snapshot() -> dict:
     aliases = alias_map_for_models(NATIVE_MODELS)
     return {"generated_from": "codex_antigravity_auth.models.NATIVE_MODELS; run scripts/generate_capability_snapshot.py",
             "capability_catalog_version": CATALOG_VERSION,
-            "data": [{"id": model.id, "capabilities": native_contract(model, aliases=[name for name, target in aliases.items() if target == model.id])} for model in NATIVE_MODELS]}
+            "data": [{"id": model.id, "capabilities": native_contract(model, aliases=[name for name, target in aliases.items() if target == model.id])}
+                     for model in NATIVE_MODELS if not required_output_bridge(model)]}

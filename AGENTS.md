@@ -32,6 +32,8 @@ contracts and the generated standalone Anti snapshot. See
 [capability semantics](codex_antigravity_auth/design/capabilities.md) and
 [discovery evidence](codex_antigravity_auth/design/model-discovery.md). Catalog
 advertisement, transport support and live generation evidence are distinct.
+Known image-generation backend IDs are recognized, but generation stays disabled
+until the Google adapter has the required output bridge.
 
 ## Critical Pitfalls
 
