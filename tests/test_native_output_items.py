@@ -31,6 +31,11 @@ def items():
     ]
 
 
+def tool_declarations():
+    return [{"type":"namespace", "name":"fixture_tools", "tools":[{"type":"function", "name":"fixture", "parameters":{}}]},
+            {"type":"custom", "name":"fixture_custom"}]
+
+
 def response(output=None, status="completed"):
     return {"id": "resp_fixture", "object": "response", "model": "upstream-fixture", "status": status,
             "output": items() if output is None else output,
@@ -164,7 +169,13 @@ def test_malformed_or_unsupported_items_never_succeed_silently(mutate):
     assert OPAQUE not in json.dumps(direct) and "fixture-secret" not in json.dumps(direct)
     streamed = collect([terminal(response(output))])[-1]
     assert streamed["type"] == "response.failed"
-    assert OPAQUE not in json.dumps(streamed)
+    function_fault = (not isinstance(output[3].get("arguments"), str)
+                      or output[4].get("call_id") == output[3].get("call_id"))
+    if function_fault:
+        assert streamed["response"]["output"][0] == items()[0]
+        assert not any(item["type"] == "function_call" for item in streamed["response"]["output"])
+    else:
+        assert OPAQUE not in json.dumps(streamed)
 
 
 @pytest.mark.parametrize("name,limit", [("MAX_BYTES", 16), ("MAX_NODES", 5), ("MAX_DEPTH", 1), ("MAX_ITEMS", 2)])
@@ -196,10 +207,14 @@ def test_documented_search_actions_round_trip(action):
     {"type": "response.reasoning_text.done", "text": "reasoning fixture"},
     {"type": "response.web_search_call.searching"},
     {"type": "response.custom_tool_call_input.delta", "delta": "custom fixture"},
-    {"type": "response.function_call_arguments.done", "arguments": "{}"},
+    {"type": "response.function_call_arguments.done", "arguments": "{}", "output_index":0, "item_id":"fc_fixture"},
 ])
 def test_supported_structured_event_payloads_are_forwarded(event):
-    assert collect([event])[0] == event
+    if event["type"] == "response.function_call_arguments.done":
+        item = {**items()[3], "arguments":"{}"}
+        assert collect([event, terminal(response([item]))])[0] == event
+    else:
+        assert collect([event])[0] == event
 
 
 def test_unsupported_event_does_not_reach_client():
@@ -242,7 +257,7 @@ def test_actual_buffered_upstream_routes_use_native_validation(monkeypatch, kind
     monkeypatch.setattr(server.httpx, "AsyncClient", lambda **kwargs: Client())
     monkeypatch.setattr(server, "openai_responses_url", lambda auth: "https://example.invalid/responses")
     monkeypatch.setattr(server, "openai_request_headers", lambda auth: {"Authorization": "Bearer fixture-only"})
-    request = {"input": items(), "store": False}
+    request = {"input": items(), "store": False, "tools": tool_declarations()}
     result = asyncio.run(server.create_openai_upstream_response(request, "upstream-fixture", SimpleNamespace(kind=kind), "display-fixture"))
     assert sent[0]["input"] == request["input"]
     assert result["status"] == ("failed" if unsupported else "completed")
@@ -265,7 +280,7 @@ def test_actual_stream_generator_preserves_complete_items_and_closes():
     client, context = Client(), Context()
     async def run():
         return [chunk async for chunk in server.openai_upstream_sse_generator(
-            {}, "fixture", None, "display-fixture", stream_state=(client, context, Response()))]
+            {"tools": tool_declarations()}, "fixture", None, "display-fixture", stream_state=(client, context, Response()))]
     chunks = asyncio.run(run())
     emitted = [json.loads(line[6:]) for chunk in chunks for line in chunk.splitlines()
                if line.startswith("data: ") and line != "data: [DONE]"]

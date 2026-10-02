@@ -15,6 +15,9 @@ from codex_antigravity_auth.response_protocol import (
 
 
 REFUSAL = 'Fixture refusal: "verbatim".\nSecond line.'
+CHAT_REQUEST = {"tools": [{"type": "function", "name": "lookup", "parameters": {
+    "type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"],
+}}]}
 
 
 def semantic_output(output):
@@ -52,7 +55,7 @@ def chat_stream(payloads):
             yield Response()
     transport = OpenAICompatibleTransport(timeout=1, client_factory=Client)
     async def collect():
-        prepared = PreparedOpenAIRequest({}, "https://example.invalid/chat/completions", {}, 1)
+        prepared = PreparedOpenAIRequest(CHAT_REQUEST, "https://example.invalid/chat/completions", {}, 1)
         return [event async for event in transport.stream_chat_events(prepared, response_id="fixture", display_model="fixture")]
     events = asyncio.run(collect())
     terminal = [event for event in events if isinstance(event, dict) and event.get("type") in {"response.completed", "response.incomplete", "response.failed"}]
@@ -79,7 +82,7 @@ def test_chat_stream_and_nonstream_preserve_siblings_and_finish_semantics(reason
     usage = {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
     result = OpenAICompatibleTransport(timeout=1).parse_chat_response({
         "choices": [{"index": 0, "message": message, "finish_reason": reason}], "usage": usage,
-    })
+    }, request=CHAT_REQUEST)
     first = {**message, "refusal": refusal[:10] or None}
     payloads = [{"choices": [{"index": 0, "delta": first}]},
                 {"choices": [{"index": 0, "delta": {"refusal": refusal[10:] or None}, "finish_reason": reason}], "usage": usage}]

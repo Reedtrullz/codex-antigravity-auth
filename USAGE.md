@@ -392,3 +392,8 @@ paths restrict the chosen run. Bounded secret-pattern checks stop a submission
 until resolved or explicitly acknowledged for its exact prompt hash. Policy
 dry runs write nothing and report hashes instead of source. See the bundled
 [policy contract](codex_antigravity_auth/skills/anti/DATA_POLICY.md).
+
+
+## Completed function-call validation
+
+Completed tool arguments must encode JSON objects and satisfy the available declared identity and supported schema checks. Invalid calls cannot become executable completion events; usable sibling output is retained with an explicit failed/incomplete result. Google’s internal `_placeholder` is removed only with per-tool injection provenance. See [final-call validation and limits](codex_antigravity_auth/design/tool-calls.md).
