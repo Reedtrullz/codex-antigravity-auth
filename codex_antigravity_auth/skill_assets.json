@@ -2,6 +2,7 @@
   "version": 1,
   "files": [
     "SKILL.md",
+    "ARTIFACTS.md",
     "agents/openai.yaml",
     "scripts/anti.py",
     "scripts/anti_lib/__init__.py",
@@ -10,6 +11,7 @@
     "scripts/anti_lib/capabilities.py",
     "scripts/anti_lib/chunking.py",
     "scripts/anti_lib/context.py",
+    "scripts/anti_lib/endpoint_policy.py",
     "scripts/anti_lib/ledger.py",
     "scripts/anti_lib/namespaces.py",
     "scripts/anti_lib/redaction.py",
@@ -20,8 +22,12 @@
     "scripts/anti_lib/retention.py",
     "scripts/anti_lib/persistence.py",
     "scripts/anti_lib/cleanup.py",
+    "scripts/anti_lib/artifacts.py",
     "scripts/anti_lib/runner.py",
     "scripts/anti_lib/verifier.py",
+    "schemas/raw-lane-v1.json",
+    "schemas/run-index-v1.json",
+    "schemas/saved-result-v2.json",
     "tests/fixtures/v5-lane-opus.json",
     "tests/fixtures/v5-lane-sonnet.json",
     "tests/test_anti.py"

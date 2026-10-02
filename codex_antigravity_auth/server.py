@@ -9,6 +9,8 @@ import sys
 import time
 import threading
 import httpx
+
+from .endpoint_policy import httpx_client_options
 import anyio
 import email.utils
 import re
@@ -975,7 +977,11 @@ def validate_response_request_body(value: object) -> dict:
         value["metadata"] = normalized_metadata
     validate_response_generation_options(value)
     validate_response_tool_choice(value)
-    validate_response_tool_schemas(value)
+    from .request_shapes import validate_request_shapes
+    try:
+        validate_request_shapes(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         validate_capabilities(value, REQUEST_BOUNDARY_CAPABILITIES)
     except CapabilityError as exc:
@@ -1047,8 +1053,10 @@ def validate_response_tool_choice(codex_req: dict) -> None:
         if tool_choice not in {"auto", "none", "required"}:
             raise HTTPException(status_code=400, detail="tool_choice must be auto, none, required, or a function choice object")
         return
-    if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
+    if not isinstance(tool_choice, dict) or not isinstance(tool_choice.get("type"), str) or not tool_choice["type"]:
         raise HTTPException(status_code=400, detail="tool_choice must be auto, none, required, or a function choice object")
+    if tool_choice["type"] != "function":
+        return  # Provider-native choices are validated on the selected route.
     nested = tool_choice.get("function")
     name = tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
     if not valid_function_name(name):
@@ -1059,40 +1067,12 @@ def validate_response_tool_choice(codex_req: dict) -> None:
 
 
 def validate_response_tool_schemas(codex_req: dict) -> None:
-    """Reject malformed tool schemas before any provider/account work."""
-    tools = codex_req.get("tools")
-    if not isinstance(tools, list):
-        return
-
-    def visit(schema: object, path: str) -> None:
-        if not isinstance(schema, dict):
-            raise HTTPException(status_code=400, detail=f"{path} must be an object")
-        if "$ref" in schema and not isinstance(schema["$ref"], str):
-            raise HTTPException(status_code=400, detail=f"{path}.$ref must be a string")
-        if "properties" in schema:
-            properties = schema["properties"]
-            if not isinstance(properties, dict):
-                raise HTTPException(status_code=400, detail=f"{path}.properties must be an object")
-            for name, child in properties.items():
-                visit(child, f"{path}.properties[{name!r}]")
-        if "items" in schema:
-            visit(schema["items"], f"{path}.items")
-        for key in ("anyOf", "oneOf", "allOf"):
-            if key in schema:
-                options = schema[key]
-                if not isinstance(options, list):
-                    raise HTTPException(status_code=400, detail=f"{path}.{key} must be an array")
-                for index, option in enumerate(options):
-                    visit(option, f"{path}.{key}[{index}]")
-
-    for index, tool in enumerate(tools):
-        if not isinstance(tool, dict) or tool.get("type") != "function":
-            continue
-        function = tool.get("function")
-        if not isinstance(function, dict):
-            function = tool
-        if isinstance(function, dict) and "parameters" in function:
-            visit(function["parameters"], f"tools[{index}].function.parameters")
+    """Compatibility entry point for pure tool definition/schema validation."""
+    from .request_shapes import validate_request_shapes
+    try:
+        validate_request_shapes({"tools": codex_req["tools"]} if "tools" in codex_req else {})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def response_stream_flag(codex_req: dict) -> bool:
@@ -1341,7 +1321,6 @@ async def create_response(request: Request):
             request_run_id = request_metadata["run_id"]
         google_backend_timeout = google_backend_timeout_from_metadata(request_metadata)
 
-        reject_unsupported_previous_response(codex_req)
         model = response_model_id(codex_req)
         codex_req["model"] = model
         stream = response_stream_flag(codex_req)
@@ -1572,10 +1551,15 @@ async def create_response(request: Request):
         )
         return response
     provider_id, provider_model = split_provider_model(model)
+    from .request_shapes import validate_request_shapes
     try:
         validate_provider_model_id(provider_id, provider_model)
+        try:
+            validate_request_shapes(codex_req, route="byok" if provider_id is not None else "google")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     except HTTPException as exc:
-        await log_request("failed", model=model, route="byok", provider=provider_id, stream=stream, http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
+        await log_request("failed", model=model, route="byok" if provider_id is not None else "google", provider=provider_id, stream=stream, http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
         raise
     if provider_id is not None:
         # Normalize self-referential prefixes (openrouter:openrouter/x ->
@@ -2640,7 +2624,7 @@ async def create_response(request: Request):
 
 async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str, *, telemetry: dict | None = None) -> dict:
     payload, url, headers, timeout = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=False)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(**httpx_client_options(url, timeout=timeout)) as client:
         try:
             res = await client.post(url, json=payload, headers=headers)
             if telemetry is not None:
@@ -2677,7 +2661,7 @@ async def create_openai_upstream_response(
         payload = _build_payload(codex_req, upstream_model, stream=True)
         payload["store"] = bool(codex_req.get("store", False))
         try:
-            async with httpx.AsyncClient(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS) as client:
+            async with httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS)) as client:
                 res = await client.post(url, json=payload, headers=headers)
                 if telemetry is not None:
                     telemetry["http_status"] = res.status_code
@@ -2715,7 +2699,7 @@ async def create_openai_upstream_response(
         return terminal
     payload = _build_payload(codex_req, upstream_model, stream=False)
     try:
-        async with httpx.AsyncClient(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS)) as client:
             res = await client.post(url, json=payload, headers=headers)
             if telemetry is not None:
                 telemetry["http_status"] = res.status_code
@@ -2750,30 +2734,15 @@ async def create_openai_upstream_response(
     return data
 
 
-def _collect_openai_sse_terminal(sse_text: str | bytes, display_model: str) -> dict | None:
-    """Extract the terminal Responses object from a buffered SSE body."""
-    from itertools import chain
-    from .sse import SSEDecoder
-
-    decoder = SSEDecoder()
+def _collect_openai_sse_terminal(sse_text: str | bytes, display_model: str) -> dict:
+    """Apply the same terminal authority to buffered and streamed native SSE."""
     wire = sse_text.encode("utf-8") if isinstance(sse_text, str) else sse_text
-    terminal: dict | None = None
-    for data in chain(decoder.feed(wire), decoder.finish()):
-        data = data.strip()
-        if data == "[DONE]":
-            continue
-        try:
-            event = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        if event.get("type") in {"response.completed", "response.incomplete", "response.failed"}:
-            response = event.get("response")
-            if isinstance(response, dict):
-                terminal = dict(response)
-                terminal["model"] = display_model
-    return terminal
+    adapter = NativeResponsesStreamAdapter(display_model=display_model)
+    for offset in range(0, len(wire), 65536):
+        adapter.consume_bytes(wire[offset:offset + 65536])
+        if adapter.protocol_failed:
+            break
+    return adapter.finish()[-1]["response"]
 
 
 async def _close_openai_upstream_stream(client, stream_context) -> None:
@@ -2797,7 +2766,7 @@ async def _open_openai_upstream_stream(
     if auth.kind == "codex_oauth":
         payload["store"] = bool(codex_req.get("store", False))
 
-    client = httpx.AsyncClient(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS)
+    client = httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))
     stream_context = client.stream("POST", url, json=payload, headers=headers)
     try:
         response = await stream_context.__aenter__()
@@ -2883,15 +2852,42 @@ async def openai_upstream_sse_generator(
 
     client, stream_context, response = stream_state
     adapter = NativeResponsesStreamAdapter(display_model=display_model)
+    tail_deadline = None
     try:
-        async for chunk in response.aiter_bytes():
-            for event in adapter.consume_bytes(chunk):
-                yield f"data: {json.dumps(event)}\n\n"
-        for event in adapter.finish():
+        iterator = response.aiter_bytes().__aiter__()
+        try:
+            while True:
+                try:
+                    if tail_deadline is None:
+                        chunk = await anext(iterator)
+                    else:
+                        remaining = tail_deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError
+                        with anyio.fail_after(remaining):
+                            chunk = await anext(iterator)
+                except StopAsyncIteration:
+                    break
+                for event in adapter.consume_bytes(chunk):
+                    yield f"data: {json.dumps(event)}\n\n"
+                if adapter.protocol_failed:
+                    break
+                if adapter.awaiting_eof and tail_deadline is None:
+                    # Bound terminal-to-EOF waiting even if keepalive comments
+                    # repeatedly reset HTTPX's per-read timeout.
+                    tail_deadline = time.monotonic() + OPENAI_UPSTREAM_TIMEOUT_SECONDS
+        except (TimeoutError, httpx.TimeoutException):
+            terminal_events = adapter.abort("stream_timeout", "The provider stream timed out before EOF.")
+        except Exception:
+            terminal_events = adapter.abort("stream_interrupted", "The provider stream was interrupted before EOF.")
+        else:
+            terminal_events = adapter.finish()
+        for event in terminal_events:
             yield f"data: {json.dumps(event)}\n\n"
         yield "data: [DONE]\n\n"
     finally:
-        await _close_openai_upstream_stream(client, stream_context)
+        with anyio.CancelScope(shield=True):
+            await _close_openai_upstream_stream(client, stream_context)
 
 
 async def openai_compatible_sse_generator(

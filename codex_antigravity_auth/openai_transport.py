@@ -11,6 +11,8 @@ import uuid
 
 import httpx
 
+from .endpoint_policy import httpx_client_options
+
 from .byok import (
     provider_capabilities,
     resolve_api_key,
@@ -445,7 +447,7 @@ class OpenAICompatibleTransport:
             yield builder.done_marker()
 
         try:
-            async with self.client_factory(timeout=prepared.timeout) as client:
+            async with self.client_factory(**httpx_client_options(prepared.url, timeout=prepared.timeout)) as client:
                 async with client.stream(
                     "POST",
                     prepared.url,
@@ -646,10 +648,24 @@ class NativeResponsesStreamAdapter:
         self._provider_done = False
         self._visible_output_started = False
         self._response_id = f"resp_{uuid.uuid4().hex[:12]}"
+        self._provider_response_id: str | None = None
+        self._protocol_error = False
+        self._last_sequence: int | None = None
+        self._items: dict[int, str] = {}
+        self._item_indices: dict[str, int] = {}
+        self._identity_chars = 0
 
     @property
     def visible_output_started(self) -> bool:
         return self._visible_output_started
+
+    @property
+    def awaiting_eof(self) -> bool:
+        return self._terminal_event is not None or self._provider_done
+
+    @property
+    def protocol_failed(self) -> bool:
+        return self._protocol_error
 
     def _failure(self, code: str, message: str) -> dict[str, Any]:
         return {
@@ -665,7 +681,77 @@ class NativeResponsesStreamAdapter:
         }
 
     def _set_failure(self, code: str, message: str) -> None:
+        if self._terminal_emitted or self._protocol_error:
+            return
+        self._protocol_error = True
         self._terminal_event = self._failure(code, message)
+
+    def _valid_id(self, value: object) -> bool:
+        if not isinstance(value, str) or not value:
+            self._set_failure("invalid_stream_identity", "The provider returned an invalid stream identifier.")
+            return False
+        if len(value) > 65536:
+            self._set_failure("stream_identity_limit", "The provider exceeded the stream identity limit.")
+            return False
+        return True
+
+    def _bind_item(self, index: object, item_id: object) -> bool:
+        if index is not None and (type(index) is not int or index < 0):
+            self._set_failure("invalid_output_index", "The provider returned an invalid output index.")
+            return False
+        if item_id is None:
+            return True
+        if not self._valid_id(item_id):
+            return False
+        if index is None:
+            return True
+        if (index in self._items and self._items[index] != item_id) or (
+            item_id in self._item_indices and self._item_indices[item_id] != index
+        ):
+            self._set_failure("mismatched_item_id", "The provider contradicted an output item's identity.")
+            return False
+        if index not in self._items:
+            if len(self._items) >= 10000 or self._identity_chars + len(item_id) > 65536:
+                self._set_failure("stream_identity_limit", "The provider exceeded the stream identity limit.")
+                return False
+            self._identity_chars += len(item_id)
+            self._items[index] = item_id
+            self._item_indices[item_id] = index
+        return True
+
+    def _validate_identity(self, event: dict[str, Any]) -> bool:
+        # Compatible providers may omit these fields or lifecycle events. Check
+        # supplied facts for contradictions without inventing missing state.
+        if "sequence_number" in event:
+            sequence = event["sequence_number"]
+            if type(sequence) is not int or sequence < 0 or (
+                self._last_sequence is not None and sequence <= self._last_sequence
+            ):
+                self._set_failure("invalid_stream_sequence", "The provider returned invalid or out-of-order sequence numbers.")
+                return False
+            self._last_sequence = sequence
+        response = event.get("response")
+        response = response if isinstance(response, dict) else {}
+        for response_id in (event.get("response_id"), response.get("id")):
+            if response_id is None:
+                continue
+            if not self._valid_id(response_id):
+                return False
+            if self._provider_response_id is not None and response_id != self._provider_response_id:
+                self._set_failure("mismatched_response_id", "The provider contradicted the response identity.")
+                return False
+            self._provider_response_id = self._response_id = response_id
+        item = event.get("item")
+        item = item if isinstance(item, dict) else {}
+        if not self._bind_item(event.get("output_index"), event.get("item_id")):
+            return False
+        if not self._bind_item(event.get("output_index"), item.get("id")):
+            return False
+        if isinstance(response.get("output"), list):
+            for index, output in enumerate(response["output"]):
+                if isinstance(output, dict) and not self._bind_item(index, output.get("id")):
+                    return False
+        return True
 
     def _release_terminal(self) -> list[dict[str, Any]]:
         if self._terminal_event is None or self._terminal_emitted:
@@ -674,6 +760,8 @@ class NativeResponsesStreamAdapter:
         return [self._terminal_event]
 
     def _consume_payload(self, data: str) -> list[dict[str, Any]]:
+        if self._terminal_emitted or self._protocol_error:
+            return []
         data = data.strip()
         if data == "[DONE]":
             if self._provider_done:
@@ -684,19 +772,24 @@ class NativeResponsesStreamAdapter:
                     "missing_terminal_signal",
                     "The provider stream ended without a terminal response event.",
                 )
-            return self._release_terminal()
+            return []
         if self._provider_done:
             self._set_failure("output_after_done", "The provider emitted output after [DONE].")
-            return self._release_terminal()
+            return []
         try:
             event = json.loads(data)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             self._set_failure("invalid_stream_chunk", "The provider returned malformed stream JSON.")
             return []
         if not isinstance(event, dict) or not isinstance(event.get("type"), str):
             self._set_failure("invalid_stream_event", "The provider returned an invalid stream event.")
             return []
         event_type = event["type"]
+        if not self._validate_identity(event):
+            return []
+        if event_type == "error":
+            self._set_failure("provider_error", "The provider reported a stream error.")
+            return []
         if event_type in self._TERMINAL_TYPES:
             if self._terminal_event is not None:
                 self._set_failure("duplicate_terminal", "The provider emitted more than one terminal event.")
@@ -742,6 +835,8 @@ class NativeResponsesStreamAdapter:
         return [event]
 
     def consume_bytes(self, chunk: bytes) -> list[dict[str, Any]]:
+        if self._terminal_emitted or self._protocol_error:
+            return []
         events: list[dict[str, Any]] = []
         try:
             for data in self._decoder.feed(chunk):
@@ -751,6 +846,8 @@ class NativeResponsesStreamAdapter:
         return events
 
     def finish(self) -> list[dict[str, Any]]:
+        if self._terminal_emitted:
+            return []
         events: list[dict[str, Any]] = []
         try:
             for data in self._decoder.finish():
@@ -764,3 +861,7 @@ class NativeResponsesStreamAdapter:
             )
         events.extend(self._release_terminal())
         return events
+
+    def abort(self, code: str, message: str) -> list[dict[str, Any]]:
+        self._set_failure(code, message)
+        return self.finish()

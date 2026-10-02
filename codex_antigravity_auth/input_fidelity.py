@@ -53,7 +53,7 @@ def image_source(part: dict[str, Any], path: str) -> tuple[str, str | None, str 
     return source, None, None
 
 
-def validate_input(request: dict[str, Any], modalities, image_forms=IMAGE_FORMS, *, image_detail=True):
+def validate_input(request: dict[str, Any], modalities, image_forms=IMAGE_FORMS, *, image_detail=True, native_passthrough=False):
     value = request.get("input")
     if value is None or isinstance(value, str):
         return
@@ -73,6 +73,10 @@ def validate_input(request: dict[str, Any], modalities, image_forms=IMAGE_FORMS,
             if not isinstance(kind, str):
                 raise ValueError(f"{part_path}.type: expected a content type string")
             if kind in {"text", "input_text", "output_text"}:
+                continue
+            if native_passthrough and kind == "refusal":
+                if not isinstance(part.get("refusal"), str):
+                    raise ValueError(f"{part_path}.refusal: expected refusal text")
                 continue
             if kind in {"tool_use", "tool_result", "function_call_output"}:
                 # These have their own tool schema/argument contracts. Attachment
@@ -123,6 +127,11 @@ def validate_input(request: dict[str, Any], modalities, image_forms=IMAGE_FORMS,
                 if any(p.get("type") not in {"text", "input_text", "output_text"} for p in output):
                     raise ValueError(f"{path}.output: only text tool output is supported")
         elif kind in {"function_call", "reasoning"}:
+            continue
+        elif native_passthrough and kind not in {"input_text", "output_text", "text", "image", "input_image",
+                                                "audio", "input_audio", "video", "input_video", "file", "input_file"}:
+            # Native provider-specific unions are carried unchanged. Media
+            # content in ordinary messages remains capability-checked above.
             continue
         else:
             # Adapters do not implement standalone content parts as input items.

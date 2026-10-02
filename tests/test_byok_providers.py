@@ -505,7 +505,7 @@ class TestBYOKProviders(unittest.TestCase):
         deepseek = normalized["providers"]["deepseek"]
         self.assertEqual(deepseek["kind"], "openai_chat")
         self.assertEqual(deepseek["displayName"], "DeepSeek Custom")
-        self.assertNotIn("baseUrl", deepseek)
+        self.assertIsNone(deepseek["baseUrl"])
         self.assertEqual(deepseek["models"], ["deepseek-chat"])
         self.assertNotIn("headers", deepseek)
         self.assertEqual(deepseek["apiKeyEnvAliases"], ["DEEPSEEK_ALT_KEY"])
@@ -568,7 +568,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         with patch("codex_antigravity_auth.byok.load_provider_config", return_value=normalized):
             providers = all_provider_configs(include_env_enabled=False)
-            self.assertEqual(providers["deepseek"]["baseUrl"], PROVIDER_PRESETS["deepseek"]["baseUrl"])
+            self.assertIsNone(providers["deepseek"]["baseUrl"])
             self.assertEqual(providers["deepseek"]["models"], ["deepseek-chat"])
             self.assertIsNone(providers["custom-one"]["kind"])
 
@@ -688,6 +688,7 @@ class TestBYOKProviders(unittest.TestCase):
             {
                 "model": "deepseek:deepseek-chat",
                 "input": [
+                    {"type":"function_call", "call_id":"call_1", "name":"lookup", "arguments":"{}"},
                     {
                         "type": "message",
                         "role": "user",
@@ -705,20 +706,16 @@ class TestBYOKProviders(unittest.TestCase):
             "deepseek-chat",
         )
 
-        self.assertEqual(payload["messages"], [
+        self.assertEqual(payload["messages"][1:], [
             {"role": "tool", "tool_call_id": "call_1", "content": '{"ok": true}', "name": "lookup"}
         ])
 
-    def test_byok_top_level_orphan_tool_output_is_preserved_when_call_id_is_valid(self):
-        payload = transform_request_to_chat(
-            {
+    def test_byok_top_level_orphan_tool_output_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"input\[0\].call_id: orphan"):
+            transform_request_to_chat({
                 "model": "deepseek:deepseek-chat",
                 "input": [{"type": "function_call_output", "call_id": "call_1", "output": "result"}],
-            },
-            "deepseek-chat",
-        )
-
-        self.assertEqual(payload["messages"], [{"role": "tool", "tool_call_id": "call_1", "content": "result"}])
+            }, "deepseek-chat")
 
     def test_flat_responses_function_tools_transform_for_google_and_byok(self):
         flat_tool = {
@@ -733,7 +730,9 @@ class TestBYOKProviders(unittest.TestCase):
             "strict": True,
         }
 
-        google = transform_request({"model": "gemini-3.5-flash-high", "input": "hi", "tools": [flat_tool]})
+        with self.assertRaisesRegex(ValueError, "strict: translation_loss"):
+            transform_request({"model": "gemini-3.5-flash-high", "input": "hi", "tools": [flat_tool]})
+        google = transform_request({"model": "gemini-3.5-flash-high", "input": "hi", "tools": [{**flat_tool, "strict": False}]})
         declaration = google["request"]["tools"][0]["functionDeclarations"][0]
         self.assertEqual(declaration["name"], "lookup")
         self.assertEqual(declaration["parameters"]["required"], ["q"])
