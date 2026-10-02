@@ -5077,9 +5077,6 @@ def finding_validation_error(value: Any) -> str | None:
             return "confidence must be a finite number"
     except (ValueError, OverflowError):
         return "confidence must be a finite number"
-    line = value.get("line")
-    if line is not None and (type(line) is not int or not 1 <= line <= 2_147_483_647):
-        return "line must be a positive integer at most 2147483647, or null"
     lanes = value.get("lanes")
     if lanes is not None and (not isinstance(lanes, list) or any(not isinstance(lane, str) for lane in lanes)):
         return "lanes must be a list of strings"
@@ -5109,9 +5106,9 @@ def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
     confidence = max(0.0, min(1.0, float(value.get("confidence", 0.5))))
     file_path = clean_string(value.get("file"), max_chars=500) or None
     line = value.get("line")
-    if type(line) in (int, float) and 0 < line <= diff_snapshot.MAX_COORDINATE and int(line) == line:
-        line = int(line)
-    else:
+    # Coordinates are advisory: invalid values make the location unknown, but
+    # must not discard an otherwise usable finding or become fabricated lines.
+    if type(line) is not int or not 0 < line <= diff_snapshot.MAX_COORDINATE:
         line = None
     evidence = clean_string(value.get("evidence"), max_chars=2000) or "unverified"
     # Model-supplied verification labels are untrusted; only the local

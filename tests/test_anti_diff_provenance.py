@@ -232,8 +232,16 @@ def test_invalid_model_coordinates_remain_unknown(repo, line, side):
     anti, root, _ = repo
     write_utf8(root / 'source.py', 'new\n')
     _, metadata = collect(anti)
-    finding = enrich(anti, metadata, 'source.py', line, side)
+    raw_finding = {'claim':'Synthetic advisory claim', 'verify':'Inspect fixture',
+                   'file':'source.py', 'line':line}
+    if side is not None:
+        raw_finding['diffSide'] = side
+    parsed, warning, _diagnostics = anti.parse_panel_findings(json.dumps({'findings':[raw_finding]}))
+    assert warning is None and parsed['findings_dropped'] == 0
+    assert len(parsed['findings']) == 1
+    finding = anti.enrich_finding_provenance(parsed, metadata)['findings'][0]
     assert finding['line'] is None and finding['locationStatus'] == 'unknown'
+    assert finding['locationReason'] in {'invalid_line', 'unsupported_side'}
 
 
 def test_binary_and_submodule_content_never_get_fabricated_lines(repo):
