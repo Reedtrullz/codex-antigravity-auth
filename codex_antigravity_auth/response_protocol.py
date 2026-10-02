@@ -289,7 +289,8 @@ def _advertised_function_names(request: dict[str, Any]) -> set[str]:
 def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabilities) -> None:
     from .input_fidelity import validate_input
     try:
-        validate_input(request, capabilities.input_modalities, capabilities.image_forms, image_detail=capabilities.image_detail)
+        validate_input(request, capabilities.input_modalities, capabilities.image_forms, image_detail=capabilities.image_detail,
+                       native_passthrough=capabilities.native_responses)
     except ValueError as exc:
         raise CapabilityError(str(exc)) from exc
 
@@ -300,10 +301,12 @@ def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabil
 
     tool_choice = request.get("tool_choice")
     if tool_choice is not None:
-        mode = tool_choice if isinstance(tool_choice, str) else "function"
-        if mode not in capabilities.tool_choice_modes:
+        native_choice = (capabilities.native_responses and isinstance(tool_choice, dict)
+                         and tool_choice.get("type") != "function")
+        mode = tool_choice if isinstance(tool_choice, str) else tool_choice.get("type", "function") if isinstance(tool_choice, dict) else "function"
+        if not native_choice and mode not in capabilities.tool_choice_modes:
             raise CapabilityError(f"tool_choice mode '{mode}' is not supported by the selected route")
-        if mode == "required" and not _advertised_function_names(request):
+        if mode == "required" and not (_advertised_function_names(request) or (capabilities.native_responses and request.get("tools"))):
             raise CapabilityError("tool_choice 'required' needs at least one advertised function")
         if mode == "function":
             if not isinstance(tool_choice, dict):

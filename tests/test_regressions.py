@@ -318,7 +318,7 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(contents[1]["parts"][0]["functionResponse"]["name"], "lookup")
         self.assertEqual(contents[1]["parts"][0]["functionResponse"]["response"]["content"], "42")
 
-    def test_non_object_function_call_arguments_are_clamped_for_google(self):
+    def test_non_object_function_call_arguments_are_rejected_for_google(self):
         for arguments in ('["not", "object"]', '"string"', "42", "null", "true"):
             with self.subTest(arguments=arguments):
                 req = {
@@ -333,11 +333,10 @@ class TestRegressionFixes(unittest.TestCase):
                     ],
                 }
 
-                parts = transform_request(req)["request"]["contents"][0]["parts"]
+                with self.assertRaisesRegex(ValueError, r"input\[0\].arguments"):
+                    transform_request(req)
 
-                self.assertEqual(parts[0]["functionCall"]["args"], {})
-
-    def test_request_transforms_drop_malformed_text_and_function_names(self):
+    def test_request_transforms_reject_malformed_text_and_function_names(self):
         request = {
             "model": "gemini-3.5-flash-high",
             "input": [
@@ -352,25 +351,15 @@ class TestRegressionFixes(unittest.TestCase):
             ],
         }
 
-        google = transform_request(request)
-        google_parts = [part for content in google["request"]["contents"] for part in content["parts"]]
+        for index in (0, 1, 2, 3, 5, 6):
+            invalid = {**request, "input": [request["input"][index]]}
+            with self.subTest(index=index):
+                with self.assertRaisesRegex(ValueError, r"input\[0\]"):
+                    transform_request(invalid)
+                with self.assertRaisesRegex(ValueError, r"input\[0\]"):
+                    transform_request_to_chat(invalid, "deepseek-chat")
 
-        self.assertNotIn({"text": ["bad"]}, google_parts)
-        self.assertNotIn({"functionCall": {"name": ["bad"], "args": {}}}, google_parts)
-        self.assertIn({"functionCall": {"name": "lookup", "args": {"q": "x"}}}, google_parts)
-
-        byok = transform_request_to_chat({**request, "model": "deepseek:deepseek-chat"}, "deepseek-chat")
-
-        rendered = json.dumps(byok)
-        self.assertNotIn('["bad"]', rendered)
-        self.assertNotIn("bad name", rendered)
-        self.assertNotIn("bad call id", rendered)
-        self.assertEqual(byok["messages"][0]["role"], "assistant")
-        self.assertEqual(byok["messages"][0]["tool_calls"][0]["function"]["name"], "lookup")
-        self.assertEqual(byok["messages"][1]["role"], "tool")
-        self.assertEqual(byok["messages"][1]["tool_call_id"], "call_ok")
-
-    def test_request_transforms_normalize_malformed_tool_metadata(self):
+    def test_request_transforms_reject_malformed_tool_metadata(self):
         request = {
             "model": "gemini-3.5-flash-high",
             "input": "hi",
@@ -414,19 +403,13 @@ class TestRegressionFixes(unittest.TestCase):
             ],
         }
 
-        google = transform_request(request)
-        declarations = google["request"]["tools"][0]["functionDeclarations"]
-        self.assertEqual(
-            declarations,
-            [
-                {"name": "lookup", "description": "", "parameters": {}},
-                {"name": "nested_lookup", "description": "", "parameters": {}},
-            ],
-        )
-
-        byok = transform_request_to_chat({**request, "model": "deepseek:deepseek-chat"}, "deepseek-chat")
-        chat_functions = [tool["function"] for tool in byok["tools"]]
-        self.assertEqual(chat_functions, [{"name": "lookup", "parameters": {}}, {"name": "nested_lookup", "parameters": {}}])
+        for index, tool in enumerate(request["tools"]):
+            invalid = {**request, "tools": [tool]}
+            with self.subTest(index=index):
+                with self.assertRaisesRegex(ValueError, r"tools\[0\]"):
+                    transform_request(invalid)
+                with self.assertRaisesRegex(ValueError, r"tools\[0\]"):
+                    transform_request_to_chat(invalid, "deepseek-chat")
 
     def test_response_transforms_drop_invalid_function_names(self):
         google = transform_response(
@@ -1028,14 +1011,14 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(mock_urlopen.call_args_list[0].kwargs["timeout"], OAUTH_HTTP_TIMEOUT_SECONDS)
         self.assertEqual(mock_urlopen.call_args_list[1].kwargs["timeout"], OAUTH_HTTP_TIMEOUT_SECONDS)
 
-    def test_previous_response_id_is_rejected_before_backend_routing(self):
+    def test_previous_response_id_is_rejected_on_translated_route(self):
         response = TestClient(app).post(
             "/v1/responses",
             json={"model": "gemini-3.5-flash-high", "input": "hello", "previous_response_id": "resp_old"},
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("previous_response_id is not supported", response.json()["detail"])
+        self.assertIn("previous_response_id: translated routes require", response.json()["detail"])
 
     def test_responses_endpoint_rejects_non_object_json_before_routing(self):
         client = TestClient(app)

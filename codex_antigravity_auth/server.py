@@ -974,7 +974,11 @@ def validate_response_request_body(value: object) -> dict:
         value["metadata"] = normalized_metadata
     validate_response_generation_options(value)
     validate_response_tool_choice(value)
-    validate_response_tool_schemas(value)
+    from .request_shapes import validate_request_shapes
+    try:
+        validate_request_shapes(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         validate_capabilities(value, REQUEST_BOUNDARY_CAPABILITIES)
     except CapabilityError as exc:
@@ -1046,8 +1050,10 @@ def validate_response_tool_choice(codex_req: dict) -> None:
         if tool_choice not in {"auto", "none", "required"}:
             raise HTTPException(status_code=400, detail="tool_choice must be auto, none, required, or a function choice object")
         return
-    if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
+    if not isinstance(tool_choice, dict) or not isinstance(tool_choice.get("type"), str) or not tool_choice["type"]:
         raise HTTPException(status_code=400, detail="tool_choice must be auto, none, required, or a function choice object")
+    if tool_choice["type"] != "function":
+        return  # Provider-native choices are validated on the selected route.
     nested = tool_choice.get("function")
     name = tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
     if not valid_function_name(name):
@@ -1058,40 +1064,12 @@ def validate_response_tool_choice(codex_req: dict) -> None:
 
 
 def validate_response_tool_schemas(codex_req: dict) -> None:
-    """Reject malformed tool schemas before any provider/account work."""
-    tools = codex_req.get("tools")
-    if not isinstance(tools, list):
-        return
-
-    def visit(schema: object, path: str) -> None:
-        if not isinstance(schema, dict):
-            raise HTTPException(status_code=400, detail=f"{path} must be an object")
-        if "$ref" in schema and not isinstance(schema["$ref"], str):
-            raise HTTPException(status_code=400, detail=f"{path}.$ref must be a string")
-        if "properties" in schema:
-            properties = schema["properties"]
-            if not isinstance(properties, dict):
-                raise HTTPException(status_code=400, detail=f"{path}.properties must be an object")
-            for name, child in properties.items():
-                visit(child, f"{path}.properties[{name!r}]")
-        if "items" in schema:
-            visit(schema["items"], f"{path}.items")
-        for key in ("anyOf", "oneOf", "allOf"):
-            if key in schema:
-                options = schema[key]
-                if not isinstance(options, list):
-                    raise HTTPException(status_code=400, detail=f"{path}.{key} must be an array")
-                for index, option in enumerate(options):
-                    visit(option, f"{path}.{key}[{index}]")
-
-    for index, tool in enumerate(tools):
-        if not isinstance(tool, dict) or tool.get("type") != "function":
-            continue
-        function = tool.get("function")
-        if not isinstance(function, dict):
-            function = tool
-        if isinstance(function, dict) and "parameters" in function:
-            visit(function["parameters"], f"tools[{index}].function.parameters")
+    """Compatibility entry point for pure tool definition/schema validation."""
+    from .request_shapes import validate_request_shapes
+    try:
+        validate_request_shapes({"tools": codex_req["tools"]} if "tools" in codex_req else {})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def response_stream_flag(codex_req: dict) -> bool:
@@ -1340,7 +1318,6 @@ async def create_response(request: Request):
             request_run_id = request_metadata["run_id"]
         google_backend_timeout = google_backend_timeout_from_metadata(request_metadata)
 
-        reject_unsupported_previous_response(codex_req)
         model = response_model_id(codex_req)
         codex_req["model"] = model
         stream = response_stream_flag(codex_req)
@@ -1571,10 +1548,15 @@ async def create_response(request: Request):
         )
         return response
     provider_id, provider_model = split_provider_model(model)
+    from .request_shapes import validate_request_shapes
     try:
         validate_provider_model_id(provider_id, provider_model)
+        try:
+            validate_request_shapes(codex_req, route="byok" if provider_id is not None else "google")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     except HTTPException as exc:
-        await log_request("failed", model=model, route="byok", provider=provider_id, stream=stream, http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
+        await log_request("failed", model=model, route="byok" if provider_id is not None else "google", provider=provider_id, stream=stream, http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
         raise
     if provider_id is not None:
         # Normalize self-referential prefixes (openrouter:openrouter/x ->

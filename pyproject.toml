@@ -56,6 +56,8 @@ include = ["codex_antigravity_auth*"]
 [tool.setuptools.package-data]
 codex_antigravity_auth = [
   "skill_assets.json",
+  "design/request-shapes.md",
+  "design/capabilities.md",
   "skills/anti/SKILL.md",
   "skills/anti/agents/*.yaml",
   "skills/anti/scripts/*.py",
