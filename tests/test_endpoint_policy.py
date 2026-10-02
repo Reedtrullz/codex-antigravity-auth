@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -18,6 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 import httpx
 from fake_upstream import allow_listener, remove_listener
+from standalone import without_installed_packages
 
 from codex_antigravity_auth import byok, cli, oauth, server, unified
 from codex_antigravity_auth.google_transport import AccountLease, GoogleTransport
@@ -222,14 +224,30 @@ def test_real_callers_use_the_no_redirect_handler_chain(monkeypatch, caller):
 
 
 @contextmanager
-def loopback_server(handler):
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler, bind_and_activate=False)
-    endpoint = allow_listener(server.socket)
-    server.server_address = endpoint
+def loopback_server(handler, host="127.0.0.1"):
+    address_host = "::1" if host == "::1" else "127.0.0.1"
+
+    class OwnedLoopbackServer(ThreadingHTTPServer):
+        address_family = socket.AF_INET6 if address_host == "::1" else socket.AF_INET
+
+    try:
+        server = OwnedLoopbackServer((address_host, 0), handler, bind_and_activate=False)
+    except OSError as exc:
+        if host == "::1":
+            pytest.skip(f"IPv6 loopback unavailable: {exc}")
+        raise
+    endpoint = None
     thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
     started = False
     try:
-        server.server_activate()
+        try:
+            endpoint = allow_listener(server.socket, host=address_host)
+            server.server_address = endpoint
+            server.server_activate()
+        except OSError as exc:
+            if host == "::1":
+                pytest.skip(f"IPv6 loopback unavailable: {exc}")
+            raise
         thread.start()
         started = True
         yield server
@@ -245,7 +263,8 @@ def loopback_server(handler):
                     if started:
                         thread.join(timeout=2)
                 finally:
-                    remove_listener(endpoint)
+                    if endpoint is not None:
+                        remove_listener(endpoint)
         if started:
             assert not thread.is_alive()
 
@@ -279,7 +298,8 @@ def test_redirect_never_reaches_another_loopback_origin(monkeypatch):
     assert received == []
 
 
-def test_loopback_gateway_requests_keep_working_with_synthetic_authorization(monkeypatch):
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
+def test_loopback_gateway_requests_keep_working_with_synthetic_authorization(monkeypatch, host):
     received = []
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -299,8 +319,18 @@ def test_loopback_gateway_requests_keep_working_with_synthetic_authorization(mon
             self.wfile.write(body)
         do_POST = do_GET
     monkeypatch.setenv("ANTIGRAVITY_GATEWAY_TOKEN", "synthetic-token")
-    with loopback_server(Handler) as server:
-        base = cli.local_gateway_base_url("127.0.0.1", server.server_address[1])
+    if host == "localhost":
+        original_getaddrinfo = socket.getaddrinfo
+
+        def resolve_owned_localhost(name, port, *args, **kwargs):
+            # Route the hostname deterministically to the registered IPv4 fixture.
+            if name == "localhost":
+                name = "127.0.0.1"
+            return original_getaddrinfo(name, port, *args, **kwargs)
+
+        monkeypatch.setattr(socket, "getaddrinfo", resolve_owned_localhost)
+    with loopback_server(Handler, host) as server:
+        base = cli.local_gateway_base_url(host, server.server_address[1])
         assert cli.gateway_model_ids(base) == {"fixture-model"}
         result = cli.gateway_generate_probe(base, "fixture-model", timeout=1, token_env="ANTIGRAVITY_GATEWAY_TOKEN")
         assert result["generation_ok"] is True
@@ -322,9 +352,20 @@ for url in json.load(sys.stdin):
     except ValueError: output.append(None)
 print(json.dumps(output))
 """
-    result = subprocess.run([sys.executable, "-c", code, str(tmp_path)], input=json.dumps(SAFE + UNSAFE), text=True, capture_output=True, timeout=10)
+    result = subprocess.run([sys.executable, "-c", without_installed_packages(code), str(tmp_path)], cwd=tmp_path, input=json.dumps(SAFE + UNSAFE), text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == SAFE + [None] * len(UNSAFE)
+
+
+def test_owned_listener_registration_rejects_non_loopback_or_mismatched_family():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(ValueError, match="loopback"):
+            allow_listener(sock, host="192.0.2.1")
+        with pytest.raises(ValueError, match="loopback"):
+            allow_listener(sock, host="::1")
+    finally:
+        sock.close()
 
 
 @pytest.mark.parametrize("route", ["google", "chat", "native", "byok"])
