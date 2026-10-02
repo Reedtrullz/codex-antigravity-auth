@@ -13,6 +13,9 @@ SCRIPT = Path(__file__).resolve().parents[1] / "codex_antigravity_auth/skills/an
 
 @pytest.fixture
 def checks(monkeypatch, tmp_path):
+    script_dir = str(SCRIPT.resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
     spec = importlib.util.spec_from_file_location("anti_check_fixture", SCRIPT)
     anti = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(anti)
@@ -311,7 +314,7 @@ def test_windows_job_assignment_failure_keeps_gate_closed(checks, monkeypatch):
         def close(self):
             state["closed"] = True
     monkeypatch.setattr(verifier, "_create_windows_job", Job)
-    command = [sys.executable, "-I", "-S", "-c", "from pathlib import Path; Path('must-not-run').write_text('bad')"]
+    command = [sys.executable, "-c", "from pathlib import Path; Path('must-not-run').write_text('bad')"]
     outcome = verifier._run_check(command, b"fixture", root)
     assert outcome["reason"] == "process_control_unavailable"
     assert state["closed"] and not marker.exists()
@@ -330,7 +333,7 @@ def test_windows_gated_wrapper_starts_only_after_assignment(checks, monkeypatch)
         def close(self):
             state["closed"] = True
     monkeypatch.setattr(verifier, "_create_windows_job", Job)
-    command = [sys.executable, "-I", "-S", "-c", "from pathlib import Path; import sys; Path('checker-started').write_text(sys.stdin.buffer.read().decode()); print('synthetic result')"]
+    command = [sys.executable, "-c", "from pathlib import Path; import sys; Path('checker-started').write_text(sys.stdin.buffer.read().decode()); print('synthetic result')"]
     outcome = verifier._run_check(command, b"synthetic captured bytes", root)
     assert outcome["status"] == "passed"
     assert state == {"assigned": True, "closed": True}
@@ -359,8 +362,8 @@ def test_windows_job_adapter_terminates_synthetic_descendants_on_timeout(checks,
                 self.pid = None
             state["closed"] = True
     monkeypatch.setattr(verifier, "_create_windows_job", Job)
-    code = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-I','-S','-c','import time; time.sleep(20)']); print('synthetic-child-started',flush=True); time.sleep(20)"
-    outcome = verifier._run_check([sys.executable, "-I", "-S", "-c", code], b"", root)
+    code = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(20)']); print('synthetic-child-started',flush=True); time.sleep(20)"
+    outcome = verifier._run_check([sys.executable, "-c", code], b"", root)
     assert outcome["reason"] == "tool_timeout"
     assert "synthetic-child-started" in outcome["output"]
     assert state == {"assigned": True, "closed": True}
