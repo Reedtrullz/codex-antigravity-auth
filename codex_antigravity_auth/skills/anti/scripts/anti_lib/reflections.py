@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -17,6 +16,7 @@ from .namespaces import gateway_home
 from .redaction import sanitize_json
 from .retention import summary_projection, summary_retention, summary_structure
 from .persistence import PersistenceError, atomic_write_json, file_lock
+from .file_protection import ensure_private_directory, protect_existing_file
 
 REFLECTIONS_DIR = gateway_home() / "anti-runs" / "reflections"
 MAX_ENTRIES_PER_REPO = 500
@@ -38,12 +38,10 @@ def _ensure_permissions(directory: Path | None = None) -> None:
     directory = directory or REFLECTIONS_DIR
     if not directory.exists():
         return
-    os.chmod(directory, 0o700)
+    ensure_private_directory(directory, enforce_existing=True)
     for path in directory.rglob("*.json"):
         if not path.is_symlink() and path.is_file():
-            current_mode = path.stat().st_mode & 0o777
-            if current_mode != 0o600:
-                os.chmod(path, 0o600)
+            protect_existing_file(path)
 
 
 def _valid_record(row: Any) -> bool:
@@ -112,8 +110,7 @@ def _load_records(path: Path) -> list[dict[str, Any]]:
 
 def _save_records(path: Path, records: list[dict[str, Any]]) -> None:
     _validate_records(path, records)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
+    ensure_private_directory(path.parent, enforce_existing=True)
     atomic_write_json(path, records)
 
 

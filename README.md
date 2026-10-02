@@ -477,6 +477,8 @@ different ports for simultaneously running instances.
 
 Switching roots never moves files automatically. See [namespace copy and
 migration limits](USAGE.md#namespace-copy) for an explicit dry-run-first copy.
+Protected stores and standalone Anti use descriptor-validated process locks and owner-only file protection. Unsupported locking or Windows ACL facilities fail explicitly; see [private storage and lock files](USAGE.md#private-storage-and-lock-files).
+
 ## Troubleshooting
 
 ### HTTP 403 VALIDATION_REQUIRED
