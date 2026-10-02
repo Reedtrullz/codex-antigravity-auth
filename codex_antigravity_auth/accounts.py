@@ -6,7 +6,7 @@ import time
 from typing import Any, Callable
 
 from .account_state import AccountState, scoped_cooldown_expiry
-from .oauth import refresh_access_token, token_expires_in_seconds
+from .oauth import OAuthRefreshError, refresh_access_token, token_expires_in_seconds
 from .redaction import redact_secret_text
 from .response_protocol import AttemptOutcome
 from .storage import (
@@ -48,6 +48,20 @@ def _get_refresh_lock(email: str) -> threading.Lock:
         if email not in _refresh_locks:
             _refresh_locks[email] = threading.Lock()
         return _refresh_locks[email]
+
+
+def _refresh_failure_outcome(exc: Exception) -> AttemptOutcome:
+    if isinstance(exc, OAuthRefreshError):
+        if exc.kind == "credential_rejected":
+            return AttemptOutcome(scope="account", category="auth")
+        if exc.kind == "reauth_required":
+            return AttemptOutcome(scope="account", category="auth", curable_auth=True)
+        if exc.kind == "throttle":
+            return AttemptOutcome(scope="account", category="rate_limit")
+        if exc.kind == "client_configuration":
+            return AttemptOutcome(scope="account", category="invalid_request")
+    # Untyped failures do not prove that a stored credential is invalid.
+    return AttemptOutcome(scope="account", category="transport")
 
 
 def _refresh_blocked(data: dict[str, Any], email: str) -> bool:
