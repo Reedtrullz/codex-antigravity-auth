@@ -211,7 +211,7 @@ def test_interrupted_full_publication_preserves_orphan_artifacts(isolated_anti, 
         patch.setattr(anti.os, "replace", interrupt_record)
         with pytest.raises(OSError, match="interrupted publication"):
             write(anti, "full", execution_ledger=None)
-    assert (anti.RUNS_DIR / "fixture-run/result.json").exists()
+    assert list((anti.RUNS_DIR / "fixture-run/revisions").glob("*/result.json"))
     assert not (anti.RUNS_DIR / "fixture-run.json").exists()
     before = all_files(root)
     with pytest.raises(anti.AntiError, match="unknown retention policy"):

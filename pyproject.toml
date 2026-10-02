@@ -57,6 +57,8 @@ include = ["codex_antigravity_auth*"]
 codex_antigravity_auth = [
   "skill_assets.json",
   "skills/anti/SKILL.md",
+  "skills/anti/ARTIFACTS.md",
+  "skills/anti/schemas/*.json",
   "skills/anti/agents/*.yaml",
   "skills/anti/scripts/*.py",
   "skills/anti/scripts/anti_lib/*.py",
