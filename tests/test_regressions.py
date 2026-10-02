@@ -745,14 +745,23 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(output[0]["type"], "function_call")
         self.assertEqual(output[0]["arguments"], "{}")
 
-    def test_non_streaming_google_response_skips_malformed_backend_shapes(self):
+    def test_non_streaming_malformed_alternative_lists_fail_closed(self):
+        cases = [
+            ("choices", transform_chat_response, {"message": {"content": "valid"}}),
+            ("candidates", transform_response, {"content": {"parts": [{"text": "valid"}]}}),
+        ]
+        for field, transform, valid in cases:
+            for malformed in ("bad", ["bad", valid], [valid, valid]):
+                with self.subTest(field=field, malformed=malformed):
+                    response = transform({field: malformed}, "fixture-model")
+                    self.assertEqual(response["status"], "failed")
+                    self.assertEqual(response["output"], [])
+
+    def test_non_streaming_google_response_skips_malformed_primary_parts(self):
         response = transform_response(
             {
                 "usageMetadata": {"promptTokenCount": ["bad"], "candidatesTokenCount": "5", "totalTokenCount": -1},
                 "candidates": [
-                    "bad",
-                    {"content": "bad"},
-                    {"content": {"parts": "bad"}},
                     {
                         "content": {
                             "role": 123,
@@ -785,21 +794,12 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(response["usage"]["output_tokens"], 5)
         self.assertEqual(response["usage"]["total_tokens"], 5)
 
-    def test_non_streaming_byok_response_skips_malformed_provider_shapes(self):
+    def test_non_streaming_byok_response_skips_malformed_primary_fields(self):
         response = transform_chat_response(
             {
                 "created": "NaN",
                 "usage": {"prompt_tokens": ["bad"], "completion_tokens": "5", "total_tokens": -1},
                 "choices": [
-                    "bad",
-                    {"message": "bad"},
-                    {
-                        "message": {
-                            "reasoning_content": ["bad"],
-                            "content": ["bad"],
-                            "tool_calls": "bad",
-                        }
-                    },
                     {
                         "message": {
                             "reasoning_content": "reason",
@@ -1512,9 +1512,9 @@ class TestRegressionFixes(unittest.TestCase):
         }
 
         chunks = [
-            'data: {"usageMetadata": "bad", "candidates": "bad"}\n',
+            'data: {"usageMetadata": "bad", "candidates": []}\n',
             'data: {"usageMetadata": {"promptTokenCount": ["bad"], "candidatesTokenCount": "5", "totalTokenCount": -1}, "candidates": []}\n',
-            'data: {"candidates": ["bad", {"content": {"parts": ["bad", {"thought": true, "text": ["bad"]}, {"text": ["bad"]}, {"functionCall": {"id": {"bad": "id"}, "name": ["bad"], "args": {"ignored": true}}}, {"functionCall": {"id": "call_a", "name": "a", "args": ["not", "object"]}}, {"text": "ok"}]}}]}\n',
+            'data: {"candidates": [{"content": {"parts": ["bad", {"thought": true, "text": ["bad"]}, {"text": ["bad"]}, {"functionCall": {"id": {"bad": "id"}, "name": ["bad"], "args": {"ignored": true}}}, {"functionCall": {"id": "call_a", "name": "a", "args": ["not", "object"]}}, {"text": "ok"}]}}]}\n',
             "data: [DONE]\n",
         ]
 
