@@ -348,7 +348,9 @@ class GoogleStreamEventAdapter:
         try:
             candidates = self._primary.select(payload.get("candidates", []))
         except ValueError as exc:
-            parts = self.accumulator.consume({**payload, "candidates": candidates})
+            self.accumulator.consume({**payload, "candidates": []})
+            raise GoogleStreamPayloadError("invalid_alternatives", str(exc)) from exc
+        parts = self.accumulator.consume({**payload, "candidates": candidates})
         events: list[dict[str, Any]] = []
         for part in parts:
             if part.has_function or part.output_error:
