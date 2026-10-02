@@ -1,7 +1,6 @@
 from tests.conftest import byte_chunks
 import json
 import os
-import io
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -538,21 +537,20 @@ class TestBYOKProviders(unittest.TestCase):
 
         for index, api_key in enumerate(("secret\nbad", "secret\u00e9bad")):
             with self.subTest(api_key=repr(api_key)):
-                captured_stderr = io.StringIO()
-                with patch("sys.stderr", captured_stderr):
+                with self.assertLogs("codex_antigravity_auth.byok", level="WARNING") as logs:
                     malformed_key = normalize_provider_entry(
                         {"apiKey": api_key, "displayName": f"Broken Provider {index}"}
                     )
                 self.assertNotIn("apiKey", malformed_key)
-                self.assertIn(f"Broken Provider {index}", captured_stderr.getvalue())
-                self.assertIn("failed validation", captured_stderr.getvalue())
-                self.assertNotIn(api_key, captured_stderr.getvalue())
+                output = "\n".join(logs.output)
+                self.assertNotIn(f"Broken Provider {index}", output)
+                self.assertIn("failed validation", output)
+                self.assertNotIn(api_key, output)
         # The warning is emitted once per provider label, not on every load.
-        captured_stderr = io.StringIO()
-        with patch("sys.stderr", captured_stderr):
+        with self.assertLogs("codex_antigravity_auth.byok", level="WARNING") as logs:
             normalize_provider_entry({"apiKey": "bad\x01key", "displayName": "Repeat Warning Provider"})
             normalize_provider_entry({"apiKey": "bad\x01key", "displayName": "Repeat Warning Provider"})
-        self.assertEqual(captured_stderr.getvalue().count("failed validation"), 1)
+        self.assertEqual("\n".join(logs.output).count("failed validation"), 1)
 
         reserved = normalize_provider_entry(
             {
