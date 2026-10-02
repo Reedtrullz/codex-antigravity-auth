@@ -32,10 +32,10 @@ def chat(index, text, reason="stop", tool=None, stream=False):
 def chat_stream(frames):
     class Response:
         status_code = 200
-        async def aiter_text(self):
+        async def aiter_bytes(self):
             for frame in frames:
-                yield "data: " + json.dumps(frame) + "\n\n"
-            yield "data: [DONE]\n\n"
+                yield ("data: " + json.dumps(frame) + "\n\n").encode()
+            yield b"data: [DONE]\n\n"
 
     class Client:
         async def __aenter__(self):

@@ -264,6 +264,8 @@ When multiple Google accounts are registered, the gateway automatically rotates 
 ---
 
 ## 3. High-Fidelity Streaming & Reasoning
+Streaming readers decode UTF-8 incrementally, ignore one leading BOM, and recognize LF, CRLF, and CR line endings. Native Responses events are dispatched at a blank line, with multiple `data:` fields joined by a newline. Malformed UTF-8 is replaced consistently; unfinished data at EOF fails instead of becoming a complete event. Chat Completions and Google retain an explicit legacy JSON-line mode for endpoints that omit blank separators, including multiline JSON continuations; a physical data line must still terminate. Readers retain at most 8 Mi decoded characters and 10,000 data lines per pending frame. These bounds do not impose whole-response or gateway admission limits.
+
 The local server natively isolates explicit thinking blocks and stream envelopes, ensuring standard formatting:
 - **Thinking/Reasoning block**: Emits `response.reasoning_text.delta` for explicit backend thinking parts while preserving regular `thoughtSignature` text as visible output.
 - **SSE Stream**: Formats candidates, function calls, usage metadata, and completion events into Responses API SSE chunks parsed correctly by both Codex CLI and Codex Desktop.
