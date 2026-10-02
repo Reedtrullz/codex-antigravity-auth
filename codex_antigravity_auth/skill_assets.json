@@ -6,6 +6,7 @@
     "scripts/anti.py",
     "scripts/anti_lib/__init__.py",
     "scripts/anti_lib/capabilities.json",
+    "scripts/anti_lib/console.py",
     "scripts/anti_lib/capabilities.py",
     "scripts/anti_lib/chunking.py",
     "scripts/anti_lib/context.py",

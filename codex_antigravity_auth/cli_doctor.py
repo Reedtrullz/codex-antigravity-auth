@@ -1,6 +1,7 @@
 """Version-check, probe, readiness, and doctor commands (split from cli.py)."""
 
 from __future__ import annotations
+from .console import console_print as print
 
 import json
 import os

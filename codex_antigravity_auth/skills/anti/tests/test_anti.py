@@ -24,6 +24,9 @@ _ACTIVE_TEST_RUNS_DIR: list[Path] = []
 
 
 def load_anti():
+    anti_lib_dir = str(SCRIPT.resolve().parent)
+    if anti_lib_dir not in sys.path:
+        sys.path.insert(0, anti_lib_dir)
     spec = importlib.util.spec_from_file_location("anti_skill_helper", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
