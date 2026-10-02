@@ -113,10 +113,11 @@ def test_windows_acl_failure_refuses_before_secret_write(tmp_path, monkeypatch):
     fake.protect_descriptor.assert_called_once()
 
 
-def test_windows_backend_sentinel_write_only_after_descriptor_protection(tmp_path, monkeypatch):
+def test_windows_backend_protects_then_locks_before_sentinel_write(tmp_path, monkeypatch):
     path = tmp_path / "state.json"
     events = []
     original_protect = protection.protect_descriptor
+    original_write = protection.os.write
     def protect(fd, **kwargs):
         assert os.fstat(fd).st_size == 0
         original_protect(fd, **kwargs)
@@ -124,13 +125,26 @@ def test_windows_backend_sentinel_write_only_after_descriptor_protection(tmp_pat
     monkeypatch.setattr(protection, "protect_descriptor", protect)
     backend = Mock(LK_LOCK=1, LK_UNLCK=2)
     def lock(fd, operation, count):
-        assert events and events[0] == "protected"
-        assert os.fstat(fd).st_size == 1 and count == 1
-        events.append(operation)
+        assert count == 1
+        if operation == backend.LK_LOCK:
+            assert events == ["protected"]
+            assert os.fstat(fd).st_size == 0
+            events.append("locked")
+        else:
+            assert operation == backend.LK_UNLCK
+            events.append("unlocked")
     backend.locking.side_effect = lock
+    def write(fd, content):
+        assert events == ["protected", "locked"]
+        assert content == b"\0"
+        written = original_write(fd, content)
+        events.append("initialized")
+        return written
+    monkeypatch.setattr(protection.os, "write", write)
     with protection.file_lock(path, posix_backend=None, windows_backend=backend):
         events.append("entered")
-    assert events == ["protected", 1, "entered", 2]
+    assert events == ["protected", "locked", "initialized", "entered", "unlocked"]
+    assert (tmp_path / ".state.json.lock").stat().st_size == 1
 
 
 def test_packaged_lock_serializes_standalone_child_process(tmp_path):
