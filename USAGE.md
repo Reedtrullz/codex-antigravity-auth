@@ -136,6 +136,8 @@ Workflow presets save sanitized summaries under `~/.codex/anti-runs` by default.
 
 Each run ID has one writer; use a new ID for a new invocation or when a previous record's ownership is unknown. Corrupt or unreadable reflection files are preserved, with backup/recovery guidance instead of silently replacing history. See the bundled [persistence contract](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks).
 
+Preview retention cleanup with `anti.py runs clean --older-than 30 --dry-run --json`. Only old terminal records are eligible; running, uncertain and temporary state is kept regardless of age. Cleanup retains reflection history and a small permanent ID reservation. Incomplete deletion exits nonzero and lists retained paths; inspect them before retrying with `--resume-cleanup`. See the bundled [cleanup policy](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks).
+
 For the older Google-only OAuth setup, use:
 
 ```bash

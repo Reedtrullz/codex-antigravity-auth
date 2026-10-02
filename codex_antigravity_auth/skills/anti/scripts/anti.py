@@ -36,6 +36,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from anti_lib.capabilities import CapabilityRegistry
 from anti_lib.chunking import chunk_manifest
+from anti_lib.cleanup import RUN_ID_RE, assert_not_deleted, clean_runs
 from anti_lib.context import ordered_prompt
 from anti_lib.ledger import execution_entry, prompts_as_text
 from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
@@ -49,7 +50,6 @@ from anti_lib.reflections import (
     get_summary,
     list_records,
     clear_records,
-    prune_reflections_older_than,
 )
 
 
@@ -553,7 +553,6 @@ EXCLUDED_PATTERNS = [
     "*apikey*",
     "*api-key*",
 ]
-RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 CHUNK_PART_SUFFIX_RE = re.compile(r" part \d+/\d+$")
 FAILURE_OUTPUT_PREVIEW_CHARS = 1600
 REVIEW_SYNTHESIS_OVERFLOW_SENTINEL = "ANTI_SYNTHESIS_STATUS: OVERFLOW"
@@ -712,6 +711,7 @@ def check_record_retention(record_id: str, output_mode: str) -> None:
         raise AntiError("run id must contain only letters, numbers, '_' or '-'")
     if RUNS_DIR.is_symlink():
         raise AntiError("refusing to write Anti run record through symlinked directory")
+    assert_not_deleted(RUNS_DIR, record_id)
     path = RUNS_DIR / f"{record_id}.json"
     if path.is_symlink():
         raise AntiError("refusing to overwrite symlinked run record")
@@ -8529,30 +8529,21 @@ def command_runs(args: argparse.Namespace) -> int:
         return 0
     if args.runs_command == "clean":
         cutoff = time.time() - (args.older_than * 86400)
-        removed = 0
-        for path in iter_run_records():
-            if path.stat().st_mtime < cutoff:
-                if args.dry_run:
-                    print(f"[*] Would remove {path.name}")
-                else:
-                    path.unlink()
-                    artifact_dir = RUNS_DIR / path.stem
-                    if artifact_dir.is_dir() and not artifact_dir.is_symlink():
-                        shutil.rmtree(artifact_dir)
-                removed += 1
-        if RUNS_DIR.exists():
-            for path in RUNS_DIR.glob("*.json.tmp"):
-                if path.stat().st_mtime < cutoff:
-                    if args.dry_run:
-                        print(f"[*] Would remove {path.name}")
-                    else:
-                        path.unlink()
-                    removed += 1
-        reflection_removed = prune_reflections_older_than(cutoff, dry_run=args.dry_run)
-        verb = "Would remove" if args.dry_run else "Removed"
-        print(f"[+] {verb} {removed} Anti run record(s) older than {args.older_than} day(s)")
-        print(f"[+] {verb} {reflection_removed} reflection record file(s) older than {args.older_than} day(s)")
-        return 0
+        report = clean_runs(RUNS_DIR, cutoff, dry_run=args.dry_run, resume=args.resume_cleanup)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            for row in report["rows"]:
+                label = json.dumps(row["id"], ensure_ascii=True)
+                print(f"[*] {row['action']}: {label} ({row['reason']})")
+                if row.get("recovery"):
+                    print("    " + row["recovery"])
+                    print("    Retained paths: " + json.dumps([row["recordPath"], row["artifactPath"], row["markerPath"]]))
+            removed = sum(row["action"] in {"remove", "resume", "removed"} for row in report["rows"])
+            verb = "Would remove" if args.dry_run else "Removed"
+            print(f"[+] {verb} {removed} Anti run record(s) older than {args.older_than} day(s)")
+            print("[*] Reflection history and unowned temporary files retained.")
+        return 1 if report["errors"] else 0
     if args.runs_command == "reflections":
         repo = Path(args.repo).resolve()
         verify_verdict = getattr(args, "verify_verdict", None)
@@ -8900,8 +8891,10 @@ def build_parser() -> argparse.ArgumentParser:
     runs_show = runs_sub.add_parser("show")
     runs_show.add_argument("id")
     runs_clean = runs_sub.add_parser("clean")
-    runs_clean.add_argument("--older-than", type=positive_int, required=True, help="Delete records older than N days")
-    runs_clean.add_argument("--dry-run", action="store_true", help="List records that would be removed without deleting")
+    runs_clean.add_argument("--older-than", type=positive_int, required=True, help="Delete terminal records older than N days; retain running and uncertain state")
+    runs_clean.add_argument("--dry-run", action="store_true", help="Plan cleanup without changing any files")
+    runs_clean.add_argument("--resume-cleanup", action="store_true", help="Retry a previously interrupted terminal cleanup after revalidation")
+    runs_clean.add_argument("--json", action="store_true", help="Print the cleanup plan or result as JSON")
     runs_reflections = runs_sub.add_parser("reflections", help="Show repo-level reflection history")
     runs_reflections.add_argument("--repo", default=".", help="Repository path (default: cwd)")
     runs_reflections.add_argument("--limit", type=positive_int, default=10)
