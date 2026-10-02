@@ -349,9 +349,11 @@ MAX_PROMPT_CHARS_HELP = (
     "Claude-family review/plan/panel calls still use the conservative safety budget with --chunked auto; "
     "--chunked off refuses any review scope that cannot fit exactly."
 )
-PID_FILE = Path.home() / ".codex" / "anti-gateway.pid"
-LOG_FILE = Path.home() / ".codex" / "anti-gateway.log"
-RUNS_DIR = Path.home() / ".codex" / "anti-runs"
+from anti_lib.namespaces import gateway_home, client_config_path
+
+PID_FILE = gateway_home() / "anti-gateway.pid"
+LOG_FILE = gateway_home() / "anti-gateway.log"
+RUNS_DIR = gateway_home() / "anti-runs"
 RUN_OUTPUT_PREVIEW_CHARS = 1600
 POST_FAILURE_MODEL_PROBE_TIMEOUT = 8.0
 FALLBACK_POLICIES = {"never", "on-retryable", "on-timeout"}
@@ -8567,7 +8569,7 @@ def add_generation_control_args(
 
 
 def add_codex_config_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path")
+    parser.add_argument("--config", default=str(client_config_path()), help="Codex config path")
     parser.add_argument("--provider", default="antigravity", help="Codex provider id")
     parser.add_argument("--provider-name", default="Google Antigravity", help="Codex provider display name")
 

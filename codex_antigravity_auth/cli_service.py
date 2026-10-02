@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from .namespaces import gateway_home
 
 from . import cli as _cli
 
@@ -19,7 +20,7 @@ from . import cli as _cli
 def _codex_home_read_only() -> Path:
     if _cli.get_codex_home is not _cli._DEFAULT_GET_CODEX_HOME:
         return _cli.get_codex_home()
-    return Path(os.path.expanduser("~/.codex"))
+    return gateway_home()
 
 
 def gateway_model_ids(
@@ -258,6 +259,7 @@ def run_gateway_status(args) -> dict:
         ).to_dict(),
     }
     info["request_log"] = _cli.request_log_info()
+    info["namespaces"] = _cli.namespace_diagnostics()
     if getattr(args, "json", False):
         print(json.dumps(info, indent=2))
     else:
@@ -340,7 +342,7 @@ def run_service_command(args) -> dict:
         error=info.get("error"),
     ).to_dict()
     info = {**info, **observed}
-    result = {"service": info, "gateway": gateway}
+    result = {"service": info, "gateway": gateway, "namespaces": _cli.namespace_diagnostics()}
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2))
     else:

@@ -42,6 +42,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from .namespaces import client_home, gateway_file
 from typing import Any
 
 from .redaction import redact_secret_text
@@ -254,10 +255,7 @@ def openai_model_capabilities(model: str):
 
 
 def _codex_home() -> Path:
-    override = os.environ.get("CODEX_HOME", "").strip()
-    if override:
-        return Path(override).expanduser()
-    return Path(os.path.expanduser("~/.codex"))
+    return client_home()
 
 
 def _read_json_file(path: Path) -> dict[str, Any] | None:
@@ -293,7 +291,7 @@ def resolve_openai_auth() -> OpenAIAuth:
         base_url = _validate_base_url_or_default(base_url_raw)
         return OpenAIAuth(kind="api_key", base_url=base_url, api_key=api_key)
 
-    config = _read_json_file(Path(os.path.expanduser(OPENAI_CONFIG_FILE)))
+    config = _read_json_file(gateway_file(OPENAI_CONFIG_FILE, "antigravity-openai.json"))
     if config:
         file_key = _validate_api_key(config.get("api_key") or config.get("apiKey"))
         if file_key:
@@ -330,20 +328,12 @@ def _validate_base_url_or_default(raw: str) -> str:
 
 def _resolve_codex_oauth_auth() -> OpenAIAuth:
     """Read Codex ChatGPT credentials read-only (no refresh, no writes)."""
-    candidates = [
-        _codex_home() / "auth.json",
-        Path(os.path.expanduser("~/.codex/auth.json")),
-    ]
-    data: dict[str, Any] | None = None
-    for path in candidates:
-        data = _read_json_file(path)
-        if data:
-            break
+    data = _read_json_file(_codex_home() / "auth.json")
     if not data:
         raise OpenAIUpstreamAuthError(
             401,
             "Codex ChatGPT auth was requested (ANTIGRAVITY_OPENAI_USE_CODEX_AUTH=1) "
-            "but no readable ~/.codex/auth.json was found. Run `codex login` first.",
+            "but no readable auth.json was found in the selected client root. Run `codex login` with the same CODEX_HOME first.",
         )
     # Codex currently stores credentials under ``tokens``. Keep the older
     # observed ``OPENAI_API_KEY`` dictionary shape as a compatibility fallback.

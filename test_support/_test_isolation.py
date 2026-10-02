@@ -151,6 +151,15 @@ def install():
         return original_expanduser(path)
 
     os.path.expanduser = safe_expanduser
+    Path.home = classmethod(lambda cls: cls(safe_expanduser("~")))
+    original_path_expanduser = Path.expanduser
+
+    def safe_path_expanduser(path):
+        if path.parts and path.parts[0] == "~":
+            return type(path)(safe_expanduser("~")).joinpath(*path.parts[1:])
+        return original_path_expanduser(path)
+
+    Path.expanduser = safe_path_expanduser
     original_popen = subprocess.Popen
 
     class IsolatedPopen(original_popen):

@@ -269,3 +269,45 @@ Streaming readers decode UTF-8 incrementally, ignore one leading BOM, and recogn
 The local server natively isolates explicit thinking blocks and stream envelopes, ensuring standard formatting:
 - **Thinking/Reasoning block**: Emits `response.reasoning_text.delta` for explicit backend thinking parts while preserving regular `thoughtSignature` text as visible output.
 - **SSE Stream**: Formats candidates, function calls, usage metadata, and completion events into Responses API SSE chunks parsed correctly by both Codex CLI and Codex Desktop.
+
+## Namespace copy
+
+Use `CODEX_HOME=/absolute/client/root` for client config/auth/skills and
+`ANTIGRAVITY_STATE_HOME=/absolute/gateway/root` for gateway configuration and
+state. Set either to `~/.codex` explicitly when sharing that root is intentional.
+`namespace show`, status JSON, service JSON and readiness diagnostics distinguish
+their sources and whether the roots are shared, without printing credential or
+private directory contents. `--config /absolute/file.toml` and `--skill-dir
+/absolute/directory` still override individual client paths.
+
+To copy gateway configuration on the same machine, stop the gateway and any
+other configuration writers, then inspect the plan:
+
+```sh
+codex-antigravity namespace copy-state --source /absolute/old/root --destination /absolute/new/root
+# Explicitly publish the copy after checking the plan:
+codex-antigravity namespace copy-state --source /absolute/old/root --destination /absolute/new/root --write
+```
+
+The destination must not exist. The command stages all selected files in a
+private sibling directory, rechecks the source, and publishes the directory
+under a destination lock. Ordinary failures discard only staging; abrupt process
+termination may leave a hidden staging directory for manual inspection, while
+the source stays untouched. Cooperating store writers are locked; stop external
+editors and Anti as well, since they need not honor these locks. The contract
+does not defend against the same user replacing every parent directory.
+
+Copied configuration comprises account/provider ciphertext, the local fallback
+storage key if present, Google OAuth client settings, OpenAI gateway settings,
+and model overlays. File bytes are copied unchanged and a versioned checksum
+manifest is included. No keyring material is exported: retain access to the same
+OS keyring or explicitly supplied storage-key environment. This is not a portable
+credential backup or an encryption-key migration. POSIX copies use owner-only
+permissions; Windows privacy retains the platform's existing protection model.
+
+Client `auth.json`/`config.toml`, process PID/log files, and historical Anti runs
+are excluded. Existing histories remain at the old root; selecting a new root
+starts a separate history. Log in through Codex with the selected `CODEX_HOME`
+when a new client identity is needed. Finally set `ANTIGRAVITY_STATE_HOME` to the
+new root and reinstall any service to capture the selection. Neither the copy
+command nor diagnostics changes the current environment or service automatically.

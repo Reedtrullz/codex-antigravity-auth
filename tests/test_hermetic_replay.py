@@ -69,6 +69,18 @@ def test_unowned_loopback_and_external_network_are_denied():
         socket.getaddrinfo("example.invalid", 443)
 
 
+def test_home_resolution_remains_private_when_environment_is_cleared():
+    from pathlib import Path
+    from unittest.mock import patch
+
+    root = Path(os.environ["ANTIGRAVITY_TEST_ROOT"])
+    with patch.dict(os.environ, {}, clear=True):
+        assert Path.home() == root
+        assert Path("~").expanduser() == root
+        assert Path("~/child").expanduser() == root / "child"
+        assert Path(os.path.expanduser("~/child")) == root / "child"
+
+
 @pytest.mark.parametrize("environment", [{}, {"OPENAI_API_KEY": "synthetic-canary", "CODEX_HOME": "/nonexistent-test-state"}])
 def test_python_child_inherits_isolation_even_with_empty_env(environment):
     code = """
