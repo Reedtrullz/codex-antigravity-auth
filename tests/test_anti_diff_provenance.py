@@ -227,21 +227,33 @@ def test_excerpts_are_redacted_without_falsifying_original_hash(repo):
     assert finding['excerptSha256'] == hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
-@pytest.mark.parametrize('line,side', [(True,None), (1.5,None), (10**400,None), (1,{}), (1,'left')])
-def test_invalid_model_coordinates_remain_unknown(repo, line, side):
+@pytest.mark.parametrize('line', [True, 1.5, 10**400])
+def test_invalid_model_lines_are_rejected_and_enrichment_stays_unknown(repo, line):
     anti, root, _ = repo
     write_utf8(root / 'source.py', 'new\n')
     _, metadata = collect(anti)
     raw_finding = {'claim':'Synthetic advisory claim', 'verify':'Inspect fixture',
                    'file':'source.py', 'line':line}
-    if side is not None:
-        raw_finding['diffSide'] = side
-    parsed, warning, _diagnostics = anti.parse_panel_findings(json.dumps({'findings':[raw_finding]}))
-    assert warning is None and parsed['findings_dropped'] == 0
-    assert len(parsed['findings']) == 1
-    finding = anti.enrich_finding_provenance(parsed, metadata)['findings'][0]
+    assert anti.finding_validation_error(raw_finding) is not None
+    assert anti.normalize_finding_item(raw_finding, 1) is None
+    finding = anti.enrich_finding_provenance({'findings':[raw_finding]}, metadata)['findings'][0]
     assert finding['line'] is None and finding['locationStatus'] == 'unknown'
-    assert finding['locationReason'] in {'invalid_line', 'unsupported_side'}
+    assert finding['sourceExcerpt'] is None and finding['excerptSha256'] is None
+
+
+@pytest.mark.parametrize('side', [{}, 'left'])
+def test_valid_line_with_unsupported_diff_side_remains_unknown(repo, side):
+    anti, root, _ = repo
+    write_utf8(root / 'source.py', 'new\n')
+    _, metadata = collect(anti)
+    raw_finding = {'claim':'Synthetic advisory claim', 'verify':'Inspect fixture',
+                   'file':'source.py', 'line':1, 'diffSide':side}
+    normalized = anti.normalize_finding_item(raw_finding, 1)
+    assert normalized is not None and normalized['line'] == 1 and normalized['diffSide'] == 'unknown'
+    finding = anti.enrich_finding_provenance({'findings':[normalized]}, metadata)['findings'][0]
+    assert finding['line'] is None and finding['locationStatus'] == 'unknown'
+    assert finding['locationReason'] == 'unsupported_side'
+    assert finding['sourceExcerpt'] is None and finding['excerptSha256'] is None
 
 
 def test_binary_and_submodule_content_never_get_fabricated_lines(repo):

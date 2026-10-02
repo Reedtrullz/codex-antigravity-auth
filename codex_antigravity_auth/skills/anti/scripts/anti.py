@@ -5077,6 +5077,9 @@ def finding_validation_error(value: Any) -> str | None:
             return "confidence must be a finite number"
     except (ValueError, OverflowError):
         return "confidence must be a finite number"
+    line = value.get("line")
+    if line is not None and (type(line) is not int or not 1 <= line <= 2_147_483_647):
+        return "line must be a positive integer at most 2147483647, or null"
     lanes = value.get("lanes")
     if lanes is not None and (not isinstance(lanes, list) or any(not isinstance(lane, str) for lane in lanes)):
         return "lanes must be a list of strings"
