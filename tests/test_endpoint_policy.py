@@ -29,6 +29,8 @@ from codex_antigravity_auth.unified import OpenAIAuth
 from codex_antigravity_auth.endpoint_policy import open_http_request, validate_endpoint_url
 from codex_antigravity_auth.skills.anti.scripts.anti_lib import endpoint_policy as shared
 from codex_antigravity_auth.skills.anti.tests.test_anti import load_anti
+from _test_isolation import allow_listener, remove_listener
+from standalone import without_installed_packages
 
 
 UNSAFE = [
@@ -353,7 +355,8 @@ for url in json.load(sys.stdin):
     except ValueError: output.append(None)
 print(json.dumps(output))
 """
-    result = subprocess.run([sys.executable, "-c", without_installed_packages(code), str(tmp_path)], cwd=tmp_path, input=json.dumps(SAFE + UNSAFE), text=True, capture_output=True, timeout=10)
+    result = subprocess.run([sys.executable, "-c", without_installed_packages(code), str(tmp_path)], cwd=tmp_path,
+                            input=json.dumps(SAFE + UNSAFE), text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == SAFE + [None] * len(UNSAFE)
 

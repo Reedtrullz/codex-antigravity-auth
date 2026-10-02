@@ -36,6 +36,7 @@ from .byok import (
     split_provider_model,
     validate_provider_api_key,
     validate_provider_id,
+    validate_http_base_url,
     validate_supported_provider_kind,
 )
 from .transform import safe_project_id, transform_chat_response, valid_function_name
@@ -703,21 +704,50 @@ def native_model_catalog_with_input_modalities() -> list[dict]:
     return native_model_catalog()
 
 
-def provider_model_catalog(created: int) -> list[dict]:
+def provider_diagnostic_id(provider_id) -> str:
+    from .model_observations import public_id, ObservationError
+    try:
+        return public_id(provider_id)
+    except ObservationError:
+        return "redacted"
+
+
+def provider_model_catalog(created: int, *, diagnostics: list | None = None) -> list[dict]:
     byok_models = []
+    diagnostics = diagnostics if diagnostics is not None else []
     seen_model_ids: set[str] = set()
     try:
         providers = all_provider_configs_read_only()
     except Exception:
+        diagnostics.append({"provider":None, "status":"configuration_unreadable", "omitted_models":None})
         return byok_models
     for provider_id, provider in providers.items():
+        label = provider_diagnostic_id(provider_id)
+        configured_models = provider.get("models", [])
+        diagnostic = {"provider":label, "status":"complete", "omitted_models":len(configured_models) if isinstance(configured_models, list) else None}
+        diagnostics.append(diagnostic)
+        if provider.get("_configuration_error"):
+            count = provider.get("_declared_model_count")
+            diagnostic.update(status="invalid_configuration", omitted_models=count if type(count) is int and count >= 0 else None)
+            continue
+        try:
+            validate_http_base_url(provider.get("baseUrl"))
+        except ValueError:
+            diagnostic["status"] = "invalid_configuration"
+            continue
         try:
             validate_supported_provider_kind(provider)
+        except ValueError:
+            diagnostic["status"] = "unsupported_route"
+            continue
+        try:
             usable = provider_has_usable_key(provider)
         except Exception:
             usable = False
         if not usable:
+            diagnostic["status"] = "unusable_configuration"
             continue
+        diagnostic["omitted_models"] = 0
         for model_entry in provider.get("models", []):
             if isinstance(model_entry, dict):
                 provider_model = model_entry.get("id")
@@ -728,6 +758,8 @@ def provider_model_catalog(created: int) -> list[dict]:
                 display_name = provider_model
                 context_window = None
             if not provider_model:
+                diagnostic["status"] = "partial"
+                diagnostic["omitted_models"] += 1
                 continue
             catalog_model_id = normalize_byok_model_id(provider_model, provider_id)
             model_id = f"{provider_id}:{catalog_model_id}"
@@ -737,6 +769,8 @@ def provider_model_catalog(created: int) -> list[dict]:
             try:
                 capabilities = provider_capabilities(provider, provider_model)
             except ValueError:
+                diagnostic["status"] = "partial"
+                diagnostic["omitted_models"] += 1
                 continue
             display_name = display_name if display_name != provider_model else catalog_model_id
             byok_models.append(
@@ -762,14 +796,20 @@ def provider_model_catalog(created: int) -> list[dict]:
     return byok_models
 
 
-async def provider_model_catalog_fail_soft(created: int) -> list[dict]:
+async def provider_model_catalog_fail_soft(created: int, *, with_diagnostics: bool = False):
+    diagnostics = []
     try:
-        return await asyncio.wait_for(
-            run_in_threadpool(provider_model_catalog, created),
+        models = await asyncio.wait_for(
+            run_in_threadpool(provider_model_catalog, created, diagnostics=diagnostics),
             timeout=MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS,
         )
+        state = "partial" if any(item["status"] != "complete" for item in diagnostics) else "complete"
+        report = {"status":state, "providers":diagnostics}
+    except asyncio.TimeoutError:
+        models, report = [], {"status":"timeout", "providers":[]}
     except Exception:
-        return []
+        models, report = [], {"status":"error", "providers":[]}
+    return (models, report) if with_diagnostics else models
 
 
 def provider_health_catalog() -> list[dict]:
@@ -780,16 +820,20 @@ def provider_health_catalog() -> list[dict]:
         return providers
     for provider_id, provider in provider_configs.items():
         models = provider.get("models", [])
+        count = len(models) if isinstance(models, list) else 0
+        if provider.get("_configuration_error"):
+            declared = provider.get("_declared_model_count")
+            count = declared if type(declared) is int and declared >= 0 else None
         try:
             usable = provider_has_usable_key(provider)
         except Exception:
             usable = False
         providers.append(
             {
-                "id": provider_id,
+                "id": provider_diagnostic_id(provider_id),
                 "kind": provider.get("kind"),
                 "usable": usable,
-                "model_count": len(models) if isinstance(models, list) else 0,
+                "model_count": count,
             }
         )
     return providers
@@ -812,7 +856,7 @@ async def provider_health_catalog_fail_soft() -> tuple[list[dict], str]:
 async def list_models():
     """Return model catalog so Codex Desktop can populate its picker dropdown."""
     created = int(time.time())
-    byok_models = await provider_model_catalog_fail_soft(created)
+    byok_models, catalog_diagnostics = await provider_model_catalog_fail_soft(created, with_diagnostics=True)
     models = [
         codex_model_metadata(
             m["id"],
@@ -875,6 +919,7 @@ async def list_models():
     models = list(unique.values())
     return {
         "capability_catalog_version": CATALOG_VERSION,
+        "provider_catalog_diagnostics": catalog_diagnostics,
         "collision_policy": "native definitions precede OpenAI registry entries; first canonical catalog identity wins",
         "object": "list",
         "data": models,
@@ -989,6 +1034,11 @@ def validate_response_request_body(value: object) -> dict:
         validate_request_shapes(value)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    from .tool_calls import FunctionCallValidator, ToolCallError
+    try:
+        FunctionCallValidator(value)  # Check rule containers before auth/account work.
+    except ToolCallError as exc:
+        raise HTTPException(status_code=400, detail="tools: function declarations cannot be validated") from exc
     try:
         validate_capabilities(value, REQUEST_BOUNDARY_CAPABILITIES)
     except CapabilityError as exc:
@@ -2265,7 +2315,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                             rotation_attempted=rotation_attempted,
                         ),
                     )
-                provider_result = await call_sync(google_transport.parse_response, gemini_resp)
+                provider_result = await call_sync(google_transport.parse_response, gemini_resp, request=codex_req)
                 codex_resp = response_from_result(
                     provider_result,
                     response_id=provider_result.provider_response_id or f"resp_{secrets.token_hex(6)}",
@@ -2438,7 +2488,7 @@ async def _create_response(request: Request, budget: RequestBudget):
         nonlocal observed_stream_terminal, observed_stream_account, stream_terminal_logged
         import uuid
         response_id = f"resp_{uuid.uuid4().hex[:12]}"
-        adapter = GoogleStreamEventAdapter(response_id=response_id, display_model=model)
+        adapter = GoogleStreamEventAdapter(response_id=response_id, display_model=model, request=codex_req)
         attempt_num = 0
 
         def serialize_transport_event(event: dict | str) -> str:
@@ -2746,7 +2796,7 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
                 status_code=status_code_from_backend_error(code, message),
                 detail=f"{provider['id']} API error: {safe_error_detail(message)}",
             )
-        return await call_sync(transform_chat_response, chat_resp, display_model)
+        return await call_sync(transform_chat_response, chat_resp, display_model, request=codex_req)
     except (HTTPException, RequestDeadlineExceeded, ClientDisconnect):
         raise
     except Exception as e:
@@ -2789,7 +2839,7 @@ async def create_openai_upstream_response(
                 detail=openai_failure_detail(display_model, f"OpenAI upstream error: {safe_error_detail(res.text)}"),
             )
         try:
-            terminal = await call_sync(_collect_openai_sse_terminal, res.content, display_model)
+            terminal = await call_sync(_collect_openai_sse_terminal, res.content, display_model, request=codex_req)
         except Exception as exc:
             raise HTTPException(
                 status_code=502,
@@ -2834,15 +2884,20 @@ async def create_openai_upstream_response(
             detail=openai_failure_detail(display_model, f"OpenAI returned non-JSON data: {exc}"),
         ) from exc
     try:
-        return await call_sync(OpenAICompatibleTransport(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS).validate_native_response, data, display_model=display_model)
+        return await call_sync(
+            OpenAICompatibleTransport(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS).validate_native_response,
+            data,
+            display_model=display_model,
+            request=codex_req,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=openai_failure_detail(display_model, "OpenAI returned an invalid native response.")) from exc
 
 
-def _collect_openai_sse_terminal(sse_text: str | bytes, display_model: str) -> dict:
+def _collect_openai_sse_terminal(sse_text: str | bytes, display_model: str, *, request=None) -> dict:
     """Apply the same terminal authority to buffered and streamed native SSE."""
     wire = sse_text.encode("utf-8") if isinstance(sse_text, str) else sse_text
-    adapter = NativeResponsesStreamAdapter(display_model=display_model)
+    adapter = NativeResponsesStreamAdapter(display_model=display_model, request=request)
     for offset in range(0, len(wire), 65536):
         adapter.consume_bytes(wire[offset:offset + 65536])
         if adapter.protocol_failed:
@@ -2951,7 +3006,7 @@ async def openai_upstream_sse_generator(
             return
 
     client, stream_context, response = stream_state
-    adapter = NativeResponsesStreamAdapter(display_model=display_model)
+    adapter = NativeResponsesStreamAdapter(display_model=display_model, request=codex_req)
     tail_deadline = None
     try:
         iterator = response.aiter_bytes().__aiter__()

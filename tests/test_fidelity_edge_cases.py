@@ -55,14 +55,11 @@ class TestTransformationEdgeCases(unittest.TestCase):
         # Non-reserved colon prefixes (BYOK ids) must be preserved verbatim.
         self.assertEqual(canonical_model_id("deepseek:deepseek-chat"), "deepseek:deepseek-chat")
 
-    def test_placeholder_marker_is_stripped_alongside_real_arguments(self):
-        # The schema-injected _placeholder marker must never reach Codex, even
-        # when the model emitted legitimate arguments in the same call.
-        self.assertEqual(
-            clean_function_call_args({INTERNAL_PLACEHOLDER_ARGUMENT: True, "q": "x"}),
-            {"q": "x"},
-        )
-        self.assertEqual(clean_function_call_args({INTERNAL_PLACEHOLDER_ARGUMENT: True}), {})
+    def test_placeholder_marker_is_preserved_without_request_provenance(self):
+        # A generic argument helper cannot prove which schema injected a key.
+        value = {INTERNAL_PLACEHOLDER_ARGUMENT: True, "q": "x"}
+        self.assertEqual(clean_function_call_args(value), value)
+        self.assertEqual(clean_function_call_args({INTERNAL_PLACEHOLDER_ARGUMENT: True}), {INTERNAL_PLACEHOLDER_ARGUMENT: True})
         self.assertEqual(clean_function_call_args({"q": "x"}), {"q": "x"})
 
     def test_input_image_with_only_file_id_is_not_silently_dropped(self):
