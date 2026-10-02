@@ -20,6 +20,7 @@ import pytest
 import httpx
 from fake_upstream import allow_listener, remove_listener
 from standalone import without_installed_packages
+from _test_isolation import expected_denial
 
 from codex_antigravity_auth import byok, cli, oauth, server, unified
 from codex_antigravity_auth.google_transport import AccountLease, GoogleTransport
@@ -357,15 +358,28 @@ print(json.dumps(output))
     assert json.loads(result.stdout) == SAFE + [None] * len(UNSAFE)
 
 
-def test_owned_listener_registration_rejects_non_loopback_or_mismatched_family():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+@pytest.mark.parametrize("family,hosts", [
+    (socket.AF_INET, ["192.0.2.1", "::1"]),
+    (socket.AF_INET6, ["2001:db8::1", "127.0.0.1"]),
+])
+def test_owned_listener_registration_rejects_non_loopback_or_mismatched_family(family, hosts):
+    sock = socket.socket(family, socket.SOCK_STREAM)
     try:
-        with pytest.raises(ValueError, match="loopback"):
-            allow_listener(sock, host="192.0.2.1")
-        with pytest.raises(ValueError, match="loopback"):
-            allow_listener(sock, host="::1")
+        for host in hosts:
+            with pytest.raises(ValueError, match="loopback"):
+                allow_listener(sock, host=host)
     finally:
         sock.close()
+
+
+def test_removed_listener_endpoint_is_denied_before_connection():
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    endpoint = allow_listener(listener)
+    listener.close()
+    remove_listener(endpoint)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+        with expected_denial(), pytest.raises(AssertionError):
+            client.connect(endpoint)
 
 
 @pytest.mark.parametrize("route", ["google", "chat", "native", "byok"])
