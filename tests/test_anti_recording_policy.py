@@ -62,7 +62,8 @@ def test_never_records_only_allowlisted_lifecycle(isolated_anti, status):
     assert SENTINEL not in files[path]
     record = json.loads(files[path])
     assert record["status"] == status
-    assert record["metadata"] == {"request_log_correlation_id": "fixture-run", "output_chars": 4000, "scope_status": "partial"}
+    assert record["metadata"] == {"request_log_correlation_id": "fixture-run", "output_chars": 4000,
+                                  "scope_status": "partial", "panel_lane_count": 1}
     assert "resultPath" not in record
     if sys.platform != "win32":
         assert path.stat().st_mode & 0o777 == 0o600
