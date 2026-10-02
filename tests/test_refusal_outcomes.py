@@ -36,10 +36,10 @@ def semantic_output(output):
 def chat_stream(payloads):
     class Response:
         status_code = 200
-        async def aiter_text(self):
+        async def aiter_bytes(self):
             for payload in payloads:
-                yield "data: " + json.dumps(payload) + "\n"
-            yield "data: [DONE]\n"
+                yield ("data: " + json.dumps(payload) + "\n").encode()
+            yield b"data: [DONE]\n"
     class Client:
         def __init__(self, **kwargs):
             pass
