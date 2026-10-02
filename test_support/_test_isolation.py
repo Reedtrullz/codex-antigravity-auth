@@ -165,7 +165,8 @@ def install():
     class IsolatedPopen(original_popen):
         def __init__(self, args, *positional, **kwargs):
             if positional or kwargs.get("shell") or not isinstance(args, (list, tuple)):
-                _deny("tests require an explicit argv subprocess with keyword options")
+                import traceback
+                _deny("tests require an explicit argv subprocess with keyword options\n" + "".join(traceback.format_stack(limit=10)))
             argv = [os.fspath(a) for a in args]
             command = Path(argv[0]).name.lower()
             env = dict(os.environ if kwargs.get("env") is None else kwargs["env"])
