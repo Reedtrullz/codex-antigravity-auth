@@ -1334,7 +1334,9 @@ class TestServerStreaming(unittest.TestCase):
         terminal = records[-1]
         self.assertEqual(terminal["run_id"], "anti-correlated-run")
         self.assertEqual(terminal["terminal_kind"], "incomplete")
-        self.assertEqual(terminal["terminal_reason"], "max_tokens")
+        self.assertEqual(terminal["terminal_reason"], "max_output_tokens")
+        self.assertEqual(terminal["status"], "incomplete")
+        self.assertTrue(terminal["provider_accepted"])
         self.assertEqual(terminal["attempt_count"], 2)
         self.assertEqual(terminal["rotation_count"], 1)
         self.assertEqual(terminal["outcome_category"], "success")

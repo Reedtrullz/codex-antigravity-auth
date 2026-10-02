@@ -460,6 +460,7 @@ class OpenAICompatibleTransport:
         *,
         response_id: str,
         display_model: str,
+        telemetry: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any] | str]:
         """Execute and normalize one Chat Completions SSE request."""
 
@@ -499,6 +500,8 @@ class OpenAICompatibleTransport:
                     json=prepared.payload,
                     headers=prepared.headers,
                 ) as response:
+                    if telemetry is not None:
+                        telemetry["http_status"] = response.status_code
                     if response.status_code != 200:
                         detail = f"Provider returned HTTP {response.status_code}."
                         try:
