@@ -190,6 +190,8 @@ codex-antigravity doctor --codex-ready --live --live-model claude-sonnet-4-6
 
 `doctor --live` currently supports Google Antigravity models only. It also performs a once-daily cached package-version check against PyPI and warns when an upgrade is available. Set `CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1` to disable that external metadata lookup.
 
+Live readiness requires a completed response with usable text in a completed assistant message. HTTP success alone, failed or incomplete responses (including token-cap exhaustion), refusals, empty output, and malformed responses do not pass. The live probe in `doctor --codex-ready --json` separates `transport_ok` from `generation_ok` and reports `terminal_kind`, `terminal_reason`, and a redacted `error`; `ok` reflects generation success. The check sends one request with the existing token budget and does not retry automatically.
+
 ## 1. Supported Models & Aliases
 You can use standard, developer-friendly names in your `~/.codex/config.toml` that the gateway automatically translates to the official Google Antigravity backend model definitions:
 
