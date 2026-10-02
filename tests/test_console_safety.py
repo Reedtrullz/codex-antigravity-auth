@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from standalone import without_installed_packages
+
 from codex_antigravity_auth import cli
 from codex_antigravity_auth.console import console_print, safe_terminal_text
 
@@ -107,7 +109,7 @@ def test_standalone_anti_uses_same_console_protection(tmp_path):
     shutil.copy2(SCRIPTS / "anti.py", scripts / "anti.py")
     shutil.copytree(SCRIPTS / "anti_lib", scripts / "anti_lib", ignore=shutil.ignore_patterns("__pycache__"))
     code = "import sys; sys.path.insert(0, sys.argv[1]); import anti; anti.print_result(mode='consult', model='fixture', base_url='http://fixture.invalid', text='safe\\x1b]fixture\\x07end')"
-    completed = subprocess.run([sys.executable, "-I", "-S", "-c", code, str(scripts)], cwd=tmp_path, capture_output=True, text=True, timeout=10)
+    completed = subprocess.run([sys.executable, "-c", without_installed_packages(code), str(scripts)], cwd=tmp_path, capture_output=True, text=True, timeout=10)
     assert completed.returncode == 0, completed.stderr
     assert_safe(completed.stdout)
     assert "safe\\x1b]fixture\\x07end" in completed.stdout
