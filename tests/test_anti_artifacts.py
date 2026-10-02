@@ -63,7 +63,7 @@ def test_current_publications_validate_with_truthful_retention_and_scope(publica
         result = stored(Path(record["resultPath"]))
         assert result["schemaVersion"] == 2
         assert result["scopeStatus"] == record["scopeStatus"] == scope
-        assert "/revisions/" in record["resultPath"]
+        assert Path(record["resultPath"]).parent.parent == anti.RUNS_DIR / record["id"] / "revisions"
         assert bool(record["publication"]["lanes"]) is (mode == "full")
 
 
