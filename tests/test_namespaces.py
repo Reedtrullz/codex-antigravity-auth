@@ -8,6 +8,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from standalone import without_installed_packages
 
 from codex_antigravity_auth import byok, cli, constants, models, observability, service, storage, unified
 from codex_antigravity_auth import namespace_migration as migration
@@ -149,13 +150,15 @@ def test_standalone_anti_namespace_paths_without_site_packages(roots, monkeypatc
     monkeypatch.setenv("CODEX_HOME", str(client))
     monkeypatch.setenv("ANTIGRAVITY_STATE_HOME", str(state))
     script_dir = Path(cli.__file__).parent / "skills/anti/scripts"
-    code = '''import json, runpy, sys
+    code = '''import json, os, runpy, sys
+os.environ['CODEX_HOME'] = sys.argv[2]
+os.environ['ANTIGRAVITY_STATE_HOME'] = sys.argv[3]
 sys.path.insert(0, sys.argv[1])
 anti = runpy.run_path(sys.argv[1] + '/anti.py', run_name='synthetic_namespace_import')
 from anti_lib import reflections
 print(json.dumps([str(anti['PID_FILE']), str(anti['LOG_FILE']), str(anti['RUNS_DIR']), str(reflections.REFLECTIONS_DIR)]))
 '''
-    result = subprocess.run([sys.executable, "-S", "-c", code, str(script_dir)], text=True, capture_output=True, timeout=10, check=True)
+    result = subprocess.run([sys.executable, "-c", without_installed_packages(code), str(script_dir), str(client), str(state)], cwd=client.parent, text=True, capture_output=True, timeout=10, check=True)
     assert json.loads(result.stdout) == [str(state / name) for name in ("anti-gateway.pid", "anti-gateway.log", "anti-runs", "anti-runs/reflections")]
     assert not any(path.exists() for path in roots)
 
