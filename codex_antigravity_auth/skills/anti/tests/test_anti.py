@@ -1278,7 +1278,7 @@ class AntiHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
             anti.RUNS_DIR = Path(tmp)
             record_path = anti.RUNS_DIR / "run-1.json"
-            record_path.write_text(json.dumps({"id": "run-1"}), encoding="utf-8")
+            record_path.write_text(json.dumps({"id": "run-1", "status": "success"}), encoding="utf-8")
             old = time.time() - 3 * 86400
             os.utime(record_path, (old, old))
             output = io.StringIO()
@@ -4170,7 +4170,7 @@ class BugfixRegressionTests(unittest.TestCase):
             self.assertTrue(rows[0]["interrupted"])
             self.assertEqual(rows[0]["size"], 0)
 
-    def test_runs_clean_removes_stale_tmp_files(self) -> None:
+    def test_runs_clean_preserves_stale_tmp_files(self) -> None:
         anti = load_anti()
         with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
             anti.RUNS_DIR = Path(tmp)
@@ -4182,8 +4182,9 @@ class BugfixRegressionTests(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 rc = anti.main(["runs", "clean", "--older-than", "1"])
             self.assertEqual(rc, 0)
-            self.assertFalse(tmp_path.exists())
-            self.assertIn("Removed 1", output.getvalue())
+            self.assertTrue(tmp_path.exists())
+            self.assertIn("Removed 0", output.getvalue())
+            self.assertIn("temporary_ownership_unknown", output.getvalue())
 
     # --- B6: provider identifier redaction ---
 
