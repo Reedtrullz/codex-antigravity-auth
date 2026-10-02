@@ -38,6 +38,7 @@ dev = [
   "pyyaml>=6.0",
   "ruff>=0.16.9",
   "tomli>=2.0.1; python_version < '3.11'",
+  "jsonschema>=4.18",
 ]
 
 quality = ["pip-audit>=2.10.1"]
@@ -56,6 +57,8 @@ include = ["codex_antigravity_auth*"]
 [tool.setuptools.package-data]
 codex_antigravity_auth = [
   "skill_assets.json",
+  "design/request-shapes.md",
+  "design/capabilities.md",
   "PROCESS_LOGS.md",
   "design/model-discovery.md",
   "skills/anti/SKILL.md",
