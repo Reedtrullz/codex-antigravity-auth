@@ -154,6 +154,14 @@
           }
         }
       ]
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "dataPolicy": {
+          "$ref": "#/$defs/dataPolicy"
+        }
+      }
     }
   },
   "allOf": [
@@ -273,6 +281,9 @@
                   "degraded_single_model",
                   "failed"
                 ]
+              },
+              "dataPolicy": {
+                "$ref": "#/$defs/dataPolicy"
               }
             },
             "additionalProperties": false
@@ -348,5 +359,85 @@
         }
       }
     }
-  ]
+  ],
+  "$defs": {
+    "dataPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "policySha256",
+        "decisions",
+        "omittedDecisions"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "policySha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "decisions": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "promptSha256",
+              "routeSha256",
+              "stage",
+              "reason",
+              "scannedChars",
+              "secretPatternCount"
+            ],
+            "properties": {
+              "promptSha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "routeSha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "stage": {
+                "enum": [
+                  "primary",
+                  "summary",
+                  "judge",
+                  "fallback"
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "allowed",
+                  "acknowledged",
+                  "route_denied",
+                  "secret_detected",
+                  "scan_limit",
+                  "path_denied"
+                ]
+              },
+              "scannedChars": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8388608
+              },
+              "secretPatternCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8388608
+              }
+            }
+          }
+        },
+        "omittedDecisions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      }
+    }
+  }
 }
