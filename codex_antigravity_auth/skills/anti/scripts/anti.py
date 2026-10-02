@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-from anti_lib.console import ConsoleArgumentParser, console_print as print
 import contextlib
 import contextvars
 import concurrent.futures
@@ -35,6 +34,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+from anti_lib.console import ConsoleArgumentParser, console_print as print
 from anti_lib.capabilities import CapabilityRegistry
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
