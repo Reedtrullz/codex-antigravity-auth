@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator
 import uuid
 
 import httpx
+from starlette.requests import ClientDisconnect
 
 from .endpoint_policy import httpx_client_options
 from .byok import (
@@ -21,7 +22,7 @@ from .byok import (
     validate_provider_headers,
 )
 
-from .request_budget import owned_context
+from .request_budget import RequestDeadlineExceeded, owned_context
 from .resource_limits import ResourceLimitError, json_loads_limited, read_response_bytes
 from .redaction import redact_secret_text
 from .native_output import (
@@ -267,7 +268,6 @@ class ChatResponseAccumulator:
                 {
                     "type": "reasoning",
                     "id": f"rs_{uuid.uuid4().hex[:8]}",
-                    "encrypted_content": "",
                     "step_by_step_summary": "".join(self._reasoning),
                 }
             )
@@ -527,6 +527,8 @@ class OpenAICompatibleTransport:
                         detail = f"Provider returned HTTP {response.status_code}."
                         try:
                             body = (await read_response_bytes(response, limit=65536)).decode("utf-8", errors="replace")
+                        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+                            raise
                         except Exception:
                             body = ""
                         if body:
@@ -599,6 +601,8 @@ class OpenAICompatibleTransport:
                         async for event in fail("invalid_stream_chunk", str(exc)):
                             yield event
                         return
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception:
             if not terminal_emitted:
                 async for event in fail("connection_error", "The provider connection failed."):

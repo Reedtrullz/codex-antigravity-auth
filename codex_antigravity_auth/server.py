@@ -1674,7 +1674,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     detail=openai_failure_detail(model, message),
                     headers=response_headers,
                 ) from exc
-            except (RequestDeadlineExceeded, ClientDisconnect):
+            except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
                 raise
             except Exception as exc:
                 message = f"OpenAI upstream is unreachable: {safe_error_detail(exc)}"
@@ -2868,6 +2868,8 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
             res = await limited_post(client, url, payload=payload, headers=headers)
             if telemetry is not None:
                 telemetry["http_status"] = res.status_code
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"{provider['id']} connection error: {safe_error_detail(e)}") from e
     if res.status_code != 200:
@@ -3013,6 +3015,8 @@ async def _open_openai_upstream_stream(
         if response.status_code != 200:
             try:
                 body = (await read_response_bytes(response, limit=65536)).decode("utf-8", errors="replace")
+            except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+                raise
             except Exception:
                 body = ""
             raise OpenAIUpstreamHTTPError(response.status_code, body, response.headers.get("retry-after"))
@@ -3060,6 +3064,8 @@ async def openai_upstream_sse_generator(
             yield f"data: {json.dumps(error_event)}\n\n"
             yield "data: [DONE]\n\n"
             return
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception as exc:
             error_event = {
                 "type": "response.failed",
@@ -3107,6 +3113,8 @@ async def openai_upstream_sse_generator(
                     tail_deadline = time.monotonic() + OPENAI_UPSTREAM_TIMEOUT_SECONDS
         except (TimeoutError, httpx.TimeoutException):
             terminal_events = adapter.abort("stream_timeout", "The provider stream timed out before EOF.")
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception:
             terminal_events = adapter.abort("stream_interrupted", "The provider stream was interrupted before EOF.")
         else:
@@ -3157,6 +3165,8 @@ async def openai_compatible_sse_generator(
                 done_sent = True
             else:
                 yield f"data: {json.dumps(event)}\n\n"
+    except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+        raise
     except Exception as exc:
         # Parity with the xAI OAuth SSE generator: surface a client-visible
         # error event plus [DONE] instead of dropping the stream mid-flight.

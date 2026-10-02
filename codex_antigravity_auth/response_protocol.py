@@ -643,7 +643,6 @@ class ResponseEventBuilder:
         item = {
             "type": "reasoning",
             "id": self._reasoning_state["id"],
-            "encrypted_content": "",
             "step_by_step_summary": text,
         }
         self._completed_items[self._reasoning_state["output_index"]] = dict(item)

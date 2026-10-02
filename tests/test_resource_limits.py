@@ -16,6 +16,9 @@ from codex_antigravity_auth.resource_limits import Admission, ResourceLimits, Re
 from codex_antigravity_auth.schema import clean_json_schema
 from codex_antigravity_auth.sse import SSEDecoder, SSELimitError
 from codex_antigravity_auth.openai_transport import NativeResponsesStreamAdapter
+from codex_antigravity_auth.request_budget import RequestDeadlineExceeded
+from codex_antigravity_auth.tool_calls import ToolCallError
+from codex_antigravity_auth.transform import function_call_arguments_string
 
 REAL_NATIVE_RESPONSE = server.create_openai_upstream_response
 
@@ -168,6 +171,87 @@ def test_compact_ref_graph_has_bounded_expansion(policy):
     assert len(json.dumps(schema)) < configured.body_bytes
     with pytest.raises(ResourceLimitError) as caught: clean_json_schema(schema)
     assert caught.value.code == "schema_expansion_limit"
+
+
+def test_tool_argument_serialization_prechecks_size_then_rejects_duplicate_keys():
+    wire = '{"outer":{"value":1,"value":2}}'
+    with pytest.raises(ToolCallError):
+        function_call_arguments_string(wire)
+    valid = '{ "outer": {"value": 1} }'
+    assert function_call_arguments_string(valid) == valid
+    deep = '{"value":' + '[' * 70 + '0' + ']' * 70 + '}'
+    with pytest.raises(ResourceLimitError) as caught:
+        function_call_arguments_string(deep)
+    assert caught.value.code == "json_depth_limit"
+
+
+@pytest.mark.parametrize("failure", [
+    ResourceLimitError("provider_body_limit", status=502),
+    RequestDeadlineExceeded(),
+    ClientDisconnect(),
+])
+def test_byok_nonstream_limited_post_preserves_typed_control_errors(monkeypatch, failure):
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+    monkeypatch.setattr(server, "prepare_openai_compatible_request", lambda *args, **kwargs: ({}, "https://example.invalid/v1", {}, 1))
+    monkeypatch.setattr(server.httpx, "AsyncClient", lambda **kwargs: Client())
+    async def rejected(*args, **kwargs): raise failure
+    monkeypatch.setattr(server, "limited_post", rejected)
+    with pytest.raises(type(failure)) as caught:
+        asyncio.run(server.create_openai_compatible_response({}, {"id": "fixture"}, "model", "display"))
+    assert caught.value is failure
+
+
+@pytest.mark.parametrize("failure", [
+    ResourceLimitError("provider_body_limit", status=502),
+    RequestDeadlineExceeded(),
+    ClientDisconnect(),
+])
+def test_native_non200_body_read_preserves_typed_control_errors(monkeypatch, failure):
+    class Response:
+        status_code = 429
+        headers = {"retry-after": "1"}
+    class StreamContext:
+        async def __aenter__(self): return Response()
+        async def __aexit__(self, *args): pass
+    class Client:
+        async def aclose(self): self.closed = True
+        def stream(self, *args, **kwargs): return StreamContext()
+    client = Client()
+    monkeypatch.setattr(server, "openai_responses_url", lambda _auth: "https://example.invalid/v1/responses")
+    monkeypatch.setattr(server, "openai_request_headers", lambda _auth: {})
+    monkeypatch.setattr(server, "httpx_client_options", lambda *args, **kwargs: {})
+    monkeypatch.setattr(server.httpx, "AsyncClient", lambda **kwargs: client)
+    async def rejected(*args, **kwargs): raise failure
+    monkeypatch.setattr(server, "read_response_bytes", rejected)
+    auth = SimpleNamespace(kind="api_key")
+    with pytest.raises(type(failure)) as caught:
+        asyncio.run(server._open_openai_upstream_stream({}, "model", auth))
+    assert caught.value is failure and client.closed
+
+
+def test_native_non200_body_read_io_failure_keeps_upstream_http_status(monkeypatch):
+    class Response:
+        status_code = 429
+        headers = {"retry-after": "1"}
+    class StreamContext:
+        async def __aenter__(self): return Response()
+        async def __aexit__(self, *args): pass
+    class Client:
+        async def aclose(self): self.closed = True
+        def stream(self, *args, **kwargs): return StreamContext()
+    client = Client()
+    monkeypatch.setattr(server, "openai_responses_url", lambda _auth: "https://example.invalid/v1/responses")
+    monkeypatch.setattr(server, "openai_request_headers", lambda _auth: {})
+    monkeypatch.setattr(server, "httpx_client_options", lambda *args, **kwargs: {})
+    monkeypatch.setattr(server.httpx, "AsyncClient", lambda **kwargs: client)
+    async def unreadable(*args, **kwargs): raise OSError("synthetic body-read failure")
+    monkeypatch.setattr(server, "read_response_bytes", unreadable)
+    with pytest.raises(server.OpenAIUpstreamHTTPError) as caught:
+        asyncio.run(server._open_openai_upstream_stream({}, "model", SimpleNamespace(kind="api_key")))
+    assert caught.value.status_code == 429 and caught.value.body == ""
+    assert caught.value.retry_after == "1" and client.closed
 
 
 def test_stream_schema_expansion_rejection_is_local_nonretryable_and_releases_permit(monkeypatch, policy):
