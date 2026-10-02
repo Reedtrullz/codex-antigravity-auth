@@ -1,3 +1,4 @@
+from .endpoint_policy import open_http_request
 from .console import console_print as print
 from .console import ConsoleArgumentParser, safe_terminal_text
 import sys

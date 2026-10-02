@@ -103,7 +103,6 @@ def gateway_generate_probe(
     token_env: str,
     max_output_tokens: int = 16,
 ) -> dict:
-    url = base_url.rstrip("/") + "/responses"
     body = {
         "model": model,
         "input": "Reply with the single word: ready",
@@ -130,14 +129,15 @@ def gateway_generate_probe(
         "http_status": None,
         "error": None,
     }
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        url = _cli.validate_http_base_url(base_url, label="gateway base URL") + "/responses"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with _cli.open_http_request(req, timeout=timeout) as response:
             raw = response.read()
             result["http_status"] = getattr(response, "status", 200)
     except urllib.error.HTTPError as exc:
@@ -211,7 +211,7 @@ def openrouter_reachability_check(*, timeout: float = 5.0) -> dict:
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _cli.open_http_request(req, timeout=timeout) as resp:
             if 200 <= resp.status < 300:
                 result["ok"] = True
             else:
@@ -323,7 +323,7 @@ def _write_version_cache(latest: str) -> None:
 
 def latest_pypi_version(timeout: float = 2.0) -> str | None:
     req = urllib.request.Request(_cli.PYPI_PROJECT_JSON_URL, headers={"Accept": "application/json"}, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as response:
+    with _cli.open_http_request(req, timeout=timeout) as response:
         payload = json.loads(response.read().decode("utf-8"))
     info = payload.get("info") if isinstance(payload, dict) else None
     latest = info.get("version") if isinstance(info, dict) else None
@@ -843,7 +843,7 @@ def run_doctor(
                                          data=json.dumps({"model": resolve_backend_model(DEFAULT_GEMINI_MODEL_ID), "request": {"contents": []}}).encode("utf-8"),
                                          headers={"Content-Type": "application/json"})
             try:
-                resp_ctx = urllib.request.urlopen(req, timeout=5.0)
+                resp_ctx = _cli.open_http_request(req, timeout=5.0)
             except urllib.error.HTTPError as e:
                 if e.code in (401, 403):
                     print("[PASS] Google Antigravity Connectivity: ONLINE (authentication required)")
