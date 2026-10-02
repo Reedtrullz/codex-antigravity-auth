@@ -37,6 +37,8 @@
     "schemas/review-report-v1.json",
     "tests/fixtures/v5-lane-opus.json",
     "tests/fixtures/v5-lane-sonnet.json",
-    "tests/test_anti.py"
+    "tests/test_anti.py",
+    "SCOPES.md",
+    "scripts/anti_lib/inventory.py"
   ]
 }

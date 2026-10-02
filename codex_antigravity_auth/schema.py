@@ -76,6 +76,8 @@ def clean_json_schema(
         props = cleaned.setdefault("properties", {})
         reqs = cleaned.setdefault("required", [])
         if not reqs:
+            if "_placeholder" in props:
+                raise ValueError("Internal placeholder injection conflicts with a declared _placeholder property")
             props["_placeholder"] = {
                 "type": "boolean",
                 "description": "Placeholder property. Always pass true."
