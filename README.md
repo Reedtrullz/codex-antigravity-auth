@@ -511,6 +511,6 @@ the `antigravity-unified` provider block for unified pickers.
 
 ## Release Automation
 
-Tagged releases are prepared for PyPI Trusted Publishing. The `.github/workflows/publish.yml` workflow runs on `v*` tags, requires the [test matrix and installed-artifact gates](#verification) plus a checked sdist/wheel build, then publishes with `pypa/gh-action-pypi-publish@release/v1` using OIDC (`id-token: write`) in the `pypi` environment. The tag must exactly match the package version.
+Tagged releases are prepared for PyPI Trusted Publishing. The `.github/workflows/publish.yml` workflow runs on `v*` tags, requires the [test matrix and installed-artifact gates](#verification) plus a checked sdist/wheel build, then publishes with `pypa/gh-action-pypi-publish@release/v1` using OIDC (`id-token: write`) in the `pypi` environment. The tag must exactly match the package version. External actions are pinned to reviewed commits, and publishing also requires the focused lint, minimum/snapshot compatibility and dependency-audit gates. See [CI dependency and action policy](requirements/README.md) for reproducible commands, scope and expiring audit exceptions.
 
 Before the first PyPI publish, configure the PyPI project `codex-antigravity-auth` with a trusted publisher for this GitHub repository, workflow file `.github/workflows/publish.yml`, and environment `pypi`. No local PyPI API token is required or expected.

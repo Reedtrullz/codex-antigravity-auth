@@ -25,7 +25,7 @@ classifiers = [
 ]
 dependencies = [
   "httpx>=0.28",
-  "fastapi>=0.110",
+  "fastapi>=0.115.6",
   "uvicorn>=0.28",
   "keyring>=25.0.0",
   "cryptography>=42.0.0",
@@ -36,8 +36,11 @@ dependencies = [
 dev = [
   "pytest>=8.0",
   "pyyaml>=6.0",
-  "tomli>=2.0; python_version < '3.11'",
+  "ruff>=0.16.9",
+  "tomli>=2.0.1; python_version < '3.11'",
 ]
+
+quality = ["pip-audit>=2.10.1"]
 
 [project.scripts]
 codex-antigravity = "codex_antigravity_auth.cli:main"
@@ -64,3 +67,20 @@ codex_antigravity_auth = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+# Start with correctness checks in the state/storage/protocol owners and CI
+# helpers. Broaden this list in reviewed changes; no repository formatting gate.
+[tool.ruff]
+target-version = "py310"
+include = [
+  "codex_antigravity_auth/account_state.py",
+  "codex_antigravity_auth/secure_store.py",
+  "codex_antigravity_auth/storage.py",
+  "codex_antigravity_auth/response_protocol.py",
+  "codex_antigravity_auth/schema.py",
+  "scripts/*.py",
+  "tests/test_quality_gates.py",
+]
+
+[tool.ruff.lint]
+select = ["F", "E9"]
