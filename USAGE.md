@@ -371,3 +371,12 @@ unverified. Rejected and unresolved findings remain visible. Existing output
 files are never overwritten, and these commands never publish to GitHub. Retained
 content and provenance limits follow the
 [review export contract](codex_antigravity_auth/skills/anti/ARTIFACTS.md#finding-adjudication-and-review-exports).
+
+### Anti repository submission policies
+
+`consult`, `review`, `plan`, `compare`, `panel` and `workflow` accept opt-in
+`--data-policy PATH`. Exact gateway/model/stage allowlists and forbidden source
+paths restrict the chosen run. Bounded secret-pattern checks stop a submission
+until resolved or explicitly acknowledged for its exact prompt hash. Policy
+dry runs write nothing and report hashes instead of source. See the bundled
+[policy contract](codex_antigravity_auth/skills/anti/DATA_POLICY.md).
