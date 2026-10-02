@@ -190,7 +190,7 @@ class AccountManager:
             if current is None or stopped():
                 return "changed"
 
-            failure = False
+            failure_outcome: AttemptOutcome | None = None
             try:
                 refreshed = refresh_access_token(current["refreshToken"])
                 token = refreshed["access_token"]
@@ -202,8 +202,8 @@ class AccountManager:
                         discovered_project = discover_project_id(token)
                     except Exception:
                         _log.warning("Project discovery failed during token refresh")
-            except Exception:
-                failure = True
+            except Exception as exc:
+                failure_outcome = _refresh_failure_outcome(exc)
 
             if stopped():
                 return "stopped"
@@ -217,10 +217,10 @@ class AccountManager:
                             or not self._same_credentials(account, current)
                             or _refresh_blocked(data, email)):
                         return False
-                    if failure:
+                    if failure_outcome is not None:
                         self._sync_state_from_storage(data)
                         self._state_owner.apply_cooldown(
-                            email, family, AttemptOutcome(scope="account", category="auth"),
+                            email, family, failure_outcome,
                         )
                         result = "failed"
                     else:
