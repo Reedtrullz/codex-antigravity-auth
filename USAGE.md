@@ -362,6 +362,6 @@ The Windows implementation follows Microsoft's
 [GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo),
 [FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info)
 and [SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo)
-contracts. Native Windows tests inspect temporary-file ACLs independently through
-PowerShell; non-Windows runs skip that check and exercise synthetic refusal paths.
+contracts. Native Windows tests inspect temporary-file security descriptors through
+read-only Win32 APIs; non-Windows runs skip that check and exercise synthetic refusal paths.
 No Windows ACL success is inferred from POSIX mode bits or mocked tests.
