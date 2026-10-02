@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from anti_lib.console import ConsoleArgumentParser, console_print as print
 import contextlib
 import concurrent.futures
 from collections import deque
@@ -8572,7 +8573,7 @@ def add_codex_config_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Antigravity Opus/Sonnet sidecar helper for Codex")
+    parser = ConsoleArgumentParser(description="Antigravity Opus/Sonnet sidecar helper for Codex")
     sub = parser.add_subparsers(dest="command", required=True)
 
     panel = sub.add_parser(
