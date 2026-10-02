@@ -1,4 +1,3 @@
-from standalone import without_installed_packages
 """Inspect every persisted fixture file; never contact a provider or real store."""
 import argparse
 import importlib.util
@@ -9,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from standalone import without_installed_packages
+
 SCRIPT = Path(__file__).resolve().parents[1] / "codex_antigravity_auth/skills/anti/scripts/anti.py"
 SENTINEL = "synthetic-private-content-"
 LONG = SENTINEL + "x" * 4000 + "-private-tail"
@@ -17,6 +18,9 @@ SECRET = "sk-syntheticfixture01234567890123456789"
 
 @pytest.fixture
 def isolated_anti(monkeypatch, tmp_path):
+    script_dir = str(SCRIPT.resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
     spec = importlib.util.spec_from_file_location("anti_recording_fixture", SCRIPT)
     anti = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(anti)
@@ -58,7 +62,8 @@ def test_never_records_only_allowlisted_lifecycle(isolated_anti, status):
     assert SENTINEL not in files[path]
     record = json.loads(files[path])
     assert record["status"] == status
-    assert record["metadata"] == {"request_log_correlation_id": "fixture-run", "output_chars": 4000, "scope_status": "partial"}
+    assert record["metadata"] == {"request_log_correlation_id": "fixture-run", "output_chars": 4000,
+                                  "scope_status": "partial", "panel_lane_count": 1}
     assert "resultPath" not in record
     if sys.platform != "win32":
         assert path.stat().st_mode & 0o777 == 0o600

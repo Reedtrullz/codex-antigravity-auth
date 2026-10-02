@@ -41,7 +41,7 @@ def test_chat_http_replay(monkeypatch, seed, finish, delta, terminal):
     assert [e["type"] for e in terminals] == ["response." + terminal]
     terminal_response = terminals[0]["response"]
     if finish == "content_filter":
-        assert terminal_response["output"][0]["content"] == [{"type": "refusal", "refusal": "The provider declined this response (CONTENT_FILTER)."}]
+        assert terminal_response["output"][0]["content"] == [{"type": "refusal", "refusal": delta["refusal"]}]
     elif finish == "length":
         assert terminal_response["incomplete_details"]["reason"] == "max_output_tokens"
     assert requests[0]["path"] == "/v1/chat/completions"
@@ -67,6 +67,18 @@ def test_unowned_loopback_and_external_network_are_denied():
             sock.connect(endpoint)
     with expected_denial(), pytest.raises(AssertionError, match="DNS denied"):
         socket.getaddrinfo("example.invalid", 443)
+
+
+def test_home_resolution_remains_private_when_environment_is_cleared():
+    from pathlib import Path
+    from unittest.mock import patch
+
+    root = Path(os.environ["ANTIGRAVITY_TEST_ROOT"])
+    with patch.dict(os.environ, {}, clear=True):
+        assert Path.home() == root
+        assert Path("~").expanduser() == root
+        assert Path("~/child").expanduser() == root / "child"
+        assert Path(os.path.expanduser("~/child")) == root / "child"
 
 
 @pytest.mark.parametrize("environment", [{}, {"OPENAI_API_KEY": "synthetic-canary", "CODEX_HOME": "/nonexistent-test-state"}])
@@ -95,6 +107,31 @@ else:
 """
     result = subprocess.run([sys.executable, "-c", code, os.environ["HOME"]], env=environment, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(not hasattr(os, "posix_spawn"), reason="POSIX spawn is unavailable")
+def test_validated_python_posix_spawn_preserves_isolation():
+    code = """
+import os, socket
+from _test_isolation import expected_denial
+assert os.environ['ANTIGRAVITY_TEST_ROOT']
+assert os.environ.get('OPENAI_API_KEY') is None
+with expected_denial():
+    try:
+        socket.create_connection(('127.0.0.1', 51122))
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError('network escaped')
+"""
+    result = subprocess.run([sys.executable, "-c", code], close_fds=False,
+                            env={"OPENAI_API_KEY": "synthetic-canary"},
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    with expected_denial(), pytest.raises(AssertionError, match="unguarded subprocess"):
+        os.posix_spawn(sys.executable, [sys.executable, "-c", "pass"], dict(os.environ))
+    with expected_denial(), pytest.raises(AssertionError, match="guarded Python"):
+        subprocess.run(["unvalidated-test-executable"])
 
 
 def test_tool_round_trip_uses_real_http(monkeypatch):

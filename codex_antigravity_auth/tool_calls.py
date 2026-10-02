@@ -142,6 +142,9 @@ def _schema(value, schema, root, budget, depth=0, *, google=False):
         raise ToolCallError('function_schema_mismatch')
     if not isinstance(schema, dict):
         return
+    if schema.get('patternProperties'):
+        # Regex matching is outside this bounded validator's contract.
+        raise ToolCallError('unsupported_tool_schema')
     ref = schema.get('$ref')
     if isinstance(ref, str) and ref.startswith('#'):
         if ref.count('/') > MAX_DEPTH:
@@ -186,8 +189,7 @@ def _schema(value, schema, root, budget, depth=0, *, google=False):
         for key, child in value.items():
             if key in properties:
                 _schema(child, properties[key], root, budget, depth+1, google=google)
-            elif not schema.get('patternProperties'):
-                # Regex-based properties are deliberately not executed locally.
+            else:
                 _schema(child, schema.get('additionalProperties', True), root, budget, depth+1, google=google)
     if isinstance(value, list):
         prefix = schema.get('prefixItems', [])

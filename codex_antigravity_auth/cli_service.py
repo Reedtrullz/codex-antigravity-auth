@@ -1,6 +1,7 @@
 """Gateway process, service, status, and log commands (split from cli.py)."""
 
 from __future__ import annotations
+from .console import console_print as print
 
 import json
 import os
@@ -11,14 +12,17 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from .namespaces import gateway_home
 
 from . import cli as _cli
+from .process_logs import process_log_info, prepare_log
+from .service import service_log_info
 
 
 def _codex_home_read_only() -> Path:
     if _cli.get_codex_home is not _cli._DEFAULT_GET_CODEX_HOME:
         return _cli.get_codex_home()
-    return Path(os.path.expanduser("~/.codex"))
+    return gateway_home()
 
 
 def gateway_model_ids(
@@ -206,7 +210,8 @@ def gateway_pid_matches(pid: int) -> bool | None:
         return None
     if not command:
         return False
-    return "codex_antigravity_auth.server:app" in command and "uvicorn" in command
+    return (("codex_antigravity_auth.server:app" in command and "uvicorn" in command)
+            or ("codex_antigravity_auth.cli" in command and "start" in command and "--port" in command))
 
 
 def read_pid_file(path: Path) -> int | None:
@@ -262,6 +267,8 @@ def run_gateway_status(args) -> dict:
         ).to_dict(),
     }
     info["request_log"] = _cli.request_log_info()
+    info["namespaces"] = _cli.namespace_diagnostics()
+    info["process_log"] = process_log_info(_codex_home_read_only(), args.port)
     if getattr(args, "json", False):
         print(json.dumps(info, indent=2))
     else:
@@ -284,6 +291,7 @@ def run_gateway_status(args) -> dict:
         if service_path:
             print(f"  service_ref: {service_path}")
         print(f"  request_log: {info['request_log']['path']}")
+        print(f"  process_log: {info['process_log']['path']} (2 MiB x 3 files; legacy logs preserved)")
     return info
 
 
@@ -344,7 +352,7 @@ def run_service_command(args) -> dict:
         error=info.get("error"),
     ).to_dict()
     info = {**info, **observed}
-    result = {"service": info, "gateway": gateway}
+    result = {"service": info, "gateway": gateway, "namespaces": _cli.namespace_diagnostics(), **service_log_info(args.port)}
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2))
     else:
@@ -415,6 +423,10 @@ def run_logs_command(args) -> None:
                         f"{item['error_class']} ({item['count']})" for item in group["top_error_classes"]
                     )
                     print(f"  errors: {errors}")
+        if summary.get("requested_window_incomplete"):
+            print(f"[WARN] Retained logs do not establish the full requested window; earliest retained timestamp: {summary.get('earliest_retained_timestamp')}")
+        if summary.get("omitted_records"):
+            print(f"[WARN] {summary['omitted_records']} oversized request-log record(s) were omitted.")
         if summary["malformed_records"]:
             print(f"[WARN] Ignored {summary['malformed_records']} malformed request-log entry/entries.")
         return
@@ -484,15 +496,18 @@ def start_gateway_background(args) -> dict:
     cmd = [
         sys.executable,
         "-m",
-        "uvicorn",
-        "codex_antigravity_auth.server:app",
+        "codex_antigravity_auth.cli",
+        "start",
         "--host",
         args.host,
         "--port",
         str(args.port),
-        "--log-level",
-        "info",
+        "--process-log",
+        str(log_path),
+        "--quiet-runtime-console",
     ]
+    if args.allow_remote:
+        cmd.append("--allow-remote")
     try:
         onepassword_description = _cli.onepassword_runtime_description(
             op_env_file=getattr(args, "op_env_file", None),
@@ -505,37 +520,23 @@ def start_gateway_background(args) -> dict:
         )
     except ValueError as exc:
         raise SystemExit(_cli.redact_secret_text(str(exc))) from exc
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-    if hasattr(os, "O_NOFOLLOW"):
-        log_flags |= os.O_NOFOLLOW
     try:
-        log_fd = os.open(log_path, log_flags, 0o600)
-    except OSError as exc:
-        raise SystemExit(f"Could not open gateway log file {log_path}: {_cli.redact_secret_text(str(exc))}") from exc
+        prepare_log(log_path)
+    except (OSError, ValueError) as exc:
+        raise SystemExit("Could not initialize private process logging; inspect the process-log directory") from exc
     try:
-        if hasattr(os, "fchmod"):
-            os.fchmod(log_fd, 0o600)
-        else:
-            os.chmod(log_path, 0o600)
-        log_file = os.fdopen(log_fd, "ab")
-    except Exception:
-        os.close(log_fd)
-        raise
-    with log_file:
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except FileNotFoundError as exc:
-            raise SystemExit(
-                "Could not start gateway through 1Password because `op` was not found. "
-                "Install 1Password CLI or start without --op-env-file/--op-environment."
-            ) from exc
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            "Could not start gateway through 1Password because `op` was not found. "
+            "Install 1Password CLI or start without --op-env-file/--op-environment."
+        ) from exc
     time.sleep(0.25)
     if proc.poll() is not None:
         raise SystemExit(f"Gateway exited during startup with code {proc.returncode}. See log: {log_path}")

@@ -2,8 +2,8 @@
 
 Generation commands share a monotonic deadline from command entry, including
 preflight elapsed time, chunk calls, lane attempts, retries, fallback and judge
-synthesis. `--run-timeout` defaults to1800 seconds and accepts a finite positive
-value up to86400 seconds. Workflow expansion retains the original control object;
+synthesis. `--run-timeout` defaults to 1800 seconds and accepts a finite positive
+value up to 86400 seconds. Workflow expansion retains the original control object;
 worker lanes do not start a fresh clock. `--timeout` remains an individual HTTP
 upper bound, reduced to the remaining run time on every actual attempt.
 
@@ -16,7 +16,7 @@ python3 scripts/anti.py review --scope staged --run-timeout 300 --save-output su
 
 Existing primary-provider queues remain an admission/fairness layer. A shared
 process-local permit additionally surrounds each actual HTTP generation attempt.
-Google Antigravity and OpenRouter retain their cap of2; other configured providers
+Google Antigravity and OpenRouter retain their cap of 2; other configured providers
 use the command's max-parallel bound (2 when absent). Catalog route/family metadata
 resolves native aliases and provider identities. Legacy colon-prefix routing is
 used only when the catalog lacks a contract; ambiguous bare/slash identities share
