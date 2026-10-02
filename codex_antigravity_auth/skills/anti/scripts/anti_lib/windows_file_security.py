@@ -121,7 +121,8 @@ class WindowsFileSecurity:
             self._ok(self.advapi.GetAce(dacl, 0, ctypes.byref(ace)))
             header = (ctypes.c_ubyte * 4).from_address(ace.value)
             mask = w.DWORD.from_address(ace.value + 4).value
-            if (header[0] != 0 or header[1] != 0 or mask != 0x1F01FF
+            expected_flags = 0x03 if directory else 0  # OI|CI for directories; no file inheritance.
+            if (header[0] != 0 or header[1] != expected_flags or mask != 0x1F01FF
                     or self._sid_text(ctypes.c_void_p(ace.value + 8)) != self.user_sid):
                 raise OSError("Private DACL grants unexpected access")
         finally:
@@ -136,7 +137,10 @@ class WindowsFileSecurity:
         finally:
             self.kernel.LocalFree(old_descriptor)
         descriptor = ctypes.c_void_p()
-        flags = ""  # Protect children individually; do not propagate ACL edits.
+        # Directories grant the owner access inherited by newly created children.
+        # MAXIMUM_ALLOWED on protect_directory's handle prevents SetSecurityInfo
+        # from rewriting existing children; each existing object is protected on use.
+        flags = "OICI" if directory else ""
         sddl = f"O:{self.user_sid}D:P(A;{flags};FA;;;{self.user_sid})"
         self._ok(self.advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None))
         try:
@@ -193,13 +197,12 @@ class WindowsFileSecurity:
             self.kernel.CloseHandle(handle)
 
     def protect_directory(self, path):
-        # An exclusive directory handle prevents SetSecurityInfo propagation to
-        # existing children (documented by Microsoft). Children are protected
-        # individually before their own writes; unrelated ACLs stay untouched.
+        # MAXIMUM_ALLOWED prevents SetSecurityInfo from propagating ACE changes
+        # to existing children. Exclusive sharing remains an additional guard.
         deadline = time.monotonic() + 2.0
         while True:
             try:
-                handle = self._handle(self.kernel.CreateFileW(str(path), 0xE0080, 0, None, 3, 0x02200000, None))
+                handle = self._handle(self.kernel.CreateFileW(str(path), 0x02000000, 0, None, 3, 0x02200000, None))
                 break
             except OSError as exc:
                 if getattr(exc, "winerror", None) != 32 or time.monotonic() >= deadline:
