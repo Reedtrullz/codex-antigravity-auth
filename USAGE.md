@@ -254,7 +254,7 @@ You can use standard, developer-friendly names in your `~/.codex/config.toml` th
 | `gemini-3.8-flash` | `gemini-3.8-flash-tiered` (current Flash; low/medium/high via `thinkingLevel`) |
 | `gemini-3.7-flash` | `gemini-3.7-flash-tiered` (supported Flash) |
 | `gemini-3.1-pro` | `gemini-3.1-pro-low` (Advanced Reasoning Pro) |
-| `gemini-3.1-flash-image` | `gemini-3.1-flash-image` (image generation) |
+| `gemini-3.1-flash-image` | Recognized but not advertised; generation rejects unsupported image output before dispatch |
 | `claude-sonnet-4-6` | `claude-sonnet-4-6` (High-Fidelity Anthropic Sonnet) |
 | `claude-opus-4-6-thinking` | `claude-opus-4-6-thinking` (Deep Anthropic Opus Reasoning) |
 
@@ -443,3 +443,5 @@ dry runs write nothing and report hashes instead of source. See the bundled
 ## Completed function-call validation
 
 Completed tool arguments must encode JSON objects and satisfy the available declared identity and supported schema checks. Invalid calls cannot become executable completion events; usable sibling output is retained with an explicit failed/incomplete result. Google’s internal `_placeholder` is removed only with per-tool injection provenance. See [final-call validation and limits](codex_antigravity_auth/design/tool-calls.md).
+
+Google generated-media parts produce an explicit failure while retaining supported sibling output. The image-generation backend is recognized but excluded from advertised models and rejected before account selection; image input on supported text models remains available. See [Google output support](codex_antigravity_auth/design/google-output.md).
