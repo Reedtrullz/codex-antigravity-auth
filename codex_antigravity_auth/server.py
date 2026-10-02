@@ -1,3 +1,4 @@
+from .console import console_print as print
 import json
 import asyncio
 import math
@@ -5,6 +6,7 @@ import os
 import secrets
 import sys
 import time
+import threading
 import httpx
 
 from .endpoint_policy import httpx_client_options
@@ -103,14 +105,24 @@ class _ClosingStreamingResponse(StreamingResponse):
 
 @asynccontextmanager
 async def gateway_lifespan(_app: FastAPI):
-    schedule_refresh_accounts_ahead(force=True)
-    yield
+    global _refresh_ahead_owner
+    if _refresh_ahead_owner is not None:
+        raise RuntimeError("Gateway refresh lifecycle is already running")
+    owner = _RefreshAheadOwner()
+    _refresh_ahead_owner = owner
+    try:
+        owner.start()
+        yield
+    finally:
+        try:
+            await owner.close()
+        finally:
+            _refresh_ahead_owner = None
 
 
 app = FastAPI(title="Codex Antigravity Gateway", lifespan=gateway_lifespan)
 account_manager = AccountManager()
-_last_refresh_ahead_at = 0.0
-_refresh_ahead_task: asyncio.Task | None = None
+_refresh_ahead_owner: "_RefreshAheadOwner | None" = None
 REFRESH_AHEAD_THROTTLE_SECONDS = 60.0
 STREAM_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 REQUEST_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -332,27 +344,70 @@ async def record_attempt_outcome(
     )
 
 
-def schedule_refresh_accounts_ahead(*, force: bool = False) -> bool:
-    global _last_refresh_ahead_at, _refresh_ahead_task
-    now = time.monotonic()
-    if _refresh_ahead_task is not None and not _refresh_ahead_task.done():
-        return False
-    if not force and now - _last_refresh_ahead_at < REFRESH_AHEAD_THROTTLE_SECONDS:
-        return False
-    _last_refresh_ahead_at = now
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return False
+class _RefreshAheadOwner:
+    """One timer and at most one worker, owned and drained by lifespan."""
 
-    async def _refresh_runner() -> None:
+    def __init__(self) -> None:
+        self.stop = threading.Event()
+        self.wake = asyncio.Event()
+        self.worker: asyncio.Task | None = None
+        self.timer: asyncio.Task | None = None
+        self.last_started = float("-inf")
+
+    def start(self) -> None:
+        schedule_refresh_accounts_ahead(force=True)
+        self.timer = asyncio.create_task(self._periodic(), name="gateway-refresh-timer")
+
+    async def _periodic(self) -> None:
+        while not self.stop.is_set():
+            try:
+                await asyncio.wait_for(self.wake.wait(), REFRESH_AHEAD_THROTTLE_SECONDS)
+            except asyncio.TimeoutError:
+                schedule_refresh_accounts_ahead()
+
+    def schedule(self, *, force: bool = False) -> bool:
+        if self.stop.is_set() or (self.worker is not None and not self.worker.done()):
+            return False
+        now = time.monotonic()
+        if not force and now - self.last_started < REFRESH_AHEAD_THROTTLE_SECONDS:
+            return False
+        self.last_started = now
+        self.worker = asyncio.create_task(self._refresh(), name="gateway-refresh-worker")
+        return True
+
+    async def _refresh(self) -> None:
         try:
-            await run_in_threadpool(account_manager.refresh_expiring_accounts, 300)
+            await asyncio.to_thread(account_manager.refresh_expiring_accounts, 300, stop_event=self.stop)
         except Exception:
+            # A transient store/refresh failure must not kill the periodic owner.
             return
 
-    _refresh_ahead_task = loop.create_task(_refresh_runner())
-    return True
+    async def close(self) -> None:
+        self.stop.set()
+        self.wake.set()
+        cancelled = False
+        for task in (self.timer, self.worker):
+            if task is None:
+                continue
+            # Cancelling to_thread abandons its running thread. Drain the owned
+            # worker instead; it observes stop before discovery and merge.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if not task.cancelled():
+                task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+
+def schedule_refresh_accounts_ahead(*, force: bool = False) -> bool:
+    # Requests without a running lifespan may not create unowned background work.
+    owner = _refresh_ahead_owner
+    if owner is None:
+        return False
+    return owner.schedule(force=force)
 
 
 def account_health_summary() -> dict:
@@ -1166,6 +1221,7 @@ async def create_response(request: Request):
     request_started = time.monotonic()
     request_run_id: str | None = None
     diagnostic_deadline: float | None = None
+    upstream_observation: dict = {}
 
     async def log_request(
         status: str,
@@ -1190,7 +1246,27 @@ async def create_response(request: Request):
         outcome_category: str | None = None,
         cancelled: bool = False,
         terminal_cleanup: bool = False,
+        response_payload: dict | None = None,
     ) -> None:
+        if isinstance(response_payload, dict):
+            terminal_kind = response_payload.get("status")
+            if not isinstance(terminal_kind, str) or terminal_kind not in {"completed", "incomplete", "failed"}:
+                terminal_kind = "failed"
+            if usage is None and isinstance(response_payload.get("usage"), dict):
+                usage = response_payload["usage"]
+            incomplete = response_payload.get("incomplete_details")
+            if terminal_kind == "incomplete" and isinstance(incomplete, dict):
+                terminal_reason = incomplete.get("reason") or terminal_reason
+            failure = response_payload.get("error")
+            if terminal_kind == "failed" and isinstance(failure, dict):
+                error_class = failure.get("code") or error_class
+                error = failure.get("message") or error
+        phase = "started" if status == "stream_started" else "terminal"
+        if phase == "terminal":
+            cancelled = cancelled or status == "cancelled"
+            terminal_kind = terminal_kind or {"success": "completed", "incomplete": "incomplete"}.get(status, "failed")
+            status = "cancelled" if cancelled else {"completed": "success", "incomplete": "incomplete"}.get(terminal_kind, "failed")
+            terminal_reason = "cancelled" if cancelled else terminal_reason or error_class or terminal_kind
         record = {
             "request_id": request_id,
             "run_id": request_run_id,
@@ -1200,6 +1276,9 @@ async def create_response(request: Request):
             "family": family,
             "stream": stream,
             "status": status,
+            "lifecycle_phase": phase,
+            "upstream_http_status": upstream_observation.get("http_status"),
+            "provider_accepted": (200 <= upstream_observation["http_status"] < 300) if upstream_observation.get("http_status") is not None else None,
             "latency_ms": int((time.monotonic() - request_started) * 1000),
             "http_status": http_status,
             "retry_after_source": retry_after_source,
@@ -1217,7 +1296,10 @@ async def create_response(request: Request):
             "cancelled": cancelled,
         }
         if diagnostic_deadline is None and not terminal_cleanup:
-            await run_in_threadpool(write_request_record, record)
+            try:
+                await run_in_threadpool(write_request_record, record)
+            except Exception:
+                pass
             return
         remaining = 2.0 if terminal_cleanup else diagnostic_deadline - time.monotonic()
         if remaining <= 0:
@@ -1230,7 +1312,11 @@ async def create_response(request: Request):
                     abandon_on_cancel=True,
                 )
         except TimeoutError as exc:
+            if terminal_cleanup:
+                return
             raise RequestDeadlineExceeded() from exc
+        except Exception:
+            return
 
     async def best_effort_diagnostic(awaitable, *, deadline: float | None = None) -> None:
         timeout = 2.0
@@ -1249,16 +1335,20 @@ async def create_response(request: Request):
     except Exception:
         await log_request("failed", http_status=400, error_class="invalid_json", error="Invalid JSON body")
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-    codex_req = validate_response_request_body(codex_req)
-    request_metadata = codex_req.pop("metadata", None)
-    if isinstance(request_metadata, dict) and isinstance(request_metadata.get("run_id"), str):
-        request_run_id = request_metadata["run_id"]
-    google_backend_timeout = google_backend_timeout_from_metadata(request_metadata)
+    try:
+        codex_req = validate_response_request_body(codex_req)
+        request_metadata = codex_req.pop("metadata", None)
+        if isinstance(request_metadata, dict) and isinstance(request_metadata.get("run_id"), str):
+            request_run_id = request_metadata["run_id"]
+        google_backend_timeout = google_backend_timeout_from_metadata(request_metadata)
 
-    reject_unsupported_previous_response(codex_req)
-    model = response_model_id(codex_req)
-    codex_req["model"] = model
-    stream = response_stream_flag(codex_req)
+        reject_unsupported_previous_response(codex_req)
+        model = response_model_id(codex_req)
+        codex_req["model"] = model
+        stream = response_stream_flag(codex_req)
+    except HTTPException as exc:
+        await log_request("failed", http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
+        raise
     unified_enabled = is_unified_mode_enabled()
     unified_route = classify_route(model, unified_enabled=unified_enabled)
     if unified_route == "unknown":
@@ -1326,7 +1416,7 @@ async def create_response(request: Request):
         if stream:
             try:
                 openai_stream_state = await _open_openai_upstream_stream(
-                    codex_req, upstream_model, auth
+                    codex_req, upstream_model, auth, telemetry=upstream_observation
                 )
             except OpenAIUpstreamHTTPError as exc:
                 if exc.status_code in (401, 403):
@@ -1380,14 +1470,15 @@ async def create_response(request: Request):
                     detail=openai_failure_detail(model, message),
                 ) from exc
 
-            await log_request("stream_started", model=model, route="openai", provider="openai", family="openai", stream=True)
+            await log_request("stream_started", model=model, route="openai", provider="openai", family="openai", stream=True, http_status=200)
 
             async def logged_openai_stream() -> AsyncGenerator[str, None]:
                 terminal_status = "ended"
-                terminal_http_status = None
+                terminal_http_status = 200  # The native upstream stream is already open.
                 terminal_error_class = None
                 terminal_error = None
                 terminal_usage = None
+                terminal_response_payload = None
                 try:
                     async for chunk in openai_upstream_sse_generator(
                         codex_req,
@@ -1407,40 +1498,54 @@ async def create_response(request: Request):
                             if not isinstance(event, dict):
                                 continue
                             etype = event.get("type")
+                            if etype in {"response.completed", "response.incomplete", "response.failed"}:
+                                terminal_response_payload = event.get("response")
+                                if isinstance(terminal_response_payload, dict) and isinstance(terminal_response_payload.get("usage"), dict):
+                                    terminal_usage = terminal_response_payload["usage"]
                             if etype in {"response.completed", "response.incomplete"}:
-                                terminal_status = "success"
+                                terminal_status = "success" if etype == "response.completed" else "incomplete"
                                 terminal_http_status = 200
                                 resp = event.get("response")
                                 if isinstance(resp, dict) and isinstance(resp.get("usage"), dict):
                                     terminal_usage = resp["usage"]
                             elif etype == "response.failed":
                                 terminal_status = "failed"
+                                terminal_http_status = 200
                                 err = event.get("response", {}).get("error", {}) if isinstance(event.get("response"), dict) else {}
                                 terminal_error_class = err.get("code") if isinstance(err, dict) else "stream_error"
                                 terminal_error = err.get("message") if isinstance(err, dict) else "OpenAI stream failed"
                         yield chunk
+                except (asyncio.CancelledError, GeneratorExit):
+                    if terminal_response_payload is None:
+                        terminal_status = "cancelled"
+                        terminal_error_class = "cancelled"
+                    raise
                 except Exception as exc:
+                    terminal_response_payload = None
                     terminal_status = "failed"
                     terminal_error_class = "stream_exception"
                     terminal_error = exc
                     raise
                 finally:
-                    await log_request(
-                        terminal_status,
-                        model=model,
-                        route="openai",
-                        provider="openai",
-                        family="openai",
-                        stream=True,
-                        http_status=terminal_http_status,
-                        usage=terminal_usage,
-                        error_class=terminal_error_class,
-                        error=terminal_error,
-                    )
+                    with anyio.CancelScope(shield=True):
+                        await log_request(
+                            terminal_status,
+                            model=model,
+                            route="openai",
+                            provider="openai",
+                            family="openai",
+                            stream=True,
+                            http_status=terminal_http_status,
+                            usage=terminal_usage,
+                            error_class=terminal_error_class,
+                            error=terminal_error,
+                            response_payload=terminal_response_payload,
+                            terminal_cleanup=True,
+                        )
 
             return StreamingResponse(logged_openai_stream(), media_type="text/event-stream")
         try:
-            response = await create_openai_upstream_response(codex_req, upstream_model, auth, model)
+            response = await create_openai_upstream_response(codex_req, upstream_model, auth, model, telemetry=upstream_observation)
         except HTTPException as exc:
             detail_text = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail)
             await log_request(
@@ -1464,10 +1569,15 @@ async def create_response(request: Request):
             stream=False,
             http_status=200,
             usage=response.get("usage") if isinstance(response, dict) else None,
+            response_payload=response if isinstance(response, dict) else None,
         )
         return response
     provider_id, provider_model = split_provider_model(model)
-    validate_provider_model_id(provider_id, provider_model)
+    try:
+        validate_provider_model_id(provider_id, provider_model)
+    except HTTPException as exc:
+        await log_request("failed", model=model, route="byok", provider=provider_id, stream=stream, http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
+        raise
     if provider_id is not None:
         # Normalize self-referential prefixes (openrouter:openrouter/x ->
         # openrouter:x) so catalog ids, capability lookup, and the upstream
@@ -1529,8 +1639,10 @@ async def create_response(request: Request):
                 terminal_error_class = None
                 terminal_error = None
                 terminal_usage = None
+                terminal_response_payload = None
+                telemetry = upstream_observation
                 try:
-                    async for chunk in openai_compatible_sse_generator(payload, url, headers, timeout, provider, model):
+                    async for chunk in openai_compatible_sse_generator(payload, url, headers, timeout, provider, model, telemetry=telemetry):
                         for line in chunk.splitlines():
                             if not line.startswith("data: ") or line == "data: [DONE]":
                                 continue
@@ -1544,6 +1656,8 @@ async def create_response(request: Request):
                             # completions into Responses events before yielding.
                             event_type = event.get("type")
                             response_payload = event.get("response")
+                            if event_type in {"response.completed", "response.incomplete", "response.failed"}:
+                                terminal_response_payload = response_payload
                             if event_type == "response.failed":
                                 error_payload = response_payload.get("error") if isinstance(response_payload, dict) else None
                                 terminal_status = "failed"
@@ -1563,35 +1677,44 @@ async def create_response(request: Request):
                             if event_type is None:
                                 choices = event.get("choices")
                                 if isinstance(choices, list) and choices and isinstance(choices[0], dict) and choices[0].get("finish_reason"):
-                                    terminal_status = "success"
+                                    terminal_status = "incomplete" if choices[0]["finish_reason"] in {"length", "content_filter"} else "success"
                                     terminal_http_status = 200
                             if isinstance(usage, dict):
                                 terminal_usage = usage
                         yield chunk
+                except (asyncio.CancelledError, GeneratorExit):
+                    if terminal_response_payload is None:
+                        terminal_status = "cancelled"
+                        terminal_error_class = "cancelled"
+                    raise
                 except Exception as exc:
+                    terminal_response_payload = None
                     terminal_status = "failed"
                     terminal_error_class = "stream_exception"
                     terminal_error = exc
                     raise
                 finally:
-                    await log_request(
-                        terminal_status,
-                        model=model,
-                        route="byok",
-                        provider=provider_id,
-                        stream=True,
-                        http_status=terminal_http_status,
-                        usage=terminal_usage,
-                        error_class=terminal_error_class,
-                        error=terminal_error,
-                    )
+                    with anyio.CancelScope(shield=True):
+                        await log_request(
+                            terminal_status,
+                            model=model,
+                            route="byok",
+                            provider=provider_id,
+                            stream=True,
+                            http_status=telemetry.get("http_status", terminal_http_status),
+                            usage=terminal_usage,
+                            error_class=terminal_error_class,
+                            error=terminal_error,
+                            response_payload=terminal_response_payload,
+                            terminal_cleanup=True,
+                        )
 
             return StreamingResponse(
                 logged_byok_stream(),
                 media_type="text/event-stream",
             )
         try:
-            response = await create_openai_compatible_response(codex_req, provider, provider_model, model)
+            response = await create_openai_compatible_response(codex_req, provider, provider_model, model, telemetry=upstream_observation)
         except HTTPException as exc:
             await log_request(
                 "failed",
@@ -1612,6 +1735,7 @@ async def create_response(request: Request):
             stream=False,
             http_status=200,
             usage=response.get("usage") if isinstance(response, dict) else None,
+            response_payload=response if isinstance(response, dict) else None,
         )
         return response
     
@@ -1804,7 +1928,10 @@ async def create_response(request: Request):
         try:
             if stream:
                 return None
-            return await google_transport.post(codex_req, account_lease(selected_account))
+            upstream_observation.pop("http_status", None)
+            response = await google_transport.post(codex_req, account_lease(selected_account))
+            upstream_observation["http_status"] = response.status_code
+            return response
         except (httpx.HTTPError, OSError, GoogleHTTPError, GoogleStreamPayloadError):
             return None
         except Exception as exc:
@@ -2127,6 +2254,7 @@ async def create_response(request: Request):
                     usage=codex_resp.get("usage") if isinstance(codex_resp, dict) else None,
                     error_class=None if request_succeeded else provider_result.terminal.error_code,
                     error=None if request_succeeded else provider_result.terminal.error_message,
+                    response_payload=codex_resp,
                     terminal_kind=provider_result.terminal.kind.value,
                     terminal_reason=provider_result.terminal.reason,
                     attempt_count=len(response_attempts),
@@ -2214,6 +2342,9 @@ async def create_response(request: Request):
     # Handle standard SSE streaming response path
     stream_attempts = [account]
     recorded_stream_attempts: set[str] = set()
+    observed_stream_terminal: dict | None = None
+    observed_stream_account: dict | None = None
+    stream_terminal_logged = False
 
     async def record_stream_attempt(
         selected_account: dict,
@@ -2237,6 +2368,7 @@ async def create_response(request: Request):
         recorded_stream_attempts.add(email)
 
     async def sse_generator() -> AsyncGenerator[str, None]:
+        nonlocal observed_stream_terminal, observed_stream_account, stream_terminal_logged
         import uuid
         response_id = f"resp_{uuid.uuid4().hex[:12]}"
         adapter = GoogleStreamEventAdapter(response_id=response_id, display_model=model)
@@ -2250,6 +2382,7 @@ async def create_response(request: Request):
         while attempt_num < len(stream_attempts):
             stream_account = stream_attempts[attempt_num]
             terminal_event: dict | None = None
+            upstream_observation.pop("http_status", None)
             try:
                 async with aclosing(google_transport.stream_events(
                     codex_req,
@@ -2257,6 +2390,7 @@ async def create_response(request: Request):
                     response_id=response_id,
                     display_model=model,
                     adapter=adapter,
+                    telemetry=upstream_observation,
                 )) as events:
                     async for event in events:
                         if isinstance(event, dict) and event.get("type") in {
@@ -2265,8 +2399,11 @@ async def create_response(request: Request):
                             "response.failed",
                         }:
                             terminal_event = event
+                            observed_stream_terminal = event
+                            observed_stream_account = stream_account
                         yield serialize_transport_event(event)
             except GoogleHTTPError as exc:
+                upstream_observation["http_status"] = exc.status_code
                 try:
                     retry_after = (
                         retry_after_seconds_from_response(exc.response)
@@ -2323,6 +2460,8 @@ async def create_response(request: Request):
                         route="google",
                         family=family,
                         stream=True,
+                        http_status=upstream_observation.get("http_status"),
+                        usage=adapter.accumulator.usage,
                         error_class=error_code,
                         error=error_message,
                         rotation_attempted=attempt_num > 0,
@@ -2365,6 +2504,7 @@ async def create_response(request: Request):
                             http_status=200,
                             rotation_attempted=attempt_num > 0,
                             usage=usage_payload,
+                            response_payload=response_payload,
                             terminal_kind=terminal_status,
                             terminal_reason=terminal_status,
                             attempt_count=len(stream_attempts),
@@ -2393,7 +2533,9 @@ async def create_response(request: Request):
                             error_class=error.get("code") if isinstance(error, dict) else None,
                             error=error.get("message") if isinstance(error, dict) else None,
                             rotation_attempted=attempt_num > 0,
+                            response_payload=response_payload,
                         )
+                    stream_terminal_logged = True
                     return
 
             if attempt_num == 0 and not adapter.visible_output_started:
@@ -2418,6 +2560,8 @@ async def create_response(request: Request):
                 route="google",
                 family=family,
                 stream=True,
+                http_status=upstream_observation.get("http_status"),
+                usage=adapter.accumulator.usage,
                 error_class=error_code,
                 error=error_message,
                 rotation_attempted=attempt_num > 0,
@@ -2439,7 +2583,17 @@ async def create_response(request: Request):
                 )
                 try:
                     with anyio.fail_after(1.0):
-                        if cancelled:
+                        if observed_stream_terminal is not None and not stream_terminal_logged:
+                            terminal_payload = observed_stream_terminal.get("response", {})
+                            await log_request(
+                                "ended", model=model, route="google", family=family, stream=True,
+                                http_status=upstream_observation.get("http_status"),
+                                response_payload=terminal_payload,
+                                attempt_count=len(stream_attempts),
+                                rotation_count=max(0, len(stream_attempts) - 1),
+                                terminal_cleanup=True,
+                            )
+                        elif cancelled and observed_stream_terminal is None:
                             await log_request(
                                 "cancelled",
                                 model=model,
@@ -2460,10 +2614,14 @@ async def create_response(request: Request):
                 for used_account in stream_attempts:
                     try:
                         with anyio.fail_after(1.0):
+                            final_account = observed_stream_account is not None and used_account.get("email") == observed_stream_account.get("email")
+                            terminal_payload = observed_stream_terminal.get("response", {}) if observed_stream_terminal is not None and final_account else {}
+                            final_kind = terminal_payload.get("status")
                             await record_stream_attempt(
                                 used_account,
-                                AttemptOutcome(scope="none", category="cancelled"),
-                                error_class="cancelled",
+                                AttemptOutcome(scope="none", category=("success" if final_kind in {"completed", "incomplete"} else "transport") if final_account else "cancelled"),
+                                usage=terminal_payload.get("usage"),
+                                error_class=None if final_kind in {"completed", "incomplete"} else "provider_error" if final_account else "cancelled",
                             )
                     except Exception:
                         pass
@@ -2481,14 +2639,17 @@ async def create_response(request: Request):
             with anyio.CancelScope(shield=True):
                 await cleanup_stream_accounts()
 
+    await log_request("stream_started", model=model, route="google", family=family, stream=True)
     return _ClosingStreamingResponse(managed_sse_generator(), media_type="text/event-stream")
 
 
-async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str) -> dict:
+async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str, *, telemetry: dict | None = None) -> dict:
     payload, url, headers, timeout = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=False)
     async with httpx.AsyncClient(**httpx_client_options(url, timeout=timeout)) as client:
         try:
             res = await client.post(url, json=payload, headers=headers)
+            if telemetry is not None:
+                telemetry["http_status"] = res.status_code
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"{provider['id']} connection error: {safe_error_detail(e)}") from e
     if res.status_code != 200:
@@ -2509,7 +2670,7 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
         raise HTTPException(status_code=500, detail=f"{provider['id']} response translation failed: {safe_error_detail(e)}") from e
 
 async def create_openai_upstream_response(
-    codex_req: dict, upstream_model: str, auth, display_model: str
+    codex_req: dict, upstream_model: str, auth, display_model: str, *, telemetry: dict | None = None
 ) -> dict:
     """Native Responses passthrough to the OpenAI upstream (no translation)."""
     from .unified import build_openai_payload as _build_payload
@@ -2523,6 +2684,8 @@ async def create_openai_upstream_response(
         try:
             async with httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS)) as client:
                 res = await client.post(url, json=payload, headers=headers)
+                if telemetry is not None:
+                    telemetry["http_status"] = res.status_code
         except Exception as exc:
             raise HTTPException(
                 status_code=502,
@@ -2543,7 +2706,7 @@ async def create_openai_upstream_response(
                 detail=openai_failure_detail(display_model, f"OpenAI upstream error: {safe_error_detail(res.text)}"),
             )
         try:
-            terminal = _collect_openai_sse_terminal(res.text, display_model)
+            terminal = _collect_openai_sse_terminal(res.content, display_model)
         except Exception as exc:
             raise HTTPException(
                 status_code=502,
@@ -2559,6 +2722,8 @@ async def create_openai_upstream_response(
     try:
         async with httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS)) as client:
             res = await client.post(url, json=payload, headers=headers)
+            if telemetry is not None:
+                telemetry["http_status"] = res.status_code
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -2590,14 +2755,16 @@ async def create_openai_upstream_response(
     return data
 
 
-def _collect_openai_sse_terminal(sse_text: str, display_model: str) -> dict | None:
+def _collect_openai_sse_terminal(sse_text: str | bytes, display_model: str) -> dict | None:
     """Extract the terminal Responses object from a buffered SSE body."""
+    from itertools import chain
+    from .sse import SSEDecoder
+
+    decoder = SSEDecoder()
+    wire = sse_text.encode("utf-8") if isinstance(sse_text, str) else sse_text
     terminal: dict | None = None
-    for raw_line in sse_text.splitlines():
-        line = raw_line.strip()
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
+    for data in chain(decoder.feed(wire), decoder.finish()):
+        data = data.strip()
         if data == "[DONE]":
             continue
         try:
@@ -2624,7 +2791,7 @@ async def _close_openai_upstream_stream(client, stream_context) -> None:
 
 
 async def _open_openai_upstream_stream(
-    codex_req: dict, upstream_model: str, auth
+    codex_req: dict, upstream_model: str, auth, *, telemetry: dict | None = None
 ):
     """Open an OpenAI SSE request and validate its status before streaming."""
     from .unified import build_openai_payload as _build_payload
@@ -2639,6 +2806,8 @@ async def _open_openai_upstream_stream(
     stream_context = client.stream("POST", url, json=payload, headers=headers)
     try:
         response = await stream_context.__aenter__()
+        if telemetry is not None:
+            telemetry["http_status"] = response.status_code
     except BaseException:
         await client.aclose()
         raise
@@ -2720,8 +2889,8 @@ async def openai_upstream_sse_generator(
     client, stream_context, response = stream_state
     adapter = NativeResponsesStreamAdapter(display_model=display_model)
     try:
-        async for chunk in response.aiter_text():
-            for event in adapter.consume_bytes(chunk.encode("utf-8", errors="replace")):
+        async for chunk in response.aiter_bytes():
+            for event in adapter.consume_bytes(chunk):
                 yield f"data: {json.dumps(event)}\n\n"
         for event in adapter.finish():
             yield f"data: {json.dumps(event)}\n\n"
@@ -2737,6 +2906,8 @@ async def openai_compatible_sse_generator(
     timeout: float,
     provider: dict,
     display_model: str,
+    *,
+    telemetry: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     import uuid
 
@@ -2757,6 +2928,7 @@ async def openai_compatible_sse_generator(
             prepared,
             response_id=response_id,
             display_model=display_model,
+            **({"telemetry": telemetry} if telemetry is not None else {}),
         ):
             if event == "[DONE]":
                 yield "data: [DONE]\n\n"

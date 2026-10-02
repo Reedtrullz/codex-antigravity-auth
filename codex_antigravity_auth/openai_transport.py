@@ -26,6 +26,7 @@ from .redaction import redact_secret_text
 from .response_protocol import (
     ProviderCapabilities,
     validate_capabilities,
+    POLICY_FINISH_REASONS,
     PrimaryAlternativeSelector,
     ProviderResult,
     ProviderTerminal,
@@ -40,74 +41,7 @@ from .transform import function_call_arguments_string, valid_function_name
 from .transform import transform_request_to_chat
 
 
-class SSELineError(RuntimeError):
-    """Raised when an SSE stream produces a malformed or truncated line."""
-
-
-async def iter_sse_data(response, *, label: str = "provider") -> AsyncIterator[str]:
-    buffer = ""
-    pending: list[str] = []
-
-    async for chunk in response.aiter_text():
-        buffer += chunk
-        while "\n" in buffer:
-            line, buffer = buffer.split("\n", 1)
-            stripped = line.strip()
-            if not stripped:
-                # SSE event boundary: flush any accumulated data lines.
-                if pending:
-                    payload = "\n".join(pending)
-                    pending = []
-                    yield payload
-                continue
-            if not stripped.startswith("data:"):
-                # Non-data metadata lines (event:, id:, retry:) are ignored;
-                # a pending frame is flushed at the next event boundary.
-                continue
-            payload = stripped[5:].strip()
-            # SSE continuation lines join with "\n". Parse-or-accumulate:
-            # a standalone line is emitted immediately, and a fragment that
-            # does not yet parse as JSON waits for its continuation lines so
-            # both blank-line-separated and bare-\n frames work.
-            if pending:
-                if payload == "[DONE]":
-                    # A [DONE] marker is never a JSON continuation: flush the
-                    # incomplete fragment (the caller reports it as malformed)
-                    # and deliver the marker on its own.
-                    yield "\n".join(pending)
-                    pending = []
-                    yield payload
-                    continue
-                candidate = "\n".join([*pending, payload])
-                try:
-                    json.loads(candidate)
-                except json.JSONDecodeError:
-                    pending.append(payload)
-                    continue
-                pending = []
-                yield candidate
-                continue
-            if payload == "[DONE]":
-                yield payload
-                continue
-            try:
-                json.loads(payload)
-            except json.JSONDecodeError:
-                pending.append(payload)
-                continue
-            yield payload
-    if buffer.strip():
-        stripped = buffer.strip()
-        if stripped.startswith("data:"):
-            payload = stripped[5:].strip()
-            if pending:
-                yield "\n".join([*pending, payload])
-            else:
-                yield payload
-        else:
-            raise SSELineError(f"The {label} stream ended with an incomplete SSE frame.")
-    elif pending:
-        yield "\n".join(pending)
+from .sse import SSEDecoder, SSELineError, iter_sse_data
 
 
 def parse_sse_payload(data: str, *, label: str = "provider") -> dict[str, Any]:
@@ -135,6 +69,26 @@ class PreparedOpenAIRequest:
     timeout: float
 
 
+def _message_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(part["text"] for part in content if isinstance(part, dict) and isinstance(part.get("text"), str))
+    return ""
+
+
+def _message_refusal(message: dict[str, Any]) -> str:
+    refusal = message.get("refusal")
+    if isinstance(refusal, str) and refusal:
+        return refusal
+    content = message.get("content")
+    if isinstance(content, list):
+        return "".join(part["refusal"] for part in content if isinstance(part, dict)
+                       and part.get("type") == "refusal" and isinstance(part.get("refusal"), str))
+    return ""
+
+
 def _message_output(message: object) -> list[dict[str, Any]]:
     if not isinstance(message, dict):
         return []
@@ -148,17 +102,7 @@ def _message_output(message: object) -> list[dict[str, Any]]:
                 "step_by_step_summary": reasoning,
             }
         )
-    content = message.get("content")
-    if isinstance(content, str):
-        text = content
-    elif isinstance(content, list):
-        text = "".join(
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and isinstance(part.get("text"), str)
-        )
-    else:
-        text = ""
+    text = _message_text(message)
     if text:
         output.append(
             {
@@ -169,6 +113,9 @@ def _message_output(message: object) -> list[dict[str, Any]]:
                 "content": [{"type": "output_text", "text": text, "annotations": []}],
             }
         )
+    refusal = _message_refusal(message)
+    if refusal:
+        output.append(refusal_item(refusal_text=refusal))
     tool_calls = message.get("tool_calls")
     if isinstance(tool_calls, list):
         for tool_call in tool_calls:
@@ -200,7 +147,8 @@ class ChatResponseAccumulator:
         self._done = False
         self._malformed = False
         self._primary = PrimaryAlternativeSelector()
-        self._refusal = False
+        self._refusal = ""
+        self._blocked = False
         self._tool_names: dict[int, str] = {}
         self._tool_arguments: dict[int, str] = {}
 
@@ -230,21 +178,20 @@ class ChatResponseAccumulator:
             if not isinstance(choice, dict):
                 continue
             finish_reason = choice.get("finish_reason")
-            if isinstance(finish_reason, str) and finish_reason:
+            if finish_reason is not None and not isinstance(finish_reason, str):
+                self._malformed = True
+            if isinstance(finish_reason, str):
                 self._finish_reason = finish_reason
-                if finish_reason == "content_filter":
-                    self._refusal = True
+                if finish_reason.strip().lower() in POLICY_FINISH_REASONS:
+                    self._blocked = True
             delta = choice.get("delta")
             if not isinstance(delta, dict):
                 continue
-            content = delta.get("content")
-            if isinstance(content, str):
-                self._text += content
+            self._text += _message_text(delta)
             reasoning = delta.get("reasoning_content")
             if isinstance(reasoning, str):
                 self._reasoning += reasoning
-            if isinstance(delta.get("refusal"), str) and delta["refusal"]:
-                self._refusal = True
+            self._refusal += _message_refusal(delta)
             tool_calls = delta.get("tool_calls")
             if isinstance(tool_calls, list):
                 for position, tool_call in enumerate(tool_calls):
@@ -283,8 +230,8 @@ class ChatResponseAccumulator:
                     "content": [{"type": "output_text", "text": self._text, "annotations": []}],
                 }
             )
-        if self._refusal and not output:
-            output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
+        if self._refusal or self._blocked:
+            output.append(refusal_item({"blockReason": "CONTENT_FILTER"}, refusal_text=self._refusal))
         for index in sorted(self._tool_names):
             name = self._tool_names[index]
             if valid_function_name(name):
@@ -301,7 +248,7 @@ class ChatResponseAccumulator:
         terminal = classify_terminal(
             output=output,
             finish_reason=self._finish_reason,
-            safety_block={"blockReason": "CONTENT_FILTER"} if self._refusal else None,
+            safety_block={"blockReason": "CONTENT_FILTER"} if self._blocked else None,
             malformed=self._malformed,
         )
         if terminal.kind is TerminalKind.COMPLETED and self._finish_reason is None and not self._done:
@@ -422,24 +369,29 @@ class OpenAICompatibleTransport:
             return self._failed_result("invalid_alternatives", str(exc), usage=normalized_usage)
         output: list[dict[str, Any]] = []
         finish_reason: str | None = None
-        refusal = False
+        malformed = False
+        blocked = False
+        explicit_refusal = False
         for choice in choices:
             if not isinstance(choice, dict):
                 continue
             reason = choice.get("finish_reason")
-            if isinstance(reason, str) and reason:
+            if reason is not None and not isinstance(reason, str):
+                malformed = True
+            if isinstance(reason, str):
                 finish_reason = reason
-                refusal = refusal or reason == "content_filter"
+                blocked = blocked or reason.strip().lower() in POLICY_FINISH_REASONS
             message = choice.get("message")
             if isinstance(message, dict):
-                refusal = refusal or bool(message.get("refusal"))
+                explicit_refusal = explicit_refusal or bool(_message_refusal(message))
             output.extend(_message_output(message))
-        if refusal and not output:
+        if blocked and not explicit_refusal:
             output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
         terminal = classify_terminal(
             output=output,
             finish_reason=finish_reason,
-            safety_block={"blockReason": "CONTENT_FILTER"} if refusal else None,
+            safety_block={"blockReason": "CONTENT_FILTER"} if blocked else None,
+            malformed=malformed,
         )
         return ProviderResult(output=tuple(output), usage=normalized_usage, terminal=terminal)
 
@@ -462,6 +414,7 @@ class OpenAICompatibleTransport:
         *,
         response_id: str,
         display_model: str,
+        telemetry: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any] | str]:
         """Execute and normalize one Chat Completions SSE request."""
 
@@ -501,6 +454,8 @@ class OpenAICompatibleTransport:
                     json=prepared.payload,
                     headers=prepared.headers,
                 ) as response:
+                    if telemetry is not None:
+                        telemetry["http_status"] = response.status_code
                     if response.status_code != 200:
                         detail = f"Provider returned HTTP {response.status_code}."
                         try:
@@ -516,7 +471,7 @@ class OpenAICompatibleTransport:
                             yield event
                         return
                     try:
-                        async for data in iter_sse_data(response, label="OpenAI"):
+                        async for data in iter_sse_data(response, label="OpenAI", legacy_json_lines=True):
                             if data == "[DONE]":
                                 if provider_done:
                                     async for event in fail("duplicate_done", "The provider emitted [DONE] more than once."):
@@ -560,7 +515,7 @@ class OpenAICompatibleTransport:
                                     reasoning_active = True
                                     for event in builder.add_reasoning_delta(reasoning):
                                         yield event
-                                content_str = delta.get("content")
+                                content_str = _message_text(delta)
                                 if isinstance(content_str, str) and content_str:
                                     text_active = True
                                     for event in builder.add_text_delta(content_str):
@@ -687,7 +642,7 @@ class NativeResponsesStreamAdapter:
 
     def __init__(self, *, display_model: str) -> None:
         self.display_model = display_model
-        self._buffer = ""
+        self._decoder = SSEDecoder()
         self._terminal_event: dict[str, Any] | None = None
         self._terminal_emitted = False
         self._provider_done = False
@@ -720,11 +675,8 @@ class NativeResponsesStreamAdapter:
         self._terminal_emitted = True
         return [self._terminal_event]
 
-    def _consume_line(self, line: str) -> list[dict[str, Any]]:
-        stripped = line.strip()
-        if not stripped or stripped.startswith(":") or not stripped.startswith("data:"):
-            return []
-        data = stripped[5:].strip()
+    def _consume_payload(self, data: str) -> list[dict[str, Any]]:
+        data = data.strip()
         if data == "[DONE]":
             if self._provider_done:
                 self._set_failure("duplicate_done", "The provider emitted [DONE] more than once.")
@@ -792,21 +744,21 @@ class NativeResponsesStreamAdapter:
         return [event]
 
     def consume_bytes(self, chunk: bytes) -> list[dict[str, Any]]:
-        if not isinstance(chunk, bytes):
-            self._set_failure("invalid_stream_chunk", "The provider returned a non-byte stream chunk.")
-            return []
-        self._buffer += chunk.decode("utf-8", errors="replace")
         events: list[dict[str, Any]] = []
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            events.extend(self._consume_line(line))
+        try:
+            for data in self._decoder.feed(chunk):
+                events.extend(self._consume_payload(data))
+        except SSELineError as exc:
+            self._set_failure("invalid_stream_chunk", str(exc))
         return events
 
     def finish(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        if self._buffer.strip():
-            events.extend(self._consume_line(self._buffer))
-        self._buffer = ""
+        try:
+            for data in self._decoder.finish():
+                events.extend(self._consume_payload(data))
+        except SSELineError as exc:
+            self._set_failure("invalid_stream_chunk", str(exc))
         if self._terminal_event is None:
             self._set_failure(
                 "missing_terminal_signal",

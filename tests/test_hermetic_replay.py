@@ -41,7 +41,7 @@ def test_chat_http_replay(monkeypatch, seed, finish, delta, terminal):
     assert [e["type"] for e in terminals] == ["response." + terminal]
     terminal_response = terminals[0]["response"]
     if finish == "content_filter":
-        assert terminal_response["output"][0]["content"] == [{"type": "refusal", "refusal": "The provider declined this response (CONTENT_FILTER)."}]
+        assert terminal_response["output"][0]["content"] == [{"type": "refusal", "refusal": delta["refusal"]}]
     elif finish == "length":
         assert terminal_response["incomplete_details"]["reason"] == "max_output_tokens"
     assert requests[0]["path"] == "/v1/chat/completions"
@@ -67,6 +67,18 @@ def test_unowned_loopback_and_external_network_are_denied():
             sock.connect(endpoint)
     with expected_denial(), pytest.raises(AssertionError, match="DNS denied"):
         socket.getaddrinfo("example.invalid", 443)
+
+
+def test_home_resolution_remains_private_when_environment_is_cleared():
+    from pathlib import Path
+    from unittest.mock import patch
+
+    root = Path(os.environ["ANTIGRAVITY_TEST_ROOT"])
+    with patch.dict(os.environ, {}, clear=True):
+        assert Path.home() == root
+        assert Path("~").expanduser() == root
+        assert Path("~/child").expanduser() == root / "child"
+        assert Path(os.path.expanduser("~/child")) == root / "child"
 
 
 @pytest.mark.parametrize("environment", [{}, {"OPENAI_API_KEY": "synthetic-canary", "CODEX_HOME": "/nonexistent-test-state"}])
@@ -282,7 +294,6 @@ def test_google_parser_all_byte_splits_preserve_terminal_and_unicode():
         assert terminal["response"]["output"][0]["content"][0]["text"] == "hé🙂"
 
 
-@pytest.mark.xfail(strict=True, reason="Known #77: native adapter decodes each UTF-8 byte chunk separately")
 def test_native_parser_unicode_byte_split_contract():
     from codex_antigravity_auth.openai_transport import NativeResponsesStreamAdapter
     wire = 'data: {"type":"response.output_text.delta","delta":"hé🙂"}\n\n'.encode()

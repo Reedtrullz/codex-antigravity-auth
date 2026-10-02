@@ -1,6 +1,7 @@
 """Interactive setup and login commands (split from cli.py)."""
 
 from __future__ import annotations
+from .console import console_print as print
 
 import argparse
 import getpass
@@ -41,7 +42,7 @@ def run_setup_v2(args) -> None:
     print("=" * 60)
     print("             ANTI V2 WORKFLOW SETUP CHECK           ")
     print("=" * 60)
-    skill_dir = Path(os.path.expanduser(args.skill_dir))
+    skill_dir = _cli.client_skills_path(args.skill_dir)
     destination = skill_dir / _cli.BUNDLED_CODEX_SKILL_NAME
 
     try:
@@ -606,7 +607,7 @@ def run_setup(args) -> dict:
                 unified_model_picker=unified,
             )
         )
-        _cli._setup_check(checks, "codex_config_repair", "pass", f"repaired {Path(os.path.expanduser(args.config))}")
+        _cli._setup_check(checks, "codex_config_repair", "pass", f"repaired {_cli.client_config_path(args.config)}")
         readiness = _cli.codex_ready_report(
             config=args.config,
             provider_id=args.provider,
@@ -712,7 +713,7 @@ def run_setup(args) -> dict:
             _cli._print_setup_report(report)
             raise SystemExit("BYOK provider is not ready; Codex config was not modified.")
 
-    skill_dir = Path(os.path.expanduser(args.skill_dir))
+    skill_dir = _cli.client_skills_path(args.skill_dir)
     skill_path = skill_dir / _cli.BUNDLED_CODEX_SKILL_NAME
     try:
         _cli.bundled_skill_root()
@@ -781,7 +782,7 @@ def run_setup(args) -> dict:
             unified_model_picker=unified,
         )
     )
-    _cli._setup_check(checks, "codex_config_write", "pass", f"updated {Path(os.path.expanduser(args.config))}")
+    _cli._setup_check(checks, "codex_config_write", "pass", f"updated {_cli.client_config_path(args.config)}")
 
     if args.install_skill:
         _cli.run_install_skill(

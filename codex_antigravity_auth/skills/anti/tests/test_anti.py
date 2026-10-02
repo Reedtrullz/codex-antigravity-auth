@@ -24,6 +24,9 @@ _ACTIVE_TEST_RUNS_DIR: list[Path] = []
 
 
 def load_anti():
+    anti_lib_dir = str(SCRIPT.resolve().parent)
+    if anti_lib_dir not in sys.path:
+        sys.path.insert(0, anti_lib_dir)
     spec = importlib.util.spec_from_file_location("anti_skill_helper", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -4117,7 +4120,7 @@ class BugfixRegressionTests(unittest.TestCase):
         self.assertEqual(record["status"], "partial")
         self.assertEqual(record["runStatus"], "partial")
         self.assertNotIn("output_text", record)
-        self.assertIn("answer that ends mid-sentence", artifact["output_text"])
+        self.assertIn("answer that ends mid-sentence", artifact["output_preview"])
         self.assertIn("consult_attempts", record["metadata"])
         self.assertEqual(len(record["metadata"]["consult_attempts"]), 2)
 
@@ -4986,7 +4989,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                             "review", "--scope", "files", "--file", "fixture.py",
                             "--max-prompt-chars", str(cap), "--max-review-chunks", "0",
                             "--chunked", "always", "--run-id", run_id,
-                            "--save-output", "summary", "--json", "--no-progress",
+                            "--save-output", "full", "--json", "--no-progress",
                         ])
 
                     artifact = json.loads((anti.RUNS_DIR / run_id / "result.json").read_text(encoding="utf-8"))
@@ -5543,7 +5546,9 @@ class ScopeIntegrityContractTests(unittest.TestCase):
             summary_record = json.loads(summary_record_path.read_text())
             summary_artifact = json.loads(Path(summary_record["resultPath"]).read_text())
         self.assertNotIn("output_text", summary_record)
-        self.assertEqual(summary_artifact["output_text"], "answer-" + "x" * 2000)
+        self.assertNotIn("output_text", summary_artifact)
+        self.assertEqual(summary_artifact["output_preview"], ("answer-" + "x" * 2000)[:1600])
+        self.assertFalse(summary_artifact["retention"]["contentComplete"])
         self.assertEqual(summary_artifact["artifacts"]["rawLanePaths"], [])
 
 
@@ -5885,7 +5890,7 @@ class AntiHardeningTests(unittest.TestCase):
             try:
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
-                    rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json", "--no-progress"])
+                    rc = anti.main(["panel", "--mode", "ask", "--prompt", "What next?", "--json", "--no-progress", "--save-output", "summary"])
                 self.assertEqual(rc, 0, output.getvalue())
                 parsed = json.loads(output.getvalue())
                 run_id = parsed["metadata"]["run_id"]

@@ -32,10 +32,10 @@ def chat(index, text, reason="stop", tool=None, stream=False):
 def chat_stream(frames):
     class Response:
         status_code = 200
-        async def aiter_text(self):
+        async def aiter_bytes(self):
             for frame in frames:
-                yield "data: " + json.dumps(frame) + "\n\n"
-            yield "data: [DONE]\n\n"
+                yield ("data: " + json.dumps(frame) + "\n\n").encode()
+            yield b"data: [DONE]\n\n"
 
     class Client:
         async def __aenter__(self):
@@ -142,8 +142,9 @@ def test_legacy_unindexed_single_answer_and_index_zero_remain_compatible():
 
 def test_alternate_cannot_override_primary_safety_outcome():
     google_result = GoogleTransport(timeout=1).parse_response({"candidates": [google(0, "", "SAFETY"), google(1, "unsafe-alternative", "STOP")]})
-    assert google_result.terminal.kind is TerminalKind.FAILED
-    assert google_result.output == ()
+    assert google_result.terminal.kind is TerminalKind.COMPLETED
+    assert google_result.output[0]["content"][0]["type"] == "refusal"
+    assert "unsafe-alternative" not in json.dumps(google_result.output)
     chat_result = OpenAICompatibleTransport(timeout=1).parse_chat_response({"choices": [chat(0, "", "content_filter"), chat(1, "unsafe-alternative", "stop")]})
     assert chat_result.output[0]["content"][0]["type"] == "refusal"
     assert "unsafe-alternative" not in json.dumps(chat_result.output)

@@ -13,11 +13,13 @@ import uuid
 import httpx
 
 from .endpoint_policy import httpx_client_options, validate_endpoint_url
+from .sse import SSELineError, iter_sse_data
 
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
 from .response_protocol import (
     AttemptOutcome,
     ProviderResult,
+    POLICY_FINISH_REASONS,
     PrimaryAlternativeSelector,
     ProviderTerminal,
     ResponseEventBuilder,
@@ -198,8 +200,12 @@ class GoogleResponseAccumulator:
             if not isinstance(candidate, dict):
                 continue
             finish_reason = candidate.get("finishReason")
-            if isinstance(finish_reason, str) and finish_reason:
+            if finish_reason is not None and not isinstance(finish_reason, str):
+                self._malformed = True
+            if isinstance(finish_reason, str):
                 self._finish_reason = finish_reason
+                if finish_reason.strip().lower() in POLICY_FINISH_REASONS:
+                    self._safety_block = self._safety_block or {"blockReason": finish_reason.strip().upper()}
             content = candidate.get("content")
             if content is None:
                 continue
@@ -262,7 +268,7 @@ class GoogleResponseAccumulator:
                 }
             )
         output.extend(self._function_calls)
-        if self._safety_block and not output:
+        if self._safety_block:
             output.append(refusal_item(self._safety_block))
         terminal = classify_terminal(
             output=output,
@@ -531,12 +537,15 @@ class GoogleTransport:
         response_id: str,
         display_model: str,
         adapter: GoogleStreamEventAdapter | None = None,
+        telemetry: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any] | str]:
         adapter = adapter or GoogleStreamEventAdapter(
             response_id=response_id,
             display_model=display_model,
         )
         async with self.stream(request, lease) as response:
+            if telemetry is not None:
+                telemetry["http_status"] = response.status_code
             if response.status_code != 200:
                 raise GoogleHTTPError(
                     response.status_code,
@@ -545,81 +554,25 @@ class GoogleTransport:
                 )
             if not adapter.created_emitted:
                 yield adapter.created()
-            buffer = ""
-            pending: list[str] = []
-
-            async for chunk in response.aiter_text():
-                buffer += chunk
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    stripped = line.strip()
-                    if not stripped:
-                        # SSE event boundary: flush accumulated continuation
-                        # lines as one frame.
-                        if pending:
-                            data = "\n".join(pending)
-                            pending = []
-                            if data == "[DONE]":
-                                adapter.mark_done()
-                                continue
-                            try:
-                                payload = json.loads(data)
-                            except json.JSONDecodeError as exc:
-                                raise GoogleStreamPayloadError(
-                                    "invalid_stream_chunk",
-                                    "The Google provider returned malformed stream JSON.",
-                                ) from exc
-                            if isinstance(payload, list):
-                                payload = payload[0] if payload else {}
-                            for event in adapter.consume(payload):
-                                yield event
-                        continue
-                    if not stripped.startswith("data:"):
-                        continue
-                    data = stripped[5:].strip()
-                    if data == "[DONE]":
+            # Preserve the endpoint's historical newline-delimited JSON mode
+            # explicitly; native Responses uses standard blank-line SSE framing.
+            try:
+                async for data in iter_sse_data(response, label="Google provider", legacy_json_lines=True):
+                    if data.strip() == "[DONE]":
                         adapter.mark_done()
-                        continue
-                    # Parse-or-accumulate: emit standalone JSON frames
-                    # immediately; hold fragments that do not yet parse as
-                    # JSON until their SSE continuation lines arrive. This
-                    # supports both blank-line-separated and bare-\n frames.
-                    if pending:
-                        candidate = "\n".join([*pending, data])
-                        try:
-                            payload = json.loads(candidate)
-                        except json.JSONDecodeError:
-                            pending.append(data)
-                            continue
-                        pending = []
-                        if isinstance(payload, list):
-                            payload = payload[0] if payload else {}
-                        for event in adapter.consume(payload):
-                            yield event
                         continue
                     try:
                         payload = json.loads(data)
-                    except json.JSONDecodeError:
-                        pending.append(data)
-                        continue
+                    except json.JSONDecodeError as exc:
+                        raise GoogleStreamPayloadError(
+                            "invalid_stream_chunk", "The Google provider returned malformed stream JSON.",
+                        ) from exc
                     if isinstance(payload, list):
                         payload = payload[0] if payload else {}
                     for event in adapter.consume(payload):
                         yield event
-            if pending:
-                data = "\n".join(pending)
-                if data == "[DONE]":
-                    adapter.mark_done()
-                else:
-                    raise GoogleStreamPayloadError(
-                        "invalid_stream_chunk",
-                        "The Google provider stream ended with an incomplete SSE frame.",
-                    )
-            if buffer.strip():
-                raise GoogleStreamPayloadError(
-                    "invalid_stream_chunk",
-                    "The Google provider stream ended with an incomplete SSE frame.",
-                )
+            except SSELineError as exc:
+                raise GoogleStreamPayloadError("invalid_stream_chunk", str(exc)) from exc
         for event in adapter.finish():
             yield event
 
@@ -652,7 +605,9 @@ class GoogleTransport:
             if not isinstance(candidate, dict):
                 continue
             candidate_reason = candidate.get("finishReason")
-            if isinstance(candidate_reason, str) and candidate_reason:
+            if candidate_reason is not None and not isinstance(candidate_reason, str):
+                malformed = True
+            if isinstance(candidate_reason, str):
                 finish_reason = candidate_reason
             transformed = transform_gemini_candidate(candidate)
             reasoning = transformed.get("reasoning")
@@ -666,9 +621,11 @@ class GoogleTransport:
                 output.extend(item for item in function_calls if isinstance(item, dict))
 
         safety_block = unwrapped.get("promptFeedback")
-        if not isinstance(safety_block, dict):
+        if not isinstance(safety_block, dict) or not safety_block.get("blockReason"):
             safety_block = None
-        if safety_block and not output:
+        if isinstance(finish_reason, str) and finish_reason.strip().lower() in POLICY_FINISH_REASONS:
+            safety_block = safety_block or {"blockReason": finish_reason.strip().upper()}
+        if safety_block:
             output.append(refusal_item(safety_block))
 
         usage = unwrapped.get("usageMetadata")

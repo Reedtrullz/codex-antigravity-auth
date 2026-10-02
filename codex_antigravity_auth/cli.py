@@ -1,4 +1,6 @@
 from .endpoint_policy import open_http_request
+from .console import console_print as print
+from .console import ConsoleArgumentParser, safe_terminal_text
 import sys
 import os
 import argparse
@@ -22,6 +24,7 @@ import urllib.request
 from importlib import metadata as importlib_metadata
 from importlib.resources import as_file, files
 from pathlib import Path
+from .namespaces import client_config_path, client_skills_path, namespace_diagnostics, root_path
 from urllib.parse import parse_qs, urlparse
 from .byok import (
     PROVIDER_PRESETS,
@@ -89,6 +92,8 @@ from .constants import (
     validate_gateway_token_strength,
 )
 from .redaction import redact_secret_text
+from .codex_config import merge_provider_config, parse_provider_config
+from .secure_store import file_lock, SecureStore
 
 _DEFAULT_GET_CODEX_HOME = get_codex_home
 
@@ -442,7 +447,7 @@ def verify_codex_skill(skill_path: Path) -> bool:
 def run_install_skill(args) -> None:
     try:
         action, destination, backup_path = install_codex_skill(
-            Path(os.path.expanduser(args.skill_dir)),
+            client_skills_path(args.skill_dir),
             force=args.force,
             dry_run=args.dry_run,
         )
@@ -472,12 +477,23 @@ def _confirm_account_mutation(prompt: str, *, yes: bool, non_interactive_error: 
         return True
     if not sys.stdin.isatty():
         raise SystemExit(non_interactive_error)
-    answer = input(f"{prompt} [y/N] ").strip().lower()
+    answer = input(safe_terminal_text(f"{prompt} [y/N] ")).strip().lower()
     return answer in {"y", "yes"}
 
 
 def run_accounts_command(args) -> None:
     action = getattr(args, "accounts_action", None) or "list"
+    if action == "explain":
+        from .account_diagnostics import account_eligibility_lines, account_eligibility_report
+        report = account_eligibility_report(args.model)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            for line in account_eligibility_lines(report):
+                print(line)
+        if not report["ok"]:
+            raise SystemExit(1)
+        return
     if action == "list":
         data = load_accounts()
         accounts = data.get("accounts", [])
@@ -990,80 +1006,6 @@ def render_codex_config_snippet(
     return "\n".join(lines)
 
 
-def _toml_key(line: str) -> str | None:
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#") or "=" not in stripped:
-        return None
-    return stripped.split("=", 1)[0].strip()
-
-
-def _is_toml_section(line: str) -> bool:
-    stripped = line.split("#", 1)[0].strip()
-    return stripped.startswith("[") and stripped.endswith("]")
-
-
-def _toml_section_name(line: str) -> str | None:
-    stripped = line.split("#", 1)[0].strip()
-    if not stripped.startswith("[") or not stripped.endswith("]"):
-        return None
-    # Normalize quoted sub-table names ([model_providers."antigravity"] and
-    # [model_providers.antigravity] are the same TOML table) so upserts and
-    # parse match each other instead of emitting a duplicate table header.
-    return stripped.strip("[]").replace('"', "").strip()
-
-
-def _upsert_root_keys(lines: list[str], values: dict[str, str]) -> list[str]:
-    first_section = next((idx for idx, line in enumerate(lines) if _is_toml_section(line)), len(lines))
-    root = list(lines[:first_section])
-    rest = list(lines[first_section:])
-    seen: set[str] = set()
-
-    for idx, line in enumerate(root):
-        key = _toml_key(line)
-        if key in values:
-            root[idx] = f"{key} = {values[key]}"
-            seen.add(key)
-
-    missing = [key for key in values if key not in seen]
-    if missing:
-        while root and not root[-1].strip():
-            root.pop()
-        if root:
-            root.append("")
-        root.extend(f"{key} = {values[key]}" for key in missing)
-        if rest:
-            root.append("")
-
-    return root + rest
-
-
-def _upsert_table(lines: list[str], section_name: str, values: dict[str, str]) -> list[str]:
-    header = f"[{section_name}]"
-    start = next((idx for idx, line in enumerate(lines) if _toml_section_name(line) == section_name), None)
-    if start is None:
-        updated = list(lines)
-        while updated and not updated[-1].strip():
-            updated.pop()
-        if updated:
-            updated.extend(["", header])
-        else:
-            updated.append(header)
-        updated.extend(f"{key} = {value}" for key, value in values.items())
-        return updated
-
-    end = next((idx for idx in range(start + 1, len(lines)) if _is_toml_section(lines[idx])), len(lines))
-    section = list(lines[start:end])
-    seen: set[str] = set()
-    for idx, line in enumerate(section[1:], start=1):
-        key = _toml_key(line)
-        if key in values:
-            section[idx] = f"{key} = {values[key]}"
-            seen.add(key)
-
-    section.extend(f"{key} = {value}" for key, value in values.items() if key not in seen)
-    return lines[:start] + section + lines[end:]
-
-
 def merge_codex_config(
     existing: str,
     *,
@@ -1077,112 +1019,23 @@ def merge_codex_config(
     provider_id = validate_codex_provider_id(provider_id)
     provider_name = validate_codex_provider_name(provider_name)
     base_url = validate_http_base_url(base_url, label="Codex gateway base URL")
-    if not existing.strip():
-        return render_codex_config_snippet(
-            model=model,
-            provider_id=provider_id,
-            provider_name=provider_name,
-            base_url=base_url,
-            activate=activate,
-        )
-
-    lines = existing.splitlines()
-    if activate:
-        lines = _upsert_root_keys(
-            lines,
-            {
-                "model": toml_string(model),
-                "model_provider": toml_string(provider_id),
-                "wire_api": '"responses"',
-            },
-        )
-    lines = _upsert_table(
-        lines,
-        f"model_providers.{provider_id}",
-        {
-            "name": toml_string(provider_name),
-            "base_url": toml_string(base_url),
-            "wire_api": '"responses"',
-        },
+    return merge_provider_config(
+        existing, model=model, provider_id=provider_id, provider_name=provider_name,
+        base_url=base_url, activate=activate,
     )
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _strip_toml_inline_comment(value: str) -> str:
-    in_single = False
-    in_double = False
-    escaped = False
-    for idx, ch in enumerate(value):
-        if escaped:
-            escaped = False
-            continue
-        if in_double and ch == "\\":
-            escaped = True
-            continue
-        if ch == '"' and not in_single:
-            in_double = not in_double
-            continue
-        if ch == "'" and not in_double:
-            in_single = not in_single
-            continue
-        if ch == "#" and not in_single and not in_double:
-            return value[:idx]
-    return value
-
-
-def _parse_toml_string_value(raw_value: str) -> str:
-    value = _strip_toml_inline_comment(raw_value).strip()
-    if not value:
-        return ""
-    if value.startswith('"') and value.endswith('"'):
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError:
-            return ""
-        return parsed if isinstance(parsed, str) else ""
-    if value.startswith("'") and value.endswith("'"):
-        return value[1:-1]
-    return value
 
 
 def parse_codex_config(content: str) -> dict[str, object]:
-    active_provider = ""
-    active_model = ""
-    provider_tables: dict[str, dict[str, str]] = {}
-    current_section = ""
-
-    for line in content.splitlines():
-        section_name = _toml_section_name(line)
-        if section_name is not None:
-            current_section = section_name
-            continue
-        key = _toml_key(line)
-        if key is None:
-            continue
-        raw_value = line.split("=", 1)[1]
-        value = _parse_toml_string_value(raw_value)
-        if not current_section:
-            if key == "model_provider":
-                active_provider = value
-            elif key == "model":
-                active_model = value
-            continue
-        prefix = "model_providers."
-        if current_section.startswith(prefix):
-            table_provider = current_section[len(prefix):].strip().strip('"').strip("'")
-            provider_tables.setdefault(table_provider, {})[key] = value
-
-    return {
-        "active_provider": active_provider,
-        "active_model": active_model,
-        "provider_tables": provider_tables,
-    }
+    return parse_provider_config(content)
 
 
 def inspect_codex_gateway_config(content: str, *, provider_id: str, expected_base_url: str) -> tuple[bool, str]:
     provider_id = validate_codex_provider_id(provider_id)
     expected_base_url = validate_http_base_url(expected_base_url, label="Codex gateway base URL")
-    parsed = parse_codex_config(content)
+    try:
+        parsed = parse_codex_config(content)
+    except ValueError as exc:
+        return False, str(exc)
     active_provider = parsed["active_provider"]
     provider_tables = parsed["provider_tables"]
 
@@ -1192,18 +1045,23 @@ def inspect_codex_gateway_config(content: str, *, provider_id: str, expected_bas
     if not provider_table:
         return False, f"missing [model_providers.{provider_id}] table"
     base_url = provider_table.get("base_url")
+    if base_url is not None and not isinstance(base_url, str):
+        return False, "provider base_url must be a string"
     if base_url != expected_base_url:
         return False, f"provider base_url is {base_url or '(unset)'}, expected {expected_base_url}"
     wire_api = provider_table.get("wire_api")
-    if wire_api and wire_api != "responses":
-        return False, f"provider wire_api is {wire_api}, expected responses"
+    if "wire_api" in provider_table and (not isinstance(wire_api, str) or wire_api != "responses"):
+        return False, "provider wire_api must be the string responses"
     return True, "active provider points to this gateway server"
 
 
 def inspect_codex_provider_block_config(content: str, *, provider_id: str, expected_base_url: str) -> tuple[bool, str]:
     provider_id = validate_codex_provider_id(provider_id)
     expected_base_url = validate_http_base_url(expected_base_url, label="Codex gateway base URL")
-    parsed = parse_codex_config(content)
+    try:
+        parsed = parse_codex_config(content)
+    except ValueError as exc:
+        return False, str(exc)
     provider_tables = parsed["provider_tables"]
     active_provider = parsed["active_provider"]
 
@@ -1211,11 +1069,13 @@ def inspect_codex_provider_block_config(content: str, *, provider_id: str, expec
     if not provider_table:
         return False, f"missing [model_providers.{provider_id}] table"
     base_url = provider_table.get("base_url")
+    if base_url is not None and not isinstance(base_url, str):
+        return False, "provider base_url must be a string"
     if base_url != expected_base_url:
         return False, f"provider base_url is {base_url or '(unset)'}, expected {expected_base_url}"
     wire_api = provider_table.get("wire_api")
-    if wire_api and wire_api != "responses":
-        return False, f"provider wire_api is {wire_api}, expected responses"
+    if "wire_api" in provider_table and (not isinstance(wire_api, str) or wire_api != "responses"):
+        return False, "provider wire_api must be the string responses"
     if active_provider == provider_id:
         return True, "provider block is installed and active"
     return True, f"provider block is installed; active model_provider is {active_provider or '(unset)'}"
@@ -1228,6 +1088,7 @@ def _write_private_text(path: Path, text: str) -> None:
         with tempfile.NamedTemporaryFile(
             "w",
             encoding="utf-8",
+            newline="",
             delete=False,
             dir=path.parent,
             prefix=f".{path.name}.",
@@ -1251,13 +1112,22 @@ def _write_private_text(path: Path, text: str) -> None:
 
 def _codex_config_backup_path(config_path: Path) -> Path:
     backup_path = config_path.with_name(f"{config_path.name}.bak-{time.strftime('%Y%m%d%H%M%S')}")
-    if not backup_path.exists():
+    if not backup_path.exists() and not backup_path.is_symlink():
         return backup_path
     for suffix in range(2, 100):
         candidate = config_path.with_name(f"{backup_path.name}-{suffix}")
-        if not candidate.exists():
+        if not candidate.exists() and not candidate.is_symlink():
             return candidate
     raise RuntimeError(f"Could not allocate a unique backup path for {config_path}")
+
+
+def _read_codex_config_text(path: Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        return path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Codex config must be UTF-8; no changes were written.") from exc
 
 
 def write_codex_config(
@@ -1272,26 +1142,33 @@ def write_codex_config(
     model = validate_codex_model_id(model)
     provider_id = validate_codex_provider_id(provider_id)
     provider_name = validate_codex_provider_name(provider_name)
+    base_url = validate_http_base_url(base_url, label="Codex gateway base URL")
     target_path = config_path.resolve() if config_path.is_symlink() else config_path
-    existing = target_path.read_text(encoding="utf-8") if target_path.exists() else ""
-    updated = merge_codex_config(
-        existing,
-        model=model,
-        provider_id=provider_id,
-        provider_name=provider_name,
-        base_url=base_url,
-        activate=activate,
-    )
-    if existing == updated:
-        return False, None
-
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    backup_path = None
-    if target_path.exists():
-        backup_path = _codex_config_backup_path(target_path)
-        _write_private_text(backup_path, existing)
-    _write_private_text(target_path, updated)
-    return True, backup_path
+    lock_target = target_path.resolve()
+    options = dict(model=model, provider_id=provider_id, provider_name=provider_name, base_url=base_url, activate=activate)
+    # Reject known invalid input before creating directories, locks or backups.
+    existing = _read_codex_config_text(target_path)
+    merge_codex_config(existing, **options)
+    lock_path = lock_target.with_name(f".{lock_target.name}.lock")
+    if lock_path.is_symlink():
+        raise ValueError("Refusing a symlinked Codex config lock.")
+    with file_lock(lock_target):
+        if config_path.resolve() != lock_target:
+            raise ValueError("Codex config target changed while waiting for its lock; no changes were written.")
+        # Repeat read/parse/merge under the shared path lock. The preflight was
+        # diagnostic only and must never overwrite another writer's update.
+        existing = _read_codex_config_text(target_path)
+        updated = merge_codex_config(existing, **options)
+        if existing == updated:
+            return False, None
+        backup_path = None
+        if target_path.exists():
+            backup_path = _codex_config_backup_path(target_path)
+            _write_private_text(backup_path, existing)
+            SecureStore._fsync_directory(target_path.parent)
+        _write_private_text(target_path, updated)
+        SecureStore._fsync_directory(target_path.parent)
+        return True, backup_path
 
 
 def configure_codex_write_command(args) -> str:
@@ -1326,7 +1203,7 @@ def gateway_start_command(base_url: str, *, unified: bool = False) -> str:
 
 
 def run_configure_codex(args) -> None:
-    config_path = Path(os.path.expanduser(args.config))
+    config_path = client_config_path(args.config)
     activate = bool(getattr(args, "activate", False))
     provider_id, provider_name = unified_provider_defaults(args)
     # Keep argparse namespace coherent for the write-command echo.
@@ -1380,9 +1257,9 @@ def run_configure_codex(args) -> None:
     print("[*] Optional sidecar skill: codex-antigravity install-skill")
 
 
-def main():
+def _main():
     _ensure_split_modules()
-    parser = argparse.ArgumentParser(description="Codex Antigravity Auth CLI Utility")
+    parser = ConsoleArgumentParser(description="Codex Antigravity Auth CLI Utility")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # login
@@ -1512,6 +1389,9 @@ def main():
     accounts_parser = subparsers.add_parser("accounts", help="List or manage configured Google accounts")
     accounts_sub = accounts_parser.add_subparsers(dest="accounts_action")
     accounts_sub.add_parser("list", help="List configured Google accounts")
+    accounts_explain = accounts_sub.add_parser("explain", help="Explain local Google eligibility without refreshing or changing state")
+    accounts_explain.add_argument("--model", required=True, help="Google model whose family to inspect")
+    accounts_explain.add_argument("--json", action="store_true", help="Print sanitized eligibility as JSON")
     accounts_remove = accounts_sub.add_parser("remove", help="Remove a Google account from the encrypted rotation store")
     accounts_remove.add_argument("email", help="Google account email to remove")
     accounts_remove.add_argument("--yes", action="store_true", help="Confirm removal without prompting")
@@ -1632,8 +1512,18 @@ def main():
     provider_remove = provider_sub.add_parser("remove", help="Remove a stored BYOK provider config")
     provider_remove.add_argument("provider")
 
+    namespace_parser = subparsers.add_parser("namespace", help="Inspect client/gateway roots without credential access")
+    namespace_sub = namespace_parser.add_subparsers(dest="namespace_command", required=True)
+    namespace_sub.add_parser("show", help="Print read-only namespace relationship as JSON")
+    copy_state = namespace_sub.add_parser("copy-state", help="Plan or copy gateway configuration to an unused root")
+    copy_state.add_argument("--source", required=True, help="Existing absolute gateway state root")
+    copy_state.add_argument("--destination", required=True, help="New absolute gateway state root")
+    copy_state.add_argument("--write", action="store_true", help="Publish the copy; stop state writers first (default is dry run)")
+
     # start
     start_parser = subparsers.add_parser("start", help="Start the local Responses API gateway server")
+    start_parser.add_argument("--client-home", help="Explicit client config/auth root (CODEX_HOME)")
+    start_parser.add_argument("--state-home", help="Explicit gateway state root (ANTIGRAVITY_STATE_HOME)")
     start_parser.add_argument("--port", type=int, default=51122, help="Gateway server port (default: 51122)")
     start_parser.add_argument("--host", default="127.0.0.1", help="Gateway server host (default: 127.0.0.1)")
     start_parser.add_argument(
@@ -1664,8 +1554,30 @@ def main():
     status_parser.add_argument("--json", action="store_true", help="Print status as JSON")
 
     args = parser.parse_args()
+    if args.command == "start":
+        overrides = {}
+        for option, name in (("client_home", "CODEX_HOME"), ("state_home", "ANTIGRAVITY_STATE_HOME")):
+            value = getattr(args, option, None)
+            if value is not None:
+                try:
+                    overrides[name] = str(root_path(value, label=name))
+                except ValueError as exc:
+                    parser.error(str(exc))
+        os.environ.update(overrides)
 
-    if args.command == "login":
+
+    if args.command == "namespace":
+        try:
+            if args.namespace_command == "show":
+                result = namespace_diagnostics()
+            else:
+                from .namespace_migration import copy_gateway_state
+                result = copy_gateway_state(args.source, args.destination, write=args.write)
+            print(json.dumps(result, indent=2))
+        except (ValueError, RuntimeError, OSError) as exc:
+            print(f"[FAIL] {redact_secret_text(str(exc))}")
+            sys.exit(1)
+    elif args.command == "login":
         run_login(args)
     elif args.command == "setup":
         run_setup(args)
@@ -1805,6 +1717,15 @@ def main():
         stop_gateway(args)
     elif args.command == "status":
         run_gateway_status(args)
+
+
+def main():
+    try:
+        return _main()
+    except SystemExit as exc:
+        if isinstance(exc.code, str):
+            raise SystemExit(safe_terminal_text(exc.code)) from None
+        raise
 
 
 # The cli_* modules below import `cli` themselves (`from . import cli as _cli`),

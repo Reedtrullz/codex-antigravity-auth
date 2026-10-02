@@ -222,6 +222,53 @@ class AccountState:
     def state(self) -> dict[str, Any]:
         return self.data["accountState"]
 
+    def _exclusion_reasons(self, account: Any, family: str, now: float, exclude_emails: set[str] | None = None) -> list[str]:
+        if not isinstance(account, dict) or not account.get("email"):
+            return ["missing_identity"]
+        email = str(account["email"])
+        reasons = []
+        if exclude_emails and email in exclude_emails:
+            reasons.append("excluded_for_request")
+        if self.state.get("disabled", {}).get(email):
+            reasons.append("disabled")
+        scoped = self.state["cooldowns"].get(email, {})
+        for scope in ("account", family):
+            if scoped.get(scope, 0) > now:
+                reasons.append(f"{scope}_cooldown")
+        return reasons
+
+    def _preferred_index(self, family: str, count: int) -> int:
+        start = self.data.get("activeIndexByFamily", {}).get(family, 0)
+        return start if isinstance(start, int) and 0 <= start < count else 0
+
+    def selection_snapshot(self, family: str) -> dict[str, Any]:
+        """Describe this owner's selection predicates without changing any state."""
+        if family not in FAMILIES:
+            raise ValueError(f"unsupported model family: {family}")
+        with self._lock:
+            accounts = self.data.get("accounts", [])
+            start = self._preferred_index(family, len(accounts))
+            now = self._now()
+            rows = []
+            for index, account in enumerate(accounts):
+                email = str(account.get("email", "")) if isinstance(account, dict) else ""
+                reasons = self._exclusion_reasons(account, family, now)
+                scoped = self.state["cooldowns"].get(email, {})
+                rows.append({
+                    "index": index,
+                    "order": (index - start) % len(accounts),
+                    "in_flight": self._in_flight.get(email, 0),
+                    "exclusion_reasons": reasons,
+                    "cooldown_remaining_seconds": {
+                        scope: math.ceil(scoped[scope] - now)
+                        for scope in ("account", family) if scoped.get(scope, 0) > now
+                    },
+                })
+            candidates = [row for row in rows if not row["exclusion_reasons"]]
+            selected = min(candidates, key=lambda row: (row["in_flight"], row["order"])) if candidates else None
+            return {"accounts": rows, "preferred_index": start if accounts else None,
+                    "candidate_index": selected["index"] if selected else None}
+
     def _select(
         self,
         family: str,
@@ -236,24 +283,16 @@ class AccountState:
             if not isinstance(accounts, list) or not accounts:
                 return None
             family_map = self.data.setdefault("activeIndexByFamily", {name: 0 for name in FAMILIES})
-            start = family_map.get(family, 0)
-            if not isinstance(start, int) or start < 0 or start >= len(accounts):
-                start = 0
+            start = self._preferred_index(family, len(accounts))
             now = self._now()
             candidates = []
             for order in range(len(accounts)):
                 index = (start + order) % len(accounts)
                 account = accounts[index]
-                if not isinstance(account, dict) or not account.get("email"):
+                if self._exclusion_reasons(account, family, now, exclude_emails):
                     continue
                 email = str(account["email"])
-                if exclude_emails and email in exclude_emails:
-                    continue
-                if self.state.get("disabled", {}).get(email):
-                    continue
                 scoped = self.state["cooldowns"].get(email, {})
-                if scoped.get("account", 0) > now or scoped.get(family, 0) > now:
-                    continue
                 for scope in ("account", family):
                     if scoped.get(scope) and scoped[scope] <= now:
                         scoped.pop(scope, None)

@@ -227,12 +227,13 @@ def test_startup_refresh_preserves_unsupported_store(monkeypatch, store, encrypt
     original = write(account_data(999), encrypted)
     monkeypatch.setattr(server, "account_manager", accounts.AccountManager())
     monkeypatch.setattr(server, "schedule_refresh_accounts_ahead", STARTUP_SCHEDULER)
-    monkeypatch.setattr(server, "_refresh_ahead_task", None)
+    monkeypatch.setattr(server, "_refresh_ahead_owner", None)
 
     async def startup():
         async with server.gateway_lifespan(server.app):
-            assert server._refresh_ahead_task is not None
-            await server._refresh_ahead_task
+            owner = server._refresh_ahead_owner
+            assert owner is not None and owner.worker is not None
+            await owner.worker
 
     asyncio.run(startup())
     assert (path.read_bytes(), path.stat().st_mtime_ns) == original
