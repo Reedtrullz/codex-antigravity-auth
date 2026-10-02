@@ -917,6 +917,24 @@ def _write_run_record_unlocked(
             record["execution_ledger"] = execution_ledger
 
     if output_mode == "summary":
+        # Keep structured check counts and identities, but omit the potentially
+        # large check descriptors from persisted summaries before clipping.
+        summary_metadata = dict(record.get("metadata") or {})
+        verification_metadata = summary_metadata.get("verification")
+        if isinstance(verification_metadata, dict) and "checks" in verification_metadata:
+            summary_metadata["verification"] = {key: value for key, value in verification_metadata.items() if key != "checks"}
+            summary_metadata["verification"]["checksRetained"] = False
+        findings_metadata = summary_metadata.get("findings")
+        if isinstance(findings_metadata, dict) and isinstance(findings_metadata.get("findings"), list):
+            findings_metadata = dict(findings_metadata)
+            findings_metadata["findings"] = [
+                {key: value for key, value in finding.items() if key != "checks"}
+                if isinstance(finding, dict) else finding
+                for finding in findings_metadata["findings"]
+            ]
+            summary_metadata["findings"] = findings_metadata
+        metadata = summary_metadata
+        record["metadata"] = summary_metadata
         # Preserve fixed lifecycle fields and the metadata consumed by the
         # result artifact before applying the shared content budget. Large
         # panel transcripts must not exhaust that budget ahead of checks and
@@ -6974,17 +6992,24 @@ def command_panel(args: argparse.Namespace) -> int:
         workspace = Path((review_context or {}).get("workspace_root") or Path.cwd())
         raw_findings = findings.get("findings", [])
         if isinstance(raw_findings, list):
-            verified = verify_findings(raw_findings, workspace)
+            verified = verify_findings(raw_findings, workspace, profiles=getattr(args, "check_profile", []))
             findings["findings"] = verified
-            verified_count = sum(1 for f in verified if f.get("evidence", "unverified") != "unverified")
+            checks = {check["checkId"]: check for finding in verified for check in finding.get("checks", [])}
+            counts = {state: sum(check["status"] == state for check in checks.values())
+                      for state in ("passed", "failed", "skipped", "error")}
             metadata["verification"] = {
-                "status": "completed_no_evidence" if not verified_count else "tool_checks",
+                "status": "tool_checks" if counts["passed"] + counts["failed"] else "completed_no_evidence",
                 "performedBy": "anti",
                 "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
-                "evidenceCount": verified_count,
+                "evidenceCount": counts["passed"] + counts["failed"],
+                "checkCounts": counts,
+                "checks": list(checks.values()),
+                "claimVerdict": "unverified",
             }
-            if verified_count:
-                caveats.append(f"Verification: {verified_count}/{len(verified)} findings received tool-backed evidence")
+            caveats.append(
+                f"File checks: {counts['passed']} passed, {counts['failed']} failed, "
+                f"{counts['skipped']} skipped, {counts['error']} errors; finding claims remain unverified."
+            )
     if metadata.get("findings_status") == "parsed" and isinstance(findings, dict):
         display_text = render_panel_findings(findings, [])
 
@@ -8170,6 +8195,8 @@ def _panel_argv(
         argv.append("--no-anonymize")
     if getattr(args, "no_verify", False):
         argv.append("--no-verify")
+    for profile in getattr(args, "check_profile", []) or []:
+        argv.extend(["--check-profile", profile])
     return argv
 
 
@@ -8740,7 +8767,9 @@ def build_parser() -> argparse.ArgumentParser:
     panel.add_argument("--print-prompt", action="store_true", help="Print assembled source prompt without contacting gateway")
     panel.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
     panel.add_argument("--no-anonymize", action="store_true", help="Do not anonymize lane labels before judge synthesis")
-    panel.add_argument("--no-verify", action="store_true", help="Skip evidence-linked verification of findings")
+    panel_checks = panel.add_mutually_exclusive_group()
+    panel_checks.add_argument("--no-verify", action="store_true", help="Skip all finding file checks")
+    panel_checks.add_argument("--check-profile", choices=["eslint"], action="append", default=[], help="Opt into an installed trusted checker and project config (no fixes or installs)")
     panel.add_argument("prompt_parts", nargs="*", help="Positional ask/planning prompt text")
     panel.set_defaults(func=command_panel)
 
@@ -8862,7 +8891,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workflow.add_argument("--panel-mode", choices=["review", "plan", "ask"], default="review", help="Panel mode for collaboration workflows")
     workflow.add_argument("--no-anonymize", action="store_true", help="Do not anonymize lane labels before judge synthesis")
-    workflow.add_argument("--no-verify", action="store_true", help="Skip evidence-linked verification of findings")
+    workflow_checks = workflow.add_mutually_exclusive_group()
+    workflow_checks.add_argument("--no-verify", action="store_true", help="Skip all finding file checks")
+    workflow_checks.add_argument("--check-profile", choices=["eslint"], action="append", default=[], help="Opt into an installed trusted checker and project config (no fixes or installs)")
     workflow.add_argument("--model", action="append", help="Model alias/id for the workflow; repeatable for panels")
     workflow.add_argument(
         "--model-free",
