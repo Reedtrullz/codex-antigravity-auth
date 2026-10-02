@@ -44,6 +44,10 @@ _refresh_locks: dict[str, threading.Lock] = {}
 _refresh_locks_lock = threading.Lock()
 
 
+class AccountRefreshInProgress(RuntimeError):
+    """No eligible account is available while its refresh owner is active."""
+
+
 def _get_refresh_lock(email: str) -> threading.Lock:
     """Return a per-account lock for serializing token refresh attempts."""
     with _refresh_locks_lock:
@@ -247,6 +251,7 @@ class AccountManager:
         excluded: set[str] = set()
         attempted: dict[str, list[dict]] = {}
         refreshed_emails: set[str] = set()
+        refresh_in_progress = False
         while True:
             selected = None
             snapshot = None
@@ -311,6 +316,8 @@ class AccountManager:
                         return dirty
                 update_accounts(mutate)
             if selected is not None or snapshot is None:
+                if selected is None and refresh_in_progress:
+                    raise AccountRefreshInProgress()
                 return selected
             email = str(snapshot["email"])
             attempted.setdefault(email, []).append(snapshot)
@@ -318,6 +325,8 @@ class AccountManager:
             result = self._refresh_snapshot(snapshot, family=family)
             if result == "refreshed":
                 refreshed_emails.add(email)
+            if result == "busy":
+                refresh_in_progress = True
             if result in {"busy", "failed", "stopped"}:
                 excluded.add(email)
 
