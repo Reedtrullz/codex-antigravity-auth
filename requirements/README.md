@@ -54,7 +54,7 @@ Local gate checks after installing `.[dev,quality]`:
 
 ```sh
 python -m ruff check .
-python -m pytest tests/test_quality_gates.py -q
+python scripts/run_tests.py tests/test_quality_gates.py -q
 python scripts/audit_dependencies.py
 ```
 
