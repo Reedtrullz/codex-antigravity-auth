@@ -270,6 +270,12 @@ When multiple Google accounts are registered, the gateway automatically rotates 
 - **Sticky Active Selection**: The `AccountManager` keeps independent active-account slots for Gemini and Claude families to preserve conversational continuity before rotating on connection timeouts/failures.
 - **Claude Diagnostics**: Google request failures include sanitized family-level diagnostics such as selected family, cooldown count, retry-after source, rotation attempt status, and whether all Claude accounts are cooling down. Non-streaming Google failure responses use a structured `detail` object with `message` and `diagnostics`; clients should handle both this shape and older string details. Account identifiers are reserved for authenticated account-list commands.
 
+Use `codex-antigravity accounts explain --model claude-sonnet-4-6` (or add `--json`) for a read-only eligibility explanation. The view uses positional identifiers such as `account-1`, fixed exclusion categories, cooldown seconds, token lifetime categories, and next actions. It includes the account-store, OAuth client configuration, and keyring namespaces without displaying emails, tokens, project IDs, fingerprints, or stored free-text error reasons. Identifiers follow store order and may change when accounts are removed.
+
+Routing eligibility is separate from token readiness: an expired token may require refresh, whose success is unknown until attempted. The command never refreshes, probes providers, takes leases, writes migrations, or repairs files. Unsupported store versions fail with recovery guidance. Runtime selection prefers the lowest lease count, with ties ordered cyclically from the family's preferred account; this is sticky preference, not round-robin. The CLI cannot observe another gateway process's leases, so it reports them as unknown and does not predict the next selected account. Cooldown expiry alone does not reveal whether its cause was throttling, transport failure, or authentication.
+
+The view reports route classification for both classic and unified gateway modes because a separate gateway may run with different settings. Google eligibility applies only to modes classified as `antigravity`; OpenAI and BYOK routes are rejected. Standard namespace paths use `~/.codex/...`; customized paths are represented by stable hashes so private directory names stay out of shared reports.
+
 ---
 
 ## 3. High-Fidelity Streaming & Reasoning
