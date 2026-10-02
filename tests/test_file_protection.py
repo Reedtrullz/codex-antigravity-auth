@@ -1,5 +1,4 @@
 """Private-file fixtures only; no real stores, keyring, service or network use."""
-import json
 import os
 from pathlib import Path
 import stat
@@ -173,23 +172,77 @@ with file_lock(Path(sys.argv[2])):
 def _native_acl_snapshot(path):
     import ctypes
     from ctypes import wintypes as w
+
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.GetSystemDirectoryW.argtypes = [w.LPWSTR, w.UINT]
-    kernel.GetSystemDirectoryW.restype = w.UINT
-    buffer = ctypes.create_unicode_buffer(32768)
-    size = kernel.GetSystemDirectoryW(buffer, len(buffer))
-    assert 0 < size < len(buffer)
-    system_directory = Path(buffer.value)
-    shell = system_directory / "WindowsPowerShell/v1.0/powershell.exe"
-    script = '''$acl=Get-Acl -LiteralPath $env:ANTIGRAVITY_ACL_FIXTURE;
-$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
-$entries=@($acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]));
-@{Protected=$acl.AreAccessRulesProtected;Owner=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;Current=$sid;Entries=@($entries | ForEach-Object {@{Sid=$_.IdentityReference.Value;Rights=[int]$_.FileSystemRights;Allow=($_.AccessControlType -eq 'Allow');Inherited=$_.IsInherited}})} | ConvertTo-Json -Depth 4 -Compress
-'''
-    env = {**os.environ, "SystemRoot": str(system_directory.parent), "ANTIGRAVITY_ACL_FIXTURE": str(path)}
-    result = subprocess.run([str(shell), "-NoProfile", "-NonInteractive", "-Command", script], env=env,
-                            capture_output=True, text=True, check=True, timeout=15)
-    return json.loads(result.stdout)
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    pointer = ctypes.c_void_p
+    advapi.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE)]
+    advapi.OpenProcessToken.restype = w.BOOL
+    advapi.GetTokenInformation.argtypes = [w.HANDLE, ctypes.c_int, pointer, w.DWORD, ctypes.POINTER(w.DWORD)]
+    advapi.GetTokenInformation.restype = w.BOOL
+    advapi.ConvertSidToStringSidW.argtypes = [pointer, ctypes.POINTER(w.LPWSTR)]
+    advapi.ConvertSidToStringSidW.restype = w.BOOL
+    advapi.GetNamedSecurityInfoW.argtypes = [
+        w.LPWSTR, ctypes.c_int, w.DWORD, ctypes.POINTER(pointer), ctypes.POINTER(pointer),
+        ctypes.POINTER(pointer), ctypes.POINTER(pointer), ctypes.POINTER(pointer),
+    ]
+    advapi.GetNamedSecurityInfoW.restype = w.DWORD
+    advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+        pointer, w.DWORD, w.DWORD, ctypes.POINTER(w.LPWSTR), ctypes.POINTER(w.DWORD),
+    ]
+    advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = w.BOOL
+    kernel.GetCurrentProcess.restype = w.HANDLE
+    kernel.LocalFree.argtypes = [pointer]
+    kernel.LocalFree.restype = pointer
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    kernel.CloseHandle.restype = w.BOOL
+
+    token = w.HANDLE()
+    if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        token_size = w.DWORD()
+        advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(token_size))  # TokenUser size query.
+        if not token_size.value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        token_user = ctypes.create_string_buffer(token_size.value)
+        if not advapi.GetTokenInformation(
+            token, 1, token_user, token_size, ctypes.byref(token_size)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        user_sid_pointer = ctypes.cast(token_user, ctypes.POINTER(pointer))[0]
+        user_sid_string = w.LPWSTR()
+        if not advapi.ConvertSidToStringSidW(user_sid_pointer, ctypes.byref(user_sid_string)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            current_sid = user_sid_string.value
+        finally:
+            kernel.LocalFree(ctypes.cast(user_sid_string, pointer))
+    finally:
+        kernel.CloseHandle(token)
+
+    owner = pointer()
+    dacl = pointer()
+    descriptor = pointer()
+    error = advapi.GetNamedSecurityInfoW(
+        str(path), 1, 0x1 | 0x4, ctypes.byref(owner), None, ctypes.byref(dacl), None,
+        ctypes.byref(descriptor),
+    )  # SE_FILE_OBJECT, owner and DACL only; this API does not modify the object.
+    if error:
+        raise ctypes.WinError(error)
+    try:
+        sddl = w.LPWSTR()
+        sddl_length = w.DWORD()
+        if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor, 1, 0x1 | 0x4, ctypes.byref(sddl), ctypes.byref(sddl_length)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return {"Current": current_sid, "Sddl": sddl.value}
+        finally:
+            kernel.LocalFree(ctypes.cast(sddl, pointer))
+    finally:
+        kernel.LocalFree(descriptor)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows ACL inspection")
@@ -197,11 +250,9 @@ def test_native_windows_file_dacl_is_current_user_only_and_protected(tmp_path):
     path = tmp_path / "private" / "fixture.json"
     secure_store.SecureStore().atomic_write_text(path, "synthetic private payload")
     acl = _native_acl_snapshot(path)
-    assert acl["Protected"] and acl["Owner"] == acl["Current"]
-    assert len(acl["Entries"]) == 1
-    entry = acl["Entries"][0]
-    assert entry["Sid"] == acl["Current"] and entry["Rights"] == 0x1F01FF
-    assert entry["Allow"] and not entry["Inherited"]
+    # Exact SDDL asserts current-user ownership and a protected DACL with one
+    # explicit, non-inheriting full-control ACE for only that SID.
+    assert acl["Sddl"] == f"O:{acl['Current']}D:P(A;;FA;;;{acl['Current']})"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows child ACL inspection")
