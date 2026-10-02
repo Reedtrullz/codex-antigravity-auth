@@ -1227,7 +1227,7 @@ class TestInstallSkill(unittest.TestCase):
             )
             with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6-thinking", "claude-sonnet-4-6"}):
                 with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"deepseek": provider}):
-                    with patch("codex_antigravity_auth.cli.load_provider_config", return_value={"providers": {"deepseek": provider}}):
+                    with patch("codex_antigravity_auth.cli.load_provider_config_read_only", return_value={"providers": {"deepseek": provider}}):
                         with patch("builtins.print") as mock_print:
                             run_setup_v2(args)
 
