@@ -33,6 +33,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+from anti_lib.capabilities import CapabilityRegistry
 from anti_lib.chunking import chunk_manifest
 from anti_lib.context import ordered_prompt
 from anti_lib.ledger import execution_entry, prompts_as_text
@@ -105,41 +106,12 @@ MODEL_ALIASES = {
 GEMINI_FLASH_EFFORT_RE = re.compile(r"^(gemini-3\.[78]-flash)-(low|medium|high)$")
 LEGACY_GEMINI_FLASH_RE = re.compile(r"^(gemini-3\.[56]-flash)(?:-(low|medium|high|extra-low))?$")
 
-# Model capabilities: what each model supports
-MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
-    # Gemini Antigravity (Google backend)
-    "gemini-3.8-flash": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
-    "gemini-3.7-flash": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
-    "gemini-3.1-flash-image": {"images": True, "video": False, "audio": False, "tools": False, "streaming": True, "json_mode": False},
-    "gemini-3.5-flash-high": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
-    "gemini-3.5-flash-medium": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
-    "gemini-3.6-flash-high": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
-    "gemini-3.6-flash-medium": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
-    "gemini-3.1-pro": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
-    "gemini-3.1-pro-high": {"images": True, "video": True, "audio": True, "tools": True, "streaming": True, "json_mode": True},
-    # Claude Antigravity (Google backend)
-    "claude-sonnet-4-6": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "claude-opus-4-6-thinking": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "claude-3.5-sonnet": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "claude-opus-4-6": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "gpt-oss-120b-medium": {"images": False, "video": False, "audio": False, "tools": False, "streaming": True, "json_mode": True},
-    # OpenRouter free tier (BYOK)
-    "openrouter:nvidia/nemotron-3-super-120b-a12b:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "openrouter/free": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "openrouter:poolside/laguna-s-2.1:free": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "openrouter:google/gemma-4-31b-it:free": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    # xAI OAuth
-    # Official DeepSeek API (metered, API-key route)
-    "deepseek:deepseek-v4-pro": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "deepseek:deepseek-v4-flash": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    # BluesMinds API-key routes (metered; currently fail closed until live-health gate passes)
-    # OpenRouter free vision models (verified: support image input)
-    "openrouter:nvidia/nemotron-nano-12b-v2-vl:free": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {"images": True, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    # Ollama local
-    "ollama:gpt-oss:20b": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
-    "ollama:qwen3:8b": {"images": False, "video": False, "audio": False, "tools": True, "streaming": True, "json_mode": True},
+# Runtime capabilities come from the gateway's versioned contract, falling back
+# to a generated built-in snapshot. Local aliases remain UX shorthand only.
+CAPABILITY_REGISTRY = CapabilityRegistry()
+MODEL_CAPABILITIES = {
+    model: CAPABILITY_REGISTRY.features(model)
+    for model in set(MODEL_ALIASES.values()) | set(CAPABILITY_REGISTRY.entries)
 }
 
 # Cost tiers: free < quota < paid
@@ -1189,7 +1161,8 @@ def base_model_id(model_id: str) -> str:
     if match:
         return match.group(1)
     legacy = LEGACY_GEMINI_FLASH_RE.fullmatch(model)
-    return f"{legacy.group(1)}-high" if legacy else model
+    normalized = f"{legacy.group(1)}-high" if legacy else model
+    return CAPABILITY_REGISTRY.canonical(normalized)
 
 
 def effort_for_model(model_id: str) -> str | None:
@@ -1280,8 +1253,8 @@ def model_cost_tier(model_id: str) -> str:
 
 def model_supports(model_id: str, feature: str) -> bool:
     """Check if a model supports a feature (images, video, audio, tools, streaming, json_mode)."""
-    caps = MODEL_CAPABILITIES.get(base_model_id(model_id), {})
-    return caps.get(feature, False)
+    model = resolve_model(model_id, default=model_id)
+    return CAPABILITY_REGISTRY.features(base_model_id(model)).get(feature, False)
 
 
 def model_quality_rank(model_id: str) -> int:
@@ -1506,6 +1479,9 @@ def fetch_model_ids(base_url: str, *, timeout: float, token_env: str) -> set[str
         detail = payload.get("detail") or payload.get("error") or payload
         raise AntiError(f"/v1/models returned HTTP {status}: {detail}")
     ids = model_ids_from_catalog(payload)
+    CAPABILITY_REGISTRY.consume(payload)
+    global MODEL_CAPABILITIES
+    MODEL_CAPABILITIES = {model: CAPABILITY_REGISTRY.features(model) for model in set(MODEL_ALIASES.values()) | set(CAPABILITY_REGISTRY.entries)}
     if not ids:
         raise AntiError("/v1/models returned no usable model ids")
     return ids

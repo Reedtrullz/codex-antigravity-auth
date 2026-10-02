@@ -190,9 +190,11 @@ def _is_gemini_thinking_level_model(backend_model: str) -> bool:
     return "gemini-3.7" in lower or "gemini-3.8" in lower
 
 
-def thinking_level_for_request(codex_req: dict[str, Any], backend_model: str) -> str | None:
+def thinking_level_for_request(codex_req: dict[str, Any], backend_model: str, *, mapping: str | None = None) -> str | None:
     """Return the thinkingLevel string for Gemini 3.7+ models, or None."""
-    if not _is_gemini_thinking_level_model(backend_model):
+    if mapping not in (None, "thinking_level"):
+        return None
+    if mapping != "thinking_level" and not _is_gemini_thinking_level_model(backend_model):
         return None
     reasoning = codex_req.get("reasoning")
     valid_levels = {"low", "medium", "high"}
@@ -206,10 +208,10 @@ def thinking_level_for_request(codex_req: dict[str, Any], backend_model: str) ->
     return effort if effort in valid_levels else "medium"
 
 
-def thinking_budget_for_request(codex_req: dict[str, Any], backend_model: str) -> int | None:
-    if _is_gemini_thinking_level_model(backend_model):
+def thinking_budget_for_request(codex_req: dict[str, Any], backend_model: str, *, mapping: str | None = None) -> int | None:
+    if mapping == "thinking_level" or (mapping is None and _is_gemini_thinking_level_model(backend_model)):
         return None  # Gemini 3.7+ uses thinkingLevel, not thinking_budget
-    if "thinking" not in backend_model.lower() and "claude" not in backend_model.lower():
+    if mapping != "thinking_budget" and "thinking" not in backend_model.lower() and "claude" not in backend_model.lower():
         return None
     reasoning = codex_req.get("reasoning")
     effort = reasoning.get("effort", "high") if isinstance(reasoning, dict) else "high"
@@ -501,8 +503,8 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     # thinking_budget (int).  Claude rejects requests where max output tokens
     # do not exceed the thinking budget, so cap the budget to stay below
     # explicit Codex limits.
-    thinking_level = thinking_level_for_request(codex_req, backend_model)
-    budget = thinking_budget_for_request(codex_req, backend_model)
+    thinking_level = thinking_level_for_request(codex_req, backend_model, mapping=capabilities.reasoning_effort_parameter)
+    budget = thinking_budget_for_request(codex_req, backend_model, mapping=capabilities.reasoning_effort_parameter)
     if thinking_level is not None:
         generation_config["thinkingConfig"] = {
             "thinkingLevel": thinking_level,

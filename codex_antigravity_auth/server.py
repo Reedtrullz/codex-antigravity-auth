@@ -59,6 +59,9 @@ from .openai_transport import (
     PreparedOpenAIRequest,
     TransportConfigError,
 )
+from .capability_catalog import CATALOG_VERSION, contract, native_contract
+from .models import native_model_definition
+from .unified import openai_model_capabilities
 from .response_protocol import (
     CURABLE_AUTH_ERROR_CLASSES,
     AttemptOutcome,
@@ -120,17 +123,6 @@ GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS = 600.0
 CLIENT_DISCONNECT_POLL_SECONDS = 0.1
 TEST_CLIENT_HOSTS = {"testserver"}
 REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
-    native_responses=True,
-    parallel_tool_calls=True,
-    structured_output=True,
-    stop_sequences=True,
-    reasoning=True,
-    streaming_usage=True,
-    input_modalities=frozenset({"text", "image"}),
-    opaque_reasoning_replay=True,
-)
-# OpenAI upstream speaks Responses natively, so the full boundary holds.
-OPENAI_ROUTE_CAPABILITIES = ProviderCapabilities(
     native_responses=True,
     parallel_tool_calls=True,
     structured_output=True,
@@ -639,11 +631,11 @@ def provider_model_catalog(created: int) -> list[dict]:
             if isinstance(model_entry, dict):
                 provider_model = model_entry.get("id")
                 display_name = model_entry.get("display_name") or model_entry.get("displayName") or provider_model
-                context_window = model_entry.get("context_window") or model_entry.get("contextWindow") or 128000
+                context_window = model_entry.get("context_window") or model_entry.get("contextWindow")
             else:
                 provider_model = str(model_entry)
                 display_name = provider_model
-                context_window = 128000
+                context_window = None
             if not provider_model:
                 continue
             catalog_model_id = normalize_byok_model_id(provider_model, provider_id)
@@ -667,6 +659,14 @@ def provider_model_catalog(created: int) -> list[dict]:
                     input_modalities=sorted(capabilities.input_modalities),
                     supported_reasoning_efforts=capabilities.reasoning_effort_levels,
                 )
+            )
+            declared = dict(provider.get("capabilities") or {})
+            if isinstance(model_entry, dict):
+                declared.update(model_entry.get("capabilities") or {})
+            byok_models[-1]["capabilities"] = contract(
+                canonical_id=model_id, backend_id=catalog_model_id, route="byok", family=provider_id,
+                aliases=[], capabilities=capabilities, context_window=context_window,
+                declaration_source="provider_configuration", declared_capabilities=declared,
             )
     return byok_models
 
@@ -732,6 +732,7 @@ async def list_models():
             default_reasoning_level=m.get("default_reasoning_level", "high"),
             supports_parallel_tool_calls=bool(m.get("supports_parallel_tool_calls", True)),
             input_modalities=m.get("input_modalities", ["text"]),
+            supported_reasoning_efforts=native_model_capabilities(m["id"]).reasoning_effort_levels,
         )
         for m in native_model_catalog_with_input_modalities()
     ]
@@ -740,6 +741,14 @@ async def list_models():
         # Registry lives in unified.openai_catalog (env-extendable), so the
         # catalog and the router can never drift apart.
         for m in openai_catalog():
+            # Native definitions win collisions exactly as classify_route does.
+            # Explain the suppressed identity on the retained native entry.
+            if classify_route(m["id"], unified_enabled=True) != "openai":
+                definition = native_model_definition(m["id"])
+                for entry in models:
+                    if definition and entry["id"] == definition.id:
+                        entry.setdefault("shadowed_routes", []).append({"route": "openai", "id": m["id"], "reason": "native_definition_precedence"})
+                continue
             models.append(
                 codex_model_metadata(
                     m["id"],
@@ -749,11 +758,33 @@ async def list_models():
                     created,
                     default_reasoning_level=m.get("default_reasoning_level", "high"),
                     supports_parallel_tool_calls=bool(m.get("supports_parallel_tool_calls", True)),
-                    input_modalities=["text", "image"],
+                    input_modalities=m.get("input_modalities", ["text"]),
+                    supported_reasoning_efforts=openai_model_capabilities(m["id"]).reasoning_effort_levels,
                 )
             )
+    for entry in models:
+        definition = native_model_definition(entry["id"])
+        if definition is not None:
+            source = "builtin" if definition in NATIVE_MODELS else "overlay"
+            entry["capabilities"] = native_contract(definition, source=source, aliases=[alias for alias in (*definition.aliases, definition.backend_id) if (native_model_definition(alias) or definition).id == definition.id])
+        else:
+            entry["capabilities"] = contract(
+                canonical_id=entry["id"], backend_id=entry["id"], route="openai", family="openai", aliases=[],
+                capabilities=openai_model_capabilities(entry["id"]), context_window=entry["context_window"],
+                declaration_source="openai_registry",
+            )
+        entry["canonical_id"] = entry["capabilities"]["canonical_id"]
+        entry["alias_of"] = entry["canonical_id"] if entry["id"] != entry["canonical_id"] else None
     models = models + byok_models
+    unique = {}
+    for entry in models:
+        entry.setdefault("canonical_id", entry["id"])
+        entry.setdefault("alias_of", None)
+        unique.setdefault(entry["id"].lower(), entry)
+    models = list(unique.values())
     return {
+        "capability_catalog_version": CATALOG_VERSION,
+        "collision_policy": "native definitions precede OpenAI registry entries; first canonical catalog identity wins",
         "object": "list",
         "data": models,
         "models": models,
@@ -1231,7 +1262,7 @@ async def create_response(request: Request):
         raise HTTPException(status_code=404, detail=detail)
     if unified_route == "openai":
         try:
-            validate_capabilities(codex_req, OPENAI_ROUTE_CAPABILITIES)
+            validate_capabilities(codex_req, openai_model_capabilities(model))
         except CapabilityError as exc:
             await log_request(
                 "failed",

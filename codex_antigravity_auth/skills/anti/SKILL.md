@@ -27,14 +27,14 @@ Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to mu
 - Use `flash-3.6` for the retained `gemini-3.6-flash-*` compatibility IDs.
 - Use `gemini-pro` for `gemini-3.1-pro` (Gemini Pro). Deep reasoning and analysis, 1M context.
 - Use `gpt-oss-120b` for `gpt-oss-120b-medium` (text-only, 131K context).
-- Use `gemini-3.1-flash-image` for image generation; it is image-only and does not support tools.
+- `gemini-3.1-flash-image` is retained as a routing identity; the gateway does not expose generated image output.
 - Use `nemotron-super` for `openrouter:nvidia/nemotron-3-super-120b-a12b:free` (120B MoE, 262K ctx). Fast, good for second opinions.
 - Use `nemotron-ultra` for `openrouter:nvidia/nemotron-3-ultra-550b-a55b:free` (550B, 1M ctx, vendor-reported). Large-context analysis and planning.
-- Use `nemotron-omni` for `openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` (30B MoE, 256K ctx, reasoning-capable, vision). Good for image tasks and reasoning.
-- Use `nemotron-vl` for `openrouter:nvidia/nemotron-nano-12b-v2-vl:free` (12B, 128K ctx, vision). Fast and reliable for image understanding — the default vision sidecar model.
+- Use `nemotron-omni` for `openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` (30B MoE, 256K ctx, reasoning-capable, vision). Use only the capabilities declared by the configured gateway contract.
+- Use `nemotron-vl` for `openrouter:nvidia/nemotron-nano-12b-v2-vl:free` (12B, 128K ctx, vision). Use for image tasks only when the configured gateway contract supports images.
 - Use `free` for `openrouter/free` (auto-selects the best available free model on OpenRouter). Good for quick checks when you want zero-cost and don't care which model answers.
 - Use `poolside` for `openrouter:poolside/laguna-s-2.1:free`. Coding-focused model for code generation and refactoring.
-- Use `gemma-4` for `openrouter:google/gemma-4-31b-it:free` (30.7B dense, 262K ctx, vision). Lightweight, fast for simple consults and image tasks.
+- Use `gemma-4` for `openrouter:google/gemma-4-31b-it:free` (30.7B dense, 262K ctx, vision). A candidate for simple consults; image tasks require an explicit gateway capability.
 - Use `gpt-oss` for `ollama:gpt-oss:20b` (local). Private, offline inference.
 - Use `qwen3` for `ollama:qwen3:8b` (local). Private, offline inference.
 - Default review model: `opus`.
@@ -61,37 +61,42 @@ DeepSeek and OpenRouter rows are optional BYOK routes and are expected to be abs
 
 The helper tracks per-model capabilities and cost tiers to make cost-aware decisions. When Opus/Sonnet quota is limited, prefer free models for simple tasks.
 
-| Model | Alias | Cost | Context | Images | Video | Audio | Tools | Quality |
-|---|---|---|---|---|---|---|---|---|
-| `claude-opus-4-6-thinking` | `opus` | quota | 250K | yes | no | no | yes | 100 |
-| `gemini-3.1-pro` | `gemini-pro` | quota | 1M | yes | yes | yes | yes | 90 |
-| `claude-sonnet-4-6` | `sonnet` | quota | 250K | yes | no | no | yes | 85 |
-| `gemini-3.8-flash` | `flash`, `flash-low`, `flash-medium`, `flash-high`, `flash-3.8[-low\|medium\|high]` | quota | 1M | yes | yes | yes | yes | 85 |
-| `gemini-3.7-flash` | `flash-3.7` | quota | 1M | yes | yes | yes | yes | 85 |
-| `gemini-3.1-flash-image` | — | quota | 1M | yes (generation) | no | no | no | 50 |
-| `gpt-oss-120b-medium` | `gpt-oss-120b` | quota | 131K | no | no | no | no | 65 |
-| `gemini-3.6-flash-high` | `flash-3.6` (compatibility) | quota | 1M | yes | yes | yes | yes | 82 |
-| `gemini-3.5-flash-high` | retired compatibility alias | quota | 1M | yes | yes | yes | yes | 80 |
-| `gemini-3.6-flash-medium` | `flash-3.6-medium` | quota | 1M | yes | yes | yes | yes | 70 |
-| `openrouter:nvidia/nemotron-3-ultra-550b-a55b:free` | `nemotron-ultra` | free | 1M | no | no | no | yes | 70 |
-| `gemini-3.5-flash-medium` | retired compatibility alias | quota | 1M | yes | yes | yes | yes | 68 |
-| `openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | `nemotron-omni` | free | 256K | yes | no | no | yes | 65 |
-| `openrouter:nvidia/nemotron-3-super-120b-a12b:free` | `nemotron-super` | free | 262K | no | no | no | yes | 65 |
-| `openrouter:nvidia/nemotron-nano-12b-v2-vl:free` | `nemotron-vl` | free | 128K | yes | no | no | yes | 60 |
-| `openrouter:poolside/laguna-s-2.1:free` | `poolside` | free | 128K | no | no | no | yes | 60 |
-| `openrouter:google/gemma-4-31b-it:free` | `gemma-4` | free | 262K | yes | no | no | yes | 55 |
-| `deepseek:deepseek-v4-pro` | `deepseek-v4-pro` | paid | — | no | no | no | yes | 88 |
-| `deepseek:deepseek-v4-flash` | `deepseek-v4-flash` | paid | — | no | no | no | yes | 74 |
-| `ollama:gpt-oss:20b` | `gpt-oss` | free | 128K | no | no | no | yes | 50 |
-| `ollama:qwen3:8b` | `qwen3` | free | 128K | no | no | no | yes | 40 |
+| Model | Alias | Cost tier | Quality heuristic |
+|---|---|---|---|
+| `claude-opus-4-6-thinking` | `opus` | quota | 100 |
+| `gemini-3.1-pro` | `gemini-pro` | quota | 90 |
+| `claude-sonnet-4-6` | `sonnet` | quota | 85 |
+| `gemini-3.8-flash` | `flash`, `flash-low`, `flash-medium`, `flash-high`, `flash-3.8[-low\|medium\|high]` | quota | 85 |
+| `gemini-3.7-flash` | `flash-3.7` | quota | 85 |
+| `gemini-3.1-flash-image` | — | quota | 50 |
+| `gpt-oss-120b-medium` | `gpt-oss-120b` | quota | 65 |
+| `gemini-3.6-flash-high` | `flash-3.6` (compatibility) | quota | 82 |
+| `gemini-3.5-flash-high` | retired compatibility alias | quota | 80 |
+| `gemini-3.6-flash-medium` | `flash-3.6-medium` | quota | 70 |
+| `openrouter:nvidia/nemotron-3-ultra-550b-a55b:free` | `nemotron-ultra` | free | 70 |
+| `gemini-3.5-flash-medium` | retired compatibility alias | quota | 68 |
+| `openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | `nemotron-omni` | free | 65 |
+| `openrouter:nvidia/nemotron-3-super-120b-a12b:free` | `nemotron-super` | free | 65 |
+| `openrouter:nvidia/nemotron-nano-12b-v2-vl:free` | `nemotron-vl` | free | 60 |
+| `openrouter:poolside/laguna-s-2.1:free` | `poolside` | free | 60 |
+| `openrouter:google/gemma-4-31b-it:free` | `gemma-4` | free | 55 |
+| `deepseek:deepseek-v4-pro` | `deepseek-v4-pro` | paid | 88 |
+| `deepseek:deepseek-v4-flash` | `deepseek-v4-flash` | paid | 74 |
+| `ollama:gpt-oss:20b` | `gpt-oss` | free | 50 |
+| `ollama:qwen3:8b` | `qwen3` | free | 40 |
 
-Table rows are *documented routes*, not guarantees: every row (except Ollama
-local) requires the gateway to advertise its id in `/v1/models`. Quality ranks
-are planning heuristics; observed output-cap failures or unavailable routes
-can be checked live with `smoke --check-documented` and do not downgrade the
-table itself. Context figures are vendor-reported and were not live-verified
-against OpenRouter (these routes are not currently runnable through this
-gateway); re-verify the OpenRouter spec when a route is enabled.
+Capabilities and context limits come from the gateway's versioned `/v1/models`
+contract when available. An older gateway uses the bundled, generated native-model
+snapshot. An unsupported catalog version disables capability assumptions; do not
+promote an advertised model ID into a capability or health claim. Unknown context
+limits remain unknown. Regenerate the repository snapshot with
+`python scripts/generate_capability_snapshot.py` and verify with `--check`.
+
+The current gateway transports accept declared text/image inputs and emit text,
+reasoning summaries, function calls and refusals. They do not carry audio/video
+input or generated image/audio/video output. Standalone BYOK capabilities are
+unknown until the gateway supplies a compatible contract. Local short aliases,
+quality ranks and cost tiers are selection heuristics, not capability evidence.
 
 **Cost tiers:**
 - `free` — No metering. OpenRouter free tier and Ollama local.
@@ -102,7 +107,7 @@ gateway); re-verify the OpenRouter spec when a route is enabled.
 - When Opus quota is low, use `nemotron-ultra` (70 quality, free, 1M) for broad scans and planning.
 - For quick consults, prefer `flash-3.8` (current Flash, quota, 1M).
 - For code review, prefer `poolside` (60 quality, free, coding-focused) first, then fall back to quota models.
-- For image/video/audio tasks, Gemini and Claude families support full multimodal. Free OpenRouter vision models (nemotron-vl, nemotron-omni, gemma-4) also support images, making them cost-effective for image tasks when Gemini/Claude quota is low. For video/audio, only Gemini models support those modalities.
+- For image tasks, require image support in the effective gateway contract. Audio/video input is currently unsupported, including on upstream models that support those modalities.
 - Gemini 3.8 Flash is the current default; use explicit 3.7/3.6 IDs only when a pinned workflow requires them.
 - The helper's `cheapest_models_for_task()` function automates this: it filters by capability requirements, then sorts free models first, then by quality.
 
