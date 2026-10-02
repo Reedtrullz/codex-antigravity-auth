@@ -173,6 +173,23 @@ def test_late_account_acquisition_is_released_without_dispatch(monkeypatch, setu
     asyncio.run(scenario())
 
 
+def test_refresh_in_progress_is_retryable_and_logged_without_a_lease(monkeypatch, setup_route):
+    state = setup_route("google")
+
+    async def acquire(*_args):
+        raise server.AccountRefreshInProgress()
+
+    monkeypatch.setattr(server, "acquire_active_account_for_request", acquire)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(server.create_response(Request("google")))
+
+    assert caught.value.status_code == 503
+    assert caught.value.headers["Retry-After"] == "1"
+    assert state.release.await_count == 0
+    assert state.records[-1]["http_status"] == 503
+    assert state.records[-1]["error_class"] == "account_refresh_in_progress"
+
+
 @pytest.mark.parametrize("phase", ["idle", "total"])
 def test_stream_event_idle_and_total_policies_fail_once_without_replay(monkeypatch, phase):
     monkeypatch.setattr(budgets, "DRAIN_SECONDS", 0.01)

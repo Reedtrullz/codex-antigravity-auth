@@ -23,7 +23,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
-from .accounts import AccountManager, classify_backend_status, is_validation_required_error
+from .accounts import AccountManager, AccountRefreshInProgress, classify_backend_status, is_validation_required_error
 from .account_state import scoped_cooldown_expiry
 from .byok import (
     PROVIDER_AUTH_MODE_API_KEY,
@@ -1916,6 +1916,22 @@ async def _create_response(request: Request, budget: RequestBudget):
             terminal_cleanup=True,
         ))
         raise HTTPException(status_code=504, detail="Antigravity request deadline exceeded")
+    except AccountRefreshInProgress as exc:
+        await log_request(
+            "failed",
+            model=model,
+            route="google",
+            family=family,
+            stream=stream,
+            http_status=503,
+            error_class="account_refresh_in_progress",
+            error="Google account refresh is in progress; retry the request shortly.",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Google account refresh is in progress; retry the request shortly.",
+            headers={"Retry-After": "1"},
+        ) from exc
     if not account:
         await log_request(
             "failed",
@@ -2313,6 +2329,31 @@ async def _create_response(request: Request, budget: RequestBudget):
                     error=safe_error_detail(e),
                 )
                 raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
+        except AccountRefreshInProgress as exc:
+            if cooldown_category is None:
+                await best_effort_diagnostic(record_attempt_outcome(
+                    response_account.get("email", ""),
+                    model,
+                    AttemptOutcome(scope="none", category="transport"),
+                    status_code=502,
+                    error_class="connection_error",
+                ))
+            await log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=503,
+                rotation_attempted=True,
+                error_class="account_refresh_in_progress",
+                error="Google account refresh is in progress; retry the request shortly.",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Google account refresh is in progress; retry the request shortly.",
+                headers={"Retry-After": "1"},
+            ) from exc
         except RequestDeadlineExceeded:
             await best_effort_diagnostic(log_request(
                 "failed",
@@ -2565,7 +2606,15 @@ async def _create_response(request: Request, budget: RequestBudget):
                     return
 
             if attempt_num == 0 and not adapter.visible_output_started:
-                rotated = await run_bounded_operation(lambda: acquire_active_account_for_request(model), release_late_result=True)
+                try:
+                    rotated = await run_bounded_operation(
+                        lambda: acquire_active_account_for_request(model),
+                        release_late_result=True,
+                    )
+                except AccountRefreshInProgress:
+                    rotated = None
+                    error_code = "account_refresh_in_progress"
+                    error_message = "Google account refresh is in progress; retry the request shortly."
                 if rotated and rotated.get("email") != stream_account.get("email"):
                     adapter.reset_attempt()
                     stream_attempts.append(rotated)
