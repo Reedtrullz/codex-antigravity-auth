@@ -16,6 +16,7 @@
     "scripts/anti_lib/reflections.py",
     "scripts/anti_lib/retention.py",
     "scripts/anti_lib/persistence.py",
+    "scripts/anti_lib/cleanup.py",
     "scripts/anti_lib/runner.py",
     "scripts/anti_lib/verifier.py",
     "tests/fixtures/v5-lane-opus.json",
