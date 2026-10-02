@@ -1685,7 +1685,8 @@ def request_json(
 
     retry_after_header: object = None
     try:
-        with open_http_request(req, timeout=transport_entry_timeout(method, timeout)) as res:
+        with open_http_request(req, timeout=timeout,
+                               before_open=lambda prepared, value: transport_entry_timeout(prepared.get_method(), value)) as res:
             raw = read_response_body(res, timeout)
             status = int(res.status)
     except urllib.error.HTTPError as exc:

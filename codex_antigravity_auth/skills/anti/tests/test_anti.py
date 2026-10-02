@@ -2653,7 +2653,9 @@ class AntiHelperTests(unittest.TestCase):
         real_urlopen = anti.open_http_request
         captured: dict[str, dict] = {}
 
-        def fake_urlopen(req, timeout=10.0):
+        def fake_urlopen(req, timeout=10.0, before_open=None):
+            if before_open is not None:
+                timeout = before_open(req, timeout)
             captured["regular"] = dict(req.headers)
             captured["unredirected"] = dict(req.unredirected_hdrs)
 
