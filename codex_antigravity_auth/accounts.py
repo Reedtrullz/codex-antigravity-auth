@@ -446,7 +446,8 @@ class AccountManager:
                 if result in {"refreshed", "failed"}:
                     summary[result] += 1
             except Exception:
-                summary["failed"] += 1        return summary
+                summary["failed"] += 1
+        return summary
 
     def clear_failures(self, email: str, family: str | None = None) -> None:
         with self._lock:
