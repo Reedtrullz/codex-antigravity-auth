@@ -957,6 +957,7 @@ class AntiHelperTests(unittest.TestCase):
         calls: list[str] = []
 
         def fake_request_json(method, url, *, payload=None, timeout=10.0, token_env=anti.DEFAULT_TOKEN_ENV):
+            anti.transport_entry_timeout(method, timeout)  # synthetic transport entered
             calls.append(payload["model"])
             if payload["model"] == "claude-opus-4-6-thinking":
                 raise anti.AntiError("request to http://127.0.0.1:51122/v1/responses returned HTTP 502 non-JSON response")
@@ -2652,7 +2653,9 @@ class AntiHelperTests(unittest.TestCase):
         real_urlopen = anti.open_http_request
         captured: dict[str, dict] = {}
 
-        def fake_urlopen(req, timeout=10.0):
+        def fake_urlopen(req, timeout=10.0, before_open=None):
+            if before_open is not None:
+                timeout = before_open(req, timeout)
             captured["regular"] = dict(req.headers)
             captured["unredirected"] = dict(req.unredirected_hdrs)
 
@@ -4378,7 +4381,8 @@ class BugfixRegressionTests(unittest.TestCase):
         metadata = raised.exception.run_metadata
         self.assertEqual(len(calls), 1)
         self.assertEqual(metadata["completed_chunk_count"], 1)
-        self.assertEqual(metadata["failed_chunk_count"], 1)
+        self.assertEqual(metadata["failed_chunk_count"], 0)
+        self.assertEqual(metadata["chunk_generation"][-1]["status"], "not_sent")
         self.assertGreater(metadata["not_sent_chunk_count"], 0)
 
     def test_chunk_prompts_do_not_carry_stale_single_prompt_diff_caveat(self) -> None:
@@ -4975,7 +4979,9 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                         calls.append(prompt)
                         attempts["count"] += 1
                         if cap == 1000 and attempts["count"] == 2:
-                            raise anti.AntiError("provider broke at chunk 2")
+                            failure = anti.AntiError("provider broke at chunk 2")
+                            failure.submitted = True
+                            raise failure
                         return (
                             "synthesis" if "Chunked Review Manifest" in prompt else "chunk",
                             model,
@@ -5042,7 +5048,9 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 def generate(*args, **kwargs):
                     calls["count"] += 1
                     if calls["count"] == 2:
-                        raise anti.AntiError("provider broke")
+                        failure = anti.AntiError("provider broke")
+                        failure.submitted = True
+                        raise failure
                     return "chunk result", "claude-sonnet-4-6", {
                         "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
                     }
@@ -5105,7 +5113,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                     "--model", "sonnet", "--model", "opus", "--judge", "opus",
                     "--max-prompt-chars", "3000", "--max-review-chunks", "0",
                     "--chunked", "always", "--run-id", "synthesis-failure",
-                    "--save-output", "summary", "--json", "--no-progress",
+                    "--save-output", "full", "--json", "--no-progress",
                 ])
             finally:
                 os.chdir(old_cwd)
@@ -5113,6 +5121,8 @@ class ScopeIntegrityContractTests(unittest.TestCase):
             artifact = json.loads(
                 Path(anti.load_run_record(anti.RUNS_DIR / "synthesis-failure.json")["resultPath"]).read_text(encoding="utf-8")
             )
+            raw_lane_paths = artifact["artifacts"]["rawLanePaths"]
+            ledger = [json.loads(Path(path).read_text(encoding="utf-8")) for path in raw_lane_paths]
 
         self.assertEqual(rc, 1)
         coverage = artifact["coverage"]
@@ -5124,6 +5134,11 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertEqual(coverage["chunksFailed"], 0)
         self.assertEqual(coverage["files"][0]["contentStatus"], "complete")
         self.assertEqual(coverage["files"][0]["bytesReviewed"], len(source.encode("utf-8")))
+        self.assertEqual(len(raw_lane_paths), 3)
+        self.assertEqual([entry["stage"] for entry in ledger], [
+            "review_chunk_1", "review_chunk_2", "review_chunk_3",
+        ])
+        self.assertTrue(all(entry["output"] == "chunk" for entry in ledger))
 
     def test_incomplete_synthesis_does_not_mark_reviewed_file_omitted(self) -> None:
         anti = load_anti()

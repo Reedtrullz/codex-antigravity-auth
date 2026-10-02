@@ -403,6 +403,7 @@ paths restrict the chosen run. Bounded secret-pattern checks stop a submission
 until resolved or explicitly acknowledged for its exact prompt hash. Policy
 dry runs write nothing and report hashes instead of source. See the bundled
 [policy contract](codex_antigravity_auth/skills/anti/DATA_POLICY.md).
+
 ## Request time budgets
 
 Google, BYOK and native OpenAI requests now share a monotonic 60-second preparation/nonstream deadline. Streaming has separate 60-second event-idle and 30-minute total defaults, including preparation, with validated metadata overrides. Downstream backpressure and resource cleanup are bounded; timeouts never trigger replay after visible output. See [request deadlines and cleanup](codex_antigravity_auth/REQUEST_DEADLINES.md) for overrides, failure outcomes, cleanup grace and cancellation limits.
@@ -412,3 +413,11 @@ Google, BYOK and native OpenAI requests now share a monotonic 60-second preparat
 Completed tool arguments must encode JSON objects and satisfy the available declared identity and supported schema checks. Invalid calls cannot become executable completion events; usable sibling output is retained with an explicit failed/incomplete result. Google’s internal `_placeholder` is removed only with per-tool injection provenance. See [final-call validation and limits](codex_antigravity_auth/design/tool-calls.md).
 
 Google generated-media parts produce an explicit failure while retaining supported sibling output. The image-generation backend is recognized but excluded from advertised models and rejected before account selection; image input on supported text models remains available. See [Google output support](codex_antigravity_auth/design/google-output.md).
+
+## Anti whole-run deadlines
+
+Anti generation commands accept `--run-timeout` (default 1800 seconds). This budget
+is shared by chunks, retries, fallback and judge calls; each actual destination
+acquires a process-local permit for each attempt. Deadline-deferred work is saved
+as partial coverage under the selected retention mode. See [run controls and
+cooperative timeout limits](codex_antigravity_auth/skills/anti/RUN_CONTROL.md).

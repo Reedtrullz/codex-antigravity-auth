@@ -71,6 +71,7 @@ codex_antigravity_auth = [
   "skills/anti/SCOPES.md",
   "skills/anti/DIFF_PROVENANCE.md",
   "skills/anti/schemas/*.json",
+  "skills/anti/RUN_CONTROL.md",
   "skills/anti/agents/*.yaml",
   "skills/anti/scripts/*.py",
   "skills/anti/scripts/anti_lib/*.py",

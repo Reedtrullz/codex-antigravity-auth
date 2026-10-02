@@ -76,7 +76,7 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     http_error_308 = http_error_302
 
 
-def open_http_request(request: urllib.request.Request | str, *, timeout: float = 10.0):
+def open_http_request(request: urllib.request.Request | str, *, timeout: float = 10.0, before_open=None):
     if isinstance(request, str):
         request = urllib.request.Request(validate_endpoint_url(request, allow_query=True))
     if request.fragment is not None:
@@ -90,7 +90,10 @@ def open_http_request(request: urllib.request.Request | str, *, timeout: float =
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme == "http" and is_loopback_endpoint(parsed.hostname):
         handlers.append(urllib.request.ProxyHandler({}))
-    return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
+    opener = urllib.request.build_opener(*handlers)
+    if before_open is not None:
+        timeout = before_open(request, timeout)
+    return opener.open(request, timeout=timeout)
 
 
 def httpx_client_options(url: str, *, timeout: float) -> dict:
