@@ -155,7 +155,6 @@ def record_review(
         "findings_count": len(findings),
     }
     
-    record = sanitize_json(record)
     if save_output == "summary":
         structure = summary_structure(record, (
             "save_output", "timestamp", "mode", "panel_status", "run_id", "verdict", "findings_count",
@@ -163,6 +162,7 @@ def record_review(
         record = summary_projection({key: value for key, value in record.items() if key not in structure})
         record.update(structure)
         record["retention"] = summary_retention()
+    record = sanitize_json(record)
     path = _reflection_path(repo_path)
     _ensure_permissions()
     with file_lock(path):

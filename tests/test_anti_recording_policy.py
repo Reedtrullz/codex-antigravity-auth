@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from standalone import without_installed_packages
+
 SCRIPT = Path(__file__).resolve().parents[1] / "codex_antigravity_auth/skills/anti/scripts/anti.py"
 SENTINEL = "synthetic-private-content-"
 LONG = SENTINEL + "x" * 4000 + "-private-tail"
@@ -16,6 +18,9 @@ SECRET = "sk-syntheticfixture01234567890123456789"
 
 @pytest.fixture
 def isolated_anti(monkeypatch, tmp_path):
+    script_dir = str(SCRIPT.resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
     spec = importlib.util.spec_from_file_location("anti_recording_fixture", SCRIPT)
     anti = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(anti)
@@ -191,7 +196,7 @@ def test_standalone_copy_uses_same_retention_without_installed_package(isolated_
     copied = root / "copy"
     shutil.copytree(SCRIPT.parent, copied, ignore=shutil.ignore_patterns("__pycache__"))
     probe = "from anti_lib.retention import summary_projection; assert len(summary_projection('x'*4000)) == 1600"
-    subprocess.run([sys.executable, "-S", "-c", probe], cwd=copied, check=True)
+    subprocess.run([sys.executable, "-c", without_installed_packages(probe)], cwd=copied, check=True)
 
 
 @pytest.mark.parametrize("retention", ["never", "summary", "full"])
