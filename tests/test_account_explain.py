@@ -53,7 +53,7 @@ def isolated_store(monkeypatch, tmp_path):
     monkeypatch.setattr(constants, "CREDENTIALS_FILE", str(path.with_name("antigravity-credentials.json")))
     monkeypatch.setattr(diagnostics.time, "time", lambda: NOW)
     for module, name in ((storage, "save_accounts"), (storage, "update_accounts"),
-                         (accounts, "refresh_access_token"), (accounts, "_apply_token_refresh"),
+                         (accounts, "refresh_access_token"), (accounts.AccountManager, "_refresh_snapshot"),
                          (constants, "resolve_oauth_credentials"), (AccountState, "acquire"), (AccountState, "select")):
         monkeypatch.setattr(module, name, MagicMock(side_effect=AssertionError(f"must not call {name}")))
 
@@ -259,6 +259,18 @@ def test_private_namespace_components_are_masked(isolated_store, monkeypatch, in
     assert "fixture@example.invalid" not in text and "synthetic-private-profile" not in text
     assert report["namespace"]["account_store"].startswith("<configured path ")
     assert diagnostics.account_eligibility_report("sonnet")["namespace"] == report["namespace"]
+    assert tree_snapshot(root) == before
+
+
+def test_oauth_client_namespace_follows_selected_gateway_root(isolated_store, monkeypatch):
+    root, path, write = isolated_store
+    state = root / "alternate-state"
+    monkeypatch.setenv("ANTIGRAVITY_STATE_HOME", str(state))
+    monkeypatch.setattr(constants, "CREDENTIALS_FILE", "~/.codex/antigravity-credentials.json")
+    before = tree_snapshot(root)
+    report = diagnostics.account_eligibility_report("sonnet")
+    assert report["namespace"]["oauth_client_file"] == diagnostics._display_path(
+        state / "antigravity-credentials.json", "antigravity-credentials.json")
     assert tree_snapshot(root) == before
 
 
