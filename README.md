@@ -118,7 +118,7 @@ Install or refresh the Codex provider block without changing your active default
 codex-antigravity configure-codex --write
 ```
 
-The command validates the Codex model id, provider id, provider name, and gateway base URL before writing. It updates `~/.codex/config.toml` through a private atomic write, follows an existing symlink to update the real config target, and writes a timestamped private backup first when it changes an existing config. By default it writes only `[model_providers.antigravity]`; it does not change top-level `model` or `model_provider`. Add `--activate` only when you explicitly want Antigravity to become the active Codex default.
+The command validates the Codex model id, provider id, provider name, and gateway base URL before writing. It parses and edits TOML semantically, preserving comments, multiline strings and unrelated values; invalid or ambiguous input is refused. Cooperating gateway writers share a lock across read, merge, backup and private atomic replacement. It follows an existing symlink to update the real config target, and writes a timestamped private backup first when it changes an existing config. By default it writes only `[model_providers.antigravity]`; it does not change top-level `model` or `model_provider`. Add `--activate` only when you explicitly want Antigravity to become the active Codex default.
 
 To inspect the TOML without writing it:
 

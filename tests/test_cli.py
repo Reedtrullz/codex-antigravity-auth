@@ -55,7 +55,7 @@ from codex_antigravity_auth.cli import (
     validate_codex_provider_name,
     version_check_result,
     write_codex_config,
-    _toml_section_name,
+    parse_codex_config,
 )
 from codex_antigravity_auth.cli_doctor import (
     openrouter_reachability_check,
@@ -3403,12 +3403,10 @@ class TestVNextPolishCli(unittest.TestCase):
 
 
 class VisionSidecarDoctorTests(unittest.TestCase):
-    def test_toml_section_name_normalizes_quoted_subtables(self):
-        # [model_providers."antigravity"] and [model_providers.antigravity]
-        # name the same TOML table; upserts must not emit a duplicate header.
-        self.assertEqual(_toml_section_name('[model_providers."antigravity"]'), "model_providers.antigravity")
-        self.assertEqual(_toml_section_name("[model_providers.antigravity]"), "model_providers.antigravity")
-        self.assertIsNone(_toml_section_name("model = 'x'"))
+    def test_codex_config_recognizes_quoted_provider_tables(self):
+        for header in ('[model_providers."antigravity"]', "[model_providers.antigravity]"):
+            parsed = parse_codex_config(header + '\nbase_url = "http://localhost:51122/v1"\n')
+            self.assertEqual(parsed["provider_tables"]["antigravity"]["base_url"], "http://localhost:51122/v1")
 
     def test_codex_model_metadata_default_input_modalities(self):
         m = codex_model_metadata('test-model', 'Test', 100000, 'test', 1234)
