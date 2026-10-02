@@ -12,6 +12,7 @@ import uuid
 
 import httpx
 
+from .endpoint_policy import httpx_client_options
 from .byok import (
     provider_capabilities,
     resolve_api_key,
@@ -30,6 +31,8 @@ from .native_output import (
 from .response_protocol import (
     ProviderCapabilities,
     validate_capabilities,
+    POLICY_FINISH_REASONS,
+    PrimaryAlternativeSelector,
     ProviderResult,
     ProviderTerminal,
     ResponseEventBuilder,
@@ -38,7 +41,6 @@ from .response_protocol import (
     normalize_usage,
     refusal_item,
 )
-from .transform import function_call_arguments_string, valid_function_name
 from .tool_calls import (FunctionCallValidator, ToolCallError, tool_terminal, parse_arguments,
                          checked_native_call, native_response)
 from .transform import transform_request_to_chat
@@ -72,6 +74,26 @@ class PreparedOpenAIRequest:
     timeout: float
 
 
+def _message_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(part["text"] for part in content if isinstance(part, dict) and isinstance(part.get("text"), str))
+    return ""
+
+
+def _message_refusal(message: dict[str, Any]) -> str:
+    refusal = message.get("refusal")
+    if isinstance(refusal, str) and refusal:
+        return refusal
+    content = message.get("content")
+    if isinstance(content, list):
+        return "".join(part["refusal"] for part in content if isinstance(part, dict)
+                       and part.get("type") == "refusal" and isinstance(part.get("refusal"), str))
+    return ""
+
+
 def _message_output(message: object, *, tool_validator=None, tool_errors=None, duplicate_ids=()) -> list[dict[str, Any]]:
     tool_validator = tool_validator or FunctionCallValidator()
     tool_errors = tool_errors if tool_errors is not None else []
@@ -87,17 +109,7 @@ def _message_output(message: object, *, tool_validator=None, tool_errors=None, d
                 "step_by_step_summary": reasoning,
             }
         )
-    content = message.get("content")
-    if isinstance(content, str):
-        text = content
-    elif isinstance(content, list):
-        text = "".join(
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and isinstance(part.get("text"), str)
-        )
-    else:
-        text = ""
+    text = _message_text(message)
     if text:
         output.append(
             {
@@ -108,6 +120,9 @@ def _message_output(message: object, *, tool_validator=None, tool_errors=None, d
                 "content": [{"type": "output_text", "text": text, "annotations": []}],
             }
         )
+    refusal = _message_refusal(message)
+    if refusal:
+        output.append(refusal_item(refusal_text=refusal))
     tool_calls = message.get("tool_calls")
     if tool_calls is not None and not isinstance(tool_calls, list):
         tool_errors.append("invalid_function_call")
@@ -152,9 +167,16 @@ class ChatResponseAccumulator:
         self._finish_reason: str | None = None
         self._usage = normalize_usage()
         self._done = False
-        self._refusal = False
+        self._malformed = False
+        self._primary = PrimaryAlternativeSelector()
+        self._refusal = ""
+        self._blocked = False
         self._tool_names: dict[int, str] = {}
         self._tool_arguments: dict[int, str] = {}
+
+    @property
+    def usage(self) -> dict[str, int]:
+        return dict(self._usage)
 
     def mark_done(self) -> None:
         self._done = True
@@ -169,28 +191,29 @@ class ChatResponseAccumulator:
                 usage.get("completion_tokens", usage.get("output_tokens")),
                 usage.get("total_tokens"),
             )
-        choices = payload.get("choices", [])
-        if not isinstance(choices, list):
+        try:
+            choices = self._primary.select(payload.get("choices", []))
+        except ValueError:
+            self._malformed = True
             return
         for choice in choices:
             if not isinstance(choice, dict):
                 continue
             finish_reason = choice.get("finish_reason")
-            if isinstance(finish_reason, str) and finish_reason:
+            if finish_reason is not None and not isinstance(finish_reason, str):
+                self._malformed = True
+            if isinstance(finish_reason, str):
                 self._finish_reason = finish_reason
-                if finish_reason == "content_filter":
-                    self._refusal = True
+                if finish_reason.strip().lower() in POLICY_FINISH_REASONS:
+                    self._blocked = True
             delta = choice.get("delta")
             if not isinstance(delta, dict):
                 continue
-            content = delta.get("content")
-            if isinstance(content, str):
-                self._text += content
+            self._text += _message_text(delta)
             reasoning = delta.get("reasoning_content")
             if isinstance(reasoning, str):
                 self._reasoning += reasoning
-            if isinstance(delta.get("refusal"), str) and delta["refusal"]:
-                self._refusal = True
+            self._refusal += _message_refusal(delta)
             tool_calls = delta.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
                 self.tool_error = self.tool_error or "invalid_function_call"
@@ -250,8 +273,8 @@ class ChatResponseAccumulator:
                     "content": [{"type": "output_text", "text": self._text, "annotations": []}],
                 }
             )
-        if self._refusal and not output:
-            output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
+        if self._refusal or self._blocked:
+            output.append(refusal_item({"blockReason": "CONTENT_FILTER"}, refusal_text=self._refusal))
         counts = Counter(self._tool_ids.values())
         for index in self._tool_order:
             if index in self._invalid_tool_indices:
@@ -270,7 +293,8 @@ class ChatResponseAccumulator:
         terminal = classify_terminal(
             output=output,
             finish_reason=self._finish_reason,
-            safety_block={"blockReason": "CONTENT_FILTER"} if self._refusal else None,
+            safety_block={"blockReason": "CONTENT_FILTER"} if self._blocked else None,
+            malformed=self._malformed,
         )
         if terminal.kind is TerminalKind.COMPLETED and self._finish_reason is None and not self._done:
             terminal = ProviderTerminal(
@@ -381,11 +405,23 @@ class OpenAICompatibleTransport:
         tool_errors = []
         if not isinstance(payload, dict):
             payload = {}
-        choices = payload.get("choices", [])
-        if not isinstance(choices, list):
-            choices = []
-        # Count raw IDs before validating arguments so a malformed sibling cannot
-        # make an otherwise ambiguous provider identity appear safe to execute.
+        usage = payload.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+        normalized_usage = normalize_usage(
+            usage.get("prompt_tokens", usage.get("input_tokens")),
+            usage.get("completion_tokens", usage.get("output_tokens")),
+            usage.get("total_tokens"),
+        )
+        try:
+            choices = PrimaryAlternativeSelector().select(payload.get("choices", []))
+        except ValueError as exc:
+            return self._failed_result("invalid_alternatives", str(exc), usage=normalized_usage)
+        output: list[dict[str, Any]] = []
+        finish_reason: str | None = None
+        malformed = False
+        blocked = False
+        explicit_refusal = False
+        # Only the selected alternative is eligible to supply executable calls.
         call_ids = Counter()
         for choice in choices:
             message = choice.get("message") if isinstance(choice, dict) else None
@@ -394,44 +430,37 @@ class OpenAICompatibleTransport:
                 call_ids.update(call["id"] for call in calls if isinstance(call, dict)
                                 and isinstance(call.get("id"), str) and call["id"])
         duplicate_ids = {call_id for call_id, count in call_ids.items() if count > 1}
-        output: list[dict[str, Any]] = []
-        finish_reason: str | None = None
-        refusal = False
         for choice in choices:
             if not isinstance(choice, dict):
                 continue
             reason = choice.get("finish_reason")
-            if isinstance(reason, str) and reason:
+            if reason is not None and not isinstance(reason, str):
+                malformed = True
+            if isinstance(reason, str):
                 finish_reason = reason
-                refusal = refusal or reason == "content_filter"
+                blocked = blocked or reason.strip().lower() in POLICY_FINISH_REASONS
             message = choice.get("message")
             if isinstance(message, dict):
-                refusal = refusal or bool(message.get("refusal"))
+                explicit_refusal = explicit_refusal or bool(_message_refusal(message))
             output.extend(_message_output(message, tool_validator=tool_validator, tool_errors=tool_errors,
                                           duplicate_ids=duplicate_ids))
-        if refusal and not output:
+        if blocked and not explicit_refusal:
             output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
-        usage = payload.get("usage")
-        usage = usage if isinstance(usage, dict) else {}
-        normalized_usage = normalize_usage(
-            usage.get("prompt_tokens", usage.get("input_tokens")),
-            usage.get("completion_tokens", usage.get("output_tokens")),
-            usage.get("total_tokens"),
-        )
         terminal = classify_terminal(
             output=output,
             finish_reason=finish_reason,
-            safety_block={"blockReason": "CONTENT_FILTER"} if refusal else None,
+            safety_block={"blockReason": "CONTENT_FILTER"} if blocked else None,
+            malformed=malformed,
         )
         if tool_errors:
             terminal = tool_terminal(terminal, tool_errors[0])
         return ProviderResult(output=tuple(output), usage=normalized_usage, terminal=terminal)
 
     @staticmethod
-    def _failed_result(code: str, message: str) -> ProviderResult:
+    def _failed_result(code: str, message: str, *, usage: dict[str, int] | None = None) -> ProviderResult:
         return ProviderResult(
             output=(),
-            usage=normalize_usage(),
+            usage=usage if usage is not None else normalize_usage(),
             terminal=ProviderTerminal(
                 TerminalKind.FAILED,
                 code,
@@ -456,6 +485,7 @@ class OpenAICompatibleTransport:
             created_at=int(time.time()),
         )
         accumulator = ChatResponseAccumulator(tool_validator=FunctionCallValidator(prepared.payload, route="byok"))
+        primary = PrimaryAlternativeSelector()
         text_active = False
         reasoning_active = False
         terminal_emitted = False
@@ -471,12 +501,12 @@ class OpenAICompatibleTransport:
                 for event in builder.finish_text():
                     yield event
             yield builder.error(code, message)
-            yield builder.terminal(self._failed_result(code, message))
+            yield builder.terminal(self._failed_result(code, message, usage=accumulator.usage))
             terminal_emitted = True
             yield builder.done_marker()
 
         try:
-            async with owned_context(self.client_factory(timeout=prepared.timeout)) as client:
+            async with owned_context(self.client_factory(**httpx_client_options(prepared.url, timeout=prepared.timeout))) as client:
                 async with owned_context(client.stream(
                     "POST",
                     prepared.url,
@@ -525,10 +555,14 @@ class OpenAICompatibleTransport:
                                 async for event in fail(code if isinstance(code, str) and code else "provider_error", "The provider stream failed."):
                                     yield event
                                 return
-                            accumulator.consume(payload)
-                            choices = payload.get("choices", [])
-                            if not isinstance(choices, list):
-                                continue
+                            try:
+                                choices = primary.select(payload.get("choices", []))
+                            except ValueError as exc:
+                                accumulator.consume({**payload, "choices": []})
+                                async for event in fail("invalid_alternatives", str(exc)):
+                                    yield event
+                                return
+                            accumulator.consume({**payload, "choices": choices})
                             for choice in choices:
                                 if not isinstance(choice, dict):
                                     continue
@@ -540,7 +574,7 @@ class OpenAICompatibleTransport:
                                     reasoning_active = True
                                     for event in builder.add_reasoning_delta(reasoning):
                                         yield event
-                                content_str = delta.get("content")
+                                content_str = _message_text(delta)
                                 if isinstance(content_str, str) and content_str:
                                     text_active = True
                                     for event in builder.add_text_delta(content_str):
@@ -926,7 +960,6 @@ class NativeResponsesStreamAdapter:
         visible = self._emit_or_defer(events)
         terminal_events = self._release_terminal()
         if terminal_events:
-            response = terminal_events[-1].get("response", {})
             if not self._protocol_error and not self._tool_error:
                 visible.extend(self._deferred_events)
             # On failure/incompleteness, the terminal snapshot carries retained

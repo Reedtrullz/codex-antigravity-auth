@@ -21,6 +21,28 @@ FAMILIES = ("claude", "gemini")
 BAN_STRIKE_LIMIT = 3
 
 
+class UnsupportedAccountStateVersion(ValueError):
+    """The account-state format cannot safely be interpreted by this process."""
+
+
+def account_state_version(data: dict[str, Any]) -> int | None:
+    """Validate the format before touching state; None is unversioned legacy."""
+    state = data.get("accountState") if isinstance(data, dict) else None
+    if not isinstance(state, dict) or "schemaVersion" not in state:
+        return None
+    version = state["schemaVersion"]
+    if type(version) is not int or version != SCHEMA_VERSION:
+        # Invalid scalar values could contain secrets; report only their type.
+        label = str(version) if type(version) is int else f"invalid {type(version).__name__} value"
+        raise UnsupportedAccountStateVersion(
+            f"Unsupported accountState.schemaVersion: {label}. This version of the gateway "
+            f"supports unversioned legacy state and version {SCHEMA_VERSION} only. "
+            "Use a compatible gateway version or restore a matching backup with the "
+            "gateway stopped; do not reset or overwrite the account store."
+        )
+    return version
+
+
 def _number(value: Any) -> float:
     if isinstance(value, bool):
         return 0
@@ -111,6 +133,7 @@ def _strike_entries(value: object, *, emails: set[str]) -> dict[str, int]:
 
 
 def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str, Any], bool]:
+    version = account_state_version(data)
     original = copy.deepcopy(data)
     normalized = copy.deepcopy(data) if isinstance(data, dict) else {}
     accounts = normalized.get("accounts")
@@ -122,7 +145,7 @@ def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str
     }
     raw_state = normalized.get("accountState")
     raw_state = raw_state if isinstance(raw_state, dict) else {}
-    legacy = not isinstance(raw_state.get("schemaVersion"), int)
+    legacy = version is None
 
     failures = {}
     raw_failures = raw_state.get("failures")
@@ -155,6 +178,7 @@ def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str
                 counters[email] = clean
 
     normalized["accountState"] = {
+        **raw_state,
         "schemaVersion": SCHEMA_VERSION,
         "failures": failures,
         "cooldowns": cooldowns,
@@ -162,9 +186,13 @@ def migrate_account_state(data: dict[str, Any], *, now: float) -> tuple[dict[str
     }
     if strikes:
         normalized["accountState"]["authStrikes"] = strikes
+    else:
+        normalized["accountState"].pop("authStrikes", None)
     disabled = _disabled_entries(raw_state.get("disabled"), emails=emails)
     if disabled:
         normalized["accountState"]["disabled"] = disabled
+    else:
+        normalized["accountState"].pop("disabled", None)
     return normalized, normalized != original
 
 
@@ -194,6 +222,53 @@ class AccountState:
     def state(self) -> dict[str, Any]:
         return self.data["accountState"]
 
+    def _exclusion_reasons(self, account: Any, family: str, now: float, exclude_emails: set[str] | None = None) -> list[str]:
+        if not isinstance(account, dict) or not account.get("email"):
+            return ["missing_identity"]
+        email = str(account["email"])
+        reasons = []
+        if exclude_emails and email in exclude_emails:
+            reasons.append("excluded_for_request")
+        if self.state.get("disabled", {}).get(email):
+            reasons.append("disabled")
+        scoped = self.state["cooldowns"].get(email, {})
+        for scope in ("account", family):
+            if scoped.get(scope, 0) > now:
+                reasons.append(f"{scope}_cooldown")
+        return reasons
+
+    def _preferred_index(self, family: str, count: int) -> int:
+        start = self.data.get("activeIndexByFamily", {}).get(family, 0)
+        return start if isinstance(start, int) and 0 <= start < count else 0
+
+    def selection_snapshot(self, family: str) -> dict[str, Any]:
+        """Describe this owner's selection predicates without changing any state."""
+        if family not in FAMILIES:
+            raise ValueError(f"unsupported model family: {family}")
+        with self._lock:
+            accounts = self.data.get("accounts", [])
+            start = self._preferred_index(family, len(accounts))
+            now = self._now()
+            rows = []
+            for index, account in enumerate(accounts):
+                email = str(account.get("email", "")) if isinstance(account, dict) else ""
+                reasons = self._exclusion_reasons(account, family, now)
+                scoped = self.state["cooldowns"].get(email, {})
+                rows.append({
+                    "index": index,
+                    "order": (index - start) % len(accounts),
+                    "in_flight": self._in_flight.get(email, 0),
+                    "exclusion_reasons": reasons,
+                    "cooldown_remaining_seconds": {
+                        scope: math.ceil(scoped[scope] - now)
+                        for scope in ("account", family) if scoped.get(scope, 0) > now
+                    },
+                })
+            candidates = [row for row in rows if not row["exclusion_reasons"]]
+            selected = min(candidates, key=lambda row: (row["in_flight"], row["order"])) if candidates else None
+            return {"accounts": rows, "preferred_index": start if accounts else None,
+                    "candidate_index": selected["index"] if selected else None}
+
     def _select(
         self,
         family: str,
@@ -208,24 +283,16 @@ class AccountState:
             if not isinstance(accounts, list) or not accounts:
                 return None
             family_map = self.data.setdefault("activeIndexByFamily", {name: 0 for name in FAMILIES})
-            start = family_map.get(family, 0)
-            if not isinstance(start, int) or start < 0 or start >= len(accounts):
-                start = 0
+            start = self._preferred_index(family, len(accounts))
             now = self._now()
             candidates = []
             for order in range(len(accounts)):
                 index = (start + order) % len(accounts)
                 account = accounts[index]
-                if not isinstance(account, dict) or not account.get("email"):
+                if self._exclusion_reasons(account, family, now, exclude_emails):
                     continue
                 email = str(account["email"])
-                if exclude_emails and email in exclude_emails:
-                    continue
-                if self.state.get("disabled", {}).get(email):
-                    continue
                 scoped = self.state["cooldowns"].get(email, {})
-                if scoped.get("account", 0) > now or scoped.get(family, 0) > now:
-                    continue
                 for scope in ("account", family):
                     if scoped.get(scope) and scoped[scope] <= now:
                         scoped.pop(scope, None)

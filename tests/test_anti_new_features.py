@@ -175,7 +175,7 @@ class NormalizeAndFindingsTests(unittest.TestCase):
                     metadata={"failure_diagnostics": diagnostics, "scope_status": "partial"},
                     error="review synthesis output was truncated",
                 )
-            result = json.loads((Path(tmp) / "diagnostic-test" / "result.json").read_text())
+            result = json.loads(Path(anti.load_run_record(result_path)["resultPath"]).read_text())
             self.assertEqual(result["failureDiagnostics"], diagnostics)
             self.assertEqual(result_path, Path(tmp) / "diagnostic-test.json")
 
@@ -395,14 +395,14 @@ class NormalizeAndFindingsTests(unittest.TestCase):
 
     def test_normalize_defaults_clamps_and_fingerprints(self):
         item = anti.normalize_finding_item(
-            {"claim": "  Unsafe input  ", "verify": "run tests", "confidence": 9, "severity": "bogus", "line": -1},
+            {"claim": "  Unsafe input  ", "verify": "run tests", "confidence": 9, "severity": "bogus", "line": None},
             2,
         )
         self.assertIsNotNone(item)
         self.assertEqual(item["claim"], "Unsafe input")
         self.assertEqual(item["severity"], "medium")
         self.assertEqual(item["confidence"], 1.0)
-        self.assertEqual(item["id"], "F002")
+        self.assertRegex(item["id"], r"^F-[0-9a-f]{16}$")
         self.assertIsNone(item["line"])
         self.assertRegex(item["fingerprint"], r"^sha256:[0-9a-f]{16}$")
         self.assertIsNone(anti.normalize_finding_item({"claim": "missing verify"}, 1))
@@ -423,7 +423,8 @@ class NormalizeAndFindingsTests(unittest.TestCase):
         self.assertEqual(finding["confidence"], 0.5)
         self.assertEqual(set(finding["lanes"]), {"a", "b"})
         self.assertEqual(result["findings_total"], 2)
-        self.assertEqual(result["findings_dropped"], 1)
+        self.assertEqual(result["findings_dropped"], 0)
+        self.assertEqual(result["findings_merged"], 1)
 
 
 class RoutingAndCostTests(unittest.TestCase):
@@ -673,8 +674,9 @@ class VerifierTests(unittest.TestCase):
             bad = root / "bad.py"
             bad.write_text("token = '123456789'\ndef broken(:\n", encoding="utf-8")
             result = verify_finding({"file": "bad.py", "evidence": "unverified"}, root)
-            self.assertIn("python_syntax", result["evidence"])
-            self.assertIn("secrets_scan", result["evidence"])
+            self.assertEqual({check["check"] for check in result["checks"]}, {"python_syntax", "secrets_scan"})
+            self.assertTrue(all(check["status"] == "failed" for check in result["checks"]))
+            self.assertEqual(result["evidence"], "unverified")
 
     def test_verifier_existing_missing_and_no_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -684,9 +686,9 @@ class VerifierTests(unittest.TestCase):
             existing = verify_finding({"file": "good.py", "evidence": "unverified"}, root)
             self.assertEqual(existing["evidence"], "unverified")
             missing = {"file": "missing.py", "evidence": "unverified"}
-            self.assertEqual(verify_finding(missing, root), missing)
+            self.assertEqual(verify_finding(missing, root)["checks"][0]["reason"], "file_missing_or_not_regular")
             no_file = {"claim": "x"}
-            self.assertEqual(verify_finding(no_file, root), no_file)
+            self.assertEqual(verify_finding(no_file, root)["checks"][0]["reason"], "file_not_provided")
 
 
 class FreeLanePresetTests(unittest.TestCase):

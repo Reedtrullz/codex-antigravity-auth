@@ -283,7 +283,7 @@ def test_terminal_failures_preserve_submitted_attempt_evidence(anti,monkeypatch,
     assert settings._run_control.snapshot()['permits_released']==1
 
 
-@pytest.mark.parametrize('preparation', ['json','request'])
+@pytest.mark.parametrize('preparation', ['json','request','opener'])
 def test_preparation_expiry_never_enters_transport_or_marks_submitted(anti,monkeypatch,preparation):
     settings=args(anti, fallback_model=None, budget=1)
     clock=[0.0]
@@ -295,11 +295,16 @@ def test_preparation_expiry_never_enters_transport_or_marks_submitted(anti,monke
             if isinstance(value,dict) and value.get('input')=='fixture':clock[0]=2
             return result
         monkeypatch.setattr(anti.json,'dumps',expire)
-    else:
+    elif preparation=='request':
         request=anti.urllib.request.Request
         def expire(*values,**kwargs):
             result=request(*values,**kwargs);clock[0]=2;return result
         monkeypatch.setattr(anti.urllib.request,'Request',expire)
+    else:
+        def expire(*handlers):
+            clock[0]=2
+            return argparse.Namespace(open=lambda *a,**k:pytest.fail('no late POST'))
+        monkeypatch.setattr(anti.urllib.request,'build_opener',expire)
     monkeypatch.setattr(anti.urllib.request,'urlopen',lambda *a,**k:pytest.fail('no late POST'))
     with pytest.raises(anti.RunDeadlineExceeded) as caught:
         anti.generate_with_fallback(settings,model='claude-sonnet-4-6',prompt='fixture',max_output_tokens=32,
@@ -326,6 +331,7 @@ def test_transport_timeout_is_rechecked_after_preparation(anti,monkeypatch):
         timeouts.append(timeout)
         response=io.BytesIO(body);response.status=200;return response
     monkeypatch.setattr(anti.urllib.request,'urlopen',opened)
+    monkeypatch.setattr(anti.urllib.request,'build_opener',lambda *handlers:argparse.Namespace(open=opened))
     anti.generate_with_fallback(settings,model='fixture:model',prompt='fixture',max_output_tokens=32,
                                 purpose='preparation',model_ids={'fixture:model'})
     assert timeouts==[.75]

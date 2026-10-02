@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import contextvars
 from contextvars import ContextVar
 import concurrent.futures
 from collections import deque
@@ -35,22 +36,33 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+from anti_lib.console import ConsoleArgumentParser, console_print as print
 from anti_lib.run_control import RunControl, DeadlineExceeded, CURRENT_RUN
 from anti_lib.spend_control import SpendControl, SpendRefused, AdmissionConfigError
 from anti_lib.capabilities import CapabilityRegistry
+from anti_lib.artifacts import (
+    ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
+    file_reference, read_record, validate_record, coverage_has_loss,
+)
 from anti_lib.chunking import chunk_manifest
+from anti_lib.cleanup import RUN_ID_RE, assert_not_deleted, clean_runs
 from anti_lib.context import ordered_prompt
+from anti_lib import inventory as review_inventory
+from anti_lib.data_policy import DataPolicy, PolicyError
 from anti_lib.ledger import execution_entry, prompts_as_text
+from anti_lib.endpoint_policy import open_http_request, validate_endpoint_url
 from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
+from anti_lib.persistence import PersistenceError, atomic_write_json, file_lock, fsync_directory
+from anti_lib.retention import lifecycle_metadata, summary_projection, summary_retention, summary_structure
 from anti_lib.runner import presentable_result
 from anti_lib.verifier import verify_findings
 from anti_lib.reflections import (
     record_review,
     update_verdict,
+    update_finding_verdict,
     get_summary,
     list_records,
     clear_records,
-    prune_reflections_older_than,
 )
 
 
@@ -355,9 +367,11 @@ MAX_PROMPT_CHARS_HELP = (
     "Claude-family review/plan/panel calls still use the conservative safety budget with --chunked auto; "
     "--chunked off refuses any review scope that cannot fit exactly."
 )
-PID_FILE = Path.home() / ".codex" / "anti-gateway.pid"
-LOG_FILE = Path.home() / ".codex" / "anti-gateway.log"
-RUNS_DIR = Path.home() / ".codex" / "anti-runs"
+from anti_lib.namespaces import gateway_home, client_config_path
+
+PID_FILE = gateway_home() / "anti-gateway.pid"
+LOG_FILE = gateway_home() / "anti-gateway.log"
+RUNS_DIR = gateway_home() / "anti-runs"
 RUN_OUTPUT_PREVIEW_CHARS = 1600
 POST_FAILURE_MODEL_PROBE_TIMEOUT = 8.0
 FALLBACK_POLICIES = {"never", "on-retryable", "on-timeout"}
@@ -557,7 +571,6 @@ EXCLUDED_PATTERNS = [
     "*apikey*",
     "*api-key*",
 ]
-RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 CHUNK_PART_SUFFIX_RE = re.compile(r" part \d+/\d+$")
 FAILURE_OUTPUT_PREVIEW_CHARS = 1600
 REVIEW_SYNTHESIS_OVERFLOW_SENTINEL = "ANTI_SYNTHESIS_STATUS: OVERFLOW"
@@ -566,6 +579,61 @@ REVIEW_SYNTHESIS_OVERFLOW_SENTINEL = "ANTI_SYNTHESIS_STATUS: OVERFLOW"
 class AntiError(Exception):
     pass
 
+
+_POLICY_STAGE = contextvars.ContextVar("anti_data_policy_stage", default="primary")
+
+
+def data_policy(args):
+    if args is None:
+        return None
+    if hasattr(args, "_data_policy_session"):
+        return args._data_policy_session
+    path = getattr(args, "data_policy", None)
+    acknowledgements = getattr(args, "acknowledge_secret_hash", None) or []
+    if acknowledgements and not path:
+        raise PolicyError("Secret acknowledgements require --data-policy")
+    session = DataPolicy(Path(path).expanduser(), root=find_repo_root(Path.cwd()) or Path.cwd(), acknowledgements=acknowledgements) if path else None
+    args._data_policy_session = session
+    return session
+
+
+def policy_paths(args, root, paths):
+    session = data_policy(args)
+    if session:
+        session.check_paths(paths, root=root)
+
+
+def policy_submit(args, *, model, prompt, base_url, fallback=False):
+    session = data_policy(args)
+    if session:
+        session.check(model=model, prompt=prompt, base_url=base_url, stage=_POLICY_STAGE.get())
+        if fallback:
+            session.check(model=model, prompt=prompt, base_url=base_url, stage="fallback")
+
+
+def policy_generate(args, *, stage, **kwargs):
+    token = _POLICY_STAGE.set(stage)
+    try:
+        return generate_with_fallback(args, **kwargs)
+    finally:
+        _POLICY_STAGE.reset(token)
+
+
+def policy_preflight(args, prompt, routes):
+    session = data_policy(args)
+    if session is None:
+        return False
+    fallback = getattr(args, "fallback_model", None)
+    for model, stage in routes:
+        session.check(model=model, prompt=prompt, base_url=args.base_url, stage=stage)
+        if fallback and getattr(args, "fallback_policy", "never") != "never":
+            resolved = resolve_model(fallback, default=fallback)
+            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage=stage)
+            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage="fallback")
+    if getattr(args, "dry_run", False):
+        print(json.dumps({"dryRun": True, "dataPolicy": session.audit(), "noContentSubmitted": True}, indent=2))
+        return True
+    return False
 
 class RunDeadlineExceeded(DeadlineExceeded, AntiError):
     pass
@@ -847,7 +915,80 @@ def write_preflight_record(
     )
 
 
-def write_run_record(
+def check_record_retention(record_id: str, output_mode: str) -> None:
+    """Do not silently mix policies or delete older artifacts when reusing an ID."""
+    if not RUN_ID_RE.fullmatch(record_id):
+        raise AntiError("run id must contain only letters, numbers, '_' or '-'")
+    if RUNS_DIR.is_symlink():
+        raise AntiError("refusing to write Anti run record through symlinked directory")
+    assert_not_deleted(RUNS_DIR, record_id)
+    path = RUNS_DIR / f"{record_id}.json"
+    if path.is_symlink():
+        raise AntiError("refusing to overwrite symlinked run record")
+    if path.exists():
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            raise AntiError("cannot inspect existing run retention; choose a new run id") from exc
+        if not isinstance(previous, dict) or previous.get("save_output") != output_mode:
+            raise AntiError("run id already exists with another retention policy; choose a new run id")
+    artifact_dir = RUNS_DIR / record_id
+    if artifact_dir.is_symlink():
+        raise AntiError("refusing to write result artifact through symlink")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    if not path.exists() and (artifact_dir.exists() or temporary.exists() or temporary.is_symlink()):
+        raise AntiError("run id has orphan artifacts with unknown retention policy; choose a new run id")
+    if (output_mode == "never" and artifact_dir.exists()) or (
+        output_mode == "summary" and artifact_dir.exists() and any(artifact_dir.glob("lane-*.json"))
+    ):
+        raise AntiError("run id has artifacts incompatible with retention policy; choose a new run id")
+
+
+_RECORD_WRITES = threading.local()
+
+
+def write_run_record(args: argparse.Namespace, **kwargs: Any) -> Path | None:
+    """Serialize one invocation's run; a terminal record never regresses."""
+    output_mode = save_output_mode(args)
+    record_id = getattr(args, "run_id", None)
+    if not record_id and output_mode == "never":
+        return None
+    record_id = str(record_id or new_run_id())
+    if not RUN_ID_RE.fullmatch(record_id):
+        raise AntiError("run id must contain only letters, numbers, '_' or '-'")
+    args.run_id = record_id
+    check_record_retention(record_id, output_mode)
+    if not getattr(args, "_anti_writer_id", None):
+        args._anti_writer_id = uuid.uuid4().hex
+    if RUNS_DIR.is_symlink():
+        raise AntiError("refusing to write Anti run record through symlinked directory")
+    RUNS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(RUNS_DIR, 0o700)
+    path = RUNS_DIR / f"{record_id}.json"
+    _RECORD_WRITES.depth = getattr(_RECORD_WRITES, "depth", 0) + 1
+    try:
+        with file_lock(path):
+            check_record_retention(record_id, output_mode)
+            if path.exists():
+                previous = read_record(path)
+                if previous.get("id") != record_id or previous.get("writerId") != args._anti_writer_id:
+                    raise AntiError("run id belongs to another writer or legacy record; choose a new run id")
+                if previous.get("status") not in {"running", "success", "partial", "failed", "error", "interrupted"}:
+                    raise AntiError("unknown saved run state; preserve the record and choose a new run id")
+                if previous["status"] != "running":
+                    args.run_record_written = True
+                    return path
+            return _write_run_record_unlocked(args, **kwargs)
+    finally:
+        _RECORD_WRITES.depth -= 1
+        if not _RECORD_WRITES.depth:
+            pending = getattr(_RECORD_WRITES, "pending_signal", None)
+            _RECORD_WRITES.pending_signal = None
+            if pending is not None:
+                _handle_run_signal(*pending)
+
+
+def _write_run_record_unlocked(
     args: argparse.Namespace,
     *,
     mode: str,
@@ -867,6 +1008,11 @@ def write_run_record(
                                 metadata.get('admission_controls', {}).get('assumption_exceeded')):
         status = 'partial'
     output_mode = save_output_mode(args)
+    record_id = getattr(args, "run_id", None)
+    if not record_id and output_mode != "never":
+        record_id = new_run_id()
+    if record_id:
+        check_record_retention(str(record_id), output_mode)
     if output_mode == "never":
         # Minimal lifecycle record: correlation survives even when prompt and
         # output retention are disabled (bug report root cause 2).
@@ -882,47 +1028,37 @@ def write_run_record(
             os.chmod(RUNS_DIR, 0o700)
         except OSError:
             pass
+        commands = {"consult", "review", "plan", "panel", "moa", "fusion", "workflow", "compare"}
+        statuses = {"running", "success", "partial", "error", "interrupted", "failed"}
+        command = getattr(args, "command", mode)
         record: dict[str, Any] = {
             "id": str(record_id),
             "created_at": utc_timestamp(),
-            "command": getattr(args, "command", mode),
-            "workflow": getattr(args, "workflow_name", None),
-            "run_label": getattr(args, "run_label", None),
-            "mode": mode,
-            "status": status,
-            "gateway": base_url,
-            "models": models or [],
+            "command": command if command in commands else "unknown",
+            "mode": mode if mode in commands else "unknown",
+            "status": status if status in statuses else "unknown",
             "save_output": output_mode,
-            "helper": helper_identity(),
-            "runStatus": "failed" if status == "error" else status,
+            "runStatus": "failed" if status == "error" else status if status in statuses else "unknown",
             "metadata": {
-                **(metadata or {}),
+                **lifecycle_metadata(metadata),
                 "request_log_correlation_id": str(record_id),
             },
         }
         if error:
-            record["error"] = error
+            record["error"] = "interrupted" if status == "interrupted" else "run_failed"
         record = sanitize_json(record)
         record["id"] = str(record_id)
         record["metadata"]["request_log_correlation_id"] = str(record_id)
         record_path = RUNS_DIR / f"{record['id']}.json"
         if record_path.exists() and record_path.is_symlink():
             raise AntiError(f"refusing to overwrite symlinked run record: {record_path}")
-        tmp_path = record_path.with_suffix(record_path.suffix + ".tmp")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        try:
-            fd = os.open(tmp_path, flags, 0o600)
-        except FileExistsError:
-            if tmp_path.is_symlink():
-                raise
-            tmp_path.unlink()
-            fd = os.open(tmp_path, flags, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+        record["writerId"] = args._anti_writer_id
+        record["recordSchemaVersion"] = RECORD_SCHEMA_VERSION
+        if getattr(args, "_data_policy_session", None):
+            record["metadata"]["dataPolicy"] = args._data_policy_session.audit()
+        validate_record(record, record_path)
+        atomic_write_json(record_path, record)
         args.run_record_written = status != "running"
-        os.replace(tmp_path, record_path)
         return record_path
 
     if RUNS_DIR.is_symlink():
@@ -935,7 +1071,6 @@ def write_run_record(
 
     output_chars = len(output_text or "")
     prompt_chars = len(prompt_text or "")
-    record_id = getattr(args, "run_id", None) or new_run_id()
     if not RUN_ID_RE.fullmatch(str(record_id)):
         raise AntiError("run id must contain only letters, numbers, '_' or '-'")
 
@@ -983,9 +1118,7 @@ def write_run_record(
     if error:
         record["error"] = error
     if output_mode == "summary" and output_text:
-        record["output_preview"] = output_text[:RUN_OUTPUT_PREVIEW_CHARS]
-        if force_full_output:
-            record["output_text"] = output_text
+        record["output_preview"] = redact_sensitive_text(output_text)[:RUN_OUTPUT_PREVIEW_CHARS]
     elif output_mode == "full":
         if prompt_text is not None:
             record["prompt_sha256"] = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
@@ -995,126 +1128,182 @@ def write_run_record(
         if execution_ledger is not None:
             record["execution_ledger"] = execution_ledger
 
+    if output_mode == "summary":
+        # Keep structured check counts and identities, but omit the potentially
+        # large check descriptors from persisted summaries before clipping.
+        summary_metadata = dict(record.get("metadata") or {})
+        verification_metadata = summary_metadata.get("verification")
+        if isinstance(verification_metadata, dict) and "checks" in verification_metadata:
+            summary_metadata["verification"] = {key: value for key, value in verification_metadata.items() if key != "checks"}
+            summary_metadata["verification"]["checksRetained"] = False
+        findings_metadata = summary_metadata.get("findings")
+        if isinstance(findings_metadata, dict) and isinstance(findings_metadata.get("findings"), list):
+            findings_metadata = dict(findings_metadata)
+            findings_metadata["findings"] = [
+                {key: value for key, value in finding.items() if key != "checks"}
+                if isinstance(finding, dict) else finding
+                for finding in findings_metadata["findings"]
+            ]
+            summary_metadata["findings"] = findings_metadata
+        metadata = summary_metadata
+        record["metadata"] = summary_metadata
+        # Preserve fixed lifecycle fields and the metadata consumed by the
+        # result artifact before applying the shared content budget. Large
+        # panel transcripts must not exhaust that budget ahead of checks and
+        # chunk counts.
+        structure = summary_structure(record, (
+            "id", "created_at", "command", "mode", "status", "runStatus", "scopeStatus", "save_output",
+            "prompt_chars", "output_chars", "omittedFileCount", "omittedChunkCount",
+        ))
+        metadata_for_preview = record.get("metadata")
+        ordered = {key: value for key, value in record.items() if key not in structure and key != "metadata"}
+        if isinstance(metadata_for_preview, dict):
+            priority = (
+            "request_log_correlation_id", "runStatus", "scopeStatus", "scope_status", "panel_status",
+            "consult_attempts",
+            "planned_chunk_count", "completed_chunk_count", "failed_chunk_count", "not_sent_chunk_count",
+            "omitted_chunk_count", "verification", "coverage", "findings", "failure_diagnostics", "panel_results",
+            )
+            ordered["metadata"] = {key: metadata_for_preview[key] for key in priority if key in metadata_for_preview}
+            ordered["metadata"].update({key: value for key, value in metadata_for_preview.items() if key not in ordered["metadata"]})
+        record = summary_projection(ordered)
+        record.update(structure)
+        record["retention"] = summary_retention()
     record = sanitize_json(record)
+    if not isinstance(record, dict):
+        raise AntiError("Full run record exceeds the structured redaction limit")
     # The record id is generated by us or validated by RUN_ID_RE; never let
     # value redaction mangle it (e.g. a run id shaped like user_12345678).
     record["id"] = str(record_id)
     if record.get("metadata", {}).get("request_log_correlation_id") is not None:
         record["metadata"]["request_log_correlation_id"] = str(record_id)
     run_record_path = RUNS_DIR / f"{record['id']}.json"
-    artifact_dir = RUNS_DIR / str(record_id)
-    if artifact_dir.exists() and artifact_dir.is_symlink():
-        raise AntiError(f"refusing to write result artifact through symlink: {artifact_dir}")
-    artifact_dir.mkdir(mode=0o700, exist_ok=True)
-    try:
-        os.chmod(artifact_dir, 0o700)
-    except OSError:
-        pass
+    run_dir = RUNS_DIR / str(record_id)
+    revisions_dir = run_dir / "revisions"
+    for directory in (run_dir, revisions_dir):
+        if directory.is_symlink():
+            raise AntiError("refusing to publish artifacts through a symlink")
+        directory.mkdir(mode=0o700, exist_ok=True)
+    revision_id = uuid.uuid4().hex
+    artifact_dir = revisions_dir / revision_id
+    artifact_dir.mkdir(mode=0o700)  # Never overwrite an existing revision.
     artifact_path = artifact_dir / "result.json"
-    if artifact_path.exists() and artifact_path.is_symlink():
-        raise AntiError(f"refusing to overwrite symlinked result artifact: {artifact_path}")
     raw_lane_paths: list[str] = []
     if output_mode == "full" and execution_ledger:
         for index, entry in enumerate(execution_ledger, start=1):
             lane_path = artifact_dir / f"lane-{index:04d}.json"
-            lane_tmp = lane_path.with_suffix(lane_path.suffix + ".tmp")
-            lane_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            if hasattr(os, "O_NOFOLLOW"):
-                lane_flags |= os.O_NOFOLLOW
-            try:
-                lane_fd = os.open(lane_tmp, lane_flags, 0o600)
-            except FileExistsError:
-                if lane_tmp.is_symlink():
-                    raise
-                lane_tmp.unlink()
-                lane_fd = os.open(lane_tmp, lane_flags, 0o600)
-            with os.fdopen(lane_fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(sanitize_json(entry), indent=2, sort_keys=True) + "\n")
-            os.replace(lane_tmp, lane_path)
+            lane = sanitize_json(entry)
+            if not isinstance(lane, dict):
+                raise AntiError("Raw lane exceeds the structured redaction limit")
+            lane.update({"laneSchemaVersion": LANE_SCHEMA_VERSION, "runId": str(record_id), "revisionId": revision_id})
+            atomic_write_json(lane_path, lane)
             raw_lane_paths.append(str(lane_path))
     artifact_scope_status = record.get("scopeStatus") or ("complete" if status == "success" else "partial")
-    artifact_metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    artifact_metadata = metadata if isinstance(metadata, dict) else {}
     artifact_run_status = "failed" if status == "error" else status
     finding_contract = artifact_metadata.get("findings")
     if not isinstance(finding_contract, dict):
         finding_contract = {}
-    artifact = sanitize_json(
-        {
-            "schemaVersion": RESULT_SCHEMA_VERSION,
-            "runId": str(record_id),
-            "createdAt": record["created_at"],
-            "sourceCommit": artifact_metadata.get("sourceCommit") or artifact_metadata.get("source_commit"),
-            "helper": record.get("helper"),
-            "mode": mode,
-            "runStatus": artifact_run_status,
-            "scopeStatus": artifact_scope_status,
-            "panelStatus": artifact_metadata.get("panel_status") or artifact_metadata.get("panelStatus"),
-            "coverage": coverage_summary(artifact_metadata),
-            "requestedModels": artifact_metadata.get("requested_models") or record.get("models", []),
-            "actualModels": artifact_metadata.get("actual_models", []),
-            "actualProviders": artifact_metadata.get("actual_providers", []),
-            "lanes": artifact_metadata.get("panel_results", []),
-            "findings": finding_contract.get("findings", []),
-            "disagreements": finding_contract.get("disagreements", []),
-            "unverifiable": finding_contract.get("unverifiable", []),
-            "recommendedNextActions": finding_contract.get("recommended_next_actions", []),
-            "summary": finding_contract.get("summary"),
-            "output_text": output_text,
-            "failureDiagnostics": artifact_metadata.get("failure_diagnostics", []),
-            "verification": artifact_metadata.get(
-                "verification",
-                {
-                    "status": "not_run",
-                    "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
-                    "performedBy": None,
-                    "evidence": [],
-                },
-            ),
-            "caveats": record.get("caveats", []),
-            "error": record.get("error"),
-            "artifacts": {
-                "runRecordPath": str(run_record_path),
-                "resultPath": str(artifact_path),
-                "rawLanePaths": raw_lane_paths,
+    artifact = {
+        "schemaVersion": SAVED_RESULT_SCHEMA_VERSION,
+        "runId": str(record_id),
+        "createdAt": record["created_at"],
+        "sourceCommit": artifact_metadata.get("sourceCommit") or artifact_metadata.get("source_commit"),
+        "helper": record.get("helper"),
+        "mode": mode,
+        "runStatus": artifact_run_status,
+        "scopeStatus": artifact_scope_status,
+        "panelStatus": artifact_metadata.get("panel_status") or artifact_metadata.get("panelStatus"),
+        "coverage": coverage_summary(artifact_metadata),
+        "requestedModels": artifact_metadata.get("requested_models") or record.get("models", []),
+        "actualModels": artifact_metadata.get("actual_models", []),
+        "actualProviders": artifact_metadata.get("actual_providers", []),
+        "lanes": artifact_metadata.get("panel_results", []),
+        "findings": finding_contract.get("findings", []),
+        "disagreements": finding_contract.get("disagreements", []),
+        "unverifiable": finding_contract.get("unverifiable", []),
+        "recommendedNextActions": finding_contract.get("recommended_next_actions", []),
+        "summary": finding_contract.get("summary"),
+        "output_text": output_text,
+        "failureDiagnostics": artifact_metadata.get("failure_diagnostics", []),
+        "verification": artifact_metadata.get(
+            "verification",
+            {
+                "status": "not_run",
+                "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
+                "performedBy": None,
+                "evidence": [],
             },
+        ),
+        "caveats": record.get("caveats", []),
+        "error": record.get("error"),
+        "artifacts": {
+            "runRecordPath": str(run_record_path),
             "resultPath": str(artifact_path),
-        }
-    )
-    artifact_tmp = artifact_path.with_suffix(artifact_path.suffix + ".tmp")
-    artifact_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        artifact_flags |= os.O_NOFOLLOW
-    try:
-        artifact_fd = os.open(artifact_tmp, artifact_flags, 0o600)
-    except FileExistsError:
-        if artifact_tmp.is_symlink():
-            raise
-        artifact_tmp.unlink()
-        artifact_fd = os.open(artifact_tmp, artifact_flags, 0o600)
-    with os.fdopen(artifact_fd, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
-    os.replace(artifact_tmp, artifact_path)
+            "rawLanePaths": raw_lane_paths,
+        },
+        "resultPath": str(artifact_path),
+    }
+    if coverage_has_loss(artifact["coverage"]):
+        artifact["coverage"]["status"] = "partial"
+    if artifact["coverage"]["status"] == "partial" or record.get("omittedFileCount", 0) or record.get("omittedChunkCount", 0):
+        record["scopeStatus"] = artifact["scopeStatus"] = "partial"
+    if output_mode == "summary":
+        artifact.pop("output_text", None)
+        artifact["output_preview"] = redact_sensitive_text(output_text or "")[:RUN_OUTPUT_PREVIEW_CHARS]
+        artifact["output_chars"] = output_chars
+        structure = summary_structure(artifact, (
+            "schemaVersion", "runId", "createdAt", "mode", "runStatus", "scopeStatus", "panelStatus", "output_chars",
+        ))
+        coverage_structure = summary_structure(artifact["coverage"], (
+            "status", "chunksExpected", "chunksCompleted", "chunksFailed", "chunksOmitted", "chunksNotSent",
+        ))
+        verification = artifact.get("verification")
+        verification = verification if isinstance(verification, dict) else {"status": "unknown"}
+        verification_structure = summary_structure(verification, ("status", "performedBy", "evidenceCount"))
+        pointers = artifact["artifacts"]
+        ordered_artifact = {key: artifact[key] for key in ("verification", "output_preview")}
+        ordered_artifact.update({key: value for key, value in artifact.items()
+                                 if key not in structure and key not in {"artifacts", "resultPath"}})
+        artifact = summary_projection(ordered_artifact)
+        artifact.update(structure)
+        artifact["runId"] = str(record_id)
+        artifact["coverage"] = {**artifact.get("coverage", {}), **coverage_structure}
+        artifact["verification"] = {**artifact.get("verification", {}), **verification_structure}
+        artifact["artifacts"] = pointers
+        artifact["resultPath"] = str(artifact_path)
+        artifact["retention"] = summary_retention()
+    if output_mode == "full":
+        artifact["retention"] = record["retention"] = {"mode": "full", "contentComplete": True}
+    artifact = sanitize_json(artifact)
+    if not isinstance(artifact, dict):
+        raise AntiError("Full result exceeds the structured redaction limit")
+    artifact["writerId"] = args._anti_writer_id
+    artifact["runId"] = str(record_id)
+    artifact["revisionId"] = revision_id
+    artifact.setdefault("lanes", [])
+    # Preview clipping must not redact trusted publication identity/path aliases.
+    artifact["artifacts"] = {"runRecordPath": str(run_record_path), "resultPath": str(artifact_path), "rawLanePaths": raw_lane_paths}
+    artifact["resultPath"] = str(artifact_path)
+    atomic_write_json(artifact_path, artifact)
     record["resultPath"] = str(artifact_path)
+    record["writerId"] = args._anti_writer_id
+    record["recordSchemaVersion"] = RECORD_SCHEMA_VERSION
+    record["publication"] = {
+        "revision": revision_id,
+        "result": file_reference(RUNS_DIR, artifact_path),
+        "lanes": [file_reference(RUNS_DIR, Path(path)) for path in raw_lane_paths],
+    }
     path = run_record_path
-    if path.exists() and path.is_symlink():
-        raise AntiError(f"refusing to overwrite symlinked run record: {path}")
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        fd = os.open(tmp_path, flags, 0o600)
-    except FileExistsError:
-        if tmp_path.is_symlink():
-            raise
-        tmp_path.unlink()
-        fd = os.open(tmp_path, flags, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
-    # A 'running' placeholder is not a final record; lifecycle handlers may
-    # still overwrite it with interrupted/error/failed status.
+    if getattr(args, "_data_policy_session", None):
+        record.setdefault("metadata", {})["dataPolicy"] = args._data_policy_session.audit()
+    validate_record(record, path)
+    fsync_directory(revisions_dir)
+    fsync_directory(run_dir)
+    # This is the publication commit. Earlier immutable files alone grant no
+    # terminal authority; an interrupted replacement leaves the old index valid.
+    atomic_write_json(path, record)
     args.run_record_written = status != "running"
-    os.replace(tmp_path, path)
     progress(args, f"saved sanitized run record: {path}")
     return path
 
@@ -1281,21 +1470,10 @@ def add_claude_guardrail_caveat(caveats: list[str], *, prompt_budget: int) -> No
 
 
 def normalize_base_url(value: str) -> str:
-    value = str(value).strip()
-    if not value:
-        raise AntiError("base URL must be non-empty")
-    if any(ord(char) <= 0x20 for char in value):
-        raise AntiError("base URL must not contain whitespace or control characters")
-    parsed = urllib.parse.urlsplit(value)
-    if parsed.username or parsed.password:
-        raise AntiError("base URL must not contain username or password")
-    if parsed.query or parsed.fragment:
-        raise AntiError("base URL must not contain query strings or fragments")
-    if parsed.scheme not in {"http", "https"}:
-        raise AntiError(f"base URL scheme must be http or https, not {parsed.scheme!r}")
-    if not parsed.netloc:
-        raise AntiError("base URL must include a host")
-    return value.rstrip("/")
+    try:
+        return validate_endpoint_url(value, label="base URL").rstrip("/")
+    except ValueError as exc:
+        raise AntiError(str(exc)) from exc
 
 
 def resolve_model(value: str | None, *, default: str) -> str:
@@ -1526,7 +1704,8 @@ def transport_entry_timeout(method, timeout, *, payload=None, body=None, url=Non
         if policy is not None and policy.enabled:
             if not isinstance(payload, dict) or not isinstance(body, bytes) or type(payload.get('max_output_tokens')) is not int:
                 raise SpendAdmissionError('admission refused: request/output reservation is unknown')
-            gateway = url[:-len('/responses')] if isinstance(url, str) and url.endswith('/responses') else None
+            suffix = '/local/responses' if isinstance(url, str) and url.endswith('/local/responses') else '/responses'
+            gateway = url[:-len(suffix)] if isinstance(url, str) and url.endswith(suffix) else None
             ticket = policy.reserve(payload.get('model'), len(body), payload['max_output_tokens'], gateway=gateway)
             _SPEND_TICKET.set((policy, ticket, submitted_count))
         if control is not None:
@@ -1538,18 +1717,13 @@ def transport_entry_timeout(method, timeout, *, payload=None, body=None, url=Non
 
 
 def open_gateway_request(request, *, timeout, payload=None, body=None):
-    control = CURRENT_RUN.get()
-    policy = getattr(control, 'spend_control', None)
-    if policy is not None and policy.pricing is not None:
-        # A quote scoped to one gateway never authorizes redirected dispatch.
-        class NoPricingRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, req, fp, code, msg, headers, newurl):
-                return None
-        opener = urllib.request.build_opener(NoPricingRedirect())
-        return opener.open(request, timeout=transport_entry_timeout(request.get_method(), timeout,
-                           payload=payload, body=body, url=request.full_url))
-    return urllib.request.urlopen(request, timeout=transport_entry_timeout(request.get_method(), timeout,
-                                  payload=payload, body=body, url=request.full_url))
+    return open_http_request(
+        request,
+        timeout=timeout,
+        before_open=lambda prepared, value: transport_entry_timeout(
+            prepared.get_method(), value, payload=payload, body=body, url=prepared.full_url,
+        ),
+    )
 
 
 def request_json(
@@ -1560,6 +1734,10 @@ def request_json(
     timeout: float = 10.0,
     token_env: str = DEFAULT_TOKEN_ENV,
 ) -> tuple[int, dict[str, Any]]:
+    try:
+        url = validate_endpoint_url(url, allow_query=True)
+    except ValueError as exc:
+        raise AntiError(str(exc)) from exc
     control = CURRENT_RUN.get()
     if control is not None:
         timeout = control.timeout(timeout)
@@ -1864,7 +2042,9 @@ def post_response(
     run_id: str | None = None,
     budget_args: argparse.Namespace | None = None,
     budget_purpose: str | None = None,
+    policy_fallback: bool = False,
 ) -> ResponseText:
+    policy_submit(budget_args, model=model, prompt=prompt, base_url=base_url, fallback=policy_fallback)
     control = run_control(budget_args)
     requested_model = model
     available_model_ids = model_ids
@@ -1879,8 +2059,10 @@ def post_response(
         suggestions = closest_catalog_models(model, available_model_ids)
         suggestion_note = f" Closest advertised: {', '.join(suggestions)}." if suggestions else ""
         raise AntiError(f"model {model!r} is not advertised by /v1/models.{suggestion_note} Available sample: {sample}")
+    policy_submit(budget_args, model=matched_model, prompt=prompt, base_url=base_url, fallback=policy_fallback)
     if matched_model != model:
-        eprint(f"[anti] model alias {model!r} matched catalog id {matched_model!r}; forwarding the catalog id")
+        if not data_policy(budget_args):
+            eprint(f"[anti] model alias {model!r} matched catalog id {matched_model!r}; forwarding the catalog id")
         model = matched_model
     payload = {
         "model": model,
@@ -2223,6 +2405,7 @@ def generate_with_fallback(
                     run_id=getattr(args, "run_id", None),
                     budget_args=args,
                     budget_purpose=f"{purpose} fallback",
+                    **({"policy_fallback": True} if data_policy(args) else {}),
                 )
         except AntiError as fallback_exc:
             fallback_error = redact_sensitive_text(str(fallback_exc))
@@ -2397,6 +2580,8 @@ def validate_path_list_item(value: str, *, source: str) -> None:
 def selected_paths_from_args(args: argparse.Namespace) -> list[str]:
     paths = list(getattr(args, "file", None) or [])
     for spec in getattr(args, "files_from", None) or []:
+        if spec != "-":
+            policy_paths(args, Path.cwd(), [spec])
         paths.extend(read_paths_file(spec))
     return paths
 
@@ -2436,7 +2621,7 @@ def changed_paths(
         raise AntiError(f"unsupported review scope: {scope}")
     raw = run_git_bytes(
         root,
-        [*diff_args, "--name-status", "--diff-filter=ACMRTD", "-z"],
+        [*diff_args, "--no-ext-diff", "--no-textconv", "--name-status", "--diff-filter=ACMRTD", "-z"],
     )
     fields = raw.split(b"\0")
     names: list[str] = []
@@ -2459,16 +2644,16 @@ def changed_paths(
 
 
 def diff_for_paths(root: Path, scope: str, paths: list[str], *, rev_range: str | None = None) -> str:
-    if not paths or scope == "files":
+    if not paths or scope in {"files", "repository"}:
         return ""
     if scope == "staged":
-        return run_git(root, ["-c", "core.quotePath=false", "diff", "--cached", "--no-ext-diff", "--", *paths], check=False)
+        return run_git(root, ["-c", "core.quotePath=false", "diff", "--cached", "--no-ext-diff", "--no-textconv", "--", *paths])
     if scope == "diff":
         if not rev_range:
             raise AntiError("--scope diff requires --base or --changed-files")
         rev_range = validate_git_rev_range(rev_range, source="revision range")
-        return run_git(root, ["-c", "core.quotePath=false", "diff", "--no-ext-diff", rev_range, "--", *paths], check=False)
-    return run_git(root, ["-c", "core.quotePath=false", "diff", "HEAD", "--no-ext-diff", "--", *paths], check=False)
+        return run_git(root, ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", rev_range, "--", *paths])
+    return run_git(root, ["-c", "core.quotePath=false", "diff", "HEAD", "--no-ext-diff", "--no-textconv", "--", *paths])
 
 
 def file_is_tracked(root: Path, rel_path: str) -> bool:
@@ -2483,6 +2668,8 @@ def file_is_tracked(root: Path, rel_path: str) -> bool:
         )
     except subprocess.TimeoutExpired:
         raise AntiError(f"git ls-files timed out after 60s")
+    if proc.returncode not in (0, 1):
+        raise AntiError(proc.stderr.strip() or "git ls-files failed")
     return proc.returncode == 0
 
 
@@ -2757,6 +2944,7 @@ def review_prompt_parts(
     omitted_files: list[str],
     excluded: list[str],
     caveats: list[str],
+    omission_reasons: dict[str, str] | None = None,
 ) -> list[str]:
     incomplete = bool(omitted_files) or any("truncated" in caveat.lower() for caveat in caveats)
     manifest_lines = [
@@ -2767,6 +2955,9 @@ def review_prompt_parts(
         f"- omitted_files: {', '.join(omitted_files) if omitted_files else 'none'}",
         f"- excluded_paths: {', '.join(excluded[:20]) if excluded else 'none'}",
     ]
+    if omission_reasons:
+        manifest_lines.append("- omission_reasons:")
+        manifest_lines.extend(f"  - {path}: {reason}" for path, reason in omission_reasons.items())
     if caveats:
         manifest_lines.append("- helper_warnings:")
         manifest_lines.extend(f"  - {caveat}" for caveat in caveats)
@@ -2853,6 +3044,7 @@ def extract_file_paths_from_prompt(prompt: str) -> list[str]:
 def build_consult_file_context(
     prompt: str,
     max_prompt_chars: int,
+    *, policy_args=None,
 ) -> tuple[str, list[str], list[str]]:
     """Read files mentioned in the prompt, inject contents to prevent hallucination."""
     file_paths = extract_file_paths_from_prompt(prompt)
@@ -2865,6 +3057,7 @@ def build_consult_file_context(
     
     workspace_root = find_repo_root(Path.cwd()) or Path.cwd().resolve()
     for file_path_str in file_paths:
+        policy_paths(policy_args, Path.cwd(), [file_path_str])
         raw_path = Path(file_path_str).expanduser()
         if raw_path.is_symlink():
             caveats.append(f"Skipped symlink: {file_path_str}")
@@ -2901,6 +3094,13 @@ def build_consult_file_context(
         return prompt, caveats, []
     
     return enhanced_prompt, caveats, read_files
+
+
+def review_read_omissions(records):
+    return {str(record['path']): str(record.get('reason') or record.get('contentStatus') or 'incomplete capture')
+            for record in records or [] if record.get('path') and coverage_is_incomplete([record])}
+
+
 def build_review_prompt(
     *,
     scope_line: str,
@@ -2925,7 +3125,9 @@ def build_review_prompt(
         record = records_by_path.get(rel)
         return bool(text) or bool(record and record.get("contentStatus") == "complete")
 
-    omitted_files = [rel for rel, text in file_texts if not is_includable(rel, text)]
+    omission_reasons = review_read_omissions(file_records)
+    omitted_files = list(dict.fromkeys([*omission_reasons,
+        *(rel for rel, text in file_texts if not is_includable(rel, text))]))
     candidates = [(rel, text) for rel, text in file_texts if is_includable(rel, text)]
     included: list[tuple[str, str]] = []
 
@@ -2935,9 +3137,10 @@ def build_review_prompt(
                 scope_line=scope_line,
                 diff=diff_for_prompt,
                 included_files=[],
-                omitted_files=[rel for rel, _text in candidates],
+                omitted_files=list(dict.fromkeys([*omitted_files, *(rel for rel, _text in candidates)])),
                 excluded=excluded,
                 caveats=caveats,
+                omission_reasons=omission_reasons,
             )
         )
         if len(prompt_without_files) > max_prompt_chars:
@@ -2945,9 +3148,10 @@ def build_review_prompt(
                 scope_line=scope_line,
                 diff="",
                 included_files=[],
-                omitted_files=[rel for rel, _text in candidates],
+                omitted_files=list(dict.fromkeys([*omitted_files, *(rel for rel, _text in candidates)])),
                 excluded=excluded,
                 caveats=caveats,
+                omission_reasons=omission_reasons,
             )
             base_len = len("\n\n".join(base_parts))
             available = max(0, max_prompt_chars - base_len - len("\n\n## Git Diff\n```diff\n\n```"))
@@ -2970,6 +3174,7 @@ def build_review_prompt(
                 omitted_files=trial_omitted,
                 excluded=excluded,
                 caveats=caveats,
+                omission_reasons=omission_reasons,
             )
         )
         if max_prompt_chars <= 0 or len(trial_prompt) <= max_prompt_chars:
@@ -2985,6 +3190,7 @@ def build_review_prompt(
             omitted_files=omitted_files,
             excluded=excluded,
             caveats=caveats,
+            omission_reasons=omission_reasons,
         )
     )
     metadata = {
@@ -2999,6 +3205,7 @@ def build_review_prompt(
         "diff_truncated": diff_for_prompt != diff,
         "included_files": [rel for rel, _text in included],
         "omitted_files": omitted_files,
+        "omission_reasons": omission_reasons,
         "excluded_paths": excluded,
         "helper_warnings": caveats,
         "coverage": [dict(record) for record in (file_records or [])],
@@ -3019,18 +3226,77 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
 
     selected = selected_paths_from_args(args)
     rev_range = review_rev_range(args)
-    paths, excluded = changed_paths(root, args.scope, selected, rev_range=rev_range)
-    diff = diff_for_paths(root, args.scope, paths, rev_range=rev_range)
+    include_untracked = getattr(args, "include_untracked", False)
+    roots = getattr(args, "review_root", None) or []
+    exclusions = getattr(args, "exclude_path", None) or []
+    if include_untracked and args.scope not in {"working-tree", "repository"}:
+        raise AntiError("--include-untracked requires working-tree or repository scope; staged scope is never broadened")
+    if (roots or exclusions) and args.scope != "repository":
+        raise AntiError("--review-root and --exclude-path require repository scope")
+    inventory = None
+    untracked_paths: set[str] = set()
+    known_tracked: set[str] = set()
+    try:
+        if args.scope == "repository":
+            if rev_range:
+                raise AntiError("repository scope does not accept --base or --changed-files")
+            paths, inventory = review_inventory.collect(root, roots=roots, exclusions=exclusions,
+                include_untracked=include_untracked, selected=selected, excluded_path=path_is_excluded)
+            excluded = [row['path'] for row in inventory['excluded']]
+            for path in [*paths, *excluded]: validate_path_list_item(path, source="repository inventory")
+        else:
+            paths, excluded = changed_paths(root, args.scope, selected, rev_range=rev_range)
+            if not selected and args.scope != "files":
+                known_tracked.update(paths)  # Enumerated by Git's tracked diff.
+            if args.scope == "working-tree":
+                untracked = review_inventory.git_paths(root, ['--others', '--exclude-standard'], ['.'])
+                selected_path_set = set(paths)
+                inventory = {'scope':'working-tree', 'include_untracked':include_untracked,
+                             'excluded':[], 'inventory_complete':True}
+                for raw in untracked:
+                    validate_path_list_item(raw, source="untracked inventory")
+                    rel = review_inventory.relative_path(root, raw)
+                    untracked_paths.add(rel)
+                    if rel in selected_path_set: continue  # An explicitly selected file remains explicit.
+                    kind = review_inventory.path_kind(root, rel)
+                    reason = ('not_selected' if selected else 'sensitive_cache_or_binary' if path_is_excluded(rel)
+                              else kind if kind != 'file' else 'untracked_not_requested' if not include_untracked else None)
+                    if reason:
+                        inventory['excluded'].append({'path':rel, 'reason':reason})
+                    else:
+                        paths.append(rel)
+                        selected_path_set.add(rel)
+                excluded = list(dict.fromkeys([*excluded, *(row['path'] for row in inventory['excluded'])]))
+    except review_inventory.InventoryError as exc:
+        raise AntiError(str(exc)) from None
+    policy_paths(args, root, [*paths, *excluded])
+    diff_paths = [path for path in paths if path not in untracked_paths]
+    diff = diff_for_paths(root, args.scope, diff_paths, rev_range=rev_range)
     notes: list[str] = []
     file_texts: list[tuple[str, str]] = []
     file_records: list[dict[str, Any]] = []
 
-    include_file_text = args.scope == "files"
+    include_file_text = args.scope in {"files", "repository"}
+    source_budget = review_inventory.MAX_SOURCE_BYTES
     for rel in paths:
-        if include_file_text or not file_is_tracked(root, rel):
+        if include_file_text or rel in untracked_paths or (rel not in known_tracked and not file_is_tracked(root, rel)):
             # Review planning must chunk the complete source from disk. The
             # smaller read limit remains for consult/plan pre-reads.
             path = root / rel
+            if args.scope == "repository" or include_untracked:
+                raw, declared_bytes, reason = review_inventory.read_file(root, rel, source_budget)
+                if reason:
+                    notes.append(f"{rel}: {reason}")
+                    file_records.append({'path':rel, 'sha256':None, 'bytesDeclared':declared_bytes,
+                        'bytesSent':0, 'chunksExpected':0, 'chunksSent':0, 'contentStatus':'omitted',
+                        'reason':reason, 'sourceKind':'file'})
+                    continue
+                source_budget -= len(raw)
+                text, note = decode_source_bytes(rel, raw, truncate=False)
+                if note: notes.append(note)
+                file_texts.append((rel, text))
+                file_records.append(file_coverage_record(root, rel, text, note, raw=raw))
+                continue
             try:
                 raw = path.read_bytes()
                 text, note = decode_source_bytes(rel, raw, truncate=False)
@@ -3046,7 +3312,7 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
     # path in the manifest, including deletions and renames, without rereading
     # a possibly changed working tree as source evidence.
     recorded_paths = {str(record.get("path")) for record in file_records}
-    if args.scope != "files":
+    if args.scope not in {"files", "repository"}:
         for rel in paths:
             if rel in recorded_paths:
                 continue
@@ -3074,33 +3340,58 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
 
     caveats: list[str] = []
     if excluded:
-        caveats.append("Excluded sensitive/cache/binary-looking paths: " + ", ".join(excluded[:20]))
+        caveats.append("Excluded paths (see inventory reasons when available): " + ", ".join(excluded[:20]))
+    if inventory:
+        if args.scope == "repository":
+            caveats.append("Repository inventory roots: " + ", ".join(inventory['roots'])
+                           + "; package roots: " + ", ".join(inventory['package_roots'][:20]))
+        not_requested = [row['path'] for row in inventory['excluded'] if row['reason'] == 'untracked_not_requested']
+        if not_requested:
+            caveats.append(f"{len(not_requested)} untracked file(s) excluded; use --include-untracked to include them: "
+                           + ", ".join(not_requested[:20]))
     if notes:
         caveats.extend(notes)
-    return {
+    result = {
         "root": root,
         "paths": paths,
         "excluded": excluded,
         "diff": diff,
+        "diff_paths": diff_paths,
         "file_texts": file_texts,
         "file_records": file_records,
         "source_commit": source_commit(root),
         "workspace_root": str(root),
         "scope_line": scope_line,
         "caveats": caveats,
+        "inventory": inventory,
     }
+    required = normalized_priority_paths(result, getattr(args, "required_file", None))
+    unreadable = [record['path'] for record in file_records
+                  if record['path'] in required and record['contentStatus'] != 'complete']
+    if unreadable:
+        raise AntiError("required file(s) could not be captured completely: " + ", ".join(unreadable))
+    return result
 
 
-def empty_review_scope_error(scope: str) -> AntiError:
+def empty_review_scope_error(scope: str, context=None) -> AntiError:
     if scope == "staged":
         message = "no staged changes to review; stage files with git add, or use --scope working-tree, --scope files, or --scope diff"
     elif scope == "diff":
         message = "no diff found for the requested revision range; check --base/--changed-files"
     elif scope == "files":
         message = "no readable file content in the requested file set; check --file/--files-from paths"
+    elif scope == "repository":
+        message = "no readable content in the selected repository inventory; check roots, exclusions and --include-untracked"
     else:
         message = "no working-tree changes to review; the tree is clean or the selected paths are unchanged"
-    return AntiError(message + " (nothing was sent to the model)")
+    inventory = (context or {}).get("inventory")
+    if inventory and inventory.get("excluded"):
+        rows = inventory["excluded"]
+        message += f"; {len(rows)} inventory exclusion(s): " + ", ".join(
+            f"{row['path']} ({row['reason']})" for row in rows[:20])
+    error = AntiError(message + " (nothing was sent to the model)")
+    if inventory: error.run_metadata = {"inventory":inventory}
+    return error
 
 
 def assemble_review_prompt_from_context(
@@ -3120,6 +3411,8 @@ def assemble_review_prompt_from_context(
     metadata["sourceCommit"] = context.get("source_commit")
     metadata["workspace_root"] = context.get("workspace_root")
     metadata["declared_files"] = list(context.get("paths") or [])
+    if context.get("inventory") is not None:
+        metadata["inventory"] = context["inventory"]
     if not metadata.get("status") == "incomplete" and context.get("diff"):
         metadata["included_files"] = list(
             dict.fromkeys([*(metadata.get("included_files") or []), *(context.get("paths") or [])])
@@ -3162,6 +3455,7 @@ def diff_part_prompt_budget(
     excluded: list[str],
     caveats: list[str],
     max_prompt_chars: int,
+    omission_reasons: dict[str, str] | None = None,
 ) -> int:
     """Per-diff-part char budget that leaves room for prompt scaffolding.
 
@@ -3174,9 +3468,10 @@ def diff_part_prompt_budget(
         scope_line=scope_line,
         diff="",
         included_files=[],
-        omitted_files=[],
+        omitted_files=list(omission_reasons or {}),
         excluded=excluded,
         caveats=caveats,
+        omission_reasons=omission_reasons,
     )
     overhead = len("\n\n".join(base_parts)) + len("## Git Diff\n```diff\n\n```")
     budget = max_prompt_chars - overhead - 200
@@ -3205,8 +3500,9 @@ def build_review_chunk_prompts(
     """
     unlimited = max_chunks <= 0
     all_chunks: list[dict[str, Any]] = []
-    omitted_items: list[str] = []
     file_records = [dict(record) for record in context.get("file_records", [])]
+    omission_reasons = review_read_omissions(file_records)
+    omitted_items: list[str] = list(omission_reasons)
     records_by_path = {
         str(record.get("path")): record for record in file_records if record.get("path")
     }
@@ -3214,6 +3510,14 @@ def build_review_chunk_prompts(
     source_offsets: dict[str, int] = {}
     priority = normalized_priority_paths(context, priority_paths)
     required = normalized_priority_paths(context, required_paths)
+    omission_records = [records_by_path[path] for path in omission_reasons]
+
+    def chunk_records(items):
+        # Carry unavailable source into every model-facing manifest, plus the
+        # captured records needed to distinguish empty files from missing input.
+        labels = dict.fromkeys(label for label, _ in items)
+        return [*omission_records, *(records_by_path[label] for label in labels
+                if label in records_by_path and label not in omission_reasons)]
 
     def source_bytes(items: list[tuple[str, str]]) -> dict[str, int]:
         totals: dict[str, int] = {}
@@ -3277,6 +3581,7 @@ def build_review_chunk_prompts(
                 excluded=context["excluded"],
                 initial_caveats=chunk_caveats,
                 max_prompt_chars=max_prompt_chars,
+                file_records=chunk_records([(probe_rel, text[:size])]),
             )
             return prompt_fits(prompt, max_prompt_chars) and metadata.get("included_files") == [probe_rel]
 
@@ -3298,6 +3603,7 @@ def build_review_chunk_prompts(
             excluded=context["excluded"],
             caveats=context["caveats"],
             max_prompt_chars=max_prompt_chars,
+            omission_reasons=omission_reasons,
         )
         diff_parts = split_text_by_budget(diff, diff_budget)
         for index, diff_part in enumerate(diff_parts, start=1):
@@ -3313,6 +3619,7 @@ def build_review_chunk_prompts(
                     f"Chunked review: {label}; synthesize with other chunks before final judgment.",
                 ],
                 max_prompt_chars=max_prompt_chars,
+                file_records=chunk_records([]),
             )
             metadata["chunk_kind"] = "diff"
             metadata["chunk_label"] = label
@@ -3320,14 +3627,14 @@ def build_review_chunk_prompts(
                 metadata["diff_truncated"] = True
                 omitted_items.append(f"{label} (diff part exceeds {max_prompt_chars} chars)")
                 continue
-            metadata["included_files"] = list(context.get("paths") or [])
+            metadata["included_files"] = list(context.get("diff_paths", context.get("paths")) or [])
             append_chunk("diff", label, prompt, metadata)
 
     file_items: list[tuple[str, str]] = []
     for rel, text in context["file_texts"]:
         record = records_by_path.get(rel)
         if not text and not (record and record.get("contentStatus") == "complete"):
-            omitted_items.append(rel)
+            if rel not in omitted_items: omitted_items.append(rel)
             continue
         whole_prompt, _whole_caveats, whole_metadata = build_review_prompt(
             scope_line=f"{context['scope_line']} ({rel})",
@@ -3336,7 +3643,7 @@ def build_review_chunk_prompts(
             excluded=context["excluded"],
             initial_caveats=context["caveats"],
             max_prompt_chars=max_prompt_chars,
-            file_records=[record] if record else None,
+            file_records=chunk_records([(rel, text)]),
         )
         if prompt_fits(whole_prompt, max_prompt_chars) and whole_metadata.get("included_files") == [rel]:
             file_items.append((rel, text))
@@ -3372,8 +3679,9 @@ def build_review_chunk_prompts(
                 "Chunked review: file chunk; synthesize with other chunks before final judgment.",
             ],
             max_prompt_chars=max_prompt_chars,
+            file_records=chunk_records(trial),
         )
-        if prompt_fits(prompt, max_prompt_chars) and not metadata["omitted_files"]:
+        if prompt_fits(prompt, max_prompt_chars) and metadata['included_files'] == [path for path, _ in trial]:
             current = trial
             continue
         if current:
@@ -3387,6 +3695,7 @@ def build_review_chunk_prompts(
                     "Chunked review: file chunk; synthesize with other chunks before final judgment.",
                 ],
                 max_prompt_chars=max_prompt_chars,
+                file_records=chunk_records(current),
             )
             label = ", ".join(path for path, _item_text in current)
             current_metadata["chunk_kind"] = "files"
@@ -3410,6 +3719,7 @@ def build_review_chunk_prompts(
                 "Chunked review: file chunk; synthesize with other chunks before final judgment.",
             ],
             max_prompt_chars=max_prompt_chars,
+            file_records=chunk_records(current),
         )
         label = ", ".join(path for path, _item_text in current)
         current_metadata["chunk_kind"] = "files"
@@ -3464,6 +3774,10 @@ def build_review_chunk_prompts(
     metadata["sourceCommit"] = context.get("source_commit")
     metadata["declared_files"] = list(context.get("paths") or [])
     metadata["required_files"] = required
+    metadata["omission_reasons"] = omission_reasons
+    if context.get("inventory") is not None:
+        metadata["inventory"] = context["inventory"]
+        metadata["excluded_paths"] = list(context.get("excluded") or [])
     return chunks, metadata
 
 
@@ -3481,6 +3795,7 @@ def build_chunk_synthesis_prompt(
         "included_files": chunk_metadata.get("included_files", []),
         "included_items": chunk_metadata.get("included_items", []),
         "omitted_items": chunk_metadata.get("omitted_items", []),
+        "omission_reasons": chunk_metadata.get("omission_reasons", {}),
         "chunk_labels": [chunk["label"] for chunk in chunks],
         "status": chunk_metadata.get("status", "complete"),
     }
@@ -3880,6 +4195,7 @@ def run_chunked_review(
             "included_items": list(chunk_metadata.get("included_items") or []),
             "coverage": [dict(record) for record in chunk_metadata.get("coverage", [])],
             "failure_diagnostics": bounded_failure_diagnostics(execution_ledger),
+            "_execution_ledger": execution_ledger,
             **overrides,
         }
 
@@ -3918,8 +4234,9 @@ def run_chunked_review(
     ]
     caveats.extend(synthesis_caveats)
     try:
-        synthesis, synthesis_model, synthesis_generation = generate_with_fallback(
+        synthesis, synthesis_model, synthesis_generation = policy_generate(
             args,
+            stage="summary",
             model=model,
             prompt=synthesis_prompt,
             max_output_tokens=args.max_output_tokens,
@@ -4062,6 +4379,7 @@ def assemble_plan_prompt(args: argparse.Namespace, *, apply_limit: bool = True) 
             root = Path.cwd().resolve()
 
         paths, excluded = changed_paths(root, args.scope, args.file or [])
+        policy_paths(args, root, [*paths, *excluded])
         diff = diff_for_paths(root, args.scope, paths)
         notes: list[str] = []
         file_blocks: list[str] = []
@@ -4082,7 +4400,7 @@ def assemble_plan_prompt(args: argparse.Namespace, *, apply_limit: bool = True) 
                 scope_line += f", ... ({len(paths)} files total)"
 
         context_parts = [f"Planning context scope: {scope_line}."]
-        repo_profile = detect_repo_profile(root)
+        repo_profile = "" if data_policy(args) else detect_repo_profile(root)
         if repo_profile:
             context_parts.insert(1, f"## Repository Profile\n{repo_profile}")
         if diff.strip():
@@ -4267,8 +4585,9 @@ def run_chunked_plan(
         raise failure
     caveats = [*caveats, *synthesis_caveats]
     try:
-        text, synthesis_model, synthesis_generation = generate_with_fallback(
+        text, synthesis_model, synthesis_generation = policy_generate(
             args,
+            stage="summary",
             model=model,
             prompt=synthesis_prompt,
             max_output_tokens=args.max_output_tokens,
@@ -4334,6 +4653,7 @@ def read_prompt(args: argparse.Namespace) -> str:
     pieces: list[str] = []
     if args.prompt_file:
         path = Path(args.prompt_file).expanduser()
+        policy_paths(args, Path.cwd(), [path])
         raw = path.read_bytes()
         if b"\0" in raw:
             raise AntiError("prompt file looks binary")
@@ -4915,8 +5235,48 @@ def strip_fenced_json_blocks(text: str) -> str:
     )
 
 
-def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
+_FINDING_STRING_LIMITS = {
+    "claim": 1600, "verify": 1200, "severity": 40, "id": 80,
+    "file": 500, "evidence": 2000, "sourceCommit": 128,
+    "chunkId": 160, "laneId": 160, "excerptSha256": 64, "scopeStatus": 40,
+}
+
+
+def finding_validation_error(value: Any) -> str | None:
     if not isinstance(value, dict):
+        return "finding must be an object"
+    for field in _FINDING_STRING_LIMITS:
+        raw = value.get(field)
+        if raw is not None and not isinstance(raw, str):
+            return f"{field} must be a string"
+    if not str(value.get("claim") or "").strip() or not str(value.get("verify") or "").strip():
+        return "claim and verify must be nonempty strings"
+    confidence = value.get("confidence", 0.5)
+    if type(confidence) not in (int, float):
+        return "confidence must be a finite number"
+    try:
+        if not math.isfinite(float(confidence)):
+            return "confidence must be a finite number"
+    except (ValueError, OverflowError):
+        return "confidence must be a finite number"
+    line = value.get("line")
+    if line is not None and (type(line) is not int or not 1 <= line <= 2_147_483_647):
+        return "line must be a positive integer at most 2147483647, or null"
+    lanes = value.get("lanes")
+    if lanes is not None and (not isinstance(lanes, list) or any(not isinstance(lane, str) for lane in lanes)):
+        return "lanes must be a list of strings"
+    return None
+
+
+def finding_was_truncated(value: dict[str, Any]) -> bool:
+    if any(len(redact_sensitive_text(value.get(field) or "").strip()) > limit for field, limit in _FINDING_STRING_LIMITS.items()):
+        return True
+    lanes = value.get("lanes") or []
+    return len(lanes) > 12 or any(len(redact_sensitive_text(lane).strip()) > 120 for lane in lanes)
+
+
+def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
+    if finding_validation_error(value):
         return None
     claim = clean_string(value.get("claim"), max_chars=1600)
     verify = clean_string(value.get("verify"), max_chars=1200)
@@ -4925,21 +5285,12 @@ def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
     severity = clean_string(value.get("severity"), max_chars=40).lower()
     if severity not in {"critical", "high", "medium", "low", "info"}:
         severity = "medium"
-    finding_id = clean_string(value.get("id"), max_chars=80) or f"F{index:03d}"
-    finding_id = re.sub(r"[^A-Za-z0-9_.:-]+", "-", finding_id).strip("-._:") or f"F{index:03d}"
-    lanes = clean_string_list(value.get("lanes"), max_items=12, max_chars=120)
-    # Phase 1: enriched findings schema
-    try:
-        confidence = float(value.get("confidence", 0.5))
-    except (TypeError, ValueError):
-        confidence = 0.5
-    confidence = max(0.0, min(1.0, confidence))
+    finding_id = clean_string(value.get("id"), max_chars=80)
+    finding_id = re.sub(r"[^A-Za-z0-9_.:-]+", "-", finding_id).strip("-._:")
+    lanes = sorted(set(clean_string_list(value.get("lanes"), max_items=12, max_chars=120)))
+    confidence = max(0.0, min(1.0, float(value.get("confidence", 0.5))))
     file_path = clean_string(value.get("file"), max_chars=500) or None
     line = value.get("line")
-    if isinstance(line, (int, float)) and line > 0:
-        line = int(line)
-    else:
-        line = None
     evidence = clean_string(value.get("evidence"), max_chars=2000) or "unverified"
     # Model-supplied verification labels are untrusted; only the local
     # verifier may upgrade this field after attaching tool evidence.
@@ -4948,10 +5299,12 @@ def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
     if excerpt_sha256 and not re.fullmatch(r"[0-9a-f]{64}", excerpt_sha256):
         excerpt_sha256 = None
     # Build fingerprint for cross-lane dedup
-    fp_key = f"{file_path or ''}:{line or ''}:{claim.lower().strip()}"
+    full_file = redact_sensitive_text(value.get("file") or "").strip()
+    full_claim = redact_sensitive_text(value["claim"]).lower().strip()
+    fp_key = f"{full_file}:{line or ''}:{full_claim}"
     fingerprint = "sha256:" + hashlib.sha256(fp_key.encode("utf-8")).hexdigest()[:16]
     return {
-        "id": finding_id,
+        "id": finding_id or "F-" + fingerprint.split(":", 1)[1],
         "claim": claim,
         "severity": severity,
         "lanes": lanes,
@@ -5006,37 +5359,42 @@ def parse_panel_findings(text: str) -> tuple[dict[str, Any] | None, str | None, 
     diagnostics["safe_structured"] = sanitize_json(parsed)
 
     findings: list[dict[str, Any]] = []
-    dropped = 0
+    invalid = 0
+    truncated = 0
+    diagnostics["finding_errors"] = []
     for index, item in enumerate(raw_findings, start=1):
-        normalized = normalize_finding_item(item, index)
+        error = finding_validation_error(item)
+        normalized = None if error else normalize_finding_item(item, index)
         if normalized is None:
-            dropped += 1
+            invalid += 1
+            if len(diagnostics["finding_errors"]) < 20:
+                diagnostics["finding_errors"].append({"index": index, "reason": error or "no usable claim or verification"})
         else:
+            truncated += int(finding_was_truncated(item))
             findings.append(normalized)
-    # Phase 1: dedup by fingerprint — merge lanes, keep highest severity, average confidence
-    if findings:
-        SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
-        deduped: dict[str, dict[str, Any]] = {}
-        for f in findings:
-            fp = f.get("fingerprint", "")
-            if fp in deduped:
-                existing = deduped[fp]
-                # merge lanes
-                for lane in f.get("lanes", []):
-                    if lane not in existing["lanes"]:
-                        existing["lanes"].append(lane)
-                # keep highest severity
-                if SEVERITY_ORDER.get(f["severity"], 0) > SEVERITY_ORDER.get(existing["severity"], 0):
-                    existing["severity"] = f["severity"]
-                # average confidence
-                existing["confidence"] = round((existing["confidence"] + f["confidence"]) / 2, 2)
-                # prefer non-default evidence
-                if f.get("evidence", "unverified") != "unverified":
-                    existing["evidence"] = f["evidence"]
-                dropped += 1
-            else:
-                deduped[fp] = f
-        findings = list(deduped.values())
+    diagnostics["finding_errors_omitted"] = invalid - len(diagnostics["finding_errors"])
+    # Merge each group once, with stable representative fields and a true mean.
+    # Confidence is model-reported, not a calibrated probability.
+    severity_order = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for finding in findings:
+        groups.setdefault(finding["fingerprint"], []).append(finding)
+    merged = len(findings) - len(groups)
+    findings = []
+    for fingerprint in sorted(groups):
+        group = sorted(groups[fingerprint], key=lambda item: json.dumps(item, sort_keys=True))
+        finding = dict(group[0])
+        finding["lanes"] = sorted({lane for item in group for lane in item["lanes"]})
+        finding["severity"] = max((item["severity"] for item in group), key=severity_order.get)
+        finding["confidence"] = round(math.fsum(item["confidence"] for item in group) / len(group), 2)
+        evidence = sorted({item["evidence"] for item in group if item["evidence"] != "unverified"})
+        finding["evidence"] = "\n".join(evidence) or "unverified"
+        if len(group) > 1:
+            # Retain distinct model-reported evidence/checks without claiming verification.
+            fields = ("evidence", "verify", "confidence", "lanes", "verificationStatus")
+            contributions = {json.dumps({field: item[field] for field in fields}, sort_keys=True) for item in group}
+            finding["corroboration"] = [json.loads(item) for item in sorted(contributions)]
+        findings.append(finding)
     parse_warning = None
     if diagnostics["repaired"]:
         parse_warning = (
@@ -5056,7 +5414,13 @@ def parse_panel_findings(text: str) -> tuple[dict[str, Any] | None, str | None, 
         "caveats": clean_string_list(parsed.get("caveats") or parsed.get("verification_caveats"), max_items=20, max_chars=700),
         "parse_warning": parse_warning,
         "findings_total": len(raw_findings),
-        "findings_dropped": dropped,
+        "findings_dropped": invalid,
+        "findings_invalid": invalid,
+        "findings_merged": merged,
+        "findings_truncated": truncated,
+        "confidence_kind": "model_reported",
+        "finding_errors": diagnostics["finding_errors"],
+        "finding_errors_omitted": diagnostics["finding_errors_omitted"],
     }
     return sanitize_json(contract), None, diagnostics
 
@@ -5174,8 +5538,14 @@ def fallback_findings_contract(
             "recommended_next_actions": [],
             "caveats": caveats,
             "parse_warning": parse_warning,
-            "findings_total": 0,
-            "findings_dropped": 0,
+            "findings_total": None,
+            "findings_dropped": None,
+            "findings_invalid": 0,
+            "findings_merged": 0,
+            "findings_truncated": 0,
+            "confidence_kind": "model_reported",
+            "finding_errors": [],
+            "finding_errors_omitted": 0,
         }
     )
 
@@ -5251,7 +5621,7 @@ def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[st
         normalized_priority_paths(context, getattr(args, "priority_file", None))
         normalized_priority_paths(context, getattr(args, "required_file", None))
         if not context["diff"].strip() and not context["file_texts"]:
-            raise empty_review_scope_error(args.scope)
+            raise empty_review_scope_error(args.scope, context)
         prompt, _paths, caveats, review_metadata = assemble_review_prompt_from_context(
             context,
             max_prompt_chars=prompt_budget,
@@ -5423,10 +5793,23 @@ def build_panel_synthesis_prompt(
             safe_structured = diagnostics.get("safe_structured")
             if isinstance(safe_structured, dict):
                 material["structuredOutput"] = safe_structured
+                # Keep full corroboration in the final contract, but do not
+                # repeat every duplicate's evidence twice beside the raw lane.
+                projection = []
+                for finding in findings:
+                    item = dict(finding)
+                    corroboration = item.pop("corroboration", None)
+                    if corroboration:
+                        item["corroboration_count"] = len(corroboration)
+                        item["evidence"] = "See structuredOutput.findings for all corroborating evidence and checks."
+                    projection.append(item)
+                material["findings"] = projection
             findings_dropped = int(parsed.get("findings_dropped") or 0)
-            if findings_dropped:
+            findings_truncated = int(parsed.get("findings_truncated") or 0)
+            if findings_dropped or findings_truncated:
                 normalization_warning = (
-                    f"{findings_dropped} finding item(s) were normalized out of Anti's final findings list; "
+                    f"{findings_dropped} invalid finding item(s) were normalized out and "
+                    f"{findings_truncated} finding item(s) were truncated in Anti's final findings list; "
                     "the complete redacted structured lane payload is preserved for judging."
                 )
                 material["structuredNormalizationWarnings"] = [normalization_warning]
@@ -5544,7 +5927,7 @@ def build_panel_synthesis_prompt(
                     "and never describe repeated fallback output as agreement."
                 ),
                 "Return one JSON object and no surrounding prose. The object must contain: summary (string), disagreements (array of strings), findings (array of objects), unverifiable (array of strings), recommended_next_actions (array of strings), and caveats (array of strings).",
-                "Each findings item must contain: id (stable short string), claim (specific claim), severity (critical|high|medium|low|info), lanes (array of model ids that support it), verify (a concrete local check Codex should run before acting), confidence (float 0.0-1.0 indicating how certain you are), file (path to the file if applicable), line (line number if applicable), and evidence (any concrete evidence like test output or type error, or 'unverified').",
+                "Each findings item must contain: id (stable short string), claim (specific claim), severity (critical|high|medium|low|info), lanes (array of model ids that support it), verify (a concrete local check Codex should run before acting), confidence (model-reported float 0.0-1.0, not a calibrated probability), file (path to the file if applicable), line (line number if applicable), and evidence (any concrete evidence like test output or type error, or 'unverified').",
                 "Put speculative or externally dependent observations in unverifiable, not findings. Do not include secrets, credentials, raw account identifiers, or provider keys.",
                 "## Panel Manifest\n```json\n" + json.dumps(manifest, indent=2, sort_keys=True) + "\n```",
                 "## Source Prompt / Context\n" + source.strip(),
@@ -6327,15 +6710,20 @@ def maybe_summarize_panel_review(
     summary_model = panel_review_summary_model(panel_models)
     prompt_budget = prompt_budget_for_model(args, summary_model)
     progress(args, f"panel review: summarizing broad review context with {summary_model} before fan-out")
-    summary_text, summary_caveats, summary_metadata = run_chunked_review(
-        args=args,
-        context=context,
-        model=summary_model,
-        base_metadata=metadata,
-        max_prompt_chars=prompt_budget,
-        chunks=pre_chunks,
-        chunk_metadata=pre_chunk_metadata,
-    )
+    policy_token = _POLICY_STAGE.set("summary")
+    try:
+        summary_text, summary_caveats, summary_metadata = run_chunked_review(
+            args=args,
+            context=context,
+            model=summary_model,
+            base_metadata=metadata,
+            max_prompt_chars=prompt_budget,
+            chunks=pre_chunks,
+            chunk_metadata=pre_chunk_metadata,
+        )
+    finally:
+        _POLICY_STAGE.reset(policy_token)
+
     instruction_prefix = prompt.split("\n## Review Manifest", 1)[0].rstrip()
     if not instruction_prefix:
         instruction_prefix = "\n\n".join(
@@ -6415,6 +6803,9 @@ def maybe_summarize_panel_review(
 
 @controlled_command
 def command_panel(args: argparse.Namespace) -> int:
+    if args.mode != "review" and (args.scope == "repository" or getattr(args, "include_untracked", False)
+                                 or getattr(args, "review_root", None) or getattr(args, "exclude_path", None)):
+        raise AntiError("Repository inventory options require panel --mode review")
     if args.output not in PANEL_OUTPUT_MODES:
         raise AntiError(f"unsupported panel output mode: {args.output}")
     apply_free_lane_preset(args)
@@ -6489,6 +6880,8 @@ def command_panel(args: argparse.Namespace) -> int:
         panel_models=panel_models,
         judge_model=judge_model,
     )
+    if policy_preflight(args, prompt, [(model, "primary") for model in panel_models] + [(judge_model, "judge")]):
+        return 0
     if args.dry_run:
         print(format_dry_run(mode=f"panel {args.mode}", model=panel_models[0],
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
@@ -6857,9 +7250,14 @@ def command_panel(args: argparse.Namespace) -> int:
 
     def run_judge(prompt: str, max_output_tokens: int) -> tuple[str, str, dict[str, Any]]:
         try:
-            result = generate_with_fallback(
-                args, model=judge_model, prompt=prompt, max_output_tokens=max_output_tokens,
-                model_ids=model_ids, purpose="panel judge",
+            result = policy_generate(
+                args,
+                stage="judge",
+                model=judge_model,
+                prompt=prompt,
+                max_output_tokens=max_output_tokens,
+                model_ids=model_ids,
+                purpose="panel judge",
             )
         except AntiError as exc:
             exc.run_metadata = scheduling_metadata({**metadata, 'scope_status':'partial',
@@ -6972,10 +7370,10 @@ def command_panel(args: argparse.Namespace) -> int:
         parse_diagnostics.get("repaired")
         or parse_diagnostics.get("parse_error")
         or findings_caveat
-        or (isinstance(findings, dict) and findings.get("findings_dropped", 0))
+        or (isinstance(findings, dict) and (findings.get("findings_dropped", 0) or findings.get("findings_truncated", 0)))
     ):
         metadata["judge_input_status"] = "partial"
-        metadata["judge_input_loss_reason"] = "judge output was repaired, unparsable, or dropped findings"
+        metadata["judge_input_loss_reason"] = "judge output was repaired, unparsable, or lost finding content"
     metadata["judge_truncated"] = judge_truncated
     metadata["estimated_total"] = estimated_total
     metadata["estimated_cost"] = running_cost
@@ -7052,17 +7450,24 @@ def command_panel(args: argparse.Namespace) -> int:
         workspace = Path((review_context or {}).get("workspace_root") or Path.cwd())
         raw_findings = findings.get("findings", [])
         if isinstance(raw_findings, list):
-            verified = verify_findings(raw_findings, workspace)
+            verified = verify_findings(raw_findings, workspace, profiles=getattr(args, "check_profile", []))
             findings["findings"] = verified
-            verified_count = sum(1 for f in verified if f.get("evidence", "unverified") != "unverified")
+            checks = {check["checkId"]: check for finding in verified for check in finding.get("checks", [])}
+            counts = {state: sum(check["status"] == state for check in checks.values())
+                      for state in ("passed", "failed", "skipped", "error")}
             metadata["verification"] = {
-                "status": "completed_no_evidence" if not verified_count else "tool_checks",
+                "status": "tool_checks" if counts["passed"] + counts["failed"] else "completed_no_evidence",
                 "performedBy": "anti",
                 "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
-                "evidenceCount": verified_count,
+                "evidenceCount": counts["passed"] + counts["failed"],
+                "checkCounts": counts,
+                "checks": list(checks.values()),
+                "claimVerdict": "unverified",
             }
-            if verified_count:
-                caveats.append(f"Verification: {verified_count}/{len(verified)} findings received tool-backed evidence")
+            caveats.append(
+                f"File checks: {counts['passed']} passed, {counts['failed']} failed, "
+                f"{counts['skipped']} skipped, {counts['error']} errors; finding claims remain unverified."
+            )
     if metadata.get("findings_status") == "parsed" and isinstance(findings, dict):
         display_text = render_panel_findings(findings, [])
 
@@ -7136,13 +7541,15 @@ def command_panel(args: argparse.Namespace) -> int:
             repo_path=workspace,
             findings=findings.get("findings", []) if isinstance(findings, dict) else [],
             models=list(dict.fromkeys([*panel_models, str(judge_model)])),
+            context={**metadata, "caveats": caveats},
             panel_status=panel_status,
             mode=args.mode,
             scope=metadata.get("scope", ""),
             run_id=getattr(args, "run_id", None),
+            save_output=save_output_mode(args),
         )
-    except Exception:
-        pass  # Reflection recording is best-effort
+    except Exception as exc:
+        eprint("[anti] Reflection history was not updated: " + redact_sensitive_text(str(exc)))
     print_panel_result(
         panel_mode=args.mode,
         base_url=args.base_url,
@@ -7179,7 +7586,7 @@ def command_consult(args: argparse.Namespace) -> int:
     read_files: list[str] = []
     if not getattr(args, "no_pre_read", False):
         prompt, file_caveats, read_files = build_consult_file_context(
-            prompt, args.max_prompt_chars
+            prompt, args.max_prompt_chars, **({"policy_args": args} if data_policy(args) else {})
         )
         caveats.extend(file_caveats)
     else:
@@ -7189,6 +7596,8 @@ def command_consult(args: argparse.Namespace) -> int:
     
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
     estimated_cost = estimate_call_cost(model, len(prompt), args.max_output_tokens)
+    if policy_preflight(args, prompt, [(model, "primary")]):
+        return 0
     if args.dry_run:
         print(format_dry_run(mode="consult", model=model,
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
@@ -7328,7 +7737,7 @@ def command_review(args: argparse.Namespace) -> int:
     normalized_priority_paths(context, getattr(args, "priority_file", None))
     normalized_priority_paths(context, getattr(args, "required_file", None))
     if not context["diff"].strip() and not context["file_texts"]:
-        raise empty_review_scope_error(args.scope)
+        raise empty_review_scope_error(args.scope, context)
     prompt, _paths, caveats, metadata = assemble_review_prompt_from_context(
         context,
         max_prompt_chars=prompt_budget,
@@ -7347,6 +7756,8 @@ def command_review(args: argparse.Namespace) -> int:
         metadata.setdefault("privacy_disclosures", []).append(disclosure)
         if not args.print_prompt:
             eprint(f"[anti] {redact_sensitive_text(disclosure)}")
+    if policy_preflight(args, prompt, [(model, "primary")]):
+        return 0
     if args.dry_run:
         stage_plan = [{"name": "review", "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 1}]
         if chunked_review:
@@ -7525,14 +7936,17 @@ def command_review(args: argparse.Namespace) -> int:
         record_review(
             repo_path=workspace,
             findings=[],  # Reviews don't produce structured findings
+            context={**metadata, "actualModels": [str(model_used)],
+                     "actualProviders": [provider_for_model(str(model_used)) or "unknown"], "caveats": caveats},
             models=[str(model_used)],
             panel_status="single_model",
             mode="review",
             scope=scope_line,
             run_id=getattr(args, "run_id", None),
+            save_output=save_output_mode(args),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        eprint("[anti] Reflection history was not updated: " + redact_sensitive_text(str(exc)))
     print_result(
         mode="review",
         model=str(model_used),
@@ -7566,6 +7980,8 @@ def command_plan(args: argparse.Namespace) -> int:
         if not args.print_prompt:
             eprint(f"[anti] {redact_sensitive_text(disclosure)}")
     recorded_prompt = prompt
+    if policy_preflight(args, prompt, [(model, "primary")]):
+        return 0
     if args.dry_run:
         stage_plan = [{"name": "plan", "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 1}]
         if should_chunk_plan(args, prompt, max_prompt_chars=prompt_budget):
@@ -7951,6 +8367,10 @@ def command_smoke(args: argparse.Namespace) -> int:
 @controlled_command
 def command_compare(args: argparse.Namespace) -> int:
     """Send one bounded prompt through each requested model and report the outcomes."""
+    if data_policy(args):
+        policy_prompt = read_prompt(args)
+        if policy_preflight(args, policy_prompt, [(resolve_model(value, default=value), "primary") for value in args.model]):
+            return 0
     if args.dry_run:
         print(format_dry_run(
             mode="compare",
@@ -8157,27 +8577,31 @@ def command_doctor(args: argparse.Namespace) -> int:
     return run_cli(cli_args)
 
 
+def _handle_run_signal(args: argparse.Namespace, signum: int) -> None:
+    # A Python signal can interrupt us while we own a non-reentrant OS lock.
+    # Finish/unwind the current atomic publication, then record interruption.
+    if getattr(_RECORD_WRITES, "depth", 0):
+        _RECORD_WRITES.pending_signal = (args, signum)
+        return
+    if not getattr(args, "run_record_written", False):
+        try:
+            write_run_record(
+                args, mode=getattr(args, "command", "unknown"), status="interrupted",
+                models=[], base_url=getattr(args, "base_url", None),
+                metadata={"request_log_correlation_id": getattr(args, "run_id", None)},
+                error=f"terminated by signal {signum}",
+            )
+        except Exception:
+            pass
+    raise SystemExit(128 + signum)
+
+
 def _install_run_signal_handlers(args: argparse.Namespace) -> None:
-    """Write an interrupted record (over the running placeholder) on SIGTERM/SIGHUP."""
+    """Persist interruption without recursively acquiring a held record lock."""
     if not hasattr(args, "save_output"):
         return
-
     def handler(signum: int, _frame: Any) -> None:
-        if not getattr(args, "run_record_written", False):
-            try:
-                write_run_record(
-                    args,
-                    mode=getattr(args, "command", "unknown"),
-                    status="interrupted",
-                    models=[],
-                    base_url=getattr(args, "base_url", None),
-                    metadata={"request_log_correlation_id": getattr(args, "run_id", None)},
-                    error=f"terminated by signal {signum}",
-                )
-            except Exception:
-                pass
-        raise SystemExit(128 + signum)
-
+        _handle_run_signal(args, signum)
     for signum in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
         if signum is None:
             continue
@@ -8256,10 +8680,16 @@ def _panel_argv(
         argv.append("--no-anonymize")
     if getattr(args, "no_verify", False):
         argv.append("--no-verify")
+    for profile in getattr(args, "check_profile", []) or []:
+        argv.extend(["--check-profile", profile])
     return argv
 
 
 def workflow_expansion(args: argparse.Namespace) -> list[str]:
+    inventory_options = (getattr(args, "include_untracked", False) or getattr(args, "review_root", None)
+                         or getattr(args, "exclude_path", None) or args.scope == "repository")
+    if inventory_options and args.name not in {"review-ready", "ship-gate", "security-review", "quick-check", "consensus"}:
+        raise AntiError("Repository inventory options require a review workflow")
     common = [
         "--base-url",
         args.base_url,
@@ -8276,6 +8706,10 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         "--save-output",
         args.save_output,
     ]
+    if getattr(args, "data_policy", None):
+        common.extend(["--data-policy", args.data_policy])
+    for acknowledgement in getattr(args, "acknowledge_secret_hash", None) or []:
+        common.extend(["--acknowledge-secret-hash", acknowledgement])
     if args.budget is not None:
         common.extend(["--budget", str(args.budget)])
     for name in ('max_calls', 'max_total_input_tokens', 'max_total_output_tokens', 'currency_budget', 'pricing_file'):
@@ -8455,6 +8889,9 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         raise AntiError(f"unknown workflow: {args.name}")
 
     if args.name in {"review-ready", "ship-gate", "security-review", "quick-check", "consensus"}:
+        if getattr(args, "include_untracked", False): argv.append("--include-untracked")
+        append_each(argv, "--review-root", getattr(args, "review_root", None))
+        append_each(argv, "--exclude-path", getattr(args, "exclude_path", None))
         append_if_present(argv, "--base", args.base)
         append_if_present(argv, "--changed-files", args.changed_files_range)
         append_each(argv, "--file", args.file)
@@ -8498,9 +8935,14 @@ def command_workflow(args: argparse.Namespace) -> int:
     progress(args, "workflow expands to: " + workflow_command_for_progress(expanded))
     parser = build_parser()
     expanded_args = parser.parse_args(expanded)
+    expanded_args.data_policy = getattr(args, "data_policy", None)
+    expanded_args.acknowledge_secret_hash = getattr(args, "acknowledge_secret_hash", None)
+    expanded_args._data_policy_session = data_policy(args)
     expanded_args._run_control = run_control(args)
     expanded_args.run_timeout = expanded_args._run_control.limit
     expanded_args.workflow_name = args.name
+    if getattr(args, "_anti_writer_id", None):
+        expanded_args._anti_writer_id = args._anti_writer_id
     if not getattr(expanded_args, "run_label", None):
         expanded_args.run_label = args.run_label or args.name
     if hasattr(expanded_args, "base_url") and expanded_args.base_url is not None:
@@ -8514,6 +8956,8 @@ def command_workflow(args: argparse.Namespace) -> int:
     finally:
         # Propagate the inner run id so lifecycle handlers on the outer args
         # overwrite the same placeholder instead of orphaning it (B5).
+        if getattr(expanded_args, "_anti_writer_id", None):
+            args._anti_writer_id = expanded_args._anti_writer_id
         if getattr(expanded_args, "run_id", None):
             args.run_id = expanded_args.run_id
         if getattr(expanded_args, "run_record_written", False):
@@ -8537,13 +8981,7 @@ def iter_run_records() -> list[Path]:
 
 
 def load_run_record(path: Path) -> dict[str, Any]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise AntiError(f"could not read run record {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise AntiError(f"run record {path} is not a JSON object")
-    return data
+    return read_record(path)
 
 
 def resolve_run_record_path(run_id: str) -> Path:
@@ -8561,14 +8999,18 @@ def resolve_run_record_path(run_id: str) -> Path:
         if len(matches) == 1:
             path = matches[0]
     if not path.exists():
+        if (RUNS_DIR / run_id).exists():
+            raise ArtifactError("incomplete_publication", "Run artifacts exist without a committed index")
         raise AntiError(f"run record not found: {run_id}")
+    if path.is_symlink():
+        raise ArtifactError("invalid_reference", "Run index is a symlink")
 
     resolved = path.resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:
         raise AntiError(f"run record path escaped Anti run directory: {run_id}") from exc
-    return resolved
+    return path
 
 
 def command_runs(args: argparse.Namespace) -> int:
@@ -8594,13 +9036,14 @@ def command_runs(args: argparse.Namespace) -> int:
                 continue
             try:
                 data = load_run_record(path)
-            except AntiError:
+            except (AntiError, ArtifactError) as exc:
                 rows.append(
                     {
                         "id": path.stem,
                         "created_at": None,
                         "mode": None,
                         "status": "corrupt",
+                        "publicationStatus": getattr(exc, "code", "invalid_artifact"),
                         "workflow": None,
                         "models": [],
                         "run_label": None,
@@ -8615,6 +9058,7 @@ def command_runs(args: argparse.Namespace) -> int:
                     "created_at": data.get("created_at"),
                     "mode": data.get("mode"),
                     "status": data.get("status"),
+                    "publicationStatus": data.get("publicationStatus"),
                     "workflow": data.get("workflow"),
                     "models": data.get("models", []),
                     "run_label": data.get("run_label"),
@@ -8645,30 +9089,56 @@ def command_runs(args: argparse.Namespace) -> int:
         return 0
     if args.runs_command == "clean":
         cutoff = time.time() - (args.older_than * 86400)
-        removed = 0
-        for path in iter_run_records():
-            if path.stat().st_mtime < cutoff:
-                if args.dry_run:
-                    print(f"[*] Would remove {path.name}")
-                else:
-                    path.unlink()
-                    artifact_dir = RUNS_DIR / path.stem
-                    if artifact_dir.is_dir() and not artifact_dir.is_symlink():
-                        shutil.rmtree(artifact_dir)
-                removed += 1
-        if RUNS_DIR.exists():
-            for path in RUNS_DIR.glob("*.json.tmp"):
-                if path.stat().st_mtime < cutoff:
-                    if args.dry_run:
-                        print(f"[*] Would remove {path.name}")
-                    else:
-                        path.unlink()
-                    removed += 1
-        reflection_removed = prune_reflections_older_than(cutoff, dry_run=args.dry_run)
-        verb = "Would remove" if args.dry_run else "Removed"
-        print(f"[+] {verb} {removed} Anti run record(s) older than {args.older_than} day(s)")
-        print(f"[+] {verb} {reflection_removed} reflection record file(s) older than {args.older_than} day(s)")
-        return 0
+        report = clean_runs(RUNS_DIR, cutoff, dry_run=args.dry_run, resume=args.resume_cleanup)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            for row in report["rows"]:
+                label = json.dumps(row["id"], ensure_ascii=True)
+                print(f"[*] {row['action']}: {label} ({row['reason']})")
+                if row.get("recovery"):
+                    print("    " + row["recovery"])
+                    print("    Retained paths: " + json.dumps([row["recordPath"], row["artifactPath"], row["markerPath"]]))
+            removed = sum(row["action"] in {"remove", "resume", "removed"} for row in report["rows"])
+            verb = "Would remove" if args.dry_run else "Removed"
+            print(f"[+] {verb} {removed} Anti run record(s) older than {args.older_than} day(s)")
+            print("[*] Reflection history and unowned temporary files retained.")
+        return 1 if report["errors"] else 0
+    if args.runs_command in {"finding", "export"}:
+        try:
+            from anti_lib.reports import build_report, to_markdown, to_sarif, write_export
+            repo = Path(args.repo).resolve()
+            if args.runs_command == "finding":
+                evidence = args.evidence
+                if args.evidence_file:
+                    path = Path(args.evidence_file).expanduser()
+                    if not path.is_file() or path.stat().st_size > 16000:
+                        raise AntiError("Evidence file must be regular and at most 16000 bytes")
+                    with path.open("rb") as handle:
+                        raw = handle.read(16001)
+                    if len(raw) > 16000:
+                        raise AntiError("Evidence file exceeds the limit")
+                    evidence = raw.decode("utf-8")
+                updated = update_finding_verdict(repo, args.run_id, args.finding, status=args.verdict,
+                                                 author=args.author, evidence=evidence, source_file=args.source_file)
+                print(json.dumps(updated, indent=2, sort_keys=True))
+                return 0
+            records = list_records(repo, limit=None)
+            if args.run_id:
+                records = [record for record in records if record.get("run_id") == args.run_id]
+                if not records:
+                    raise AntiError("No retained reflection record matches this run")
+            report = build_report(records, repo)
+            text = (to_markdown(report) if args.format == "markdown" else
+                    json.dumps(to_sarif(report) if args.format == "sarif" else report, indent=2, sort_keys=True))
+            if args.output:
+                destination = Path(args.output).expanduser()
+                write_export(destination, text)
+            else:
+                print(text)
+            return 0
+        except (ValueError, OSError) as exc:
+            raise AntiError(str(exc)) from exc
     if args.runs_command == "reflections":
         repo = Path(args.repo).resolve()
         verify_verdict = getattr(args, "verify_verdict", None)
@@ -8687,6 +9157,7 @@ def command_runs(args: argparse.Namespace) -> int:
         print(f"- Records: {summary['records']}")
         print(f"- Total findings: {summary['total_findings']}")
         print(f"- Recurring fingerprints: {summary['recurring_fingerprints']}")
+        print(f"- Per-finding verdict cohorts: {summary.get('verdictCohorts', {})}")
         if summary.get("date_range"):
             print(f"- Date range: {summary['date_range'][0]} to {summary['date_range'][1]}")
         if summary.get("top_recurring"):
@@ -8742,6 +9213,8 @@ def add_generation_control_args(
     *,
     default_save_output: str = "never",
 ) -> None:
+    parser.add_argument("--data-policy", help="Explicit path to a version 1 restrictive repository submission policy")
+    parser.add_argument("--acknowledge-secret-hash", action="append", help="Explicitly acknowledge this exact assembled prompt SHA-256; repeatable")
     parser.add_argument("--run-timeout", type=float, default=1800.0, help="Whole-run provider deadline in seconds (default: 1800; maximum: 86400)")
     parser.add_argument("--auto-route", action="store_true", help="Automatically pick the cheapest adequate model based on diff size and risk")
     parser.add_argument("--fallback-model", help="Fallback model alias/id for retryable or timeout failures")
@@ -8764,18 +9237,24 @@ def add_generation_control_args(
         "--save-output",
         choices=sorted(SAVE_OUTPUT_MODES),
         default=default_save_output,
-        help="Save sanitized run metadata under ~/.codex/anti-runs",
+        help="Retention under ~/.codex/anti-runs: never = content-free lifecycle only; summary = bounded previews; full = redacted detailed output",
     )
 
 
 def add_codex_config_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path")
+    parser.add_argument("--config", default=str(client_config_path()), help="Codex config path")
     parser.add_argument("--provider", default="antigravity", help="Codex provider id")
     parser.add_argument("--provider-name", default="Google Antigravity", help="Codex provider display name")
 
 
+def add_inventory_args(parser):
+    parser.add_argument("--include-untracked", action="store_true", help="Include untracked files in working-tree or repository reviews")
+    parser.add_argument("--review-root", action="append", help="Literal repository-relative directory for repository inventory; repeatable")
+    parser.add_argument("--exclude-path", action="append", help="Literal file or directory to exclude from repository inventory; repeatable")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Antigravity Opus/Sonnet sidecar helper for Codex")
+    parser = ConsoleArgumentParser(description="Antigravity Opus/Sonnet sidecar helper for Codex")
     sub = parser.add_subparsers(dest="command", required=True)
 
     panel = sub.add_parser(
@@ -8795,7 +9274,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     panel.add_argument("--judge", default="opus", help="Judge model alias/id; defaults to opus")
     panel.add_argument("--role", action="append", help="Review/planning lens such as security, correctness, tests, ux")
-    panel.add_argument("--scope", choices=["none", "working-tree", "staged", "files", "diff"], default="working-tree")
+    panel.add_argument("--scope", choices=["none", "working-tree", "staged", "files", "diff", "repository"], default="working-tree")
+    add_inventory_args(panel)
     panel.add_argument("--base", help="Base ref for --mode review --scope diff; uses <base>...HEAD")
     panel.add_argument("--changed-files", dest="changed_files_range", help="Git revision range for --mode review --scope diff")
     panel.add_argument("--file", action="append", help="Add or limit repository file context; repeatable")
@@ -8843,7 +9323,9 @@ def build_parser() -> argparse.ArgumentParser:
     panel.add_argument("--print-prompt", action="store_true", help="Print assembled source prompt without contacting gateway")
     panel.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
     panel.add_argument("--no-anonymize", action="store_true", help="Do not anonymize lane labels before judge synthesis")
-    panel.add_argument("--no-verify", action="store_true", help="Skip evidence-linked verification of findings")
+    panel_checks = panel.add_mutually_exclusive_group()
+    panel_checks.add_argument("--no-verify", action="store_true", help="Skip all finding file checks")
+    panel_checks.add_argument("--check-profile", choices=["eslint"], action="append", default=[], help="Opt into an installed trusted checker and project config (no fixes or installs)")
     panel.add_argument("prompt_parts", nargs="*", help="Positional ask/planning prompt text")
     panel.set_defaults(func=command_panel)
 
@@ -8904,7 +9386,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_gateway_args(review, default_timeout=120.0)
     add_generation_control_args(review)
     review.add_argument("--model", default=None, help="opus, sonnet, or full model id")
-    review.add_argument("--scope", choices=["working-tree", "staged", "files", "diff"], default="working-tree")
+    review.add_argument("--scope", choices=["working-tree", "staged", "files", "diff", "repository"], default="working-tree")
+    add_inventory_args(review)
     review.add_argument("--base", help="Base ref for --scope diff; uses <base>...HEAD")
     review.add_argument("--changed-files", dest="changed_files_range", help="Git revision range for --scope diff")
     review.add_argument("--file", action="append", help="Limit review to path; repeatable")
@@ -8965,7 +9448,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workflow.add_argument("--panel-mode", choices=["review", "plan", "ask"], default="review", help="Panel mode for collaboration workflows")
     workflow.add_argument("--no-anonymize", action="store_true", help="Do not anonymize lane labels before judge synthesis")
-    workflow.add_argument("--no-verify", action="store_true", help="Skip evidence-linked verification of findings")
+    workflow_checks = workflow.add_mutually_exclusive_group()
+    workflow_checks.add_argument("--no-verify", action="store_true", help="Skip all finding file checks")
+    workflow_checks.add_argument("--check-profile", choices=["eslint"], action="append", default=[], help="Opt into an installed trusted checker and project config (no fixes or installs)")
     workflow.add_argument("--model", action="append", help="Model alias/id for the workflow; repeatable for panels")
     workflow.add_argument(
         "--model-free",
@@ -8974,7 +9459,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workflow.add_argument("--judge", default="opus")
     workflow.add_argument("--role", action="append")
-    workflow.add_argument("--scope", choices=["auto", "none", "working-tree", "staged", "files", "diff"], default="auto")
+    workflow.add_argument("--scope", choices=["auto", "none", "working-tree", "staged", "files", "diff", "repository"], default="auto")
+    add_inventory_args(workflow)
     workflow.add_argument("--base")
     workflow.add_argument("--changed-files", dest="changed_files_range", help="Git revision range for --scope diff")
     workflow.add_argument("--file", action="append")
@@ -9022,8 +9508,25 @@ def build_parser() -> argparse.ArgumentParser:
     runs_show = runs_sub.add_parser("show")
     runs_show.add_argument("id")
     runs_clean = runs_sub.add_parser("clean")
-    runs_clean.add_argument("--older-than", type=positive_int, required=True, help="Delete records older than N days")
-    runs_clean.add_argument("--dry-run", action="store_true", help="List records that would be removed without deleting")
+    runs_clean.add_argument("--older-than", type=positive_int, required=True, help="Delete terminal records older than N days; retain running and uncertain state")
+    runs_clean.add_argument("--dry-run", action="store_true", help="Plan cleanup without changing any files")
+    runs_clean.add_argument("--resume-cleanup", action="store_true", help="Retry a previously interrupted terminal cleanup after revalidation")
+    runs_clean.add_argument("--json", action="store_true", help="Print the cleanup plan or result as JSON")
+    runs_finding = runs_sub.add_parser("finding", help="Record local evidence for one retained advisory finding")
+    runs_finding.add_argument("--repo", default=".")
+    runs_finding.add_argument("--run-id", required=True)
+    runs_finding.add_argument("--finding", required=True, help="findingKey from runs export")
+    runs_finding.add_argument("--verdict", required=True, choices=["confirmed", "rejected", "unresolved"])
+    runs_finding.add_argument("--author", required=True, help="Explicit local author label")
+    runs_finding.add_argument("--source-file", required=True, help="Inspected source within --repo; its SHA-256 is recorded")
+    evidence = runs_finding.add_mutually_exclusive_group(required=True)
+    evidence.add_argument("--evidence", help="Explicit local evidence (up to 4000 characters)")
+    evidence.add_argument("--evidence-file", help="UTF-8 file containing explicit local evidence")
+    runs_export = runs_sub.add_parser("export", help="Export local JSON/SARIF/Markdown without publishing")
+    runs_export.add_argument("--repo", default=".")
+    runs_export.add_argument("--run-id")
+    runs_export.add_argument("--format", choices=["json", "sarif", "markdown"], default="json")
+    runs_export.add_argument("--output", help="New local output file (default: stdout; refuses existing files)")
     runs_reflections = runs_sub.add_parser("reflections", help="Show repo-level reflection history")
     runs_reflections.add_argument("--repo", default=".", help="Repository path (default: cwd)")
     runs_reflections.add_argument("--limit", type=positive_int, default=10)
@@ -9140,9 +9643,10 @@ def main(argv: list[str] | None = None) -> int:
         _install_run_signal_handlers(args)
         if hasattr(args, "base_url") and args.base_url is not None:
             args.base_url = normalize_base_url(args.base_url)
+        data_policy(args)
         return int(args.func(args))
     except KeyboardInterrupt:
-        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False):
+        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False) and not (getattr(args, "dry_run", False) or getattr(args, "print_prompt", False)):
             try:
                 run_id = getattr(args, "run_id", None)
                 correlation = {"request_log_correlation_id": run_id} if run_id else {}
@@ -9159,8 +9663,10 @@ def main(argv: list[str] | None = None) -> int:
                 pass
         eprint("Interrupted")
         return 130
-    except AntiError as exc:
-        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False):
+    except (AntiError, PersistenceError, PolicyError) as exc:
+        if isinstance(exc, PolicyError) and getattr(args, "_data_policy_session", None) and not (getattr(args, "dry_run", False) or getattr(args, "print_prompt", False)):
+            args.run_id = getattr(args, "run_id", None) or new_run_id()
+        if hasattr(args, "save_output") and not getattr(args, "run_record_written", False) and not (getattr(args, "dry_run", False) or getattr(args, "print_prompt", False)):
             try:
                 run_id = getattr(args, "run_id", None)
                 correlation = {"request_log_correlation_id": run_id} if run_id else {}

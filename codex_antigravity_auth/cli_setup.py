@@ -1,6 +1,7 @@
 """Interactive setup and login commands (split from cli.py)."""
 
 from __future__ import annotations
+from .console import console_print as print
 
 import argparse
 import getpass
@@ -41,7 +42,7 @@ def run_setup_v2(args) -> None:
     print("=" * 60)
     print("             ANTI V2 WORKFLOW SETUP CHECK           ")
     print("=" * 60)
-    skill_dir = Path(os.path.expanduser(args.skill_dir))
+    skill_dir = _cli.client_skills_path(args.skill_dir)
     destination = skill_dir / _cli.BUNDLED_CODEX_SKILL_NAME
 
     try:
@@ -93,8 +94,8 @@ def run_setup_v2(args) -> None:
     providers = {}
     if args.check_byok:
         try:
-            providers = _cli.all_provider_configs()
-            stored_providers = _cli.load_provider_config().get("providers", {})
+            providers = _cli._diagnostic_all_provider_configs()
+            stored_providers = _cli.load_provider_config_read_only().get("providers", {})
             stored_provider_ids = set(stored_providers) if isinstance(stored_providers, dict) else set()
         except Exception as exc:
             print(f"[WARN] BYOK provider visibility: could not load provider config ({_cli.redact_secret_text(str(exc))})")
@@ -124,13 +125,20 @@ def run_setup_v2(args) -> None:
         print("[INFO] BYOK provider checks skipped; pass --check-byok to inspect provider readiness")
 
     if args.check_google:
-        cid, csec = _cli.resolve_oauth_credentials()
+        credential_warnings: list[str] = []
+        cid, csec = _cli.resolve_oauth_credentials(read_only=True, warnings=credential_warnings)
+        for warning in credential_warnings:
+            print(f"[WARN] Google OAuth credentials: {_cli.redact_secret_text(warning)}")
         if cid and csec:
             print("[PASS] Google OAuth credentials: configured")
         else:
             print("[WARN] Google OAuth credentials: missing")
-        accounts = _cli.load_accounts().get("accounts", [])
-        print(f"[INFO] Google account rotation pool: {len(accounts)} account(s)")
+        try:
+            accounts = _cli._diagnostic_load_accounts().get("accounts", [])
+        except Exception as exc:
+            print(f"[WARN] Google account rotation pool: could not inspect account store ({_cli.redact_secret_text(str(exc))})")
+        else:
+            print(f"[INFO] Google account rotation pool: {len(accounts)} account(s)")
 
     if args.check_byok and providers:
         unusable = [
@@ -149,7 +157,7 @@ def run_setup_v2(args) -> None:
     print("=" * 60)
 
 
-def run_local_oauth_flow(*, select_account: bool = False) -> dict:
+def run_local_oauth_flow(*, select_account: bool = False, no_browser: bool = False) -> dict:
     # Verify environment credentials or credentials file exists
     cid, csec = _cli.resolve_oauth_credentials()
     if not cid or not csec:
@@ -159,30 +167,43 @@ def run_local_oauth_flow(*, select_account: bool = False) -> dict:
         sys.exit(1)
 
     print("[*] Initiating Google Antigravity OAuth login...")
+    from .oauth import get_pkce_verifier
     auth_info = _cli.authorize_antigravity(select_account=select_account)
     url = auth_info["url"]
 
     try:
         server = _cli.OAuthServer(("localhost", 51121), _cli.OAuthCallbackHandler)
     except OSError as e:
+        get_pkce_verifier(auth_info["state_id"])
         raise SystemExit(
             "OAuth callback port 51121 is already in use. "
             "Stop the process using that port and run `codex-antigravity login` again."
         ) from e
     server.expected_state_id = auth_info["state_id"]
-    server.timeout = 600
     try:
-        print(f"[*] Opening browser authorization URL...")
-        print(f"[*] If the browser doesn't open automatically, navigate to:\n{url}\n")
-        webbrowser.open(url)
+        print(f"[*] Open this authorization URL in your browser:\n{url}\n")
+        if no_browser:
+            print("[*] Browser launch skipped (--no-browser). Waiting for the loopback callback.")
+        else:
+            try:
+                opened = webbrowser.open(url)
+            except Exception as exc:
+                opened = False
+                print(f"[!] Browser launch failed: {_cli.redact_secret_text(str(exc))}")
+            if not opened:
+                print("[!] No browser opened. Open the URL above manually, or use login --no-browser with an SSH loopback tunnel.")
 
-        # Wait for callback
-        deadline = time.time() + 600
-        while server.auth_code is None:
-            if time.time() > deadline:
-                print("[!] Timed out waiting for OAuth callback.")
-                sys.exit(1)
+        deadline = time.monotonic() + 600
+        server.callback_deadline = deadline
+        while server.auth_code is None and server.auth_error is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SystemExit("Timed out waiting for OAuth callback; run login again to retry.")
+            server.timeout = min(1.0, remaining)
             server.handle_request()
+        if server.auth_error is not None:
+            reason = "consent was denied" if server.auth_error == "access_denied" else _cli.redact_secret_text(server.auth_error)
+            raise SystemExit(f"OAuth authorization failed: {reason}. Run login again to retry.")
 
         print("[*] Callback received. Exchanging code for tokens...")
         try:
@@ -195,15 +216,17 @@ def run_local_oauth_flow(*, select_account: bool = False) -> dict:
             sys.exit(1)
 
         # Retrieve verifier from oauth module verifier store
-        from .oauth import get_pkce_verifier
         verifier_info = get_pkce_verifier(auth_info["state_id"])
         if not verifier_info:
             print("[!] PKCE verifier state not found or expired!")
             sys.exit(1)
 
         tokens = _cli.exchange_antigravity(server.auth_code, verifier_info["verifier"])
+    except KeyboardInterrupt:
+        raise SystemExit("OAuth login cancelled.") from None
     finally:
         server.server_close()
+        get_pkce_verifier(auth_info["state_id"])
 
     # Discover the Cloud Code Assist project for this account.
     # The backend rejects requests without a valid project id (403 VALIDATION_REQUIRED).
@@ -227,7 +250,7 @@ def run_local_oauth_flow(*, select_account: bool = False) -> dict:
             "https://www.googleapis.com/oauth2/v2/userinfo",
             headers={"Authorization": f"Bearer {tokens['access_token']}"}
         )
-        with urllib.request.urlopen(req, timeout=_cli.OAUTH_HTTP_TIMEOUT_SECONDS) as resp:
+        with _cli.open_http_request(req, timeout=_cli.OAUTH_HTTP_TIMEOUT_SECONDS) as resp:
             user_info = json.loads(resp.read().decode("utf-8"))
             email = user_info.get("email")
     except Exception as e:
@@ -290,7 +313,8 @@ def run_login(args) -> None:
     for attempt in range(count):
         if count > 1:
             print(f"[*] Login {attempt + 1}/{count}")
-        _cli.run_local_oauth_flow(select_account=select_account)
+        options = {"no_browser": True} if getattr(args, "no_browser", False) else {}
+        _cli.run_local_oauth_flow(select_account=select_account, **options)
     _cli.print_account_rotation_summary()
 
 
@@ -317,7 +341,7 @@ def run_setup_google(args) -> None:
             "Set ANTIGRAVITY_CLIENT_ID and ANTIGRAVITY_CLIENT_SECRET, "
             "or create ~/.codex/antigravity-credentials.json before running setup-google."
         )
-    _cli.run_login(argparse.Namespace(count=args.accounts, select_account=True))
+    _cli.run_login(argparse.Namespace(count=args.accounts, select_account=True, no_browser=getattr(args, "no_browser", False)))
 
     if not args.skip_codex_config:
         print("[*] Installing Codex provider block...")
@@ -406,7 +430,7 @@ def setup_byok_preflight(provider_prefix: str, provider_model: str) -> tuple[str
     if not provider_model:
         return "fail", f"BYOK model must include a model id after '{provider_prefix}:'", None
     try:
-        providers = _cli.all_provider_configs()
+        providers = _cli._diagnostic_all_provider_configs()
     except Exception as exc:
         return "fail", f"Could not load BYOK provider configuration: {_cli.redact_secret_text(str(exc))}", None
     provider = providers.get(provider_prefix)
@@ -444,7 +468,7 @@ def validate_oauth_credentials_with_google(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout):
+        with _cli.open_http_request(req, timeout=timeout):
             return "warn", "Google token endpoint accepted an invalid refresh token unexpectedly; continuing"
     except urllib.error.HTTPError as exc:
         body = ""
@@ -583,7 +607,7 @@ def run_setup(args) -> dict:
                 unified_model_picker=unified,
             )
         )
-        _cli._setup_check(checks, "codex_config_repair", "pass", f"repaired {Path(os.path.expanduser(args.config))}")
+        _cli._setup_check(checks, "codex_config_repair", "pass", f"repaired {_cli.client_config_path(args.config)}")
         readiness = _cli.codex_ready_report(
             config=args.config,
             provider_id=args.provider,
@@ -637,7 +661,10 @@ def run_setup(args) -> dict:
                 _cli._print_setup_report(report)
                 raise SystemExit("OpenAI upstream is not configured; Codex config was not modified.")
     elif google_route:
-        cid, csec = _cli.resolve_oauth_credentials()
+        credential_warnings: list[str] = []
+        cid, csec = _cli.resolve_oauth_credentials(read_only=not args.write, warnings=credential_warnings)
+        for warning in credential_warnings:
+            _cli._setup_check(checks, "google_oauth_credentials_file", "warn", _cli.redact_secret_text(warning))
         if args.write and (not cid or not csec):
             prompted_cid, prompted_csec = _cli.maybe_prompt_and_save_oauth_credentials(args, checks)
             cid = cid or prompted_cid
@@ -686,7 +713,7 @@ def run_setup(args) -> dict:
             _cli._print_setup_report(report)
             raise SystemExit("BYOK provider is not ready; Codex config was not modified.")
 
-    skill_dir = Path(os.path.expanduser(args.skill_dir))
+    skill_dir = _cli.client_skills_path(args.skill_dir)
     skill_path = skill_dir / _cli.BUNDLED_CODEX_SKILL_NAME
     try:
         _cli.bundled_skill_root()
@@ -738,7 +765,7 @@ def run_setup(args) -> dict:
         return report
 
     if google_route:
-        _cli.run_login(argparse.Namespace(count=args.accounts, select_account=True))
+        _cli.run_login(argparse.Namespace(count=args.accounts, select_account=True, no_browser=getattr(args, "no_browser", False)))
         _cli._setup_check(checks, "google_login", "pass", f"completed {args.accounts} OAuth login flow(s)")
     elif openai_route:
         _cli._setup_check(checks, "google_login", "skip", f"{model} routes to OpenAI; Google login not required")
@@ -755,7 +782,7 @@ def run_setup(args) -> dict:
             unified_model_picker=unified,
         )
     )
-    _cli._setup_check(checks, "codex_config_write", "pass", f"updated {Path(os.path.expanduser(args.config))}")
+    _cli._setup_check(checks, "codex_config_write", "pass", f"updated {_cli.client_config_path(args.config)}")
 
     if args.install_skill:
         _cli.run_install_skill(

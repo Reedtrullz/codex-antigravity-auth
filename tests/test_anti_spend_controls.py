@@ -48,9 +48,16 @@ def open_sequence(monkeypatch,anti,responses):
         calls.append(json.loads(request.data))
         status,payload=next(iterator)
         result=io.BytesIO(json.dumps(payload).encode());result.status=status;return result
-    monkeypatch.setattr(anti.urllib.request,'urlopen',opened)
+    # Exercise endpoint_policy.open_http_request and its before_open callback;
+    # only the final socket opener is synthetic.
     monkeypatch.setattr(anti.urllib.request,'build_opener',lambda *handlers:argparse.Namespace(open=opened))
     return calls
+
+
+def forbid_open(monkeypatch,anti):
+    def build_opener(*handlers):
+        return argparse.Namespace(open=lambda *a,**k:pytest.fail('transport must not open'))
+    monkeypatch.setattr(anti.urllib.request,'build_opener',build_opener)
 
 
 def response(text='Synthetic completed answer.', usage=None):
@@ -108,7 +115,7 @@ def test_unknown_model_stays_usable_for_call_controls_without_currency_claim(ant
 ])
 def test_stale_unknown_or_invalid_price_profiles_fail_before_http(anti,monkeypatch,tmp_path,patch):
     path=profile(tmp_path,**patch)
-    monkeypatch.setattr(anti.urllib.request,'urlopen',lambda *a,**k:pytest.fail('no HTTP'))
+    forbid_open(monkeypatch,anti)
     with pytest.raises(anti.AntiError):generate(anti,settings(currency_budget='1',pricing_file=str(path)))
 
 
@@ -178,7 +185,7 @@ def test_expiry_after_reservation_refunds_unsent_allowances(anti,monkeypatch,tmp
     reserve=control.spend_control.reserve
     def expire(*values,**kwargs):ticket=reserve(*values,**kwargs);clock[0]=2;return ticket
     monkeypatch.setattr(control.spend_control,'reserve',expire)
-    monkeypatch.setattr(anti.urllib.request,'urlopen',lambda *a,**k:pytest.fail('no HTTP'))
+    forbid_open(monkeypatch,anti)
     with pytest.raises(anti.RunDeadlineExceeded):generate(anti,args)
     snapshot=control.spend_control.snapshot()
     assert snapshot['committed']['calls']==snapshot['reserved']['calls']==0
@@ -318,7 +325,7 @@ def test_cli_pricing_refusal_gives_safe_actionable_reason(anti,monkeypatch,tmp_p
     path.write_text(json.dumps(data))
     if kind=='missing':path.unlink()
     if kind=='json':path.write_text('private-fixture-content:invalid-json')
-    monkeypatch.setattr(anti,'open_gateway_request',lambda *a,**k:pytest.fail('no transport'))
+    forbid_open(monkeypatch,anti)
     assert anti.main(['consult','--model','fixture:model','--prompt','fixture','--currency-budget','1',
                       '--pricing-file',str(path),'--no-progress'])==1
     error=capsys.readouterr().err

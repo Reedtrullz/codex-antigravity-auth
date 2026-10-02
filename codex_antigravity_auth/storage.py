@@ -7,10 +7,11 @@ import base64
 import hashlib
 import time
 from pathlib import Path
+from .namespaces import gateway_home, gateway_file
 from typing import Any, Callable
 from cryptography.fernet import Fernet, InvalidToken
 from .constants import ANTIGRAVITY_ACCOUNTS_FILE, get_codex_home
-from .account_state import SCHEMA_VERSION, migrate_account_state
+from .account_state import SCHEMA_VERSION, UnsupportedAccountStateVersion, account_state_version, migrate_account_state
 from .secure_store import SecureStore, file_lock as _exclusive_file_lock
 
 _accounts_lock = threading.RLock()
@@ -20,7 +21,7 @@ _DEFAULT_GET_CODEX_HOME = get_codex_home
 def _codex_home_read_only() -> Path:
     if get_codex_home is not _DEFAULT_GET_CODEX_HOME:
         return get_codex_home()
-    return Path(os.path.expanduser("~/.codex"))
+    return gateway_home()
 
 # Stable service name for OS Keyring integration
 KEYRING_SERVICE_NAME = "codex-antigravity-auth"
@@ -33,6 +34,9 @@ def default_accounts_data() -> dict[str, Any]:
 
 
 def normalize_accounts_data(data: dict[str, Any]) -> dict[str, Any]:
+    # Every account load/save/update passes here, including validation of the
+    # latest persisted state while holding the cross-process store lock.
+    account_state_version(data)
     if not isinstance(data, dict):
         data = {}
     accounts = data.get("accounts")
@@ -143,7 +147,7 @@ def _peek_encryption_key() -> str | None:
 
 def account_store_diagnostics() -> dict[str, Any]:
     """Inspect account-store format and schema without migrating or writing it."""
-    path = Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    path = gateway_file(ANTIGRAVITY_ACCOUNTS_FILE, "antigravity-accounts.json")
     report: dict[str, Any] = {
         "path": str(path),
         "exists": path.is_file(),
@@ -188,11 +192,17 @@ def account_store_diagnostics() -> dict[str, Any]:
     accounts = data.get("accounts")
     state = data.get("accountState")
     version = state.get("schemaVersion") if isinstance(state, dict) else None
+    report["account_state_schema_version"] = version if type(version) is int else 0
+    try:
+        account_state_version(data)
+    except UnsupportedAccountStateVersion as exc:
+        report["error_class"] = "unsupported_account_state_version"
+        report["error"] = str(exc)
+        return report
     report.update(
         {
             "accessible": True,
             "account_count": len(accounts) if isinstance(accounts, list) else 0,
-            "account_state_schema_version": version if isinstance(version, int) and not isinstance(version, bool) else 0,
         }
     )
     report["migration"] = (
@@ -265,7 +275,7 @@ def get_accounts_json_path() -> Path:
 
 
 def accounts_json_path_read_only() -> Path:
-    return Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    return gateway_file(ANTIGRAVITY_ACCOUNTS_FILE, "antigravity-accounts.json")
 
 
 def _load_secure_json_unlocked(

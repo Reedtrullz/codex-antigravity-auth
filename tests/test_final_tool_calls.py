@@ -153,6 +153,24 @@ def test_schema_constraints_do_not_coerce_boolean_to_integer_or_ignore_nested_ru
             validator.arguments('lookup',json.dumps(value))
 
 
+@pytest.mark.parametrize('arguments', [{'safe_key': 2}, {'unmatched': 2}, {'safe_key': 'valid'}])
+@pytest.mark.parametrize('nested', [False, True])
+def test_regex_properties_fail_closed_and_retain_usable_siblings(arguments, nested):
+    schema = {'type': 'object', 'patternProperties': {'^safe_': {'type': 'string'}},
+              'additionalProperties': False}
+    if nested:
+        schema = {'type': 'object', 'properties': {'q': schema}}
+        arguments = {'q': arguments}
+    req = request(schema)
+    items = [function_item(json.dumps(arguments)), text_item()]
+    direct = native_response(response(items), display_model='fixture', validator=FunctionCallValidator(req))
+    streamed = collect_native(events(items), req)[-1]['response']
+    for result in (direct, streamed):
+        assert result['status'] == 'failed'
+        assert result['error']['code'] == 'unsupported_tool_schema'
+        assert result['output'] == [text_item()]
+
+
 @pytest.mark.parametrize('bound,value,accepted', [
     ({'minimum':0.1}, '0.1', True), ({'maximum':0.3}, '0.3', True),
     ({'minimum':0.1}, '0.099999999999999999999', False),
@@ -254,18 +272,20 @@ def test_google_partial_args_presence_fails_and_preserves_independent_siblings(p
 
 @pytest.mark.parametrize('separate_choices', [False, True])
 @pytest.mark.parametrize('second_arguments', ['{"q":"other"}', '{'])
-def test_chat_duplicate_call_ids_remove_all_ambiguous_calls_but_keep_siblings(separate_choices, second_arguments):
+def test_chat_duplicate_call_ids_are_scoped_to_the_selected_alternative(separate_choices, second_arguments):
     calls = [{'id':'duplicate','function':{'name':'lookup','arguments':'{"q":"fixture"}'}},
              {'id':'duplicate','function':{'name':'lookup','arguments':second_arguments}},
              {'id':'good','function':{'name':'lookup','arguments':'{"q":"fixture"}'}}]
     groups = [[call] for call in calls] if separate_choices else [calls]
-    payload = {'choices':[{'message':{'content':'usable','tool_calls':group},'finish_reason':'tool_calls'} for group in groups],
+    payload = {'choices':[{'index':index,'message':{'content':'usable','tool_calls':group},'finish_reason':'tool_calls'}
+                          for index, group in enumerate(groups)],
                'usage':{'prompt_tokens':1,'completion_tokens':2,'total_tokens':3}}
     result = OpenAICompatibleTransport(timeout=0).parse_chat_response(payload, request=request())
-    assert result.terminal.kind is TerminalKind.FAILED
-    assert result.terminal.error_code == 'conflicting_function_call'
+    assert result.terminal.kind is (TerminalKind.COMPLETED if separate_choices else TerminalKind.FAILED)
+    if not separate_choices:
+        assert result.terminal.error_code == 'conflicting_function_call'
     assert any(row['type'] == 'message' for row in result.output)
-    assert [row['call_id'] for row in result.output if row['type'] == 'function_call'] == ['good']
+    assert [row['call_id'] for row in result.output if row['type'] == 'function_call'] == (['duplicate'] if separate_choices else ['good'])
     assert result.usage['total_tokens'] == 3
 
 

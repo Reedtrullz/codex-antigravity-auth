@@ -31,11 +31,13 @@ A supplied empty static catalog does not authorize a generated function.
 
 Local schema checking is bounded and deliberately limited: types (including
 number/boolean distinction), required properties, properties, enums/const,
-additional properties when no regex properties exist, items/prefix items,
+additional properties, items/prefix items,
 string/array/object size bounds, numeric minimum/maximum, local references and
 allOf/anyOf/oneOf. Numeric bounds compare JSON decimal values without introducing
 binary-float boundary errors; integer values retain their exact precision.
-Google OpenAPI-style nullable fields are recognized. Regex,
+Google OpenAPI-style nullable fields are recognized. Nonempty `patternProperties`
+fail explicitly as `unsupported_tool_schema`, including nested schemas, rather
+than bypassing property validation. Regex,
 format, conditional/dependency and remote-reference semantics are not evaluated
 locally. No remote schema is fetched and no regex is executed. Other constraints
 remain the provider's responsibility; this is not a local strict-schema
