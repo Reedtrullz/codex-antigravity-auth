@@ -53,7 +53,9 @@ def image_source(part: dict[str, Any], path: str) -> tuple[str, str | None, str 
     return source, None, None
 
 
-def validate_input(request: dict[str, Any], modalities, image_forms=IMAGE_FORMS, *, image_detail=True, native_passthrough=False):
+def validate_input(request: dict[str, Any], modalities, image_forms=IMAGE_FORMS, *, image_detail=True, native_passthrough=False, pcm_wav_probe=False):
+    from .skills.anti.scripts.anti_lib.wav_audio import validate_request as validate_audio
+    validate_audio(request,supported=pcm_wav_probe)
     value = request.get("input")
     if value is None or isinstance(value, str):
         return
@@ -87,6 +89,8 @@ def validate_input(request: dict[str, Any], modalities, image_forms=IMAGE_FORMS,
                     if any(p.get("type") not in {"text", "input_text", "output_text"} for p in output):
                         raise ValueError(f"{part_path}.content: only text tool output is supported")
                 continue
+            if kind == "antigravity_audio":
+                continue  # Already validated with route capability and bounds above.
             if kind in {"image", "input_image"}:
                 if "image" not in modalities:
                     raise ValueError(f"{part_path}: image input is not supported by the selected model")
@@ -129,7 +133,7 @@ def validate_input(request: dict[str, Any], modalities, image_forms=IMAGE_FORMS,
         elif kind in {"function_call", "reasoning"}:
             continue
         elif native_passthrough and kind not in {"input_text", "output_text", "text", "image", "input_image",
-                                                "audio", "input_audio", "video", "input_video", "file", "input_file"}:
+                                                "antigravity_audio", "audio", "input_audio", "video", "input_video", "file", "input_file"}:
             # Native provider-specific unions are carried unchanged. Media
             # content in ordinary messages remains capability-checked above.
             continue

@@ -5,6 +5,11 @@ description: Use the optional Anti helper after Antigravity Claude Opus/Sonnet i
 
 # Anti
 
+Experimental [PCM WAV consult input](WAV_AUDIO.md) requires explicit local files,
+an explicit Gemini model and `--probe-unverified-audio` before upload. Never treat
+a text response, filename or transcript as proof of listening; actual backend
+audio acceptance remains unverified. No live probe is implied by this skill.
+
 Explicit local PNG/JPEG attachments use repeatable `--image PATH` and require
 gateway-declared image support at every stage. Read [attachments](ATTACHMENTS.md)
 for limits, unscanned pixels/metadata, retention, and the unmet real-media release
@@ -126,7 +131,8 @@ fit. Never trim source silently to make a request appear to fit. See
 
 The current gateway transports accept declared text/image inputs and emit text,
 reasoning summaries, function calls and refusals. They do not carry audio/video
-input or generated image/audio/video output. Standalone BYOK capabilities are
+input on ordinary routes or generated image/audio/video output. The separate
+experimental consult-only WAV extension is documented in [WAV_AUDIO.md](WAV_AUDIO.md). Standalone BYOK capabilities are
 unknown until the gateway supplies a compatible contract. Local short aliases,
 quality ranks and cost tiers are selection heuristics, not capability evidence.
 
@@ -139,7 +145,7 @@ quality ranks and cost tiers are selection heuristics, not capability evidence.
 - When Opus quota is low, use `nemotron-ultra` (70 quality, free, 1M) for broad scans and planning.
 - For quick consults, prefer `flash-3.8` (current Flash, quota, 1M).
 - For code review, prefer `poolside` (60 quality, free, coding-focused) first, then fall back to quota models.
-- For image tasks, require image support in the effective gateway contract. Audio/video input is currently unsupported, including on upstream models that support those modalities.
+- For image tasks, require image support in the effective gateway contract. Ordinary audio/video input remains unsupported; the consult-only PCM WAV probe extension requires explicit upload intent and leaves listening unverified.
 - Gemini 3.8 Flash is the current default; use explicit 3.7/3.6 IDs only when a pinned workflow requires them.
 - The helper's `cheapest_models_for_task()` function automates this: it filters by capability requirements, then sorts free models first, then by quality.
 

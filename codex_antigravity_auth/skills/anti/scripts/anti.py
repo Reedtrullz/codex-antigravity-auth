@@ -44,6 +44,7 @@ from anti_lib import local_policy as local_workflow
 from anti_lib.context_budget import assess as assess_context, calibration as context_calibration
 from anti_lib import checkpoints as chunk_checkpoints
 from anti_lib import media as image_attachments
+from anti_lib import wav_audio
 
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
@@ -625,10 +626,21 @@ def run_control(args=None):
                     raise AntiError('Invalid attempt admission configuration: check numeric limits and pricing-file fields') from exc
     if local_settings is not None:
         current.local_policy = local_settings
-    if args is not None and (getattr(args, 'image', None) or getattr(args, '_media_session', None)):
+    audio_paths=getattr(args,'audio',None)
+    if audio_paths:
+        if not getattr(args,'model',None) or getattr(args,'auto_route',False):
+            raise AntiError('WAV consult requires an explicit --model; automatic routing is disabled')
+        if getattr(args,'command',None) not in {'consult','ask'} or getattr(args,'image',None):
+            raise AntiError('WAV input is consult/ask-only and cannot be combined with images')
+        if not getattr(args,'probe_unverified_audio',False) and not getattr(args,'dry_run',False):
+            raise AntiError('Audio backend acceptance is unverified; --probe-unverified-audio explicitly authorizes the upload')
+    elif getattr(args,'probe_unverified_audio',False):
+        raise AntiError('--probe-unverified-audio requires --audio')
+    if args is not None and (audio_paths or getattr(args, 'image', None) or getattr(args, '_media_session', None)):
         with _BUDGET_STATE_INIT_LOCK:
             if not hasattr(args, '_media_session'):
-                args._media_session = image_attachments.capture(args.image, policy=data_policy(args))
+                args._media_session = (wav_audio.capture(audio_paths,policy=data_policy(args),probe=getattr(args,'probe_unverified_audio',False))
+                                       if audio_paths else image_attachments.capture(args.image,policy=data_policy(args)))
             previous = getattr(current, 'media', None)
             if previous is not None and previous is not args._media_session:
                 raise AntiError('Attachment capture cannot change during a run')
@@ -1855,6 +1867,9 @@ def post_response(
                     status, decoded = request_json(
                         "POST", response_url, payload=payload, timeout=attempt_timeout, token_env=token_env,
                     )
+                if getattr(media,'kind',None)=='audio' and (status!=200 or decoded.get('status')=='failed'):
+                    decoded={'detail':'Audio probe failed; backend listening remains unverified','status':'failed','error':{'message':'Audio probe failed; backend listening remains unverified'},
+                             **{key:decoded[key] for key in ('_retry_after_seconds','_retry_after_unsupported') if key in decoded}}
                 control.check(submitted=True)
         except AntiError as exc:
             submitted = (_CALL_SUBMITTED.get() or 0) > submitted_before
@@ -1939,7 +1954,7 @@ def post_response(
                 response_metadata['gateway_routing_identity'] = decoded['_gateway_routing_identity']
             if media is not None:
                 response_metadata['request_content_sha256'] = media.content_sha256(prompt)
-                response_metadata['image_count'] = len(media.images)
+                response_metadata['audio_count' if getattr(media,'kind',None)=='audio' else 'image_count'] = len(media.images)
             response_metadata['context_preflight'] = context_report
             response_metadata['context_calibration'] = context_calibration(context_report, extract_usage(decoded))
             control.check(submitted=True)
@@ -1996,7 +2011,7 @@ def _pre_flight_cost_suggestion(
     alternatives = [
         m for m in model_ids
         if model_cost_tier(m) == "free" and model_quality_rank(m) >= quality - 15
-        and (captured_media(args) is None or image_attachments.supports(CAPABILITY_REGISTRY, m))
+        and (captured_media(args) is None or captured_media(args).supports(CAPABILITY_REGISTRY, m))
     ]
     if not alternatives:
         return
@@ -4431,7 +4446,7 @@ def format_dry_run(
     media = captured_media()
     if media is not None:
         payload['media_coverage'] = media.report()
-        payload['unknowns'].append('image costs and provider acceptance are unknown; displayed token estimates cover text only')
+        payload['unknowns'].append(('audio' if getattr(media,'kind',None)=='audio' else 'image')+' costs and provider acceptance are unknown; displayed token estimates cover text only')
     if output_json:
         return json.dumps(payload, indent=2, sort_keys=True)
     lines = [
@@ -4447,7 +4462,7 @@ def format_dry_run(
     lines.append(f"  possible retries: {payload['possible_retries']}; pricing: heuristic tiers only (provider prices unknown)")
     lines.append("  unknowns: provider billing and missing runtime usage")
     if media is not None:
-        lines.append("  images: captured, not sent; image costs and provider acceptance unknown; token estimates cover text only")
+        lines.append("  attachments: captured, not sent; media costs and provider acceptance unknown; token estimates cover text only")
     if budget_limit is not None:
         lines.append(f"  heuristic-unit budget: {float(budget_limit):.4f}")
     return "\n".join(lines)
@@ -8822,6 +8837,8 @@ def build_parser() -> argparse.ArgumentParser:
     consult.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
     consult.add_argument("--json", action="store_true", help="Emit structured JSON output")
     consult.add_argument("prompt_parts", nargs="*", help="Positional prompt text")
+    consult.add_argument('--audio',action='append',help='Explicit local PCM WAV for advisory consult; at most two files,2MiB each,30seconds each')
+    consult.add_argument('--probe-unverified-audio',action='store_true',help='Explicitly authorize WAV upload to an advertised experimental Gemini route; does not establish verified listening')
     consult.set_defaults(func=command_consult)
 
     compare = sub.add_parser("compare", help="Send one bounded prompt through each requested model and compare outcomes")

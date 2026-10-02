@@ -277,6 +277,9 @@ def validate_request_shapes(request, *, route=None):
                 if role != 'user':
                     reject(where, 'tool results must appear in a user message')
                 result(part, where, nested=True)
+            elif kind == 'antigravity_audio':
+                if route not in {None,'google'} or role != 'user':
+                    reject(where + '.type','experimental WAV input requires a Google user message')
             elif kind in {'image','input_image'}:
                 pass  # Existing input_fidelity owns media and role capabilities.
             elif translated:

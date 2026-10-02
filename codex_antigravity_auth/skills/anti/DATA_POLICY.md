@@ -96,3 +96,11 @@ assembled text-and-image request: SHA-256 of compact sorted JSON containing
 remain unchanged. Policy configuration is still version 1. This binds
 acknowledgements to the captured images without scanning pixels or retaining
 paths/base64. See [attachments](ATTACHMENTS.md) for limits and evaluation status.
+
+Consult WAV probes use a version2 content identity containing `promptSha256` and
+ordered typed `audio` descriptors (ordinal index, MIME, bytes, duration, sample
+rate, channels, sample width, frames, SHA-256). The policy file remains version1
+and the content-free decision audit remains version2 with `unscannedMediaCount`.
+Existing text/image digests are unchanged. Audio content is not scanned; explicit
+probe intent never overrides path, route, stage or text-secret decisions. See
+[WAV input](WAV_AUDIO.md) for the exact experimental contract.

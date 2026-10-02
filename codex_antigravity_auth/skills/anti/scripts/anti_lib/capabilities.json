@@ -9,6 +9,20 @@
           "gemini-3.8-flash-medium",
           "gemini-3.8-flash-tiered"
         ],
+        "audio_input": {
+          "backend_acceptance": "unverified",
+          "content_type": "antigravity_audio",
+          "format": "pcm_wav",
+          "listening_verification": "not_run",
+          "max_duration_seconds": 30,
+          "max_file_bytes": 2097152,
+          "max_files": 2,
+          "max_total_bytes": 4194304,
+          "requires_probe_opt_in": true,
+          "streaming": false,
+          "transport_supported": true,
+          "version": 1
+        },
         "availability": "unknown",
         "backend_id": "gemini-3.8-flash-tiered",
         "canonical_id": "gemini-3.8-flash",
@@ -102,6 +116,20 @@
           "gemini-3.7-flash-medium",
           "gemini-3.7-flash-tiered"
         ],
+        "audio_input": {
+          "backend_acceptance": "unverified",
+          "content_type": "antigravity_audio",
+          "format": "pcm_wav",
+          "listening_verification": "not_run",
+          "max_duration_seconds": 30,
+          "max_file_bytes": 2097152,
+          "max_files": 2,
+          "max_total_bytes": 4194304,
+          "requires_probe_opt_in": true,
+          "streaming": false,
+          "transport_supported": true,
+          "version": 1
+        },
         "availability": "unknown",
         "backend_id": "gemini-3.7-flash-tiered",
         "canonical_id": "gemini-3.7-flash",
@@ -195,6 +223,20 @@
           "gemini-3.1-pro-preview",
           "gemini-pro-agent"
         ],
+        "audio_input": {
+          "backend_acceptance": "unverified",
+          "content_type": "antigravity_audio",
+          "format": "pcm_wav",
+          "listening_verification": "not_run",
+          "max_duration_seconds": 30,
+          "max_file_bytes": 2097152,
+          "max_files": 2,
+          "max_total_bytes": 4194304,
+          "requires_probe_opt_in": true,
+          "streaming": false,
+          "transport_supported": true,
+          "version": 1
+        },
         "availability": "unknown",
         "backend_id": "gemini-3.1-pro-low",
         "canonical_id": "gemini-3.1-pro",
@@ -282,6 +324,20 @@
           "claude-sonnet",
           "sonnet"
         ],
+        "audio_input": {
+          "backend_acceptance": "unsupported",
+          "content_type": "antigravity_audio",
+          "format": "pcm_wav",
+          "listening_verification": "not_run",
+          "max_duration_seconds": 30,
+          "max_file_bytes": 2097152,
+          "max_files": 2,
+          "max_total_bytes": 4194304,
+          "requires_probe_opt_in": true,
+          "streaming": false,
+          "transport_supported": false,
+          "version": 1
+        },
         "availability": "unknown",
         "backend_id": "claude-sonnet-4-6",
         "canonical_id": "claude-sonnet-4-6",
@@ -375,6 +431,20 @@
           "claude-opus-4-6",
           "opus"
         ],
+        "audio_input": {
+          "backend_acceptance": "unsupported",
+          "content_type": "antigravity_audio",
+          "format": "pcm_wav",
+          "listening_verification": "not_run",
+          "max_duration_seconds": 30,
+          "max_file_bytes": 2097152,
+          "max_files": 2,
+          "max_total_bytes": 4194304,
+          "requires_probe_opt_in": true,
+          "streaming": false,
+          "transport_supported": false,
+          "version": 1
+        },
         "availability": "unknown",
         "backend_id": "claude-opus-4-6-thinking",
         "canonical_id": "claude-opus-4-6-thinking",
@@ -464,6 +534,20 @@
     {
       "capabilities": {
         "aliases": [],
+        "audio_input": {
+          "backend_acceptance": "unsupported",
+          "content_type": "antigravity_audio",
+          "format": "pcm_wav",
+          "listening_verification": "not_run",
+          "max_duration_seconds": 30,
+          "max_file_bytes": 2097152,
+          "max_files": 2,
+          "max_total_bytes": 4194304,
+          "requires_probe_opt_in": true,
+          "streaming": false,
+          "transport_supported": false,
+          "version": 1
+        },
         "availability": "unknown",
         "backend_id": "gpt-oss-120b-medium",
         "canonical_id": "gpt-oss-120b-medium",
@@ -545,6 +629,20 @@
           "gemini-3.6-flash-low",
           "gemini-3.6-flash-medium"
         ],
+        "audio_input": {
+          "backend_acceptance": "unverified",
+          "content_type": "antigravity_audio",
+          "format": "pcm_wav",
+          "listening_verification": "not_run",
+          "max_duration_seconds": 30,
+          "max_file_bytes": 2097152,
+          "max_files": 2,
+          "max_total_bytes": 4194304,
+          "requires_probe_opt_in": true,
+          "streaming": false,
+          "transport_supported": true,
+          "version": 1
+        },
         "availability": "unknown",
         "backend_id": "gemini-3.7-flash-tiered",
         "canonical_id": "gemini-3.6-flash-high",
@@ -639,6 +737,20 @@
           "gemini-3.5-flash-low",
           "gemini-3.5-flash-medium"
         ],
+        "audio_input": {
+          "backend_acceptance": "unverified",
+          "content_type": "antigravity_audio",
+          "format": "pcm_wav",
+          "listening_verification": "not_run",
+          "max_duration_seconds": 30,
+          "max_file_bytes": 2097152,
+          "max_files": 2,
+          "max_total_bytes": 4194304,
+          "requires_probe_opt_in": true,
+          "streaming": false,
+          "transport_supported": true,
+          "version": 1
+        },
         "availability": "unknown",
         "backend_id": "gemini-3-flash-agent",
         "canonical_id": "gemini-3.5-flash-high",

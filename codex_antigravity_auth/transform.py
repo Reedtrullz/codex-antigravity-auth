@@ -300,6 +300,8 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
         if part_type in ("input_text", "text", "output_text"):
             text = _stream_text(part.get("text"))
             return [{"text": text}] if text is not None else []
+        if part_type == "antigravity_audio":
+            return [{"inlineData":{"mimeType":"audio/wav","data":part["data"]}}]
         if part_type in ("input_image", "image"):
             image_url, mime_type, payload = image_source(part, "input.image")
             if payload is not None:
@@ -626,6 +628,8 @@ def transform_request_to_chat(codex_req: dict, provider_model: str, *, capabilit
         if part_type in ("input_text", "text", "output_text"):
             text = _stream_text(part.get("text"))
             return [{"type": "text", "text": text}] if text is not None else []
+        if part_type == "antigravity_audio":
+            return [{"inlineData":{"mimeType":"audio/wav","data":part["data"]}}]
         if part_type in ("input_image", "image"):
             image_url, _, _ = image_source(part, "input.image")
             image = {"url": image_url}

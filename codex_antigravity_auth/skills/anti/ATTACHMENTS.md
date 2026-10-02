@@ -28,7 +28,9 @@ The helper recognizes PNG/JPEG signatures; it does not decode, resize, normalize
 strip EXIF, or certify that a file is a valid image. The gateway receives exact
 original bytes encoded as data URLs. Metadata embedded in those files is sent
 unchanged. URLs, inline data arguments, audio, video and binary-to-text fallbacks
-are refused. There is no implicit screenshot capture, URL fetch, cloud upload,
+are refused by `--image`. A separate consult-only [WAV extension](WAV_AUDIO.md)
+requires explicit probe intent; it cannot be mixed with image attachments.
+There is no implicit screenshot capture, URL fetch, cloud upload,
 or media editor. Image-only tasks use `consult --no-pre-read` or `panel --mode ask`;
 review and plan retain their normal code/source scope alongside attachments.
 

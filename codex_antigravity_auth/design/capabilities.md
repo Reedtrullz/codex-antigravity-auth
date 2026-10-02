@@ -24,7 +24,7 @@ Use only forms supported by that provider/model. Per-model declarations override
 provider declarations. The picker and dispatch use the same contract.
 
 Images in system/developer roles are rejected because those adapter roles carry
-only text. Audio, video, files, unresolved image file IDs and unknown content types return a
+only text. Ordinary audio, video, files, unresolved image file IDs and unknown content types return a
 400 with an input field path. A mixed request is rejected in full; no unsupported
 attachment is converted into a text label or silently discarded. No implicit
 text-reference mode, media downloader or transcoder is provided. Tool-result
@@ -122,3 +122,12 @@ budgets require an output cap above 1024 when explicitly requested. The native
 picker, validator and wire payload are covered together for every published level.
 Adapter output types remain listed separately from effective types: undeclared
 BYOK reasoning/function-call outputs are not promoted to effective support.
+
+## Experimental WAV probe extension
+
+A separate version1 `audio_input` object describes bounded PCM-WAV encoding for
+Gemini backends and explicitly unverified OAuth backend acceptance. It does not
+add audio to ordinary effective modalities. The private `antigravity_audio` part
+requires explicit probe intent, an explicit model, and a non-streaming Gemini
+user message; other routes refuse it before auth/dispatch. No field is advertised
+as verified listening. See the owning [WAV contract](../skills/anti/WAV_AUDIO.md).

@@ -170,6 +170,7 @@ REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
     streaming_usage=True,
     input_modalities=frozenset({"text", "image"}),
     opaque_reasoning_replay=True,
+    pcm_wav_probe=True,  # Common body validation only; route gate precedes auth.
 )
 PACKAGE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}$")
 
@@ -1404,6 +1405,11 @@ async def _create_response(request: Request, budget: RequestBudget):
     request_started = budget.started
     request_run_id: str | None = None
     upstream_observation: dict = {}
+    audio_request = False
+
+    def safe_request_error(value):
+        return ('Audio probe failed; provider payload diagnostics withheld and listening remains unverified'
+                if audio_request else safe_error_detail(value))
 
     async def run_bounded_operation(factory, *, release_late_result=False):
         return await (budget.acquire(factory) if release_late_result else budget.run(factory))
@@ -1415,7 +1421,7 @@ async def _create_response(request: Request, budget: RequestBudget):
         await write_route_lifecycle(
             status, request_id=request_id, request_run_id=request_run_id, request_started=request_started,
             upstream_observation=upstream_observation, budget=budget, writer=write_request_record,
-            sanitize_error=safe_error_detail, clock=time.monotonic, **fields)
+            sanitize_error=safe_request_error, clock=time.monotonic, **fields)
 
     async def best_effort_diagnostic(awaitable, *, deadline: float | None = None) -> None:
         timeout = 0.05
@@ -1451,6 +1457,8 @@ async def _create_response(request: Request, budget: RequestBudget):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     try:
         codex_req = await budget.sync(validate_response_request_body, codex_req)
+        from .skills.anti.scripts.anti_lib.wav_audio import parts as audio_parts
+        audio_request = bool(audio_parts(codex_req))
         request_metadata = codex_req.pop("metadata", None)
         if isinstance(request_metadata, dict) and isinstance(request_metadata.get("run_id"), str):
             request_run_id = request_metadata["run_id"]
@@ -1488,6 +1496,10 @@ async def _create_response(request: Request, budget: RequestBudget):
     unified_enabled = is_unified_mode_enabled()
     unified_route = await budget.sync(classify_route, model, unified_enabled=unified_enabled)
     budget.context.update(model=model, route="openai" if unified_route.startswith("openai") else "google" if unified_route == "antigravity" else unified_route, stream=stream)
+    if audio_request and (unified_route!='antigravity' or not native_model_capabilities(model).pcm_wav_probe):
+        await log_request('failed',model=model,route=unified_route,stream=stream,http_status=400,
+                          error_class='unsupported_audio_route',attempt_count=0)
+        raise HTTPException(status_code=400,detail='Experimental WAV input is unsupported on this route; no audio was submitted')
     if budget.local_only and unified_route != 'byok':
         await log_request('failed', model=model, route=unified_route, stream=stream, http_status=403,
                           error_class='local_only_route_forbidden', attempt_count=0)
@@ -1581,12 +1593,12 @@ async def _create_response(request: Request, budget: RequestBudget):
                     )
                     message = (
                         f"OpenAI authentication failed. {hint} "
-                        f"{safe_error_detail(exc.body)[:300]}"
+                        f"{safe_request_error(exc.body)[:300]}"
                     )
                 else:
                     message = (
                         f"OpenAI upstream error HTTP {exc.status_code}. "
-                        f"{safe_error_detail(exc.body)[:300]}"
+                        f"{safe_request_error(exc.body)[:300]}"
                     )
                 await log_request(
                     "failed",
@@ -1609,7 +1621,7 @@ async def _create_response(request: Request, budget: RequestBudget):
             except (RequestDeadlineExceeded, ClientDisconnect):
                 raise
             except Exception as exc:
-                message = f"OpenAI upstream is unreachable: {safe_error_detail(exc)}"
+                message = f"OpenAI upstream is unreachable: {safe_request_error(exc)}"
                 await log_request(
                     "failed",
                     model=model,
@@ -1771,7 +1783,7 @@ async def _create_response(request: Request, budget: RequestBudget):
         try:
             validate_supported_provider_kind(provider)
         except ValueError as exc:
-            detail = safe_error_detail(exc)
+            detail = safe_request_error(exc)
             await log_request(
                 "failed",
                 model=model,
@@ -1797,7 +1809,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                 stream=stream,
                 http_status=400,
                 error_class="unsupported_route_capability",
-                error=safe_error_detail(exc),
+                error=safe_request_error(exc),
             )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         await check_context(providers)
@@ -2180,14 +2192,14 @@ async def _create_response(request: Request, budget: RequestBudget):
                     rotation_count=max(0, len(response_attempts) - 1),
                 )
                 if is_validation:
-                    safe_text = safe_error_detail(res.text)
+                    safe_text = safe_request_error(res.text)
                     detail_msg = (
                         f"Google account requires verification (VALIDATION_REQUIRED). "
                         f"Run 'codex-antigravity login' to re-authenticate. "
                         f"{safe_text}"
                     )
                 else:
-                    safe_text = safe_error_detail(res.text)
+                    safe_text = safe_request_error(res.text)
                     detail_msg = f"Google Authentication failure: {safe_text}"
                 raise HTTPException(
                     status_code=res.status_code,
@@ -2254,13 +2266,13 @@ async def _create_response(request: Request, budget: RequestBudget):
                     retry_after_source=retry_after_source_from_response(res),
                     rotation_attempted=rotation_attempted,
                     error_class="backend_http_error",
-                    error=safe_error_detail(res.text),
+                    error=safe_request_error(res.text),
                 )
                 raise HTTPException(
                     status_code=res.status_code,
                     detail=google_failure_detail(
                         model,
-                        f"Google Antigravity API error: {safe_error_detail(res.text)}",
+                        f"Google Antigravity API error: {safe_request_error(res.text)}",
                         retry_after_seconds=retry_after_seconds_from_response(res),
                         retry_after_source=retry_after_source_from_response(res),
                         rotation_attempted=rotation_attempted,
@@ -2297,7 +2309,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                         status_code=status_code_from_backend_error(code, message),
                         detail=google_failure_detail(
                             model,
-                            f"Google Antigravity API error: {safe_error_detail(message)}",
+                            f"Google Antigravity API error: {safe_request_error(message)}",
                             rotation_attempted=rotation_attempted,
                         ),
                     )
@@ -2362,9 +2374,9 @@ async def _create_response(request: Request, budget: RequestBudget):
                     http_status=500,
                     rotation_attempted=rotation_attempted,
                     error_class="translation_error",
-                    error=safe_error_detail(e),
+                    error=safe_request_error(e),
                 )
-                raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
+                raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_request_error(e)}")
         except RequestDeadlineExceeded:
             await best_effort_diagnostic(log_request(
                 "failed",
@@ -2526,7 +2538,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     error_class=exc.code,
                 )
                 error_code = exc.code
-                error_message = safe_error_detail(exc.message)
+                error_message = safe_request_error(exc.message)
                 if adapter.visible_output_started:
                     if not adapter.created_emitted:
                         yield serialize_transport_event(adapter.created())
@@ -2553,7 +2565,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     error_class="connection_error",
                 )
                 error_code = "connection_error"
-                error_message = safe_error_detail(exc)
+                error_message = safe_request_error(exc)
             else:
                 if terminal_event is None:
                     error_code = "missing_terminal_signal"
