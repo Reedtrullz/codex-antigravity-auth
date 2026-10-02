@@ -343,6 +343,9 @@ starts a separate history. Log in through Codex with the selected `CODEX_HOME`
 when a new client identity is needed. Finally set `ANTIGRAVITY_STATE_HOME` to the
 new root and reinstall any service to capture the selection. Neither the copy
 command nor diagnostics changes the current environment or service automatically.
+## Request shape and schema diagnostics
+
+Malformed message/content/tool shapes and orphan outputs return field-specific HTTP400 errors before account work. Translated routes reject unsupported built-in tools and explicit schema weakening; Google cannot honor `strict: true`. Native Responses keeps provider-specific items/tools and continuation intact. See [request validation and translation-loss behavior](codex_antigravity_auth/design/request-shapes.md) for compatibility changes and limits.
 ### Gateway process-log privacy and retention
 
 `start`, `start --background` and newly installed services write bounded,
