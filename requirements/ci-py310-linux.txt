@@ -142,6 +142,8 @@ tomli==2.4.1
     #   pytest
 tomli-w==1.2.0
     # via pip-audit
+tomlkit==0.15.1
+    # via codex-antigravity-auth (pyproject.toml)
 typing-extensions==4.16.0
     # via
     #   anyio

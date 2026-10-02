@@ -5,12 +5,12 @@ import json
 from pathlib import Path
 import re
 import subprocess
-import sys
 from types import SimpleNamespace
 
 from packaging.requirements import Requirement
 import pytest
 import yaml
+from _test_isolation import allow_ruff_check, expected_denial
 
 try:
     import tomllib
@@ -100,13 +100,22 @@ def test_seeded_advisory_sets_process_failure(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("source,rule", [("print(undefined_fixture_name)\n", "F821"), ("import os\n", "F401")])
 def test_seeded_lint_defect_fails_actual_config(source, rule):
-    result = subprocess.run(
-        [sys.executable, "-m", "ruff", "check", "--config", str(ROOT / "pyproject.toml"),
-         "--stdin-filename", "codex_antigravity_auth/account_state.py", "-"],
-        input=source, text=True, capture_output=True, cwd=ROOT, check=False, timeout=10,
-    )
+    with allow_ruff_check() as executable:
+        result = subprocess.run(
+            [executable, "check", "--no-cache", "--config", str(ROOT / "pyproject.toml"),
+             "--stdin-filename", "codex_antigravity_auth/account_state.py", "-"],
+            input=source, text=True, capture_output=True, cwd=ROOT, check=False, timeout=10,
+        )
     assert result.returncode == 1
     assert rule in result.stdout
+
+
+def test_ruff_authorization_is_scoped_and_does_not_allow_unrelated_children():
+    with allow_ruff_check() as executable:
+        with expected_denial(), pytest.raises(AssertionError, match="authorized Ruff check"):
+            subprocess.run(["unrelated-native-test-fixture"], check=False)
+    with expected_denial(), pytest.raises(AssertionError, match="authorized Ruff check"):
+        subprocess.run([executable, "check", "-"], check=False)
 
 
 def test_declared_runtime_minimums_match_compatibility_constraints():

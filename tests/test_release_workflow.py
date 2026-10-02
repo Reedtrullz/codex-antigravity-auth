@@ -119,4 +119,4 @@ class TestArtifactCompleteness(unittest.TestCase):
             self.assertIn("os: macos-latest", text)
             self.assertIn("python scripts/run_tests.py", text)
         project = tomllib.loads((ROOT / "pyproject.toml").read_text())
-        self.assertIn("tomli>=2.0; python_version < '3.11'", project["project"]["optional-dependencies"]["dev"])
+        self.assertIn("tomli>=2.0.1; python_version < '3.11'", project["project"]["optional-dependencies"]["dev"])
