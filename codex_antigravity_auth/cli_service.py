@@ -31,14 +31,18 @@ def gateway_model_ids(
     timeout: float = 2.0,
     token_env: str = "ANTIGRAVITY_GATEWAY_TOKEN",
 ) -> set[str]:
-    url = base_url.rstrip("/") + "/models"
+    try:
+        base_url = _cli.validate_http_base_url(base_url, label="gateway base URL")
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    url = base_url + "/models"
     headers = {"Accept": "application/json"}
     token = os.environ.get(token_env, "").strip() if token_env else ""
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        with _cli.open_http_request(req, timeout=timeout) as response:
             raw = response.read()
     except urllib.error.HTTPError as exc:
         hint = ""
@@ -104,7 +108,8 @@ def gateway_runtime_paths(port: int) -> tuple[Path, Path]:
 
 
 def local_gateway_base_url(host: str, port: int) -> str:
-    return f"http://{host}:{port}/v1"
+    authority = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"http://{authority}:{port}/v1"
 
 
 def add_gateway_reachability(info: dict, *, host: str = "127.0.0.1", timeout: float = 5.0) -> dict:

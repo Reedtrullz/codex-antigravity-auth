@@ -288,7 +288,7 @@ def _validate_api_key(value: object) -> str | None:
 def resolve_openai_auth() -> OpenAIAuth:
     """Resolve explicit OpenAI upstream credentials (never logs secrets)."""
     api_key = _validate_api_key(os.environ.get(OPENAI_API_KEY_ENV))
-    base_url_raw = os.environ.get(OPENAI_BASE_URL_ENV, "").strip()
+    base_url_raw = os.environ.get(OPENAI_BASE_URL_ENV, "")
     if api_key:
         base_url = _validate_base_url_or_default(base_url_raw)
         return OpenAIAuth(kind="api_key", base_url=base_url, api_key=api_key)
@@ -297,10 +297,10 @@ def resolve_openai_auth() -> OpenAIAuth:
     if config:
         file_key = _validate_api_key(config.get("api_key") or config.get("apiKey"))
         if file_key:
-            file_base = config.get("base_url") or config.get("baseUrl") or ""
+            file_base = config.get("base_url", config.get("baseUrl", ""))
             return OpenAIAuth(
                 kind="api_key",
-                base_url=_validate_base_url_or_default(str(file_base or "").strip()),
+                base_url=_validate_base_url_or_default(file_base),
                 api_key=file_key,
             )
 
@@ -316,8 +316,8 @@ def resolve_openai_auth() -> OpenAIAuth:
     )
 
 
-def _validate_base_url_or_default(raw: str) -> str:
-    if not raw:
+def _validate_base_url_or_default(raw: object) -> str:
+    if raw is None or (isinstance(raw, str) and not raw.strip(" ")):
         return DEFAULT_OPENAI_BASE_URL
     # Reuse BYOK URL validation so unified stays consistent with providers.
     from .byok import validate_http_base_url
@@ -359,7 +359,7 @@ def _resolve_codex_oauth_auth() -> OpenAIAuth:
 def openai_responses_url(auth: OpenAIAuth) -> str:
     if auth.kind == "codex_oauth":
         return CODEX_UPSTREAM_RESPONSES_URL
-    base = (auth.base_url or DEFAULT_OPENAI_BASE_URL).rstrip("/")
+    base = _validate_base_url_or_default(auth.base_url)
     return base if base.endswith("/responses") else f"{base}/responses"
 
 

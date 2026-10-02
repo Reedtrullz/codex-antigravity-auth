@@ -9,6 +9,8 @@ import sys
 import time
 import threading
 import httpx
+
+from .endpoint_policy import httpx_client_options
 import anyio
 import email.utils
 import re
@@ -2640,7 +2642,7 @@ async def create_response(request: Request):
 
 async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str, *, telemetry: dict | None = None) -> dict:
     payload, url, headers, timeout = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=False)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(**httpx_client_options(url, timeout=timeout)) as client:
         try:
             res = await client.post(url, json=payload, headers=headers)
             if telemetry is not None:
@@ -2677,7 +2679,7 @@ async def create_openai_upstream_response(
         payload = _build_payload(codex_req, upstream_model, stream=True)
         payload["store"] = bool(codex_req.get("store", False))
         try:
-            async with httpx.AsyncClient(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS) as client:
+            async with httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS)) as client:
                 res = await client.post(url, json=payload, headers=headers)
                 if telemetry is not None:
                     telemetry["http_status"] = res.status_code
@@ -2715,7 +2717,7 @@ async def create_openai_upstream_response(
         return terminal
     payload = _build_payload(codex_req, upstream_model, stream=False)
     try:
-        async with httpx.AsyncClient(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS)) as client:
             res = await client.post(url, json=payload, headers=headers)
             if telemetry is not None:
                 telemetry["http_status"] = res.status_code
@@ -2797,7 +2799,7 @@ async def _open_openai_upstream_stream(
     if auth.kind == "codex_oauth":
         payload["store"] = bool(codex_req.get("store", False))
 
-    client = httpx.AsyncClient(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS)
+    client = httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))
     stream_context = client.stream("POST", url, json=payload, headers=headers)
     try:
         response = await stream_context.__aenter__()

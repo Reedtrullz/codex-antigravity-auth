@@ -2649,7 +2649,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_request_json_never_forwards_authorization_on_redirect(self) -> None:
         anti = load_anti()
-        real_urlopen = anti.urllib.request.urlopen
+        real_urlopen = anti.open_http_request
         captured: dict[str, dict] = {}
 
         def fake_urlopen(req, timeout=10.0):
@@ -2670,7 +2670,7 @@ class AntiHelperTests(unittest.TestCase):
 
             return FakeResponse()
 
-        anti.urllib.request.urlopen = fake_urlopen
+        anti.open_http_request = fake_urlopen
         try:
             with unittest.mock.patch.dict(os.environ, {"ANTIGRAVITY_GATEWAY_TOKEN": "redirect-test-token"}):
                 status, decoded = anti.request_json(
@@ -2681,7 +2681,7 @@ class AntiHelperTests(unittest.TestCase):
                     token_env="ANTIGRAVITY_GATEWAY_TOKEN",
                 )
         finally:
-            anti.urllib.request.urlopen = real_urlopen
+            anti.open_http_request = real_urlopen
 
         self.assertEqual(status, 200)
         self.assertEqual(decoded, {})
@@ -3696,7 +3696,7 @@ class PostResponseGuardTests(unittest.TestCase):
         anti.request_json = lambda *a, **kw: (200, self._make_failed_response())
         try:
             anti.post_response(
-                base_url="http://x", model="gemini-3.5-flash-high",
+                base_url="https://fixture.example", model="gemini-3.5-flash-high",
                 prompt="x", max_output_tokens=100, timeout=5, token_env="",
                 retries=0, model_ids=model_ids,
             )
@@ -3712,7 +3712,7 @@ class PostResponseGuardTests(unittest.TestCase):
         anti.request_json = lambda *a, **kw: (200, self._make_empty_output_response())
         try:
             anti.post_response(
-                base_url="http://x", model="gemini-3.5-flash-high",
+                base_url="https://fixture.example", model="gemini-3.5-flash-high",
                 prompt="x", max_output_tokens=100, timeout=5, token_env="",
                 retries=0, model_ids=model_ids,
             )
@@ -3729,7 +3729,7 @@ class PostResponseGuardTests(unittest.TestCase):
             "output": [{"type": "message", "content": [{"type": "output_text", "text": "Good review."}]}],
         })
         result = anti.post_response(
-            base_url="http://x", model="gemini-3.5-flash-high",
+            base_url="https://fixture.example", model="gemini-3.5-flash-high",
             prompt="x", max_output_tokens=100, timeout=5, token_env="",
             retries=0, model_ids=model_ids,
         )
@@ -3745,7 +3745,7 @@ class PostResponseGuardTests(unittest.TestCase):
             "output": [{"type": "message", "content": [{"type": "output_text", "text": "partial"}]}],
         })
         incomplete = anti.post_response(
-            base_url="http://x", model="gemini-3.5-flash-high", prompt="x",
+            base_url="https://fixture.example", model="gemini-3.5-flash-high", prompt="x",
             max_output_tokens=100, timeout=5, token_env="", retries=0, model_ids=model_ids,
         )
         self.assertEqual(incomplete.response_metadata["upstream_status"], "incomplete")
@@ -3758,7 +3758,7 @@ class PostResponseGuardTests(unittest.TestCase):
             "model": "gemini-3.5-flash-high", "status": "completed", "output": [],
         })
         empty = anti.post_response(
-            base_url="http://x", model="gemini-3.5-flash-high", prompt="x",
+            base_url="https://fixture.example", model="gemini-3.5-flash-high", prompt="x",
             max_output_tokens=100, timeout=5, token_env="", retries=0, model_ids=model_ids,
         )
         self.assertTrue(empty.response_metadata["upstream_output_empty"])

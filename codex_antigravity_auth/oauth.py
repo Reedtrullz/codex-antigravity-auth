@@ -13,6 +13,7 @@ from .constants import (
     SCOPES,
 )
 from .redaction import redact_secret_text
+from .endpoint_policy import open_http_request
 
 # In-memory PKCE verifier store
 _pkce_verifier_store: dict[str, dict[str, str]] = {}
@@ -107,7 +108,7 @@ def post_form(url: str, payload: dict[str, Any], timeout: float = OAUTH_HTTP_TIM
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_http_request(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             status = int(getattr(resp, "status", 200))
     except urllib.error.HTTPError as exc:
@@ -239,7 +240,7 @@ def load_code_assist(access_token: str) -> str | None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15.0) as resp:
+        with open_http_request(req, timeout=15.0) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except Exception:
         return None
@@ -270,7 +271,7 @@ def onboard_user(access_token: str) -> str | None:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=15.0) as resp:
+            with open_http_request(req, timeout=15.0) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             if exc.code in (429, 500, 502, 503):
