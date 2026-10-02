@@ -2753,30 +2753,15 @@ async def create_openai_upstream_response(
     return data
 
 
-def _collect_openai_sse_terminal(sse_text: str | bytes, display_model: str) -> dict | None:
-    """Extract the terminal Responses object from a buffered SSE body."""
-    from itertools import chain
-    from .sse import SSEDecoder
-
-    decoder = SSEDecoder()
+def _collect_openai_sse_terminal(sse_text: str | bytes, display_model: str) -> dict:
+    """Apply the same terminal authority to buffered and streamed native SSE."""
     wire = sse_text.encode("utf-8") if isinstance(sse_text, str) else sse_text
-    terminal: dict | None = None
-    for data in chain(decoder.feed(wire), decoder.finish()):
-        data = data.strip()
-        if data == "[DONE]":
-            continue
-        try:
-            event = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        if event.get("type") in {"response.completed", "response.incomplete", "response.failed"}:
-            response = event.get("response")
-            if isinstance(response, dict):
-                terminal = dict(response)
-                terminal["model"] = display_model
-    return terminal
+    adapter = NativeResponsesStreamAdapter(display_model=display_model)
+    for offset in range(0, len(wire), 65536):
+        adapter.consume_bytes(wire[offset:offset + 65536])
+        if adapter.protocol_failed:
+            break
+    return adapter.finish()[-1]["response"]
 
 
 async def _close_openai_upstream_stream(client, stream_context) -> None:
@@ -2886,15 +2871,42 @@ async def openai_upstream_sse_generator(
 
     client, stream_context, response = stream_state
     adapter = NativeResponsesStreamAdapter(display_model=display_model)
+    tail_deadline = None
     try:
-        async for chunk in response.aiter_bytes():
-            for event in adapter.consume_bytes(chunk):
-                yield f"data: {json.dumps(event)}\n\n"
-        for event in adapter.finish():
+        iterator = response.aiter_bytes().__aiter__()
+        try:
+            while True:
+                try:
+                    if tail_deadline is None:
+                        chunk = await anext(iterator)
+                    else:
+                        remaining = tail_deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError
+                        with anyio.fail_after(remaining):
+                            chunk = await anext(iterator)
+                except StopAsyncIteration:
+                    break
+                for event in adapter.consume_bytes(chunk):
+                    yield f"data: {json.dumps(event)}\n\n"
+                if adapter.protocol_failed:
+                    break
+                if adapter.awaiting_eof and tail_deadline is None:
+                    # Bound terminal-to-EOF waiting even if keepalive comments
+                    # repeatedly reset HTTPX's per-read timeout.
+                    tail_deadline = time.monotonic() + OPENAI_UPSTREAM_TIMEOUT_SECONDS
+        except (TimeoutError, httpx.TimeoutException):
+            terminal_events = adapter.abort("stream_timeout", "The provider stream timed out before EOF.")
+        except Exception:
+            terminal_events = adapter.abort("stream_interrupted", "The provider stream was interrupted before EOF.")
+        else:
+            terminal_events = adapter.finish()
+        for event in terminal_events:
             yield f"data: {json.dumps(event)}\n\n"
         yield "data: [DONE]\n\n"
     finally:
-        await _close_openai_upstream_stream(client, stream_context)
+        with anyio.CancelScope(shield=True):
+            await _close_openai_upstream_stream(client, stream_context)
 
 
 async def openai_compatible_sse_generator(
