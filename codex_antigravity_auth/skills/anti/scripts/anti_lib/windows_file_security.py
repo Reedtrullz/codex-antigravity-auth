@@ -14,7 +14,6 @@ class WindowsFileSecurity:
     def __init__(self):
         self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         self.advapi = ctypes.WinDLL("advapi32", use_last_error=True)
-        self.ntdll = ctypes.WinDLL("ntdll")
         pointer = ctypes.c_void_p
         pp = ctypes.POINTER(pointer)
         self._bind(self.kernel, "GetCurrentProcess", [], w.HANDLE)
@@ -30,8 +29,7 @@ class WindowsFileSecurity:
         self._bind(self.advapi, "ConvertSidToStringSidW", [pointer, ctypes.POINTER(w.LPWSTR)], w.BOOL)
         self._bind(self.advapi, "GetSecurityInfo", [w.HANDLE, w.DWORD, w.DWORD, pp, pp, pp, pp, pp], w.DWORD)
         self._bind(self.advapi, "SetSecurityInfo", [w.HANDLE, w.DWORD, w.DWORD, pointer, pointer, pointer, pointer], w.DWORD)
-        self._bind(self.ntdll, "NtSetSecurityObject", [w.HANDLE, w.DWORD, pointer], w.LONG)
-        self._bind(self.ntdll, "RtlNtStatusToDosError", [w.LONG], w.ULONG)
+        self._bind(self.advapi, "SetFileSecurityW", [w.LPCWSTR, w.DWORD, pointer], w.BOOL)
         self._bind(self.advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorW", [w.LPCWSTR, w.DWORD, pp, ctypes.POINTER(w.DWORD)], w.BOOL)
         self._bind(self.advapi, "GetSecurityDescriptorDacl", [pointer, ctypes.POINTER(w.BOOL), pp, ctypes.POINTER(w.BOOL)], w.BOOL)
         self._bind(self.advapi, "GetSecurityDescriptorOwner", [pointer, pp, ctypes.POINTER(w.BOOL)], w.BOOL)
@@ -131,7 +129,7 @@ class WindowsFileSecurity:
         finally:
             self.kernel.LocalFree(descriptor)
 
-    def _protect(self, handle, *, directory=False):
+    def _protect(self, handle, *, directory=False, path=None):
         self._check_object(handle, directory)
         owner, _old_dacl, old_descriptor = self._descriptor(handle)
         try:
@@ -141,8 +139,8 @@ class WindowsFileSecurity:
             self.kernel.LocalFree(old_descriptor)
         descriptor = ctypes.c_void_p()
         # Directories grant the owner access inherited by newly created children.
-        # The directory setter updates this handle without Advapi's automatic
-        # child-inheritance conversion; each existing object is protected on use.
+        # SetFileSecurityW is intentionally path-based: unlike SetSecurityInfo,
+        # it does not propagate a changed directory DACL to existing children.
         flags = "OICI" if directory else ""
         sddl = f"O:{self.user_sid}D:P(A;{flags};FA;;;{self.user_sid})"
         self._ok(self.advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None))
@@ -157,9 +155,9 @@ class WindowsFileSecurity:
             if not new_owner or self._sid_text(new_owner) != self.user_sid:
                 raise OSError("Cannot establish the current user as storage owner")
             if directory:
-                status = self.ntdll.NtSetSecurityObject(handle, 0x80000005, descriptor)
-                if status:
-                    raise ctypes.WinError(self.ntdll.RtlNtStatusToDosError(status))
+                if path is None:
+                    raise ValueError("A directory path is required for non-propagating ACL protection")
+                self._ok(self.advapi.SetFileSecurityW(str(path), 0x80000005, descriptor))
             else:
                 code = self.advapi.SetSecurityInfo(handle, 1, 0x80000005, new_owner, None, dacl, None)
                 if code:
@@ -205,9 +203,9 @@ class WindowsFileSecurity:
             self.kernel.CloseHandle(handle)
 
     def protect_directory(self, path):
-        # Set the descriptor directly on this handle to avoid SetSecurityInfo's
-        # automatic child-inheritance conversion. Deny delete sharing while
-        # allowing the current-directory and ordinary read/write handles.
+        # Pin the target identity and deny delete sharing while allowing the
+        # current-directory and ordinary read/write handles. SetFileSecurityW
+        # updates this same path without converting existing child descriptors.
         deadline = time.monotonic() + 2.0
         while True:
             try:
@@ -218,7 +216,7 @@ class WindowsFileSecurity:
                     raise
                 time.sleep(0.01)
         try:
-            self._protect(handle, directory=True)
+            self._protect(handle, directory=True, path=path)
         finally:
             self.kernel.CloseHandle(handle)
 

@@ -317,7 +317,7 @@ def test_windows_acl_control_refuses_unsafe_owner_null_acl_or_unverified_result(
     from ctypes import wintypes as w
     from codex_antigravity_auth.skills.anti.scripts.anti_lib.windows_file_security import WindowsFileSecurity
     security = WindowsFileSecurity.__new__(WindowsFileSecurity)
-    security.kernel, security.advapi, security.ntdll = Mock(), Mock(), Mock()
+    security.kernel, security.advapi = Mock(), Mock()
     security.user_sid, security.default_owner_sid = "fixture-user", "fixture-owner-group"
     security._check_object = Mock()
     security._descriptor = Mock(return_value=(ctypes.c_void_p(1), ctypes.c_void_p(2), ctypes.c_void_p(3)))
@@ -336,15 +336,15 @@ def test_windows_acl_control_refuses_unsafe_owner_null_acl_or_unverified_result(
     security.advapi.GetSecurityDescriptorDacl.side_effect = dacl
     security.advapi.GetSecurityDescriptorOwner.side_effect = owner
     security.advapi.SetSecurityInfo.return_value = 0
-    security.ntdll.NtSetSecurityObject.return_value = 0
+    security.advapi.SetFileSecurityW.return_value = 1
     security.verify = Mock(side_effect=OSError("synthetic verification refusal"))
     with pytest.raises(OSError):
-        security._protect(123, directory=directory)
+        security._protect(123, directory=directory, path=Path("fixture-directory") if directory else None)
     if failure in {"foreign_owner", "null_dacl"}:
         security.advapi.SetSecurityInfo.assert_not_called()
-        security.ntdll.NtSetSecurityObject.assert_not_called()
+        security.advapi.SetFileSecurityW.assert_not_called()
     else:
-        setter = security.ntdll.NtSetSecurityObject if directory else security.advapi.SetSecurityInfo
+        setter = security.advapi.SetFileSecurityW if directory else security.advapi.SetSecurityInfo
         setter.assert_called_once()
         security.verify.assert_called_once_with(123, directory=directory)
     assert security.kernel.LocalFree.call_count == (1 if failure == "foreign_owner" else 2)
@@ -359,7 +359,7 @@ def test_windows_directory_protection_uses_pinned_acl_handle():
     security.protect_directory(Path("fixture-directory"))
     assert security.kernel.CreateFileW.call_args.args[1] == 0x000E0080
     assert security.kernel.CreateFileW.call_args.args[2] == 0x3
-    security._protect.assert_called_once_with(123, directory=True)
+    security._protect.assert_called_once_with(123, directory=True, path=Path("fixture-directory"))
     security.kernel.CloseHandle.assert_called_once_with(123)
 
 
@@ -374,7 +374,7 @@ def test_windows_directory_protection_retries_transient_sharing_conflict(monkeyp
     monkeypatch.setattr(windows.time, "sleep", Mock())
     security.protect_directory(Path("fixture-directory"))
     assert security.kernel.CreateFileW.call_count == 2
-    security._protect.assert_called_once_with(123, directory=True)
+    security._protect.assert_called_once_with(123, directory=True, path=Path("fixture-directory"))
     security.kernel.CloseHandle.assert_called_once_with(123)
 
 
