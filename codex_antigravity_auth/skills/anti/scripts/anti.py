@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-from anti_lib.console import ConsoleArgumentParser, console_print as print
 import contextlib
 import contextvars
 import concurrent.futures
@@ -35,6 +34,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+from anti_lib.console import ConsoleArgumentParser, console_print as print
 from anti_lib.capabilities import CapabilityRegistry
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
@@ -43,6 +43,7 @@ from anti_lib.artifacts import (
 from anti_lib.chunking import chunk_manifest
 from anti_lib.cleanup import RUN_ID_RE, assert_not_deleted, clean_runs
 from anti_lib.context import ordered_prompt
+from anti_lib import inventory as review_inventory
 from anti_lib.data_policy import DataPolicy, PolicyError
 from anti_lib.ledger import execution_entry, prompts_as_text
 from anti_lib.endpoint_policy import open_http_request, validate_endpoint_url
@@ -2439,7 +2440,7 @@ def changed_paths(
 
 
 def diff_for_paths(root: Path, scope: str, paths: list[str], *, rev_range: str | None = None) -> str:
-    if not paths or scope == "files":
+    if not paths or scope in {"files", "repository"}:
         return ""
     if scope == "staged":
         return run_git(root, ["-c", "core.quotePath=false", "diff", "--cached", "--no-ext-diff", "--no-textconv", "--", *paths])
@@ -2738,6 +2739,7 @@ def review_prompt_parts(
     omitted_files: list[str],
     excluded: list[str],
     caveats: list[str],
+    omission_reasons: dict[str, str] | None = None,
 ) -> list[str]:
     incomplete = bool(omitted_files) or any("truncated" in caveat.lower() for caveat in caveats)
     manifest_lines = [
@@ -2748,6 +2750,9 @@ def review_prompt_parts(
         f"- omitted_files: {', '.join(omitted_files) if omitted_files else 'none'}",
         f"- excluded_paths: {', '.join(excluded[:20]) if excluded else 'none'}",
     ]
+    if omission_reasons:
+        manifest_lines.append("- omission_reasons:")
+        manifest_lines.extend(f"  - {path}: {reason}" for path, reason in omission_reasons.items())
     if caveats:
         manifest_lines.append("- helper_warnings:")
         manifest_lines.extend(f"  - {caveat}" for caveat in caveats)
@@ -2884,6 +2889,13 @@ def build_consult_file_context(
         return prompt, caveats, []
     
     return enhanced_prompt, caveats, read_files
+
+
+def review_read_omissions(records):
+    return {str(record['path']): str(record.get('reason') or record.get('contentStatus') or 'incomplete capture')
+            for record in records or [] if record.get('path') and coverage_is_incomplete([record])}
+
+
 def build_review_prompt(
     *,
     scope_line: str,
@@ -2908,7 +2920,9 @@ def build_review_prompt(
         record = records_by_path.get(rel)
         return bool(text) or bool(record and record.get("contentStatus") == "complete")
 
-    omitted_files = [rel for rel, text in file_texts if not is_includable(rel, text)]
+    omission_reasons = review_read_omissions(file_records)
+    omitted_files = list(dict.fromkeys([*omission_reasons,
+        *(rel for rel, text in file_texts if not is_includable(rel, text))]))
     candidates = [(rel, text) for rel, text in file_texts if is_includable(rel, text)]
     included: list[tuple[str, str]] = []
 
@@ -2918,9 +2932,10 @@ def build_review_prompt(
                 scope_line=scope_line,
                 diff=diff_for_prompt,
                 included_files=[],
-                omitted_files=[rel for rel, _text in candidates],
+                omitted_files=list(dict.fromkeys([*omitted_files, *(rel for rel, _text in candidates)])),
                 excluded=excluded,
                 caveats=caveats,
+                omission_reasons=omission_reasons,
             )
         )
         if len(prompt_without_files) > max_prompt_chars:
@@ -2928,9 +2943,10 @@ def build_review_prompt(
                 scope_line=scope_line,
                 diff="",
                 included_files=[],
-                omitted_files=[rel for rel, _text in candidates],
+                omitted_files=list(dict.fromkeys([*omitted_files, *(rel for rel, _text in candidates)])),
                 excluded=excluded,
                 caveats=caveats,
+                omission_reasons=omission_reasons,
             )
             base_len = len("\n\n".join(base_parts))
             available = max(0, max_prompt_chars - base_len - len("\n\n## Git Diff\n```diff\n\n```"))
@@ -2953,6 +2969,7 @@ def build_review_prompt(
                 omitted_files=trial_omitted,
                 excluded=excluded,
                 caveats=caveats,
+                omission_reasons=omission_reasons,
             )
         )
         if max_prompt_chars <= 0 or len(trial_prompt) <= max_prompt_chars:
@@ -2968,6 +2985,7 @@ def build_review_prompt(
             omitted_files=omitted_files,
             excluded=excluded,
             caveats=caveats,
+            omission_reasons=omission_reasons,
         )
     )
     metadata = {
@@ -2982,6 +3000,7 @@ def build_review_prompt(
         "diff_truncated": diff_for_prompt != diff,
         "included_files": [rel for rel, _text in included],
         "omitted_files": omitted_files,
+        "omission_reasons": omission_reasons,
         "excluded_paths": excluded,
         "helper_warnings": caveats,
         "coverage": [dict(record) for record in (file_records or [])],
@@ -3002,19 +3021,77 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
 
     selected = selected_paths_from_args(args)
     rev_range = review_rev_range(args)
-    paths, excluded = changed_paths(root, args.scope, selected, rev_range=rev_range)
+    include_untracked = getattr(args, "include_untracked", False)
+    roots = getattr(args, "review_root", None) or []
+    exclusions = getattr(args, "exclude_path", None) or []
+    if include_untracked and args.scope not in {"working-tree", "repository"}:
+        raise AntiError("--include-untracked requires working-tree or repository scope; staged scope is never broadened")
+    if (roots or exclusions) and args.scope != "repository":
+        raise AntiError("--review-root and --exclude-path require repository scope")
+    inventory = None
+    untracked_paths: set[str] = set()
+    known_tracked: set[str] = set()
+    try:
+        if args.scope == "repository":
+            if rev_range:
+                raise AntiError("repository scope does not accept --base or --changed-files")
+            paths, inventory = review_inventory.collect(root, roots=roots, exclusions=exclusions,
+                include_untracked=include_untracked, selected=selected, excluded_path=path_is_excluded)
+            excluded = [row['path'] for row in inventory['excluded']]
+            for path in [*paths, *excluded]: validate_path_list_item(path, source="repository inventory")
+        else:
+            paths, excluded = changed_paths(root, args.scope, selected, rev_range=rev_range)
+            if not selected and args.scope != "files":
+                known_tracked.update(paths)  # Enumerated by Git's tracked diff.
+            if args.scope == "working-tree":
+                untracked = review_inventory.git_paths(root, ['--others', '--exclude-standard'], ['.'])
+                selected_path_set = set(paths)
+                inventory = {'scope':'working-tree', 'include_untracked':include_untracked,
+                             'excluded':[], 'inventory_complete':True}
+                for raw in untracked:
+                    validate_path_list_item(raw, source="untracked inventory")
+                    rel = review_inventory.relative_path(root, raw)
+                    untracked_paths.add(rel)
+                    if rel in selected_path_set: continue  # An explicitly selected file remains explicit.
+                    kind = review_inventory.path_kind(root, rel)
+                    reason = ('not_selected' if selected else 'sensitive_cache_or_binary' if path_is_excluded(rel)
+                              else kind if kind != 'file' else 'untracked_not_requested' if not include_untracked else None)
+                    if reason:
+                        inventory['excluded'].append({'path':rel, 'reason':reason})
+                    else:
+                        paths.append(rel)
+                        selected_path_set.add(rel)
+                excluded = list(dict.fromkeys([*excluded, *(row['path'] for row in inventory['excluded'])]))
+    except review_inventory.InventoryError as exc:
+        raise AntiError(str(exc)) from None
     policy_paths(args, root, [*paths, *excluded])
-    diff = diff_for_paths(root, args.scope, paths, rev_range=rev_range)
+    diff_paths = [path for path in paths if path not in untracked_paths]
+    diff = diff_for_paths(root, args.scope, diff_paths, rev_range=rev_range)
     notes: list[str] = []
     file_texts: list[tuple[str, str]] = []
     file_records: list[dict[str, Any]] = []
 
-    include_file_text = args.scope == "files"
+    include_file_text = args.scope in {"files", "repository"}
+    source_budget = review_inventory.MAX_SOURCE_BYTES
     for rel in paths:
-        if include_file_text or not file_is_tracked(root, rel):
+        if include_file_text or rel in untracked_paths or (rel not in known_tracked and not file_is_tracked(root, rel)):
             # Review planning must chunk the complete source from disk. The
             # smaller read limit remains for consult/plan pre-reads.
             path = root / rel
+            if args.scope == "repository" or include_untracked:
+                raw, declared_bytes, reason = review_inventory.read_file(root, rel, source_budget)
+                if reason:
+                    notes.append(f"{rel}: {reason}")
+                    file_records.append({'path':rel, 'sha256':None, 'bytesDeclared':declared_bytes,
+                        'bytesSent':0, 'chunksExpected':0, 'chunksSent':0, 'contentStatus':'omitted',
+                        'reason':reason, 'sourceKind':'file'})
+                    continue
+                source_budget -= len(raw)
+                text, note = decode_source_bytes(rel, raw, truncate=False)
+                if note: notes.append(note)
+                file_texts.append((rel, text))
+                file_records.append(file_coverage_record(root, rel, text, note, raw=raw))
+                continue
             try:
                 raw = path.read_bytes()
                 text, note = decode_source_bytes(rel, raw, truncate=False)
@@ -3030,7 +3107,7 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
     # path in the manifest, including deletions and renames, without rereading
     # a possibly changed working tree as source evidence.
     recorded_paths = {str(record.get("path")) for record in file_records}
-    if args.scope != "files":
+    if args.scope not in {"files", "repository"}:
         for rel in paths:
             if rel in recorded_paths:
                 continue
@@ -3058,33 +3135,58 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
 
     caveats: list[str] = []
     if excluded:
-        caveats.append("Excluded sensitive/cache/binary-looking paths: " + ", ".join(excluded[:20]))
+        caveats.append("Excluded paths (see inventory reasons when available): " + ", ".join(excluded[:20]))
+    if inventory:
+        if args.scope == "repository":
+            caveats.append("Repository inventory roots: " + ", ".join(inventory['roots'])
+                           + "; package roots: " + ", ".join(inventory['package_roots'][:20]))
+        not_requested = [row['path'] for row in inventory['excluded'] if row['reason'] == 'untracked_not_requested']
+        if not_requested:
+            caveats.append(f"{len(not_requested)} untracked file(s) excluded; use --include-untracked to include them: "
+                           + ", ".join(not_requested[:20]))
     if notes:
         caveats.extend(notes)
-    return {
+    result = {
         "root": root,
         "paths": paths,
         "excluded": excluded,
         "diff": diff,
+        "diff_paths": diff_paths,
         "file_texts": file_texts,
         "file_records": file_records,
         "source_commit": source_commit(root),
         "workspace_root": str(root),
         "scope_line": scope_line,
         "caveats": caveats,
+        "inventory": inventory,
     }
+    required = normalized_priority_paths(result, getattr(args, "required_file", None))
+    unreadable = [record['path'] for record in file_records
+                  if record['path'] in required and record['contentStatus'] != 'complete']
+    if unreadable:
+        raise AntiError("required file(s) could not be captured completely: " + ", ".join(unreadable))
+    return result
 
 
-def empty_review_scope_error(scope: str) -> AntiError:
+def empty_review_scope_error(scope: str, context=None) -> AntiError:
     if scope == "staged":
         message = "no staged changes to review; stage files with git add, or use --scope working-tree, --scope files, or --scope diff"
     elif scope == "diff":
         message = "no diff found for the requested revision range; check --base/--changed-files"
     elif scope == "files":
         message = "no readable file content in the requested file set; check --file/--files-from paths"
+    elif scope == "repository":
+        message = "no readable content in the selected repository inventory; check roots, exclusions and --include-untracked"
     else:
         message = "no working-tree changes to review; the tree is clean or the selected paths are unchanged"
-    return AntiError(message + " (nothing was sent to the model)")
+    inventory = (context or {}).get("inventory")
+    if inventory and inventory.get("excluded"):
+        rows = inventory["excluded"]
+        message += f"; {len(rows)} inventory exclusion(s): " + ", ".join(
+            f"{row['path']} ({row['reason']})" for row in rows[:20])
+    error = AntiError(message + " (nothing was sent to the model)")
+    if inventory: error.run_metadata = {"inventory":inventory}
+    return error
 
 
 def assemble_review_prompt_from_context(
@@ -3104,6 +3206,8 @@ def assemble_review_prompt_from_context(
     metadata["sourceCommit"] = context.get("source_commit")
     metadata["workspace_root"] = context.get("workspace_root")
     metadata["declared_files"] = list(context.get("paths") or [])
+    if context.get("inventory") is not None:
+        metadata["inventory"] = context["inventory"]
     if not metadata.get("status") == "incomplete" and context.get("diff"):
         metadata["included_files"] = list(
             dict.fromkeys([*(metadata.get("included_files") or []), *(context.get("paths") or [])])
@@ -3146,6 +3250,7 @@ def diff_part_prompt_budget(
     excluded: list[str],
     caveats: list[str],
     max_prompt_chars: int,
+    omission_reasons: dict[str, str] | None = None,
 ) -> int:
     """Per-diff-part char budget that leaves room for prompt scaffolding.
 
@@ -3158,9 +3263,10 @@ def diff_part_prompt_budget(
         scope_line=scope_line,
         diff="",
         included_files=[],
-        omitted_files=[],
+        omitted_files=list(omission_reasons or {}),
         excluded=excluded,
         caveats=caveats,
+        omission_reasons=omission_reasons,
     )
     overhead = len("\n\n".join(base_parts)) + len("## Git Diff\n```diff\n\n```")
     budget = max_prompt_chars - overhead - 200
@@ -3189,8 +3295,9 @@ def build_review_chunk_prompts(
     """
     unlimited = max_chunks <= 0
     all_chunks: list[dict[str, Any]] = []
-    omitted_items: list[str] = []
     file_records = [dict(record) for record in context.get("file_records", [])]
+    omission_reasons = review_read_omissions(file_records)
+    omitted_items: list[str] = list(omission_reasons)
     records_by_path = {
         str(record.get("path")): record for record in file_records if record.get("path")
     }
@@ -3198,6 +3305,14 @@ def build_review_chunk_prompts(
     source_offsets: dict[str, int] = {}
     priority = normalized_priority_paths(context, priority_paths)
     required = normalized_priority_paths(context, required_paths)
+    omission_records = [records_by_path[path] for path in omission_reasons]
+
+    def chunk_records(items):
+        # Carry unavailable source into every model-facing manifest, plus the
+        # captured records needed to distinguish empty files from missing input.
+        labels = dict.fromkeys(label for label, _ in items)
+        return [*omission_records, *(records_by_path[label] for label in labels
+                if label in records_by_path and label not in omission_reasons)]
 
     def source_bytes(items: list[tuple[str, str]]) -> dict[str, int]:
         totals: dict[str, int] = {}
@@ -3261,6 +3376,7 @@ def build_review_chunk_prompts(
                 excluded=context["excluded"],
                 initial_caveats=chunk_caveats,
                 max_prompt_chars=max_prompt_chars,
+                file_records=chunk_records([(probe_rel, text[:size])]),
             )
             return prompt_fits(prompt, max_prompt_chars) and metadata.get("included_files") == [probe_rel]
 
@@ -3282,6 +3398,7 @@ def build_review_chunk_prompts(
             excluded=context["excluded"],
             caveats=context["caveats"],
             max_prompt_chars=max_prompt_chars,
+            omission_reasons=omission_reasons,
         )
         diff_parts = split_text_by_budget(diff, diff_budget)
         for index, diff_part in enumerate(diff_parts, start=1):
@@ -3297,6 +3414,7 @@ def build_review_chunk_prompts(
                     f"Chunked review: {label}; synthesize with other chunks before final judgment.",
                 ],
                 max_prompt_chars=max_prompt_chars,
+                file_records=chunk_records([]),
             )
             metadata["chunk_kind"] = "diff"
             metadata["chunk_label"] = label
@@ -3304,14 +3422,14 @@ def build_review_chunk_prompts(
                 metadata["diff_truncated"] = True
                 omitted_items.append(f"{label} (diff part exceeds {max_prompt_chars} chars)")
                 continue
-            metadata["included_files"] = list(context.get("paths") or [])
+            metadata["included_files"] = list(context.get("diff_paths", context.get("paths")) or [])
             append_chunk("diff", label, prompt, metadata)
 
     file_items: list[tuple[str, str]] = []
     for rel, text in context["file_texts"]:
         record = records_by_path.get(rel)
         if not text and not (record and record.get("contentStatus") == "complete"):
-            omitted_items.append(rel)
+            if rel not in omitted_items: omitted_items.append(rel)
             continue
         whole_prompt, _whole_caveats, whole_metadata = build_review_prompt(
             scope_line=f"{context['scope_line']} ({rel})",
@@ -3320,7 +3438,7 @@ def build_review_chunk_prompts(
             excluded=context["excluded"],
             initial_caveats=context["caveats"],
             max_prompt_chars=max_prompt_chars,
-            file_records=[record] if record else None,
+            file_records=chunk_records([(rel, text)]),
         )
         if prompt_fits(whole_prompt, max_prompt_chars) and whole_metadata.get("included_files") == [rel]:
             file_items.append((rel, text))
@@ -3356,8 +3474,9 @@ def build_review_chunk_prompts(
                 "Chunked review: file chunk; synthesize with other chunks before final judgment.",
             ],
             max_prompt_chars=max_prompt_chars,
+            file_records=chunk_records(trial),
         )
-        if prompt_fits(prompt, max_prompt_chars) and not metadata["omitted_files"]:
+        if prompt_fits(prompt, max_prompt_chars) and metadata['included_files'] == [path for path, _ in trial]:
             current = trial
             continue
         if current:
@@ -3371,6 +3490,7 @@ def build_review_chunk_prompts(
                     "Chunked review: file chunk; synthesize with other chunks before final judgment.",
                 ],
                 max_prompt_chars=max_prompt_chars,
+                file_records=chunk_records(current),
             )
             label = ", ".join(path for path, _item_text in current)
             current_metadata["chunk_kind"] = "files"
@@ -3394,6 +3514,7 @@ def build_review_chunk_prompts(
                 "Chunked review: file chunk; synthesize with other chunks before final judgment.",
             ],
             max_prompt_chars=max_prompt_chars,
+            file_records=chunk_records(current),
         )
         label = ", ".join(path for path, _item_text in current)
         current_metadata["chunk_kind"] = "files"
@@ -3448,6 +3569,10 @@ def build_review_chunk_prompts(
     metadata["sourceCommit"] = context.get("source_commit")
     metadata["declared_files"] = list(context.get("paths") or [])
     metadata["required_files"] = required
+    metadata["omission_reasons"] = omission_reasons
+    if context.get("inventory") is not None:
+        metadata["inventory"] = context["inventory"]
+        metadata["excluded_paths"] = list(context.get("excluded") or [])
     return chunks, metadata
 
 
@@ -3465,6 +3590,7 @@ def build_chunk_synthesis_prompt(
         "included_files": chunk_metadata.get("included_files", []),
         "included_items": chunk_metadata.get("included_items", []),
         "omitted_items": chunk_metadata.get("omitted_items", []),
+        "omission_reasons": chunk_metadata.get("omission_reasons", {}),
         "chunk_labels": [chunk["label"] for chunk in chunks],
         "status": chunk_metadata.get("status", "complete"),
     }
@@ -5279,7 +5405,7 @@ def assemble_panel_source_prompt(args: argparse.Namespace) -> tuple[str, list[st
         normalized_priority_paths(context, getattr(args, "priority_file", None))
         normalized_priority_paths(context, getattr(args, "required_file", None))
         if not context["diff"].strip() and not context["file_texts"]:
-            raise empty_review_scope_error(args.scope)
+            raise empty_review_scope_error(args.scope, context)
         prompt, _paths, caveats, review_metadata = assemble_review_prompt_from_context(
             context,
             max_prompt_chars=prompt_budget,
@@ -6458,6 +6584,9 @@ def maybe_summarize_panel_review(
 
 
 def command_panel(args: argparse.Namespace) -> int:
+    if args.mode != "review" and (args.scope == "repository" or getattr(args, "include_untracked", False)
+                                 or getattr(args, "review_root", None) or getattr(args, "exclude_path", None)):
+        raise AntiError("Repository inventory options require panel --mode review")
     if args.output not in PANEL_OUTPUT_MODES:
         raise AntiError(f"unsupported panel output mode: {args.output}")
     apply_free_lane_preset(args)
@@ -7364,7 +7493,7 @@ def command_review(args: argparse.Namespace) -> int:
     normalized_priority_paths(context, getattr(args, "priority_file", None))
     normalized_priority_paths(context, getattr(args, "required_file", None))
     if not context["diff"].strip() and not context["file_texts"]:
-        raise empty_review_scope_error(args.scope)
+        raise empty_review_scope_error(args.scope, context)
     prompt, _paths, caveats, metadata = assemble_review_prompt_from_context(
         context,
         max_prompt_chars=prompt_budget,
@@ -8301,6 +8430,10 @@ def _panel_argv(
 
 
 def workflow_expansion(args: argparse.Namespace) -> list[str]:
+    inventory_options = (getattr(args, "include_untracked", False) or getattr(args, "review_root", None)
+                         or getattr(args, "exclude_path", None) or args.scope == "repository")
+    if inventory_options and args.name not in {"review-ready", "ship-gate", "security-review", "quick-check", "consensus"}:
+        raise AntiError("Repository inventory options require a review workflow")
     common = [
         "--base-url",
         args.base_url,
@@ -8497,6 +8630,9 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         raise AntiError(f"unknown workflow: {args.name}")
 
     if args.name in {"review-ready", "ship-gate", "security-review", "quick-check", "consensus"}:
+        if getattr(args, "include_untracked", False): argv.append("--include-untracked")
+        append_each(argv, "--review-root", getattr(args, "review_root", None))
+        append_each(argv, "--exclude-path", getattr(args, "exclude_path", None))
         append_if_present(argv, "--base", args.base)
         append_if_present(argv, "--changed-files", args.changed_files_range)
         append_each(argv, "--file", args.file)
@@ -8843,6 +8979,12 @@ def add_codex_config_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--provider-name", default="Google Antigravity", help="Codex provider display name")
 
 
+def add_inventory_args(parser):
+    parser.add_argument("--include-untracked", action="store_true", help="Include untracked files in working-tree or repository reviews")
+    parser.add_argument("--review-root", action="append", help="Literal repository-relative directory for repository inventory; repeatable")
+    parser.add_argument("--exclude-path", action="append", help="Literal file or directory to exclude from repository inventory; repeatable")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = ConsoleArgumentParser(description="Antigravity Opus/Sonnet sidecar helper for Codex")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -8864,7 +9006,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     panel.add_argument("--judge", default="opus", help="Judge model alias/id; defaults to opus")
     panel.add_argument("--role", action="append", help="Review/planning lens such as security, correctness, tests, ux")
-    panel.add_argument("--scope", choices=["none", "working-tree", "staged", "files", "diff"], default="working-tree")
+    panel.add_argument("--scope", choices=["none", "working-tree", "staged", "files", "diff", "repository"], default="working-tree")
+    add_inventory_args(panel)
     panel.add_argument("--base", help="Base ref for --mode review --scope diff; uses <base>...HEAD")
     panel.add_argument("--changed-files", dest="changed_files_range", help="Git revision range for --mode review --scope diff")
     panel.add_argument("--file", action="append", help="Add or limit repository file context; repeatable")
@@ -8975,7 +9118,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_gateway_args(review, default_timeout=120.0)
     add_generation_control_args(review)
     review.add_argument("--model", default=None, help="opus, sonnet, or full model id")
-    review.add_argument("--scope", choices=["working-tree", "staged", "files", "diff"], default="working-tree")
+    review.add_argument("--scope", choices=["working-tree", "staged", "files", "diff", "repository"], default="working-tree")
+    add_inventory_args(review)
     review.add_argument("--base", help="Base ref for --scope diff; uses <base>...HEAD")
     review.add_argument("--changed-files", dest="changed_files_range", help="Git revision range for --scope diff")
     review.add_argument("--file", action="append", help="Limit review to path; repeatable")
@@ -9047,7 +9191,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workflow.add_argument("--judge", default="opus")
     workflow.add_argument("--role", action="append")
-    workflow.add_argument("--scope", choices=["auto", "none", "working-tree", "staged", "files", "diff"], default="auto")
+    workflow.add_argument("--scope", choices=["auto", "none", "working-tree", "staged", "files", "diff", "repository"], default="auto")
+    add_inventory_args(workflow)
     workflow.add_argument("--base")
     workflow.add_argument("--changed-files", dest="changed_files_range", help="Git revision range for --scope diff")
     workflow.add_argument("--file", action="append")
