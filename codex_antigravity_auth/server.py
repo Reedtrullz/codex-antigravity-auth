@@ -126,6 +126,8 @@ REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
     stop_sequences=True,
     reasoning=True,
     streaming_usage=True,
+    input_modalities=frozenset({"text", "image"}),
+    opaque_reasoning_replay=True,
 )
 # OpenAI upstream speaks Responses natively, so the full boundary holds.
 OPENAI_ROUTE_CAPABILITIES = ProviderCapabilities(
@@ -135,6 +137,8 @@ OPENAI_ROUTE_CAPABILITIES = ProviderCapabilities(
     stop_sequences=True,
     reasoning=True,
     streaming_usage=True,
+    input_modalities=frozenset({"text", "image"}),
+    opaque_reasoning_replay=True,
 )
 PACKAGE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}$")
 
@@ -564,6 +568,7 @@ def codex_model_metadata(
     default_reasoning_level: str = "high",
     supports_parallel_tool_calls: bool = True,
     input_modalities: list[str] | None = None,
+    supported_reasoning_efforts: tuple[str, ...] | None = None,
 ) -> dict:
     reasoning_levels = [
         {"effort": "low", "description": "Fast responses with lighter reasoning"},
@@ -571,6 +576,11 @@ def codex_model_metadata(
         {"effort": "high", "description": "Greater reasoning depth for complex problems"},
         {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
     ]
+    if supported_reasoning_efforts is not None:
+        descriptions = {item["effort"]: item["description"] for item in reasoning_levels}
+        reasoning_levels = [{"effort": effort, "description": descriptions.get(effort, effort)} for effort in supported_reasoning_efforts]
+        if default_reasoning_level not in supported_reasoning_efforts:
+            default_reasoning_level = supported_reasoning_efforts[0] if supported_reasoning_efforts else None
     modalities = input_modalities if input_modalities is not None else ["text"]
     return {
         "id": model_id,
@@ -607,28 +617,8 @@ def codex_model_metadata(
 
 
 def native_model_catalog_with_input_modalities() -> list[dict]:
-    """Return Google Antigravity models with accurate input_modalities."""
-    builtin_ids = {model.id for model in NATIVE_MODELS}
-    # Map every known alias to its canonical builtin id so backward-compat
-    # catalog entries (e.g. "claude-3.5-sonnet") inherit image modality.
-    alias_to_canonical: dict[str, str] = {}
-    for model in NATIVE_MODELS:
-        for alias in model.aliases:
-            alias_to_canonical[alias] = model.id
-    # Models that are text-only despite being built-in (no image support).
-    _TEXT_ONLY_BUILTIN = {"gpt-oss-120b-medium"}
-    models = []
-    for m in native_model_catalog():
-        mid = m.get("id", "")
-        canonical = alias_to_canonical.get(mid, mid)
-        # Built-in models and their backward-compat aliases are multimodal;
-        # user-defined overlay models and known text-only models get ['text'].
-        if canonical in builtin_ids and canonical not in _TEXT_ONLY_BUILTIN:
-            modalities = ["text", "image"]
-        else:
-            modalities = ["text"]
-        models.append({**m, "input_modalities": modalities})
-    return models
+    """Compatibility accessor for the canonical input modality contract."""
+    return native_model_catalog()
 
 
 def provider_model_catalog(created: int) -> list[dict]:
@@ -674,6 +664,8 @@ def provider_model_catalog(created: int) -> list[dict]:
                     provider_id,
                     created,
                     supports_parallel_tool_calls=capabilities.parallel_tool_calls,
+                    input_modalities=sorted(capabilities.input_modalities),
+                    supported_reasoning_efforts=capabilities.reasoning_effort_levels,
                 )
             )
     return byok_models

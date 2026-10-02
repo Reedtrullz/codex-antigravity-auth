@@ -12,6 +12,7 @@ import uuid
 import httpx
 
 from .byok import (
+    provider_capabilities,
     resolve_api_key,
     validate_http_base_url,
     validate_provider_api_key,
@@ -22,6 +23,7 @@ from .redaction import redact_secret_text
 
 from .response_protocol import (
     ProviderCapabilities,
+    validate_capabilities,
     ProviderResult,
     ProviderTerminal,
     ResponseEventBuilder,
@@ -140,7 +142,6 @@ def _message_output(message: object) -> list[dict[str, Any]]:
             {
                 "type": "reasoning",
                 "id": f"rs_{uuid.uuid4().hex[:8]}",
-                "encrypted_content": "",
                 "step_by_step_summary": reasoning,
             }
         )
@@ -258,7 +259,6 @@ class ChatResponseAccumulator:
                 {
                     "type": "reasoning",
                     "id": f"rs_{uuid.uuid4().hex[:8]}",
-                    "encrypted_content": "",
                     "step_by_step_summary": self._reasoning,
                 }
             )
@@ -381,7 +381,9 @@ class OpenAICompatibleTransport:
         stream: bool,
     ) -> PreparedOpenAIRequest:
         try:
-            payload = transform_request_to_chat({**request, "stream": stream}, provider_model)
+            capabilities = provider_capabilities(provider, provider_model)
+            validate_capabilities(request, capabilities)
+            payload = transform_request_to_chat({**request, "stream": stream}, provider_model, capabilities=capabilities)
         except ValueError as exc:
             raise TransportConfigError(400, str(exc)) from exc
         payload["stream"] = stream

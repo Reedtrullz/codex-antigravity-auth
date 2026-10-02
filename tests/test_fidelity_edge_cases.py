@@ -78,12 +78,8 @@ class TestTransformationEdgeCases(unittest.TestCase):
                 }
             ],
         }
-        res = transform_request(req)
-        parts = res["request"]["contents"][0]["parts"]
-        self.assertTrue(
-            any("img_abc123" in part.get("text", "") for part in parts),
-            "file_id-only image part must survive as a text fallback, not vanish",
-        )
+        with self.assertRaisesRegex(ValueError, r"input\[0\].content\[0\].file_id"):
+            transform_request(req)
 
     def test_empty_conversation_produces_well_formed_contents(self):
         req = {"model": "gemini-3.5-flash-high", "input": []}
