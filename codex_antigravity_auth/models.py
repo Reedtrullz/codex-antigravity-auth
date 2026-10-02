@@ -31,6 +31,7 @@ class NativeModel:
     aliases: tuple[str, ...] = ()
     input_modalities: tuple[str, ...] = ("text",)
     reasoning_mapping: str | None = None
+    output_bridge_required: str | None = None
 
 
 DEFAULT_CLAUDE_MODEL_ID = "claude-sonnet-4-6"
@@ -80,6 +81,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
     NativeModel(
         id="gemini-3.1-flash-image",
         backend_id="gemini-3.1-flash-image",
+        output_bridge_required="image",
         display_name="Gemini 3.1 Flash Image",
         context_window=1_048_576,
         input_modalities=("text", "image"),
@@ -500,6 +502,16 @@ def native_model_capabilities(model: str) -> ProviderCapabilities:
     return capabilities_for_native_definition(native_model_definition(model))
 
 
+def required_output_bridge(definition: NativeModel | None) -> str | None:
+    """Known backend requirements cannot be bypassed by adding an overlay alias."""
+    if definition is None:
+        return None
+    if definition.output_bridge_required:
+        return definition.output_bridge_required
+    return next((model.output_bridge_required for model in NATIVE_MODELS
+                 if model.backend_id == definition.backend_id and model.output_bridge_required), None)
+
+
 def capabilities_for_native_definition(definition: NativeModel | None) -> ProviderCapabilities:
     """Pure capability owner, also used to generate the standalone snapshot."""
     return ProviderCapabilities(
@@ -523,6 +535,8 @@ def native_model_catalog(*, strict_overlays: bool = False) -> list[dict[str, Any
     entries: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for model in all_native_models(strict_overlays=strict_overlays):
+        if required_output_bridge(model):
+            continue
         entries.append(
             {
                 "id": model.id,
