@@ -60,6 +60,7 @@ codex_antigravity_auth = [
   "NATIVE_RESPONSES.md",
   "design/request-shapes.md",
   "design/tool-calls.md",
+  "design/google-output.md",
   "design/capabilities.md",
   "PROCESS_LOGS.md",
   "REQUEST_DEADLINES.md",
