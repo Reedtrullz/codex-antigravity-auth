@@ -28,7 +28,10 @@ Publication consistency does not validate model claims. The page keeps lifecycle
 code scope, panel integrity, verification, retention and media coverage separate.
 Partial, degraded, unverified and unknown states are shown literally. Requested
 models are never silently promoted to actual models. Missing legacy metadata
-stays unknown; never mode cannot supply output or findings that were not retained.
+stays unknown; recognized legacy `status` values are displayed when `runStatus`
+is absent, with legacy `error` shown as `failed`. Retained result source commits
+backfill missing index metadata; conflicting recorded commits remain visible.
+Never mode cannot supply output or findings that were not retained.
 
 Reflection history may lack lifecycle or reviewer-lane fields; those stay unknown
 or absent in its HTML view. Use the saved publication view for retained terminal
@@ -77,3 +80,9 @@ and absolute-file fields are omitted. Free-form evidence can still contain
 private code or information not recognizable as a credential; inspect the local
 report before sharing. This feature does not upload, persist additional raw
 source, or broaden the original recording policy.
+
+Full-retention saved views show the validated raw lane artifacts separately from
+reviewer summaries, including their saved SHA-256 and generation/output evidence.
+Both use the same explicit display limits; summary/never modes cannot reconstruct
+raw lane files. Rendering uses only the captured validated bytes, even if a later
+writer changes files while the HTML is being assembled.

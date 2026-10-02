@@ -262,3 +262,48 @@ def test_publication_total_byte_limit_applies_across_references(ui,monkeypatch,t
     monkeypatch.setattr(artifacts,'validate_record',consume)
     with pytest.raises(artifacts.ArtifactError,match='16MiB total'):
         artifacts.read_publication(index)
+
+
+def test_full_raw_lane_evidence_survives_preview_and_uses_captured_bytes(ui,monkeypatch):
+    anti,artifacts,renderer,_,_,_=ui
+    marker='FULL_LANE_EVIDENCE_AFTER_PREVIEW'
+    args=SimpleNamespace(save_output='full',run_id='raw-evidence',command='panel',progress=False)
+    path=anti.write_run_record(args,mode='panel',status='partial',metadata={'scope_status':'partial','panel_results':[{'status':'success','output_preview':'Short preview only.'}]},
+        output_text='Synthesis.',execution_ledger=[{'stage':'reviewer','output':'x'*3000+marker,'generation':{'actual_model':'fixture-full-lane','attempts':2}}])
+    index=json.loads(path.read_text());lane=anti.RUNS_DIR/index['publication']['lanes'][0]['path'];before=lane.read_bytes()
+    original=artifacts.validate_record
+    def validate(*args,**kwargs):
+        result=original(*args,**kwargs);lane.write_text('{"changed":"after-validation"}');return result
+    monkeypatch.setattr(artifacts,'validate_record',validate)
+    bundle=artifacts.read_publication(path)
+    assert bundle['lanes'][0]['value']['output'].endswith(marker)
+    assert bundle['lanes'][0]['sha256']==__import__('hashlib').sha256(before).hexdigest()
+    text=renderer.render([renderer.from_publication(bundle)])
+    assert marker in text and 'fixture-full-lane' in text and 'after-validation' not in text
+    assert 'Reviewer lane summaries' in text and 'Full retained lane artifacts' in text
+
+
+@pytest.mark.parametrize('saved,expected',[('success','success'),('partial','partial'),('error','failed'),('failed','failed'),('interrupted','interrupted'),('running','running'),(None,'unknown'),('invalid','unknown'),(['success'],'unknown')])
+def test_legacy_status_fallback_keeps_recorded_lifecycle(ui,saved,expected):
+    anti,artifacts,renderer,_,_,_=ui
+    anti.RUNS_DIR.mkdir();path=anti.RUNS_DIR/'old.json';path.write_text(json.dumps({'id':'old','status':saved}))
+    view=renderer.from_publication(artifacts.read_publication(path))
+    assert view['lifecycle']==expected and view['publication']=='legacy_unverified'
+    assert 'Lifecycle: '+expected in renderer.render([view])
+
+
+def test_result_source_commit_backfills_dropped_index_metadata(ui):
+    _,artifacts,renderer,_,_,_=ui
+    path=publication(ui,mode='summary');index=json.loads(path.read_text())
+    result=json.loads(Path(index['resultPath']).read_text());assert result['sourceCommit']=='a'*40
+    index['metadata'].pop('sourceCommit');path.write_text(json.dumps(index))
+    view=renderer.from_publication(artifacts.read_publication(path))
+    assert view['sourceIdentity']['sourceCommit']=='a'*40
+    assert 'a'*40 in renderer.render([view])
+
+
+def test_conflicting_recorded_source_commits_are_not_hidden(ui):
+    _,artifacts,renderer,_,_,_=ui
+    path=publication(ui);index=json.loads(path.read_text());index['metadata']['sourceCommit']='b'*40;path.write_text(json.dumps(index))
+    view=renderer.from_publication(artifacts.read_publication(path))
+    assert view['sourceIdentity']=={'sourceCommit':'b'*40,'resultSourceCommit':'a'*40}

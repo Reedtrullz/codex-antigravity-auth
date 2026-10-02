@@ -339,5 +339,14 @@ def read_publication(path: Path) -> dict[str, Any]:
         selected = selected if selected.is_absolute() else path.parent / selected
         _require(selected in captured, "Result was not in the validated publication", "invalid_reference")
         result = captured[selected][1]
-    return {"record":record, "result":result, "indexSha256":hashlib.sha256(captured[path][0]).hexdigest(),
+    lanes = []
+    if result is not None:
+        for reference in result.get("artifacts", {}).get("rawLanePaths", []):
+            selected = Path(reference)
+            selected = selected if selected.is_absolute() else path.parent / selected
+            _require(selected in captured, "Lane was not in the validated publication", "invalid_reference")
+            raw, value = captured[selected]
+            lanes.append({"sha256":hashlib.sha256(raw).hexdigest(), "value":value})
+    return {"record":record, "result":result, "lanes":lanes,
+            "indexSha256":hashlib.sha256(captured[path][0]).hexdigest(),
             "filesRead":len(captured), "bytesRead":total}

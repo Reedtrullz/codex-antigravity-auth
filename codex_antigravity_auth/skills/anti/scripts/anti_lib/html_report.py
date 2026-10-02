@@ -97,6 +97,17 @@ def from_publication(bundle):
     record=bundle['record'];result=_mapping(bundle.get('result'));metadata=_mapping(record.get('metadata'))
     verification=_mapping(result.get('verification'))
     source={key:metadata[key] for key in ('sourceCommit','source_commit','sourceHash','source_hash','git_diff_base','git_diff_head') if key in metadata}
+    result_commit=result.get('sourceCommit')
+    index_commit=source.get('sourceCommit') or source.get('source_commit')
+    if isinstance(result_commit,str) and result_commit:
+        if not isinstance(index_commit,str) or not index_commit:
+            source['sourceCommit']=result_commit
+        elif result_commit!=index_commit:
+            source['resultSourceCommit']=result_commit  # Keep a disagreement visible.
+    lifecycle=record.get('runStatus')
+    if record.get('publicationStatus')=='legacy_unverified' and lifecycle is None:
+        lifecycle=record.get('status')
+        if lifecycle=='error':lifecycle='failed'
     coverage={'resultCoverage':_mapping(result.get('coverage')),
               'indexCounts':{key:record[key] for key in ('omittedFileCount','omittedChunkCount') if key in record},
               'indexScopeEvidence':{key:metadata[key] for key in ('declared_files','included_files','omitted_files','omitted_items','coverage','chunk_coverage') if key in metadata}}
@@ -111,13 +122,13 @@ def from_publication(bundle):
                          'claimVerification':'unverified','advisory':finding,'adjudication':None})
     return _view(record.get('id'),timestamp=record.get('created_at'),
         recordHash=bundle.get('indexSha256'),sourceIdentity=source or None,publication=record.get('publicationStatus','unknown'),
-        lifecycle=_state(record.get('runStatus'),{'running','success','partial','failed','interrupted'}),
+        lifecycle=_state(lifecycle,{'running','success','partial','failed','interrupted'}),
         scope=_state(record.get('scopeStatus'),{'complete','partial'}),panel=result.get('panelStatus') or metadata.get('panel_status') or 'unknown',
         retention=record.get('save_output') or 'legacy_unknown',contentComplete=_mapping(result.get('retention')).get('contentComplete'),
         verification=_state(verification.get('status'),{'not_run','completed_no_evidence','tool_checks','unknown'}),
         verificationEvidence=verification,requested=result.get('requestedModels') or record.get('models'),
         actual=result.get('actualModels') or metadata.get('actual_models'),providers=result.get('actualProviders') or metadata.get('actual_providers'),
-        coverage=coverage,lanes=_rows(result.get('lanes')),findings=findings,declaredFindings=_count(metadata.get("findings_count")),
+        coverage=coverage,lanes=_rows(result.get('lanes')),rawLanes=_rows(bundle.get('lanes')),findings=findings,declaredFindings=_count(metadata.get("findings_count")),
         disagreements=_rows(result.get('disagreements')),unverifiable=_rows(result.get('unverifiable')),
         output=result.get('output_text') if 'output_text' in result else result.get('output_preview'),
         caveats=_rows(result.get('caveats')),media=result.get('media_coverage') or metadata.get('media_coverage'),
@@ -139,7 +150,7 @@ def from_review_report(report):
             scope=run['scopeStatus'],panel=run.get('panelStatus') or 'unknown',retention=run.get('retention') or 'unknown',contentComplete=run['contentComplete'],
             verification=_state(verification.get('status'),{'not_run','completed_no_evidence','tool_checks','unknown'}),verificationEvidence=verification,
             requested=run.get('requestedModels'),actual=run.get('actualModels'),providers=run.get('actualProviders'),coverage=context,
-            lanes=_rows(context.get('panel_results')),findings=run['findings'],declaredFindings=run.get('declaredFindingCount'),
+            lanes=_rows(context.get('panel_results')),rawLanes=[],findings=run['findings'],declaredFindings=run.get('declaredFindingCount'),
             disagreements=_rows(findings_contract.get('disagreements')),unverifiable=_rows(findings_contract.get('unverifiable')),
             output=findings_contract.get('summary'),caveats=_rows(context.get('caveats')),media=context.get('media_coverage'),errors=context.get('failure_diagnostics'),
             parserLoss=run.get('parserLossStatus'),parserTotal=run.get('parserFindingTotal'),parserDropped=run.get('parserFindingsDropped'),localVerdicts='Explicit local verdicts remain separate from model claims and file checks.'))
@@ -167,7 +178,14 @@ def _lane(value,index):
     row=_mapping(value);generation=_mapping(row.get('generation'))
     return '<article class="lane"><h4>Lane '+str(index)+'</h4>'+badge('Outcome',row.get('status') or 'unknown',good=('success',))+_table([
         ('Requested model',row.get('requested_model') or row.get('requestedModel')),('Actual model',row.get('actual_model') or row.get('actualModel') or generation.get('actual_model')),
-        ('Actual provider',row.get('provider') or generation.get('actual_provider')),('Fallback used',row.get('fallback_used'))])+_details('Retained lane evidence',row,opened=True)+'</article>'
+        ('Actual provider',row.get('provider') or generation.get('actual_provider')),('Fallback used',row.get('fallback_used'))])+_details('Retained lane summary',row,opened=True)+'</article>'
+
+
+def _raw_lane(value,index):
+    descriptor=_mapping(value);entry=_mapping(descriptor.get('value'))
+    return ('<article class="lane"><h4>Lane artifact '+str(index)+'</h4>'
+            +_table([('Stage',entry.get('stage')),('Artifact SHA-256',descriptor.get('sha256'))])
+            +_details('Full retained artifact (display bounded)',entry,opened=True)+'</article>')
 
 
 def render(views, *, title='Anti local run report'):
@@ -199,7 +217,8 @@ def render(views, *, title='Anti local run report'):
         for label,key in [('Coverage and omissions','coverage'),('Verification evidence','verificationEvidence'),('Media coverage (independent of code scope)','media'),('Caveats','caveats'),('Failure diagnostics','errors')]:
             parts.append(_details(label,view.get(key),opened=key in {'coverage','verificationEvidence'}))
         parts.append(_collection('Findings',_rows(view.get('findings')),_finding))
-        parts.append(_collection('Reviewer lanes',_rows(view.get('lanes')),_lane))
+        parts.append(_collection('Reviewer lane summaries',_rows(view.get('lanes')),_lane))
+        parts.append(_collection('Full retained lane artifacts',_rows(view.get('rawLanes')),_raw_lane))
         parts.append(_details('Disagreements',view.get('disagreements'),opened=True)+_details('Unverifiable claims',view.get('unverifiable'),opened=True)+_details('Retained output or preview',view.get('output'))+'</article>')
     parts.append('</div></main><footer><p>Generated locally from retained evidence. No scripts, network resources, editable fields or executable verification actions are included. Credential redaction is best-effort; inspect content before sharing.</p></footer></body></html>')
     result=''.join(parts)
