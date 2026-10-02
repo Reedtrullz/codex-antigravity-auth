@@ -1,0 +1,2 @@
+# Historical snapshots are hashed as exact bytes; avoid platform EOL rewriting.
+docs/history/** -text
