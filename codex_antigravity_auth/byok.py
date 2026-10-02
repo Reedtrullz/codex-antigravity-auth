@@ -255,6 +255,17 @@ def provider_auth_mode(provider: dict[str, Any]) -> str:
     return configured or PROVIDER_AUTH_MODE_API_KEY
 
 
+def validate_supported_provider_kind(provider: dict[str, Any]) -> None:
+    """Reject configured transports the gateway cannot dispatch."""
+    kind = provider.get("kind", "openai_chat")
+    if kind != "openai_chat":
+        raise ValueError(
+            f"Unsupported BYOK provider kind: {kind}. This gateway supports only "
+            "openai_chat BYOK routes; configure an OpenAI-compatible Chat Completions "
+            "endpoint with kind openai_chat, or remove this provider."
+        )
+
+
 def provider_capabilities(
     provider: dict[str, Any], provider_model: str | None = None
 ) -> ProviderCapabilities:
@@ -502,10 +513,9 @@ def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
 
     if "kind" in normalized:
         kind = _non_empty_string(normalized.get("kind"))
-        if kind in {"openai_chat", "openai_responses"}:
-            normalized["kind"] = kind
-        else:
-            normalized.pop("kind", None)
+        # Retain explicit unsupported kinds so diagnostics can reject them.
+        # Dropping the field would silently select the default chat transport.
+        normalized["kind"] = kind
     if "displayName" in normalized:
         try:
             display_name = validate_provider_display_name(normalized.get("displayName"))

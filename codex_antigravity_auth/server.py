@@ -31,6 +31,7 @@ from .byok import (
     split_provider_model,
     validate_provider_api_key,
     validate_provider_id,
+    validate_supported_provider_kind,
 )
 from .transform import safe_project_id, transform_chat_response, valid_function_name
 from .constants import get_platform, is_loopback_host, validate_gateway_token_strength
@@ -622,6 +623,7 @@ def provider_model_catalog(created: int) -> list[dict]:
         return byok_models
     for provider_id, provider in providers.items():
         try:
+            validate_supported_provider_kind(provider)
             usable = provider_has_usable_key(provider)
         except Exception:
             usable = False
@@ -1457,6 +1459,21 @@ async def create_response(request: Request):
             )
             raise HTTPException(status_code=404, detail=f"BYOK provider '{provider_id}' is not configured")
         try:
+            validate_supported_provider_kind(provider)
+        except ValueError as exc:
+            detail = safe_error_detail(exc)
+            await log_request(
+                "failed",
+                model=model,
+                route="byok",
+                provider=provider_id,
+                stream=stream,
+                http_status=400,
+                error_class="unsupported_provider_kind",
+                error=detail,
+            )
+            raise HTTPException(status_code=400, detail=detail) from exc
+        try:
             validate_capabilities(
                 codex_req,
                 provider_capabilities(provider, provider_model),
@@ -1473,19 +1490,6 @@ async def create_response(request: Request):
                 error=safe_error_detail(exc),
             )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        provider_kind = provider.get("kind")
-        if provider_kind != "openai_chat":
-            await log_request(
-                "failed",
-                model=model,
-                route="byok",
-                provider=provider_id,
-                stream=stream,
-                http_status=500,
-                error_class="unsupported_provider_kind",
-                error=f"Unsupported BYOK provider kind: {provider_kind}",
-            )
-            raise HTTPException(status_code=500, detail=f"Unsupported BYOK provider kind: {provider_kind}")
         if stream:
             payload, url, headers, timeout = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=True)
             await log_request("stream_started", model=model, route="byok", provider=provider_id, stream=True)
