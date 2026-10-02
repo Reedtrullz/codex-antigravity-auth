@@ -1627,7 +1627,7 @@ class TestBYOKProviders(unittest.TestCase):
         }
 
         chunks = [
-            'data: {"choices":"bad"}\n',
+            'data: {"choices":[]}\n',
             'data: {"choices":[{"delta":"bad"}]}\n',
             'data: {"choices":[{"delta":{"reasoning_content":["bad"],"content":["bad"]}}]}\n',
             'data: {"choices":[{"delta":{"tool_calls":[{"index":"bad","id":"bad","function":{"name":"ignored","arguments":"{}"}}]}}]}\n',

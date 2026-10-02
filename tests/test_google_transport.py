@@ -122,7 +122,7 @@ class TestGoogleResponseTranslation(unittest.TestCase):
         self.assertEqual(result.terminal.kind, TerminalKind.FAILED)
         self.assertEqual(result.terminal.error_code, "malformed_provider_response")
 
-    def test_skips_invalid_candidate_when_later_output_is_valid(self):
+    def test_rejects_ambiguous_candidates_instead_of_using_later_output(self):
         result = self.transport.parse_response(
             {
                 "candidates": [
@@ -132,8 +132,8 @@ class TestGoogleResponseTranslation(unittest.TestCase):
             }
         )
 
-        self.assertEqual(result.terminal.kind, TerminalKind.COMPLETED)
-        self.assertEqual(result.output[0]["content"][0]["text"], "valid")
+        self.assertEqual(result.terminal.kind, TerminalKind.FAILED)
+        self.assertEqual(result.output, ())
 
     def test_legacy_transform_response_wrapper_uses_terminal_contract(self):
         empty = transform_response({"candidates": []}, "test-model")
