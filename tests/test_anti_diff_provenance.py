@@ -3,6 +3,7 @@ from copy import deepcopy
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -131,7 +132,10 @@ def test_renames_preserve_old_and_new_paths_without_side_guessing(repo):
     assert enrich(anti, metadata, 'renamed.py', 2, 'old')['line'] is None
 
 
-@pytest.mark.parametrize('name', ['space name.py', 'tab\tname.py', 'quote"name.py', 'unicode-æ.py'])
+@pytest.mark.parametrize('name', ['space name.py',
+    pytest.param('tab\tname.py', marks=pytest.mark.skipif(os.name == 'nt', reason='Windows filenames cannot contain tabs')),
+    pytest.param('quote"name.py', marks=pytest.mark.skipif(os.name == 'nt', reason='Windows filenames cannot contain quotes')),
+    'unicode-æ.py'])
 def test_git_quoted_paths_map_to_exact_selected_names(repo, name):
     anti, root, git = repo
     write_utf8(root / name, 'before\n')
@@ -140,6 +144,19 @@ def test_git_quoted_paths_map_to_exact_selected_names(repo, name):
     _, metadata = collect(anti)
     finding = enrich(anti, metadata, name, 1)
     assert finding['sourceExcerpt'] == 'after' and finding['diffProvenance']['path'] == name
+
+
+@pytest.mark.parametrize('name,quoted', [('tab\tname.py', r'tab\tname.py'), ('quote"name.py', r'quote\"name.py')])
+def test_git_quoted_patch_paths_are_decoded_without_creating_files(name, quoted):
+    from codex_antigravity_auth.skills.anti.scripts.anti_lib import diff_snapshot
+    old, new = '"a/' + quoted + '"', '"b/' + quoted + '"'
+    patch = (f'diff --git {old} {new}\nindex ' + '1'*40 + '..' + '2'*40 + ' 100644\n'
+             f'--- {old}\n+++ {new}\n@@ -1 +1 @@\n-before\n+after\n')
+    snapshot = diff_snapshot.capture(patch, [name])
+    assert snapshot['status'] == 'complete'
+    location, reason = diff_snapshot.locate(snapshot, name, 1, 'new', [{'start':0, 'end':len(patch)}])
+    assert reason is None and location['path'] == name and location['line'] == 1
+    assert location['excerpt'] == 'after' and location['excerptSha256'] == hashlib.sha256(b'after').hexdigest()
 
 
 def test_added_deleted_files_and_empty_line_locations(repo):
