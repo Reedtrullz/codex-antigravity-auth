@@ -42,3 +42,65 @@ The recording policy still applies. Never mode publishes only its lifecycle inde
 Optional `verification.checks` records carry structured file-check outcomes (`passed`, `failed`, `skipped`, `error`), captured file hashes, command/cwd identities, bounded output and duration. Their presence does not change the finding claim verdict. Full retention stores the details; summary stores check counts and `checksRetained=false` so preview clipping cannot create malformed check descriptors.
 
 ESLint check identity is invocation-scoped: `identityContext` records a fresh observation ID and explicit unknown effective tool/config markers, and `comparableAcrossRuns=false` prevents treating command-path equality as stable tool/config identity. The same observation may be reused for duplicate findings within one batch.
+
+## Finding adjudication and review exports
+
+Reflection history now retains full redacted advisory/check fields when full
+recording was selected. Summary recording keeps bounded previews and original
+finding counts; never mode still writes no reflections. Capture carries actual
+models/providers and known scope gaps. Legacy records have unknown provenance;
+a requested model is never silently presented as an actual model.
+
+`runs export --repo PATH [--run-id ID] --format json|sarif|markdown` reads retained
+reflection history without modifying it. JSON follows
+[review report v1](schemas/review-report-v1.json). SARIF uses the
+[OASIS 2.1.0 contract](https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/sarif-v2.1.0-os.html);
+offline tests validate against the official schema in `tests/fixtures/`. Every
+SARIF result remains `kind: review`, and rejected findings remain present without
+SARIF suppressions. Anti's provenance, scope, advisory/check data and separate
+local verdict appear in `properties`. Markdown carries the same evidence in
+readable form. No command uploads or publishes a report.
+
+Use the exported `findingKey` with `runs finding --repo PATH --run-id ID
+--finding KEY --verdict confirmed|rejected|unresolved --author LABEL
+--source-file RELATIVE_PATH --evidence TEXT` (or `--evidence-file UTF8_FILE`).
+The inspected source must remain within the repo and be at most 512 KiB. Only its
+SHA-256 and relative path are stored, along with the explicit author, current
+UTC epoch timestamp and redacted evidence. Author labels are at most 120
+characters; evidence is at most 4000 characters (input files at most 16000 bytes).
+A new local verdict replaces that finding's prior local verdict; model claim,
+model evidence and file-check outcome stay visible and unchanged in meaning.
+The legacy run-level verdict never propagates to individual findings.
+
+Manual adjudication is a separate explicit local write, with at most one bounded
+annotation per retained finding; it does not enlarge or restore automatic model
+previews. The summary `content_preview` budget applies to captured model content,
+while explicit manual evidence has the separate 4000-character limit above.
+Unretained findings cannot be adjudicated or reconstructed. Exports disclose
+retained versus declared normalized counts and `contentComplete=false` for summaries;
+missing provenance remains unknown. If a combined report exceeds the shared
+structured-redaction budget, export an individual `--run-id` instead of silently
+truncating the result.
+
+Recurring summaries separate confirmed, rejected and unresolved cohorts and
+retain their evidence/occurrences. The inspected source hash (or captured check
+hash when no local verdict exists) allows content identity across changed paths.
+Equal content does not prove a rename rather than identical copies. Neither
+repetition, a passing syntax check, artifact checksums nor manual annotation
+turns the original model claim into an automatically verified fact.
+
+`--output PATH` creates a complete new owner-only file using same-directory
+staging and atomic no-replace publication; existing files and symlinks are
+refused. Unsupported hard-link filesystems fail explicitly. Exports redact
+credentials, omit the workspace root from their envelope, and use relative
+owned locations. Explicit author/evidence labels are still user-authored content;
+inspect reports before sharing. There is no automatic false-positive suppression,
+routing change or GitHub publication.
+
+Parser normalization loss has separate `parserFindingTotal`,
+`parserFindingsDropped` and `parserLossStatus` fields in every export format.
+These count rows before normalization and rows removed by normalization or
+deduplication; they do not redefine `contentComplete`, which only describes
+retention of normalized findings. Legacy missing parser counters and unparseable/prose fallback counts are `null`
+and `unknown`, never invented zeros. Their parse caveats remain visible. Markdown includes run timestamps, source-record
+hashes and the same verdict/content-identity cohort summaries as JSON and SARIF.

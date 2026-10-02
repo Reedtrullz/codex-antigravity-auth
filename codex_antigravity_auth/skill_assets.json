@@ -17,6 +17,8 @@
     "scripts/anti_lib/redaction.py",
     "scripts/anti_lib/secret_redaction.py",
     "scripts/anti_lib/reflections.py",
+    "scripts/anti_lib/finding_verdicts.py",
+    "scripts/anti_lib/reports.py",
     "scripts/anti_lib/retention.py",
     "scripts/anti_lib/persistence.py",
     "scripts/anti_lib/cleanup.py",
@@ -27,6 +29,7 @@
     "schemas/raw-lane-v1.json",
     "schemas/run-index-v1.json",
     "schemas/saved-result-v2.json",
+    "schemas/review-report-v1.json",
     "tests/fixtures/v5-lane-opus.json",
     "tests/fixtures/v5-lane-sonnet.json",
     "tests/test_anti.py"
