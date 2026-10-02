@@ -12,11 +12,16 @@ import time
 
 import pytest
 
+from standalone import without_installed_packages
+
 SCRIPT = Path(__file__).resolve().parents[1] / "codex_antigravity_auth/skills/anti/scripts/anti.py"
 
 
 @pytest.fixture
 def stores(monkeypatch, tmp_path):
+    script_dir = str(SCRIPT.resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
     spec = importlib.util.spec_from_file_location("anti_persistence_fixture", SCRIPT)
     anti = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(anti)
@@ -182,7 +187,8 @@ try:
 except anti.AntiError:
     raise SystemExit(3)
 '''
-    processes = [subprocess.Popen([sys.executable, "-S", "-c", code, str(SCRIPT.parent), str(anti.RUNS_DIR)],
+    guarded_code = without_installed_packages(code)
+    processes = [subprocess.Popen([sys.executable, "-c", guarded_code, str(SCRIPT.parent), str(anti.RUNS_DIR)],
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(4)]
     codes = []
     for process in processes:
