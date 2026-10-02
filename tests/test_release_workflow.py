@@ -35,7 +35,7 @@ class TestReleaseWorkflow(unittest.TestCase):
                 ("macos-latest", "3.12"),
             },
         )
-        self.assertEqual(set(jobs["publish"]["needs"]), {"build", "test"})
+        self.assertEqual(set(jobs["publish"]["needs"]), {"build", "test", "quality"})
 
     def test_release_version_and_tag_guard_are_current(self):
         project = tomllib.loads(
