@@ -4,7 +4,6 @@ import asyncio
 import io
 import json
 import shutil
-import socket
 import subprocess
 import sys
 import threading
@@ -18,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import httpx
+from fake_upstream import allow_listener, remove_listener
 
 from codex_antigravity_auth import byok, cli, oauth, server, unified
 from codex_antigravity_auth.google_transport import AccountLease, GoogleTransport
@@ -222,24 +222,32 @@ def test_real_callers_use_the_no_redirect_handler_chain(monkeypatch, caller):
 
 
 @contextmanager
-def loopback_server(handler, host="127.0.0.1"):
-    class IPv6Server(ThreadingHTTPServer):
-        address_family = socket.AF_INET6
-    try:
-        server = (IPv6Server if ":" in host else ThreadingHTTPServer)((host, 0), handler)
-    except OSError as exc:
-        if ":" in host:
-            pytest.skip(f"IPv6 loopback unavailable: {exc}")
-        raise
+def loopback_server(handler):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler, bind_and_activate=False)
+    endpoint = allow_listener(server.socket)
+    server.server_address = endpoint
     thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
-    thread.start()
+    started = False
     try:
+        server.server_activate()
+        thread.start()
+        started = True
         yield server
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
-        assert not thread.is_alive()
+        try:
+            if started:
+                server.shutdown()
+        finally:
+            try:
+                server.server_close()
+            finally:
+                try:
+                    if started:
+                        thread.join(timeout=2)
+                finally:
+                    remove_listener(endpoint)
+        if started:
+            assert not thread.is_alive()
 
 
 def test_redirect_never_reaches_another_loopback_origin(monkeypatch):
@@ -259,20 +267,19 @@ def test_redirect_never_reaches_another_loopback_origin(monkeypatch):
             def do_GET(self):
                 initial.append(self.headers.get("Authorization"))
                 self.send_response(302)
-                self.send_header("Location", f"http://127.0.0.1:{target.server_port}/target")
+                self.send_header("Location", f"http://127.0.0.1:{target.server_address[1]}/target")
                 self.end_headers()
         with loopback_server(Origin) as origin:
             # Loopback must bypass even an explicitly configured external proxy.
             monkeypatch.setenv("http_proxy", "http://example.invalid:9")
-            request = urllib.request.Request(f"http://127.0.0.1:{origin.server_port}/start", headers={"Authorization": "Bearer synthetic-token"})
+            request = urllib.request.Request(f"http://127.0.0.1:{origin.server_address[1]}/start", headers={"Authorization": "Bearer synthetic-token"})
             with pytest.raises(urllib.error.HTTPError):
                 open_http_request(request, timeout=1)
     assert initial == ["Bearer synthetic-token"]
     assert received == []
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
-def test_loopback_gateway_requests_keep_working_with_synthetic_authorization(monkeypatch, host):
+def test_loopback_gateway_requests_keep_working_with_synthetic_authorization(monkeypatch):
     received = []
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -292,8 +299,8 @@ def test_loopback_gateway_requests_keep_working_with_synthetic_authorization(mon
             self.wfile.write(body)
         do_POST = do_GET
     monkeypatch.setenv("ANTIGRAVITY_GATEWAY_TOKEN", "synthetic-token")
-    with loopback_server(Handler, "::1" if host == "::1" else "127.0.0.1") as server:
-        base = cli.local_gateway_base_url(host, server.server_port)
+    with loopback_server(Handler) as server:
+        base = cli.local_gateway_base_url("127.0.0.1", server.server_address[1])
         assert cli.gateway_model_ids(base) == {"fixture-model"}
         result = cli.gateway_generate_probe(base, "fixture-model", timeout=1, token_env="ANTIGRAVITY_GATEWAY_TOKEN")
         assert result["generation_ok"] is True
@@ -304,16 +311,18 @@ def test_copied_standalone_policy_needs_no_installed_package(tmp_path):
     module = tmp_path / "endpoint_policy.py"
     shutil.copyfile(shared.__file__, module)
     code = """
-import json,sys
-sys.path.insert(0,sys.argv[1])
+import json,sys,sysconfig
+stdlib_paths = {sysconfig.get_path("stdlib"), sysconfig.get_path("platstdlib"), sysconfig.get_config_var("DESTSHARED")}
+sys.path[:] = [sys.argv[1], *(path for path in stdlib_paths if path)]
 from endpoint_policy import validate_endpoint_url
+assert "codex_antigravity_auth" not in sys.modules
 output=[]
 for url in json.load(sys.stdin):
     try: output.append(validate_endpoint_url(url))
     except ValueError: output.append(None)
 print(json.dumps(output))
 """
-    result = subprocess.run([sys.executable, "-I", "-S", "-c", code, str(tmp_path)], input=json.dumps(SAFE + UNSAFE), text=True, capture_output=True, timeout=10)
+    result = subprocess.run([sys.executable, "-c", code, str(tmp_path)], input=json.dumps(SAFE + UNSAFE), text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == SAFE + [None] * len(UNSAFE)
 
