@@ -30,7 +30,14 @@ _STORAGE_KEY = base64.urlsafe_b64encode(b"\0" * 32).decode("ascii")
 
 
 def _deny(message):
-    _violations.append(message)
+    frame = sys._getframe(1)
+    callers = []
+    for _ in range(6):
+        if frame is None:
+            break
+        callers.append(f"{frame.f_code.co_name} ({os.path.basename(frame.f_code.co_filename)}:{frame.f_lineno})")
+        frame = frame.f_back
+    _violations.append(message + "; callers: " + " <- ".join(callers))
     raise AssertionError(message)
 
 

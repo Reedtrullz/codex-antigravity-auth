@@ -1802,14 +1802,18 @@ async def _create_response(request: Request, budget: RequestBudget):
         budget.context.update(route="byok", provider=provider_id)
     from .request_shapes import validate_request_shapes
     try:
-        validate_provider_model_id(provider_id, provider_model)
-        try:
-            validate_request_shapes(codex_req, route="byok" if provider_id is not None else "google")
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await budget.sync(validate_provider_model_id, provider_id, provider_model)
+        await budget.sync(validate_request_shapes, codex_req, route="byok" if provider_id is not None else "google")
     except HTTPException as exc:
         await log_request("failed", model=model, route="byok" if provider_id is not None else "google", provider=provider_id, stream=stream, http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
         raise
+    except ValueError as exc:
+        await log_request(
+            "failed", model=model, route="byok" if provider_id is not None else "google",
+            provider=provider_id, stream=stream, http_status=400, error_class="invalid_request",
+            error="Request shape is unsupported for this route.", attempt_count=0,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if provider_id is not None:
         # Normalize self-referential prefixes (openrouter:openrouter/x ->
         # openrouter:x) so catalog ids, capability lookup, and the upstream

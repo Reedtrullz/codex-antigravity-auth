@@ -403,6 +403,7 @@ paths restrict the chosen run. Bounded secret-pattern checks stop a submission
 until resolved or explicitly acknowledged for its exact prompt hash. Policy
 dry runs write nothing and report hashes instead of source. See the bundled
 [policy contract](codex_antigravity_auth/skills/anti/DATA_POLICY.md).
+
 ## Request time budgets
 
 Google, BYOK and native OpenAI requests now share a monotonic 60-second preparation/nonstream deadline. Streaming has separate 60-second event-idle and 30-minute total defaults, including preparation, with validated metadata overrides. Downstream backpressure and resource cleanup are bounded; timeouts never trigger replay after visible output. See [request deadlines and cleanup](codex_antigravity_auth/REQUEST_DEADLINES.md) for overrides, failure outcomes, cleanup grace and cancellation limits.
@@ -416,3 +417,11 @@ Google generated-media parts produce an explicit failure while retaining support
 ## Resource limits and overload
 
 Generation admission defaults to 32 in-flight requests per process and 16 per backend route. Excess requests receive HTTP503 with Retry-After. Incoming bodies default to32MiB, inline attachments have separate decoded limits, and JSON/schema/SSE/provider accumulation are bounded without accepting clipped requests as complete. Set operator environment overrides for larger contexts or images; increasing the in-flight ceiling above its startup value requires a gateway restart. See [resource limits and admission](codex_antigravity_auth/RESOURCE_LIMITS.md) for units, ranges, failure codes and ownership.
+
+## Anti whole-run deadlines
+
+Anti generation commands accept `--run-timeout` (default 1800 seconds). This budget
+is shared by chunks, retries, fallback and judge calls; each actual destination
+acquires a process-local permit for each attempt. Deadline-deferred work is saved
+as partial coverage under the selected retention mode. See [run controls and
+cooperative timeout limits](codex_antigravity_auth/skills/anti/RUN_CONTROL.md).

@@ -102,14 +102,31 @@ def lifecycle_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     """Allow only known numeric counters and fixed enums in never mode."""
     source = metadata if isinstance(metadata, dict) else {}
     result = {}
+    runtime = source.get("run_control")
+    if isinstance(runtime, dict):
+        projected = {"eventsRetained": False}
+        for key in ("attempts_started", "permits_acquired", "permits_released", "deferred_calls", "events_omitted"):
+            value = runtime.get(key)
+            if type(value) is int and 0 <= value <= 2**63 - 1:
+                projected[key] = value
+        for key in ("limit_seconds", "elapsed_seconds", "remaining_seconds"):
+            value = runtime.get(key)
+            if type(value) in (int, float) and 0 <= value <= 2**63 - 1 and math.isfinite(value):
+                projected[key] = value
+        if runtime.get("scope") == "process_local":
+            projected["scope"] = "process_local"
+        if type(runtime.get("deadline_exceeded")) is bool:
+            projected["deadline_exceeded"] = runtime["deadline_exceeded"]
+        result["run_control"] = projected
     policy = audit_projection(source.get("dataPolicy"))
     if policy is not None:
         result["dataPolicy"] = policy
-    for key in ("prompt_chars", "output_chars", "omitted_file_count", "omitted_chunk_count", "finding_count", "attempt_count"):
+    for key in ("prompt_chars", "output_chars", "omitted_file_count", "omitted_chunk_count", "finding_count", "attempt_count", "panel_lane_count", "judge_attempt_count"):
         value = source.get(key)
         if type(value) is int and 0 <= value <= 2**63 - 1:
             result[key] = value
     for key, choices in {
+        "synthesis_status": {"not_sent", "failed", "success", "truncated", "empty", "non_answer"},
         "runStatus": {"running", "success", "partial", "failed", "interrupted"},
         "scope_status": {"complete", "incomplete", "partial"},
         "scopeStatus": {"complete", "incomplete", "partial"},

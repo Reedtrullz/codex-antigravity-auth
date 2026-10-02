@@ -364,3 +364,14 @@ When answering the user after an Antigravity run:
 - Panel JSON keeps `panel_models` as requested lanes and records actual execution identity in each `panel_results` entry and in `metadata` (`panel_status`/`status`, `distinct_actual_models`, `successful_actual_models`, `judge_requested_model`, `judge_actual_model`, and fallback metadata). A judge fallback is disclosed separately from the requested judge.
 - Separate local proof, live gateway proof, CI proof, and non-claims.
 - For plans, convert the Antigravity plan into a concise execution-ready plan, preserving useful phase/checkpoint structure while removing unsupported claims.
+
+
+## Whole-run time and fallback admission
+
+Generation commands accept `--run-timeout` (default1800 seconds). Nested chunks,
+retries, fallback and judge calls share that deadline; `--timeout` is additionally
+clamped to remaining time. Actual destination permits apply to fallback and judge
+attempts as well as primary lanes, and are released before retry sleeps. If time
+runs out, treat deferred calls and saved partial coverage as incomplete evidence.
+See [run-control semantics and limits](RUN_CONTROL.md); separate Anti processes
+have separate limits, and blocking OS work is not forcibly preempted.
