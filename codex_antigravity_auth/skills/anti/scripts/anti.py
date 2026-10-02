@@ -37,6 +37,7 @@ from anti_lib.capabilities import CapabilityRegistry
 from anti_lib.chunking import chunk_manifest
 from anti_lib.context import ordered_prompt
 from anti_lib.ledger import execution_entry, prompts_as_text
+from anti_lib.endpoint_policy import open_http_request, validate_endpoint_url
 from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
 from anti_lib.runner import presentable_result
 from anti_lib.verifier import verify_findings
@@ -1133,21 +1134,10 @@ def add_claude_guardrail_caveat(caveats: list[str], *, prompt_budget: int) -> No
 
 
 def normalize_base_url(value: str) -> str:
-    value = str(value).strip()
-    if not value:
-        raise AntiError("base URL must be non-empty")
-    if any(ord(char) <= 0x20 for char in value):
-        raise AntiError("base URL must not contain whitespace or control characters")
-    parsed = urllib.parse.urlsplit(value)
-    if parsed.username or parsed.password:
-        raise AntiError("base URL must not contain username or password")
-    if parsed.query or parsed.fragment:
-        raise AntiError("base URL must not contain query strings or fragments")
-    if parsed.scheme not in {"http", "https"}:
-        raise AntiError(f"base URL scheme must be http or https, not {parsed.scheme!r}")
-    if not parsed.netloc:
-        raise AntiError("base URL must include a host")
-    return value.rstrip("/")
+    try:
+        return validate_endpoint_url(value, label="base URL").rstrip("/")
+    except ValueError as exc:
+        raise AntiError(str(exc)) from exc
 
 
 def resolve_model(value: str | None, *, default: str) -> str:
@@ -1376,6 +1366,10 @@ def request_json(
     timeout: float = 10.0,
     token_env: str = DEFAULT_TOKEN_ENV,
 ) -> tuple[int, dict[str, Any]]:
+    try:
+        url = validate_endpoint_url(url, allow_query=True)
+    except ValueError as exc:
+        raise AntiError(str(exc)) from exc
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {"Accept": "application/json"}
     if body is not None:
@@ -1391,7 +1385,7 @@ def request_json(
 
     retry_after_header: object = None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as res:
+        with open_http_request(req, timeout=timeout) as res:
             raw = res.read()
             status = int(res.status)
     except urllib.error.HTTPError as exc:

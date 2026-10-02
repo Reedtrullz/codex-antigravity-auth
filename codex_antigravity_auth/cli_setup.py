@@ -249,7 +249,7 @@ def run_local_oauth_flow(*, select_account: bool = False, no_browser: bool = Fal
             "https://www.googleapis.com/oauth2/v2/userinfo",
             headers={"Authorization": f"Bearer {tokens['access_token']}"}
         )
-        with urllib.request.urlopen(req, timeout=_cli.OAUTH_HTTP_TIMEOUT_SECONDS) as resp:
+        with _cli.open_http_request(req, timeout=_cli.OAUTH_HTTP_TIMEOUT_SECONDS) as resp:
             user_info = json.loads(resp.read().decode("utf-8"))
             email = user_info.get("email")
     except Exception as e:
@@ -467,7 +467,7 @@ def validate_oauth_credentials_with_google(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout):
+        with _cli.open_http_request(req, timeout=timeout):
             return "warn", "Google token endpoint accepted an invalid refresh token unexpectedly; continuing"
     except urllib.error.HTTPError as exc:
         body = ""
