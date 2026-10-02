@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shlex
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -133,7 +134,8 @@ def test_service_definitions_freeze_both_selected_roots(roots, monkeypatch):
     assert agent["ProgramArguments"] == command
     assert Path(agent["StandardOutPath"]).parent == state
     unit = service.render_linux_systemd_unit(51122, "127.0.0.1")
-    assert f"--client-home {client}" in unit and f"--state-home {state}" in unit
+    exec_start = unit.split("ExecStart=", 1)[1].splitlines()[0].replace("%%", "%")
+    assert shlex.split(exec_start) == command
     assert not client.exists() and not state.exists()
 
 
