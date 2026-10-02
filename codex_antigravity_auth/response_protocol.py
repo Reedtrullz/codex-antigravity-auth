@@ -288,12 +288,16 @@ def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabil
     if request.get("reasoning") is not None:
         if not capabilities.reasoning:
             raise CapabilityError("reasoning is not supported by the selected route")
+        if isinstance(request["reasoning"], dict) and request["reasoning"].get("effort") is not None and capabilities.reasoning_effort_levels and request["reasoning"]["effort"] not in capabilities.reasoning_effort_levels:
+            raise CapabilityError("reasoning.effort is not supported by the selected route")
         if capabilities.reasoning_effort_parameter is not None:
             reasoning = request["reasoning"]
             if not isinstance(reasoning, dict):
                 raise CapabilityError("reasoning must be an object")
             if set(reasoning) != {"effort"}:
-                raise CapabilityError("reasoning: this BYOK mapping requires exactly one effort setting")
+                raise CapabilityError("reasoning: the selected mapping requires exactly one effort setting")
+            if capabilities.reasoning_effort_parameter == "thinking_budget" and isinstance(request.get("max_output_tokens"), int) and request["max_output_tokens"] <= 1024:
+                raise CapabilityError("max_output_tokens must exceed 1024 when requesting a thinking budget")
             if "effort" in reasoning and reasoning["effort"] not in capabilities.reasoning_effort_levels:
                 raise CapabilityError("reasoning.effort is not supported by the selected provider/model")
     items = request.get("input")
