@@ -680,6 +680,9 @@ def controlled_post(function):
 
 def scheduling_metadata(metadata=None, control=None):
     metadata = dict(metadata or {})
+    for source, target in (('panel_results', 'panel_lane_count'), ('judge_attempts', 'judge_attempt_count')):
+        if isinstance(metadata.get(source), list):
+            metadata[target] = len(metadata[source])
     control = control or CURRENT_RUN.get()
     if control is not None:
         snapshot = control.snapshot()
@@ -1117,6 +1120,9 @@ def _write_run_record_unlocked(
             ordered["metadata"].update({key: value for key, value in metadata_for_preview.items() if key not in ordered["metadata"]})
         record = summary_projection(ordered)
         record.update(structure)
+        if not isinstance(record.get("metadata"), dict):
+            record["metadata"] = {}
+        record["metadata"].update(lifecycle_metadata(metadata))
         record["retention"] = summary_retention()
     record = sanitize_json(record)
     if not isinstance(record, dict):

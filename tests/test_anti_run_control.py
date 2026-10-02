@@ -197,9 +197,25 @@ def test_panel_judge_expiry_preserves_partial_lane_record_without_raw_never_data
     record=json.loads((tmp_path/'runs/fixture-run.json').read_text())
     assert record['runStatus']!='success'
     assert record['metadata']['scope_status']=='partial'
-    assert len(record['metadata']['panel_results'])==2
+    assert record['metadata']['panel_lane_count']==2
+    assert 'panel_results' not in record['metadata']
     assert record['metadata']['run_control']['attempts_started']==2
     assert 'private-fixture' not in json.dumps(record)
+
+
+def test_lifecycle_controls_retain_only_bounded_content_free_fields(anti):
+    projected = anti.lifecycle_metadata({
+        'run_control': {'attempts_started': 3, 'deferred_calls': True,
+                        'elapsed_seconds': float('nan'), 'remaining_seconds': 0,
+                        'scope': 'process_local', 'events': [{'model': 'private-fixture'}]},
+        'panel_lane_count': 2, 'judge_attempt_count': 1, 'synthesis_status': 'not_sent',
+        'panel_results': [{'output': 'private-fixture'}],
+    })
+    assert projected == {
+        'run_control': {'eventsRetained': False, 'attempts_started': 3,
+                        'remaining_seconds': 0, 'scope': 'process_local'},
+        'panel_lane_count': 2, 'judge_attempt_count': 1, 'synthesis_status': 'not_sent',
+    }
 
 
 
@@ -366,9 +382,10 @@ def test_deferred_judge_retry_retains_first_judge_evidence_per_policy(anti,monke
                       '--save-output',retention,'--no-progress'])==1
     assert len(calls)==3
     record=json.loads((tmp_path/'runs/judge-retry.json').read_text())
-    assert len(record['metadata']['judge_attempts'])==1
+    assert record['metadata']['judge_attempt_count']==1
     assert record['metadata']['synthesis_status']=='not_sent'
     if retention=='full':
+        assert len(record['metadata']['judge_attempts'])==1
         judges=[entry for entry in record['execution_ledger'] if entry['stage']=='panel_judge_1']
         assert len(judges)==1 and judges[0]['output'].startswith('first-judge-private-fixture')
         assert judges[0]['generation']['submitted'] is True
