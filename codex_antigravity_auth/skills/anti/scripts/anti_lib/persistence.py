@@ -64,6 +64,15 @@ except ImportError:  # copied skill without the gateway package
                     os.close(descriptor)
 
 
+def fsync_directory(path: Path) -> None:
+    if os.name != "nt":
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
 def atomic_write_json(path: Path, value: Any) -> None:
     """Caller holds its ownership lock. Never remove another writer's temp file."""
     if path.is_symlink() or path.parent.is_symlink():
@@ -80,12 +89,7 @@ def atomic_write_json(path: Path, value: Any) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        if os.name != "nt":
-            descriptor = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+        fsync_directory(path.parent)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
