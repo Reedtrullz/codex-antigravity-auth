@@ -477,6 +477,8 @@ different ports for simultaneously running instances.
 
 Switching roots never moves files automatically. See [namespace copy and
 migration limits](USAGE.md#namespace-copy) for an explicit dry-run-first copy.
+Protected stores and standalone Anti use descriptor-validated process locks and owner-only file protection. Unsupported locking or Windows ACL facilities fail explicitly; see [private storage and lock files](USAGE.md#private-storage-and-lock-files).
+
 Local finding verdicts and JSON/SARIF/Markdown reports are available through `anti.py runs finding` and `runs export`. They preserve advisory findings and scope gaps without automatic suppression or publication; see the [usage examples](USAGE.md#local-finding-verdicts-and-report-export).
 
 ## Troubleshooting

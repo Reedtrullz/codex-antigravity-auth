@@ -6,6 +6,7 @@ import ipaddress
 import tempfile
 from pathlib import Path
 from .namespaces import gateway_home, gateway_file
+from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory, protect_descriptor
 
 # Defaults
 DEFAULT_CLIENT_ID = None
@@ -58,7 +59,7 @@ def validate_gateway_token_strength(token: str | None) -> str:
 def get_codex_home() -> Path:
     """Legacy gateway-state helper; client config/auth use client_home instead."""
     p = gateway_home()
-    p.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(p, enforce_existing=True)
     return p
 
 
@@ -82,7 +83,7 @@ def save_oauth_credentials(client_id: str, client_secret: str) -> Path:
     cred_path = gateway_file(CREDENTIALS_FILE, "antigravity-credentials.json")
     if cred_path.is_symlink():
         raise RuntimeError(f"Refusing to write OAuth credentials through symlink: {cred_path}")
-    cred_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(cred_path.parent, enforce_existing=True)
     payload = json.dumps(
         {"client_id": client_id, "client_secret": client_secret},
         indent=2,
@@ -131,11 +132,8 @@ def _load_file_credentials(
                 "`codex-antigravity setup --write` or `codex-antigravity login` to repair it"
             )
             return None, None
-        if not read_only and mode & 0o077:
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, 0o600)
-            else:
-                os.chmod(cred_path, 0o600)
+        if not read_only:
+            protect_descriptor(fd, path=cred_path)
         with os.fdopen(fd, "r", encoding="utf-8") as f:
             fd = None
             data = json.load(f)
