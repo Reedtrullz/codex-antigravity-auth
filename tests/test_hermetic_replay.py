@@ -41,7 +41,7 @@ def test_chat_http_replay(monkeypatch, seed, finish, delta, terminal):
     assert [e["type"] for e in terminals] == ["response." + terminal]
     terminal_response = terminals[0]["response"]
     if finish == "content_filter":
-        assert terminal_response["output"][0]["content"] == [{"type": "refusal", "refusal": "The provider declined this response (CONTENT_FILTER)."}]
+        assert terminal_response["output"][0]["content"] == [{"type": "refusal", "refusal": delta["refusal"]}]
     elif finish == "length":
         assert terminal_response["incomplete_details"]["reason"] == "max_output_tokens"
     assert requests[0]["path"] == "/v1/chat/completions"
