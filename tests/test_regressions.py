@@ -704,7 +704,7 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(output[0]["call_id"], "call_123")
         self.assertEqual(json.loads(output[0]["arguments"]), {"query": "answer"})
 
-    def test_internal_placeholder_function_arg_is_stripped_from_google_response(self):
+    def test_placeholder_function_arg_is_preserved_without_original_google_request(self):
         gemini_resp = {
             "candidates": [
                 {
@@ -727,7 +727,7 @@ class TestRegressionFixes(unittest.TestCase):
         output = transform_response(gemini_resp, "gemini-3.5-flash-high")["output"]
 
         self.assertEqual(output[0]["type"], "function_call")
-        self.assertEqual(output[0]["arguments"], "{}")
+        self.assertEqual(json.loads(output[0]["arguments"]), {"_placeholder": True})
 
     def test_non_streaming_malformed_alternative_lists_fail_closed(self):
         cases = [
@@ -770,10 +770,8 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(output[0]["type"], "reasoning")
         self.assertEqual(output[0]["step_by_step_summary"], "reason")
         self.assertEqual(output[1]["content"][0]["text"], "ok")
-        self.assertEqual(output[2]["type"], "function_call")
-        self.assertEqual(output[2]["call_id"], "call_123")
-        self.assertEqual(output[2]["name"], "lookup")
-        self.assertEqual(output[2]["arguments"], "{}")
+        self.assertEqual(response["status"], "failed")
+        self.assertFalse([item for item in output if item["type"] == "function_call"])
         self.assertEqual(response["usage"]["input_tokens"], 0)
         self.assertEqual(response["usage"]["output_tokens"], 5)
         self.assertEqual(response["usage"]["total_tokens"], 5)
@@ -806,10 +804,8 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(output[0]["type"], "reasoning")
         self.assertEqual(output[0]["step_by_step_summary"], "reason")
         self.assertEqual(output[1]["content"][0]["text"], "ok")
-        self.assertEqual(output[2]["type"], "function_call")
-        self.assertEqual(output[2]["call_id"], "call_123")
-        self.assertEqual(output[2]["name"], "lookup")
-        self.assertEqual(json.loads(output[2]["arguments"]), {"q": "x"})
+        self.assertEqual(response["status"], "failed")
+        self.assertFalse([item for item in output if item["type"] == "function_call"])
         self.assertEqual(response["usage"]["input_tokens"], 0)
         self.assertEqual(response["usage"]["output_tokens"], 5)
         self.assertEqual(response["usage"]["total_tokens"], 5)
@@ -1475,7 +1471,7 @@ class TestRegressionFixes(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "gemini-3.5-flash-high", "input": "call tools", "stream": True},
+                    json={"model": "gemini-3.5-flash-high", "input": "call tools", "stream": True, "tools": [{"type":"function","name":"a"},{"type":"function","name":"b"}]},
                 )
 
         events = []
@@ -1494,7 +1490,7 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual([e["item"]["id"] for e in added], [e["item"]["id"] for e in done])
         self.assertEqual([item["type"] for item in completed[0]["response"]["output"]], ["function_call", "function_call"])
 
-    def test_google_streaming_skips_malformed_chunks_and_clamps_function_args(self):
+    def test_google_streaming_reports_invalid_calls_without_clamping_arguments(self):
         fake_account = {
             "email": "test@gmail.com",
             "accessToken": "dummy_access",
@@ -1566,9 +1562,9 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertNotIn("connection_error", response.text)
         arg_done = [e for e in events if e.get("type") == "response.function_call_arguments.done"]
         deltas = [e["delta"] for e in events if e.get("type") == "response.output_text.delta"]
-        completed = [e for e in events if e.get("type") == "response.completed"]
+        completed = [e for e in events if e.get("type") == "response.failed"]
 
-        self.assertEqual([e["arguments"] for e in arg_done], ["{}"])
+        self.assertEqual(arg_done, [])
         self.assertEqual("".join(deltas), "ok")
         self.assertTrue(completed)
         self.assertEqual(completed[0]["response"]["usage"], {"input_tokens": 0, "output_tokens": 5, "total_tokens": 5})

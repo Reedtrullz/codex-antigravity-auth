@@ -388,9 +388,19 @@ content and provenance limits follow the
 
 ### Anti repository submission policies
 
+For explicit repository audits, use `review --scope repository` with optional
+literal `--review-root` / `--exclude-path` selections. Working-tree reviews report
+excluded untracked files; `--include-untracked` opts in to their content. Staged
+scope stays unchanged. See [review inventory and coverage limits](codex_antigravity_auth/skills/anti/SCOPES.md).
+
 `consult`, `review`, `plan`, `compare`, `panel` and `workflow` accept opt-in
 `--data-policy PATH`. Exact gateway/model/stage allowlists and forbidden source
 paths restrict the chosen run. Bounded secret-pattern checks stop a submission
 until resolved or explicitly acknowledged for its exact prompt hash. Policy
 dry runs write nothing and report hashes instead of source. See the bundled
 [policy contract](codex_antigravity_auth/skills/anti/DATA_POLICY.md).
+
+
+## Completed function-call validation
+
+Completed tool arguments must encode JSON objects and satisfy the available declared identity and supported schema checks. Invalid calls cannot become executable completion events; usable sibling output is retained with an explicit failed/incomplete result. Google’s internal `_placeholder` is removed only with per-tool injection provenance. See [final-call validation and limits](codex_antigravity_auth/design/tool-calls.md).
