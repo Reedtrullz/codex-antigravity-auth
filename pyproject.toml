@@ -70,6 +70,7 @@ codex_antigravity_auth = [
   "skills/anti/CONTEXT_PREFLIGHT.md",
   "skills/anti/CHUNK_RESUME.md",
   "skills/anti/ARTIFACTS.md",
+  "skills/anti/HTML_REPORTS.md",
   "skills/anti/ATTACHMENTS.md",
   "skills/anti/DATA_POLICY.md",
   "skills/anti/SCOPES.md",

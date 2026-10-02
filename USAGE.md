@@ -371,3 +371,12 @@ in the gateway catalog. Exact bytes are forwarded; pixels and embedded metadata
 are not secret-scanned. Real-media evaluation is still an unmet release gate.
 See [attachments](codex_antigravity_auth/skills/anti/ATTACHMENTS.md) for examples,
 recording behavior, scope separation and the synthetic-only evidence boundary.
+
+### Local HTML run reports
+
+`python scripts/anti.py runs report RUN_ID --compare OTHER_ID --output compare.html`
+exports validated retained publications to a self-contained read-only page.
+`runs export --format html` shows retained reflection evidence and local finding
+verdicts. See [HTML reports](codex_antigravity_auth/skills/anti/HTML_REPORTS.md) for
+comparison, keyboard navigation, retention and display limits. No server or
+network publication is started.

@@ -8549,6 +8549,21 @@ def command_runs(args: argparse.Namespace) -> int:
                     flag = " (no final record; run may have been interrupted)"
                 print(f"{row['created_at']} {row['id']} {row['mode']} {row['status']}{workflow}{label} [{models}]{flag}")
         return 0
+    if args.runs_command == "report":
+        from anti_lib.artifacts import read_publication
+        from anti_lib.html_report import from_publication, render
+        from anti_lib.reports import write_export
+        try:
+            ids = [args.id] + ([args.compare] if args.compare else [])
+            views = [from_publication(read_publication(resolve_run_record_path(run_id))) for run_id in ids]
+            text = render(views)
+            if args.output:
+                write_export(Path(args.output).expanduser(), text)
+            else:
+                print(text)
+        except (ValueError, OSError) as exc:
+            raise AntiError("Cannot export local HTML report: " + str(exc)) from exc
+        return 0
     if args.runs_command == "show":
         path = resolve_run_record_path(args.id)
         print(json.dumps(load_run_record(path), indent=2, sort_keys=True))
@@ -8590,13 +8605,21 @@ def command_runs(args: argparse.Namespace) -> int:
                 print(json.dumps(updated, indent=2, sort_keys=True))
                 return 0
             records = list_records(repo, limit=None)
+            compare_id = getattr(args, 'compare_run_id', None)
+            if compare_id and (args.format != 'html' or not args.run_id):
+                raise AntiError('--compare-run-id requires --format html and --run-id')
             if args.run_id:
-                records = [record for record in records if record.get("run_id") == args.run_id]
-                if not records:
-                    raise AntiError("No retained reflection record matches this run")
+                selected = [args.run_id] + ([compare_id] if compare_id else [])
+                records = [record for run_id in selected for record in records if record.get("run_id") == run_id]
+                if len(records) != len(selected):
+                    raise AntiError("Each selected run must match exactly one retained reflection record")
             report = build_report(records, repo)
-            text = (to_markdown(report) if args.format == "markdown" else
-                    json.dumps(to_sarif(report) if args.format == "sarif" else report, indent=2, sort_keys=True))
+            if args.format == 'html':
+                from anti_lib.html_report import report_html
+                text = report_html(report)
+            else:
+                text = (to_markdown(report) if args.format == "markdown" else
+                        json.dumps(to_sarif(report) if args.format == "sarif" else report, indent=2, sort_keys=True))
             if args.output:
                 destination = Path(args.output).expanduser()
                 write_export(destination, text)
@@ -9002,10 +9025,15 @@ def build_parser() -> argparse.ArgumentParser:
     evidence = runs_finding.add_mutually_exclusive_group(required=True)
     evidence.add_argument("--evidence", help="Explicit local evidence (up to 4000 characters)")
     evidence.add_argument("--evidence-file", help="UTF-8 file containing explicit local evidence")
+    runs_report = runs_sub.add_parser('report', help='Export a validated saved run as self-contained read-only HTML')
+    runs_report.add_argument('id', help='Saved run ID (or unique prefix)')
+    runs_report.add_argument('--compare', help='Second saved run ID for side-by-side comparison')
+    runs_report.add_argument('--output', help='New owner-only HTML file (default: stdout); refuses existing paths')
     runs_export = runs_sub.add_parser("export", help="Export local JSON/SARIF/Markdown without publishing")
     runs_export.add_argument("--repo", default=".")
     runs_export.add_argument("--run-id")
-    runs_export.add_argument("--format", choices=["json", "sarif", "markdown"], default="json")
+    runs_export.add_argument("--compare-run-id", help="Compare a second reflection run; requires --run-id and --format html")
+    runs_export.add_argument("--format", choices=["json", "sarif", "markdown", "html"], default="json")
     runs_export.add_argument("--output", help="New local output file (default: stdout; refuses existing files)")
     runs_reflections = runs_sub.add_parser("reflections", help="Show repo-level reflection history")
     runs_reflections.add_argument("--repo", default=".", help="Repository path (default: cwd)")
