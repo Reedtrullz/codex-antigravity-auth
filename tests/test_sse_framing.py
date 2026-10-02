@@ -43,7 +43,7 @@ def test_every_byte_split_preserves_unicode_bom_multiline_data_and_native_events
         '\ufeff: fixture comment\r\nevent: response.output_text.delta\r\n'
         'data: {"type":"response.output_text.delta",\r\n'
         'data: "delta":"é漢💡"}\r\n\r\n'
-        'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n'
+        'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"é漢💡"}]}]}}\n\n'
         'data: [DONE]\r\r'
     ).encode()
     expected = decode([wire])
