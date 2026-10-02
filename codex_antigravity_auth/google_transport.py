@@ -529,12 +529,15 @@ class GoogleTransport:
         response_id: str,
         display_model: str,
         adapter: GoogleStreamEventAdapter | None = None,
+        telemetry: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any] | str]:
         adapter = adapter or GoogleStreamEventAdapter(
             response_id=response_id,
             display_model=display_model,
         )
         async with self.stream(request, lease) as response:
+            if telemetry is not None:
+                telemetry["http_status"] = response.status_code
             if response.status_code != 200:
                 raise GoogleHTTPError(
                     response.status_code,

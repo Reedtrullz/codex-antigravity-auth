@@ -396,12 +396,14 @@ def run_logs_command(args) -> None:
         else:
             print(f"[*] Request log summary ({summary['since']})")
             for group in summary["groups"].values():
-                success_pct = group["success_rate"] * 100
+                success_pct = f"{group['success_rate'] * 100:.1f}%" if group["success_rate"] is not None else "n/a"
                 p50 = group["p50_latency_ms"] if group["p50_latency_ms"] is not None else "n/a"
                 p95 = group["p95_latency_ms"] if group["p95_latency_ms"] is not None else "n/a"
                 print(
                     f"- {group['route']}/{group['family']}: {group['request_count']} request(s), "
-                    f"{success_pct:.1f}% success, p50={p50}ms, p95={p95}ms, "
+                    f"{group.get('open_count', 0)} open, {group.get('incomplete_count', 0)} incomplete, "
+                    f"{group.get('cancellation_count', 0)} cancelled, "
+                    f"{success_pct} closed-request success, p50={p50}ms, p95={p95}ms, "
                     f"429s={group['rate_limit_count']}, rotations={group['rotation_attempted_count']}"
                 )
                 if group["top_error_classes"]:

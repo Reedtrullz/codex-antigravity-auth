@@ -3166,7 +3166,7 @@ class TestVNextPolishCli(unittest.TestCase):
         self.assertEqual(google["attempt_count"], 3)
         self.assertEqual(google["rotation_count"], 1)
         self.assertEqual(google["cancellation_count"], 1)
-        self.assertEqual(google["terminal_counts"], {"completed": 1, "failed": 1})
+        self.assertEqual(google["terminal_counts"], {"completed": 1, "cancelled": 1})
         self.assertEqual(google["usage"]["total_tokens"], 5)
         self.assertEqual(google["p50_latency_ms"], 100)
         self.assertEqual(google["p95_latency_ms"], 900)
