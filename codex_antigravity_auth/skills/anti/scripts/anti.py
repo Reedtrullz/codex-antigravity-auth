@@ -39,6 +39,7 @@ from anti_lib.chunking import chunk_manifest
 from anti_lib.context import ordered_prompt
 from anti_lib.ledger import execution_entry, prompts_as_text
 from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
+from anti_lib.retention import lifecycle_metadata, summary_projection, summary_retention, summary_structure
 from anti_lib.runner import presentable_result
 from anti_lib.verifier import verify_findings
 from anti_lib.reflections import (
@@ -706,6 +707,34 @@ def write_preflight_record(
     )
 
 
+def check_record_retention(record_id: str, output_mode: str) -> None:
+    """Do not silently mix policies or delete older artifacts when reusing an ID."""
+    if not RUN_ID_RE.fullmatch(record_id):
+        raise AntiError("run id must contain only letters, numbers, '_' or '-'")
+    if RUNS_DIR.is_symlink():
+        raise AntiError("refusing to write Anti run record through symlinked directory")
+    path = RUNS_DIR / f"{record_id}.json"
+    if path.is_symlink():
+        raise AntiError("refusing to overwrite symlinked run record")
+    if path.exists():
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            raise AntiError("cannot inspect existing run retention; choose a new run id") from exc
+        if not isinstance(previous, dict) or previous.get("save_output") != output_mode:
+            raise AntiError("run id already exists with another retention policy; choose a new run id")
+    artifact_dir = RUNS_DIR / record_id
+    if artifact_dir.is_symlink():
+        raise AntiError("refusing to write result artifact through symlink")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    if not path.exists() and (artifact_dir.exists() or temporary.exists() or temporary.is_symlink()):
+        raise AntiError("run id has orphan artifacts with unknown retention policy; choose a new run id")
+    if (output_mode == "never" and artifact_dir.exists()) or (
+        output_mode == "summary" and artifact_dir.exists() and any(artifact_dir.glob("lane-*.json"))
+    ):
+        raise AntiError("run id has artifacts incompatible with retention policy; choose a new run id")
+
+
 def write_run_record(
     args: argparse.Namespace,
     *,
@@ -722,6 +751,11 @@ def write_run_record(
     force_full_output: bool = False,
 ) -> Path | None:
     output_mode = save_output_mode(args)
+    record_id = getattr(args, "run_id", None)
+    if not record_id and output_mode != "never":
+        record_id = new_run_id()
+    if record_id:
+        check_record_retention(str(record_id), output_mode)
     if output_mode == "never":
         # Minimal lifecycle record: correlation survives even when prompt and
         # output retention are disabled (bug report root cause 2).
@@ -737,26 +771,24 @@ def write_run_record(
             os.chmod(RUNS_DIR, 0o700)
         except OSError:
             pass
+        commands = {"consult", "review", "plan", "panel", "moa", "fusion", "workflow", "compare"}
+        statuses = {"running", "success", "partial", "error", "interrupted", "failed"}
+        command = getattr(args, "command", mode)
         record: dict[str, Any] = {
             "id": str(record_id),
             "created_at": utc_timestamp(),
-            "command": getattr(args, "command", mode),
-            "workflow": getattr(args, "workflow_name", None),
-            "run_label": getattr(args, "run_label", None),
-            "mode": mode,
-            "status": status,
-            "gateway": base_url,
-            "models": models or [],
+            "command": command if command in commands else "unknown",
+            "mode": mode if mode in commands else "unknown",
+            "status": status if status in statuses else "unknown",
             "save_output": output_mode,
-            "helper": helper_identity(),
-            "runStatus": "failed" if status == "error" else status,
+            "runStatus": "failed" if status == "error" else status if status in statuses else "unknown",
             "metadata": {
-                **(metadata or {}),
+                **lifecycle_metadata(metadata),
                 "request_log_correlation_id": str(record_id),
             },
         }
         if error:
-            record["error"] = error
+            record["error"] = "interrupted" if status == "interrupted" else "run_failed"
         record = sanitize_json(record)
         record["id"] = str(record_id)
         record["metadata"]["request_log_correlation_id"] = str(record_id)
@@ -790,7 +822,6 @@ def write_run_record(
 
     output_chars = len(output_text or "")
     prompt_chars = len(prompt_text or "")
-    record_id = getattr(args, "run_id", None) or new_run_id()
     if not RUN_ID_RE.fullmatch(str(record_id)):
         raise AntiError("run id must contain only letters, numbers, '_' or '-'")
 
@@ -838,9 +869,7 @@ def write_run_record(
     if error:
         record["error"] = error
     if output_mode == "summary" and output_text:
-        record["output_preview"] = output_text[:RUN_OUTPUT_PREVIEW_CHARS]
-        if force_full_output:
-            record["output_text"] = output_text
+        record["output_preview"] = redact_sensitive_text(output_text)[:RUN_OUTPUT_PREVIEW_CHARS]
     elif output_mode == "full":
         if prompt_text is not None:
             record["prompt_sha256"] = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
@@ -850,6 +879,29 @@ def write_run_record(
         if execution_ledger is not None:
             record["execution_ledger"] = execution_ledger
 
+    if output_mode == "summary":
+        # Preserve fixed lifecycle fields and the metadata consumed by the
+        # result artifact before applying the shared content budget. Large
+        # panel transcripts must not exhaust that budget ahead of checks and
+        # chunk counts.
+        structure = summary_structure(record, (
+            "id", "created_at", "command", "mode", "status", "runStatus", "scopeStatus", "save_output",
+            "prompt_chars", "output_chars", "omittedFileCount", "omittedChunkCount",
+        ))
+        metadata_for_preview = record.get("metadata")
+        ordered = {key: value for key, value in record.items() if key not in structure and key != "metadata"}
+        if isinstance(metadata_for_preview, dict):
+            priority = (
+            "request_log_correlation_id", "runStatus", "scopeStatus", "scope_status", "panel_status",
+            "consult_attempts",
+            "planned_chunk_count", "completed_chunk_count", "failed_chunk_count", "not_sent_chunk_count",
+            "omitted_chunk_count", "verification", "coverage", "findings", "failure_diagnostics", "panel_results",
+            )
+            ordered["metadata"] = {key: metadata_for_preview[key] for key in priority if key in metadata_for_preview}
+            ordered["metadata"].update({key: value for key, value in metadata_for_preview.items() if key not in ordered["metadata"]})
+        record = summary_projection(ordered)
+        record.update(structure)
+        record["retention"] = summary_retention()
     record = sanitize_json(record)
     # The record id is generated by us or validated by RUN_ID_RE; never let
     # value redaction mangle it (e.g. a run id shaped like user_12345678).
@@ -888,53 +940,79 @@ def write_run_record(
             os.replace(lane_tmp, lane_path)
             raw_lane_paths.append(str(lane_path))
     artifact_scope_status = record.get("scopeStatus") or ("complete" if status == "success" else "partial")
-    artifact_metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    artifact_metadata = metadata if isinstance(metadata, dict) else {}
     artifact_run_status = "failed" if status == "error" else status
     finding_contract = artifact_metadata.get("findings")
     if not isinstance(finding_contract, dict):
         finding_contract = {}
-    artifact = sanitize_json(
-        {
-            "schemaVersion": RESULT_SCHEMA_VERSION,
-            "runId": str(record_id),
-            "createdAt": record["created_at"],
-            "sourceCommit": artifact_metadata.get("sourceCommit") or artifact_metadata.get("source_commit"),
-            "helper": record.get("helper"),
-            "mode": mode,
-            "runStatus": artifact_run_status,
-            "scopeStatus": artifact_scope_status,
-            "panelStatus": artifact_metadata.get("panel_status") or artifact_metadata.get("panelStatus"),
-            "coverage": coverage_summary(artifact_metadata),
-            "requestedModels": artifact_metadata.get("requested_models") or record.get("models", []),
-            "actualModels": artifact_metadata.get("actual_models", []),
-            "actualProviders": artifact_metadata.get("actual_providers", []),
-            "lanes": artifact_metadata.get("panel_results", []),
-            "findings": finding_contract.get("findings", []),
-            "disagreements": finding_contract.get("disagreements", []),
-            "unverifiable": finding_contract.get("unverifiable", []),
-            "recommendedNextActions": finding_contract.get("recommended_next_actions", []),
-            "summary": finding_contract.get("summary"),
-            "output_text": output_text,
-            "failureDiagnostics": artifact_metadata.get("failure_diagnostics", []),
-            "verification": artifact_metadata.get(
-                "verification",
-                {
-                    "status": "not_run",
-                    "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
-                    "performedBy": None,
-                    "evidence": [],
-                },
-            ),
-            "caveats": record.get("caveats", []),
-            "error": record.get("error"),
-            "artifacts": {
-                "runRecordPath": str(run_record_path),
-                "resultPath": str(artifact_path),
-                "rawLanePaths": raw_lane_paths,
+    artifact = {
+        "schemaVersion": RESULT_SCHEMA_VERSION,
+        "runId": str(record_id),
+        "createdAt": record["created_at"],
+        "sourceCommit": artifact_metadata.get("sourceCommit") or artifact_metadata.get("source_commit"),
+        "helper": record.get("helper"),
+        "mode": mode,
+        "runStatus": artifact_run_status,
+        "scopeStatus": artifact_scope_status,
+        "panelStatus": artifact_metadata.get("panel_status") or artifact_metadata.get("panelStatus"),
+        "coverage": coverage_summary(artifact_metadata),
+        "requestedModels": artifact_metadata.get("requested_models") or record.get("models", []),
+        "actualModels": artifact_metadata.get("actual_models", []),
+        "actualProviders": artifact_metadata.get("actual_providers", []),
+        "lanes": artifact_metadata.get("panel_results", []),
+        "findings": finding_contract.get("findings", []),
+        "disagreements": finding_contract.get("disagreements", []),
+        "unverifiable": finding_contract.get("unverifiable", []),
+        "recommendedNextActions": finding_contract.get("recommended_next_actions", []),
+        "summary": finding_contract.get("summary"),
+        "output_text": output_text,
+        "failureDiagnostics": artifact_metadata.get("failure_diagnostics", []),
+        "verification": artifact_metadata.get(
+            "verification",
+            {
+                "status": "not_run",
+                "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
+                "performedBy": None,
+                "evidence": [],
             },
+        ),
+        "caveats": record.get("caveats", []),
+        "error": record.get("error"),
+        "artifacts": {
+            "runRecordPath": str(run_record_path),
             "resultPath": str(artifact_path),
-        }
-    )
+            "rawLanePaths": raw_lane_paths,
+        },
+        "resultPath": str(artifact_path),
+    }
+    if output_mode == "summary":
+        artifact.pop("output_text", None)
+        artifact["output_preview"] = redact_sensitive_text(output_text or "")[:RUN_OUTPUT_PREVIEW_CHARS]
+        artifact["output_chars"] = output_chars
+        # Fixed-size structural fields survive exhaustion of the content budget.
+        structure = summary_structure(artifact, (
+            "schemaVersion", "runId", "createdAt", "mode", "runStatus", "scopeStatus", "panelStatus", "output_chars",
+        ))
+        coverage = artifact["coverage"]
+        coverage_structure = summary_structure(coverage, (
+            "status", "chunksExpected", "chunksCompleted", "chunksFailed", "chunksOmitted", "chunksNotSent",
+        ))
+        verification = artifact.get("verification")
+        verification = verification if isinstance(verification, dict) else {"status": "unknown"}
+        verification_structure = summary_structure(verification, ("status", "performedBy", "evidenceCount"))
+        pointers = artifact["artifacts"]
+        # Give verification and the primary answer first access to content space.
+        ordered_artifact = {key: artifact[key] for key in ("verification", "output_preview")}
+        ordered_artifact.update({key: value for key, value in artifact.items() if key not in structure and key not in {"artifacts", "resultPath"}})
+        artifact = summary_projection(ordered_artifact)
+        artifact.update(structure)
+        artifact["runId"] = str(record_id)
+        artifact["coverage"] = {**artifact.get("coverage", {}), **coverage_structure}
+        artifact["verification"] = {**artifact.get("verification", {}), **verification_structure}
+        artifact["artifacts"] = pointers
+        artifact["resultPath"] = str(artifact_path)
+        artifact["retention"] = summary_retention()
+    artifact = sanitize_json(artifact)
     artifact_tmp = artifact_path.with_suffix(artifact_path.suffix + ".tmp")
     artifact_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
@@ -6966,6 +7044,7 @@ def command_panel(args: argparse.Namespace) -> int:
             mode=args.mode,
             scope=metadata.get("scope", ""),
             run_id=getattr(args, "run_id", None),
+            save_output=save_output_mode(args),
         )
     except Exception:
         pass  # Reflection recording is best-effort
@@ -7354,6 +7433,7 @@ def command_review(args: argparse.Namespace) -> int:
             mode="review",
             scope=scope_line,
             run_id=getattr(args, "run_id", None),
+            save_output=save_output_mode(args),
         )
     except Exception:
         pass
@@ -8564,7 +8644,7 @@ def add_generation_control_args(
         "--save-output",
         choices=sorted(SAVE_OUTPUT_MODES),
         default=default_save_output,
-        help="Save sanitized run metadata under ~/.codex/anti-runs",
+        help="Retention under ~/.codex/anti-runs: never = content-free lifecycle only; summary = bounded previews; full = redacted detailed output",
     )
 
 
