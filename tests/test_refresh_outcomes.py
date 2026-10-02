@@ -55,7 +55,7 @@ def test_refresh_preserves_typed_outcome_without_echoing_credentials(monkeypatch
 
 @pytest.mark.parametrize("error", [TimeoutError("timeout"), ConnectionResetError("reset"), URLError(socket.gaierror("DNS fixture"))])
 def test_real_post_form_network_errors_become_transport(monkeypatch, error):
-    monkeypatch.setattr("urllib.request.urlopen", MagicMock(side_effect=error))
+    monkeypatch.setattr("codex_antigravity_auth.oauth.open_http_request", MagicMock(side_effect=error))
     with pytest.raises(oauth.OAuthRefreshError) as exc:
         oauth.refresh_access_token("synthetic-refresh")
     assert exc.value.kind == "transport"

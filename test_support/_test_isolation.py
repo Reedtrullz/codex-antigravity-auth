@@ -64,12 +64,18 @@ def assert_no_violations():
         raise AssertionError("Unexpected test isolation violation(s): " + "; ".join(messages))
 
 
-def allow_listener(sock):
+def allow_listener(sock, host="127.0.0.1"):
     """Bind an owned TCP listener; authorization lives only as long as the fixture."""
     global _binding
+    if host == "127.0.0.1" and sock.family == socket.AF_INET:
+        address = (host, 0)
+    elif host == "::1" and sock.family == socket.AF_INET6:
+        address = (host, 0, 0, 0)
+    else:
+        raise ValueError("test listeners may bind only to their matching IPv4/IPv6 loopback address")
     _binding = True
     try:
-        sock.bind(("127.0.0.1", 0))
+        sock.bind(address)
     finally:
         _binding = False
     endpoint = sock.getsockname()[:2]

@@ -41,6 +41,8 @@ codex-antigravity service uninstall --port 51122
 
 The service command writes a macOS LaunchAgent, Linux systemd user unit, or Windows Scheduled Task depending on the platform. `doctor --codex-ready` and `status --json` report both the lightweight pid-file process state and the durable service state.
 
+Client endpoints require HTTPS for remote hosts. Plain HTTP is allowed for `localhost`, IPv4 loopback and IPv6 loopback; URL username/password fields, invalid ports and control characters are rejected before dispatch. Base URLs also reject query strings and fragments. CLI diagnostics/setup, OAuth requests and standalone Anti refuse all HTTP redirects, including same-origin redirects: configure a non-redirecting endpoint instead. Provider HTTPX clients explicitly disable redirect following as well. Explicit invalid provider endpoint overrides remain blocked instead of falling back to a preset URL; correct or remove the override to restore the preset. Plaintext loopback requests bypass proxies; HTTPS keeps its configured certificate environment.
+
 Gateway request diagnostics are local and sanitized:
 
 Gateway and standalone Anti share credential-redaction rules for structured fields, nested JSON error strings, authorization headers, URL user information, and known token formats. Anti additionally masks provider identifiers; gateway request IDs remain available for telemetry correlation. Redaction bounds diagnostic text to 512 KiB, structured depth to 32, and visited items to 10,000; over-limit content becomes an explicit redacted marker. This policy recognizes credential fields and formats, rather than guaranteeing detection of every arbitrary secret.
@@ -134,6 +136,10 @@ python3 ~/.codex/skills/anti/scripts/anti.py runs list
 ```
 
 Workflow presets save sanitized summaries under `~/.codex/anti-runs` by default. Primitive commands default to `--save-output never`: only a content-free lifecycle/correlation record is retained, with no findings or reflection history. Opt into `summary` for bounded previews across all saved payloads, or redacted `full` for detailed results and lane files. Summary artifacts are explicitly marked `retention.contentComplete=false`; they are not complete saved answers. See the bundled [recording policy](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks) for bounds. Saved runs include a run id; Anti sends it to the gateway as `metadata.run_id`, and the sanitized request JSONL log records it for correlation without forwarding it to Google or BYOK providers. With `--chunked auto`, Opus/Sonnet plan and review calls use a conservative Claude safety budget and split broad context into bounded chunk calls before synthesis; use `--chunked off` only when you intentionally want one large request, including when `--max-prompt-chars 0` would otherwise mean unlimited. Use `--fallback-model sonnet --fallback-policy on-retryable` for long Opus calls that should degrade after retryable backend failures, and `--progress` to print model/chunk progress to stderr.
+
+Finding checks default to in-memory Python syntax and credential-pattern checks, with structured outcomes and no project writes. Opt into trusted project ESLint with `panel --check-profile eslint` (also forwarded by workflow commands), or skip all checks with `--no-verify`. These checks never execute model-supplied `verify` text or establish a finding's semantic truth. Detailed check records appear in live JSON/full retention; summaries keep counts. See the bundled [check policy](codex_antigravity_auth/skills/anti/SKILL.md#new-flags).
+
+Saved results use immutable revisions referenced by the run index; `anti.py runs show <id>` validates checksums and status consistency before returning `resultPath`. Legacy records are explicitly unverified. See the [artifact contract](codex_antigravity_auth/skills/anti/ARTIFACTS.md).
 
 Each run ID has one writer; use a new ID for a new invocation or when a previous record's ownership is unknown. Corrupt or unreadable reflection files are preserved, with backup/recovery guidance instead of silently replacing history. See the bundled [persistence contract](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks).
 
@@ -339,6 +345,9 @@ starts a separate history. Log in through Codex with the selected `CODEX_HOME`
 when a new client identity is needed. Finally set `ANTIGRAVITY_STATE_HOME` to the
 new root and reinstall any service to capture the selection. Neither the copy
 command nor diagnostics changes the current environment or service automatically.
+## Request shape and schema diagnostics
+
+Malformed message/content/tool shapes and orphan outputs return field-specific HTTP400 errors before account work. Translated routes reject unsupported built-in tools and explicit schema weakening; Google cannot honor `strict: true`. Native Responses keeps provider-specific items/tools and continuation intact. See [request validation and translation-loss behavior](codex_antigravity_auth/design/request-shapes.md) for compatibility changes and limits.
 ### Gateway process-log privacy and retention
 
 `start`, `start --background` and newly installed services write bounded,

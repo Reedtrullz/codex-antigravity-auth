@@ -11,6 +11,8 @@ import uuid
 
 import httpx
 
+from .endpoint_policy import httpx_client_options
+
 from .byok import (
     provider_capabilities,
     resolve_api_key,
@@ -448,7 +450,7 @@ class OpenAICompatibleTransport:
             yield builder.done_marker()
 
         try:
-            async with self.client_factory(timeout=prepared.timeout) as client:
+            async with self.client_factory(**httpx_client_options(prepared.url, timeout=prepared.timeout)) as client:
                 async with client.stream(
                     "POST",
                     prepared.url,

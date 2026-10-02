@@ -86,19 +86,15 @@ class TestTransformationEdgeCases(unittest.TestCase):
         res = transform_request(req)
         self.assertTrue(res["request"]["contents"], "empty input must not produce empty contents")
 
-    def test_unknown_function_call_output_call_id_is_dropped(self):
+    def test_unknown_function_call_output_call_id_is_rejected(self):
         req = {
             "model": "gemini-3.5-flash-high",
             "input": [
                 {"type": "function_call_output", "call_id": "call_unknown", "output": "result"},
             ],
         }
-        res = transform_request(req)
-        contents = res["request"]["contents"]
-        self.assertFalse(
-            any("functionResponse" in part for content in contents for part in content.get("parts", [])),
-            "orphan call ids must not be emitted under a fabricated function name",
-        )
+        with self.assertRaisesRegex(ValueError, r"input\[0\].call_id: orphan"):
+            transform_request(req)
 
     def test_response_part_with_text_and_function_call_keeps_both(self):
         gemini_resp = {

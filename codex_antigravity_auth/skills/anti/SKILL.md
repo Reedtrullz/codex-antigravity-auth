@@ -234,7 +234,8 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - Cleanup is terminal-only: `runs clean --older-than N --dry-run --json` reports candidates and skip reasons without writing files. Execution rereads eligible records under the writer lock; running records remain protected regardless of age, and unknown/corrupt state, unowned temporaries and symlinked paths are retained. There is no force switch for uncertain runs. A small content-free marker under `.deleted/` permanently reserves a removed ID so late writers cannot recreate it; use a new run ID for later work.
 - Cleanup removes a terminal run's associated artifact directory before its record and reports incomplete deletions with retained paths and a nonzero exit. After inspecting a partial deletion, `runs clean --older-than N --resume-cleanup --dry-run --json` previews a retry; omit `--dry-run` to resume. A changed record or malformed marker is retained for manual recovery. Ordinary cleanup does not resume pending deletion or prune reflections; use `runs reflections --repo <path> --clear` only when you explicitly intend to clear that history.
 - Repo-level reflection memory, enabled only for summary/full recording, passively records review findings per repo under `~/.codex/anti-runs/reflections/` for pattern analysis. Use `runs reflections --repo <path>` to show summary (recurring fingerprints, severity distribution, most-reviewed files) and recent history. Pass `--clear` to reset. Summary reflections use the same preview bounds; full reflections retain the redacted finding fields. Reflections never suppress findings; they only surface patterns. Files are stored at 0600 permissions.
-- Run IDs belong to one invocation. An opaque `writerId` ties heartbeat, result, error and interruption writes together; workflow wrappers share their inner command's owner. Another invocation, including one reusing a completed or legacy ID, must choose a new ID. Late writes by the same owner preserve the first terminal state. Record/result writes hold a per-run OS lock and use unique 0600 temporary files, file synchronization and atomic replacement (directory synchronization on POSIX). SIGTERM/SIGHUP during a write is handled after the lock is released. The result and record are separate files, so a crash can still leave an orphan artifact; no multi-file transaction or automatic takeover is claimed.
+- Saved index/result/lane schemas and publication errors are documented in [ARTIFACTS.md](ARTIFACTS.md). Read through `runs show <id>` to validate the committed revision; checksum agreement never verifies model findings. Unknown versions, missing or changed files, conflicting statuses and unsafe references fail explicitly.
+- Run IDs belong to one invocation. An opaque `writerId` ties heartbeat, result, error and interruption writes together; workflow wrappers share their inner command's owner. Another invocation, including one reusing a completed or legacy ID, must choose a new ID. Late writes by the same owner preserve the first terminal state. Record/result writes hold a per-run OS lock and use unique 0600 temporary files, file synchronization and atomic replacement (directory synchronization on POSIX). SIGTERM/SIGHUP during a write is handled after the lock is released. The index commits immutable result/lane revisions only after checksum validation; a crash can leave unreferenced files, which are preserved. No automatic takeover is allowed.
 - Reflection history distinguishes missing files from unreadable, malformed or wrong-shaped records. Damaged history is preserved and updates fail with backup/manual-recovery guidance; passive reflection failure warns while leaving the completed model result usable. Explicit reflection commands return an error. Back up the affected file before any manual repair; the helper does not reconstruct or quarantine it automatically. Existing lock/temporary files are not treated as evidence that history can be discarded.
 - `runs reflections --run-id <id>` filters records to one run and `--verify-verdict confirmed|rejected|partially_confirmed` records a maintainer verdict on that run's review (requires `--run-id`); the verdict is shown in recent-records output.
 - The helper emits a cost-awareness hint to stderr when a quota/paid-tier model is selected and free alternatives of similar quality are available. Use `--model <free-alias>` to switch.
@@ -247,7 +248,10 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - `--model-free` — Expand the explicit free-lane preset (`nemotron-ultra`, `poolside`, `gemma-4`, `nemotron-super`) as the panel/workflow lane list. Shell convenience only: requested identities stay visible in logs and run manifests, no automatic routing, and combining it with `--model` fails closed.
 - `--auto-route` — Automatically pick the cheapest adequate model based on diff size and file risk. Small diffs use flash-3.8, medium use sonnet, large or high-risk files use opus. Only activates when `--model` is not explicitly passed.
 - `--budget <cost>` — Maximum estimated cost for a run. Admission happens before each chunk/synthesis/lane/judge call; refused work is marked not-sent. Cost is in arbitrary units (not real USD), with estimated ceilings, observed usage, and unknown-usage markers kept separate.
-- `--no-verify` — Skip evidence-linked verification of findings (syntax, secrets, eslint checks on referenced files).
+- `--no-verify` — Skip all finding file checks. Default checks parse Python bytes to AST without execution/bytecode and scan supported text for credential patterns; source input is capped at 512 KiB. A finding's `verify` string is never executed.
+- `--check-profile eslint` — Explicitly opt into an already-installed trusted ESLint tool and project configuration. The profile prefers the local version, sends the captured file bytes on stdin with an explicit workspace cwd, uses no fix/cache behavior, and redirects the cache location to a temporary directory to preserve an existing project cache. It never invokes package installers. Project config/plugins are executable operator-trusted code; this profile is not a sandbox. It cannot be combined with `--no-verify`.
+- Checks return `passed`, `failed`, `skipped`, or `error` with a reason, check ID, captured file SHA-256, cwd, command, duration and bounded redacted output. Duplicate file/hash/profile checks are reused within one batch. Missing/ignored files or tools, syntax errors, configuration/internal errors and timeouts are distinct. External waits are 15 seconds, with bounded termination/drain waits. Windows checker code starts only after an isolated wrapper joins a kill-on-close Job Object; closing the job terminates its inherited subprocess tree after completion or timeout. If job control cannot be established, the checker is not started; output capture is capped at 16 KiB and redacted previews at 2,000 characters. Overflow output is omitted in full, never exposed as a cut credential prefix.
+- Check records describe the captured file snapshot and tool invocation. ESLint configuration uses project auto-discovery; its effective tool/config fingerprints are explicitly unknown. ESLint IDs include those unknown markers and a fresh observation ID, are scoped to one invocation, and declare `comparableAcrossRuns=false`; do not infer unchanged tool/config from matching file hashes or command paths. Duplicate checks within one batch still share that observation. Findings retain their original model evidence and an unverified claim verdict. A syntax/lint pass or failure does not verify a semantic claim. Live JSON/full saved output contains detailed checks; summary retention keeps counts and `checksRetained=false` instead of partially clipped typed check records.
 - `--no-anonymize` — Preserve original model names and lane order in judge synthesis (default: anonymize and shuffle).
 - `--required-file <path>` — Require every chunk for these paths to be sent; repeatable and fail-closed when the cap cannot cover them.
 - `--min-providers <N>` — Require successful lanes from at least N distinct actual providers before panel judging.
@@ -256,7 +260,7 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 
 ## Agent Execution Pattern
 
-**anti.py runs synchronously.** Every command (`consult`, `review`, `plan`, `panel`, `workflow`) blocks until the API response arrives and prints the result directly to stdout. With `--save-output summary` or `--save-output full`, it also writes a stable result artifact at `resultPath` (`~/.codex/anti-runs/<runId>/result.json`) for retrieval after a long run. Summary artifacts contain bounded previews; only full mode provides the detailed saved result.
+**anti.py runs synchronously.** Every command (`consult`, `review`, `plan`, `panel`, `workflow`) blocks until the API response arrives and prints the result directly to stdout. With `--save-output summary` or `--save-output full`, it also writes a revision-specific result artifact at the run index's `resultPath` (`~/.codex/anti-runs/<runId>/revisions/<revision>/result.json`) for retrieval after a long run. Summary artifacts contain bounded previews; only full mode provides the detailed saved result.
 
 ### Correct pattern for Codex agents
 
@@ -267,7 +271,8 @@ exec_command(
   yield_time_ms=120000  # 2 minutes for consults; 300s for panels/reviews
 )
 # Read the result from stdout — no file polling needed
-# For saved runs, read resultPath/result.json; summary mode contains bounded previews.
+# For saved runs, use runs show <runId> and follow its validated resultPath.
+# Summary mode contains bounded previews.
 ```
 
 ### What NOT to do
@@ -291,12 +296,12 @@ Panel findings use an enriched schema with provenance and dedup:
 - `severity` — critical, high, medium, low, or info
 - `confidence` — float 0.0-1.0 indicating model certainty
 - `file` / `line` — file path and line number when applicable
-- `evidence` — concrete evidence (test output, type error) or "unverified"
+- `evidence` — model-provided evidence or "unverified"; file-check observations are separate `checks` records
 - `verify` — a concrete local check Codex should run before acting
 - `lanes` — array of model identities that support this finding
 - `fingerprint` — sha256 hash for cross-lane dedup (same file+line+claim)
 - `sourceCommit` / `chunkId` / `laneId` — source and execution provenance when available
-- `verificationStatus` — `unverified` until the native agent confirms or rejects the claim; helper evidence does not promote it automatically
+- `verificationStatus` — `unverified` or `needs-runtime-check`; file checks never promote it. `claimVerdict` remains `unverified` until native evidence confirms or rejects the claim.
 
 Cross-lane dedup is automatic: when multiple lanes produce findings with the same fingerprint, they are merged (lanes combined, highest severity kept, confidence averaged).
 

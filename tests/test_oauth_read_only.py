@@ -56,7 +56,7 @@ def isolated_home(monkeypatch, tmp_path):
     response = MagicMock()
     response.status = 200
     response.__enter__.return_value = response
-    monkeypatch.setattr("urllib.request.urlopen", MagicMock(return_value=response))
+    monkeypatch.setattr("codex_antigravity_auth.cli.open_http_request", MagicMock(return_value=response))
     return home
 
 
