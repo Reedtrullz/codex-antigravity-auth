@@ -6,6 +6,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from .namespaces import gateway_home
 from typing import Any, Iterable
 
 from .constants import get_codex_home
@@ -17,7 +18,7 @@ _DEFAULT_GET_CODEX_HOME = get_codex_home
 def _codex_home_read_only() -> Path:
     if get_codex_home is not _DEFAULT_GET_CODEX_HOME:
         return get_codex_home()
-    return Path(os.path.expanduser("~/.codex"))
+    return gateway_home()
 
 REQUEST_LOG_FILE = "antigravity-requests.jsonl"
 REQUEST_LOG_MAX_BYTES = 10 * 1024 * 1024
