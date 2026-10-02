@@ -2362,7 +2362,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     cooldown_category=cooldown_category,
                 )
                 return codex_resp
-            except HTTPException:
+            except (HTTPException, RequestDeadlineExceeded, ClientDisconnect):
                 raise
             except Exception as e:
                 await run_nonstream_diagnostic(
@@ -2846,6 +2846,8 @@ async def create_openai_upstream_response(
             )
         try:
             terminal = await call_sync(_collect_openai_sse_terminal, res.content, display_model, request=codex_req)
+        except (RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception as exc:
             raise HTTPException(
                 status_code=502,
@@ -2884,6 +2886,8 @@ async def create_openai_upstream_response(
         )
     try:
         data = await call_sync(res.json)
+    except (RequestDeadlineExceeded, ClientDisconnect):
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=502,
