@@ -65,7 +65,7 @@ User-facing aliases → Google backend models (`models.py`):
 - `gemini-3.8-flash` → `gemini-3.8-flash-tiered` (current Flash generation)
 - `gemini-3.7-flash` → `gemini-3.7-flash-tiered` (supported Flash generation)
 - `gemini-3.1-pro` → `gemini-3.1-pro-low` (alias: `gemini-pro-agent` → `gemini-pro-agent`)
-- `gemini-3.1-flash-image` → `gemini-3.1-flash-image` (image generation)
+- `gemini-3.1-flash-image` → recognized backend ID; gateway generation is disabled until an image-output bridge exists.
 - `gemini-3.5-flash-high` → `gemini-3-flash-agent` (retired, backward compat)
 - `gemini-3.6-flash-high` → `gemini-3.7-flash-tiered` (backward compat)
 - `claude-sonnet-4-6` → `claude-sonnet-4-6` (alias: `claude-3.5-sonnet`)
