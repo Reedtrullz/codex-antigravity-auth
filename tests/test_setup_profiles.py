@@ -519,6 +519,7 @@ def test_config_read_rejects_content_change_during_capture(isolated, monkeypatch
     client, _state = isolated
     target = existing_config(client)
     native_fdopen = setup.os.fdopen
+    captured = []
     class ChangingRead:
         def __init__(self, stream): self.stream = stream
         def __enter__(self): return self
@@ -526,11 +527,13 @@ def test_config_read_rejects_content_change_during_capture(isolated, monkeypatch
         def fileno(self): return self.stream.fileno()
         def read(self, count):
             value = self.stream.read(count)
+            captured.append(True)
             target.write_bytes(ORIGINAL.encode() + b"# concurrent edit\n")
             return value
     monkeypatch.setattr(setup.os, "fdopen", lambda *a, **kw: ChangingRead(native_fdopen(*a, **kw)))
     with pytest.raises((setup.SetupError, ValueError, OSError)):
         setup._read_file(target)
+    assert captured, "The rejection must exercise an actual changing read"
 
 
 def test_journal_config_writer_never_follows_a_late_leaf_link(isolated, tmp_path, monkeypatch):
@@ -548,7 +551,7 @@ def test_journal_config_writer_never_follows_a_late_leaf_link(isolated, tmp_path
         return native_configure(args)
     monkeypatch.setattr(cli, "run_configure_codex", replace_then_configure)
     with pytest.raises((setup.SetupError, SystemExit)) as failure:
-        cli_setup.run_setup(options(write=True, json=True))
+        cli_setup.run_setup(options(write=True))
     assert external.read_text() == ORIGINAL
     assert target.is_symlink(), str(failure.value)
 
