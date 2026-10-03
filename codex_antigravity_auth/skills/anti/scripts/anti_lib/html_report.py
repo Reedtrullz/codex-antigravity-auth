@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import html
 import json
-from pathlib import PurePath, PureWindowsPath
+from pathlib import PurePosixPath, PureWindowsPath
 
 from .redaction import redact_sensitive_text, sanitize_json
 from .reports import validate_report
@@ -58,7 +58,7 @@ def _display(value):
         if isinstance(item,dict):
             return {key:('<local path omitted>' if key in {'cwd','repo','workspace_root','resultPath','runRecordPath','rawLanePaths'}
                          else '<absolute path omitted>' if key in {'file','sourceFile','path'} and isinstance(child,str)
-                            and (PurePath(child).is_absolute() or PureWindowsPath(child).is_absolute())
+                            and (PurePosixPath(child).is_absolute() or bool(PureWindowsPath(child).anchor))
                          else locations(child, depth+1)) for key,child in item.items()}
         if isinstance(item,list):return [locations(child, depth+1) for child in item]
         return item

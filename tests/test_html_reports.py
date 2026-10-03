@@ -120,13 +120,24 @@ def test_every_model_html_url_and_command_is_inert_escaped_text(ui):
     assert any(tag=='meta' and attrs.get('http-equiv')=='Content-Security-Policy' and "default-src 'none'" in attrs['content'] for tag,attrs in doc.elements)
 
 
-def test_credentials_redacted_before_html_and_absolute_paths_omitted(ui):
+@pytest.mark.parametrize("location", [
+    "/private/sensitive/location.py",
+    "C:\\private\\sensitive\\location.py",
+    "\\\\fixture-server\\share\\private\\location.py",
+    "\\private\\sensitive\\location.py",
+    "C:private\\sensitive\\location.py",
+])
+def test_credentials_redacted_before_html_and_absolute_paths_omitted(ui,location):
     _,artifacts,renderer,_,_,_=ui
     view=renderer.from_publication(artifacts.read_publication(publication(ui)))
     view['output']='api_key=fixture-very-private-token-value'
-    view['findings'][0]['advisory'].update(file='/private/sensitive/location.py',evidence='password="fixture secret words"')
+    view['findings'][0]['advisory'].update(file=location,evidence='password="fixture secret words"')
+    control=view['findings'][0]
+    view['findings'].append({**control,'findingKey':'relative-control',
+        'advisory':{**control['advisory'],'file':'src/allowed-relative.py'}})
     text=renderer.render([view]);assert 'fixture-very-private-token-value' not in text and 'fixture secret words' not in text
-    assert '/private/sensitive/location.py' not in text and '&lt;absolute path omitted&gt;' in text
+    assert 'location.py' not in text and '&lt;absolute path omitted&gt;' in text
+    assert 'src/allowed-relative.py' in text
 
 
 def test_side_by_side_comparison_has_generated_ids_and_no_resolution_inference(ui,capsys):
