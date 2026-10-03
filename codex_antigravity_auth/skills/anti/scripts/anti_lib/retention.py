@@ -163,25 +163,15 @@ def lifecycle_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     """Allow only known numeric counters and fixed enums in never mode."""
     source = metadata if isinstance(metadata, dict) else {}
     result = control_metadata(source)
-    local = source.get('local_policy')
-    if isinstance(local, dict) and local.get('enabled') is True and local.get('destination_scope') == 'declared_loopback':
-        result['local_policy'] = {'enabled':True, 'destination_scope':'declared_loopback',
-                                  'third_party_network_behavior':'not_attested'}
-        digest = local.get('profile_sha256')
-        if digest is None:
-            result['local_policy']['profile_sha256'] = None
-        elif isinstance(digest,str) and re.fullmatch(r'[0-9a-f]{64}',digest):
-            result['local_policy']['profile_sha256'] = digest
     policy = audit_projection(source.get("dataPolicy"))
     if policy is not None:
         result["dataPolicy"] = policy
-    for key in ("prompt_chars", "output_chars", "omitted_file_count", "omitted_chunk_count", "finding_count", "attempt_count", "panel_lane_count", "judge_attempt_count", "consult_attempt_count", "completed_chunk_count", "failed_chunk_count", "not_sent_chunk_count"):
+    for key in ("prompt_chars", "output_chars", "omitted_file_count", "omitted_chunk_count", "finding_count", "attempt_count", "panel_lane_count", "judge_attempt_count"):
         value = source.get(key)
         if type(value) is int and 0 <= value <= 2**63 - 1:
             result[key] = value
     for key, choices in {
         "synthesis_status": {"not_sent", "failed", "success", "truncated", "empty", "non_answer"},
-        "retry_disposition": {"not_applicable", "attempted", "succeeded", "exhausted"},
         "runStatus": {"running", "success", "partial", "failed", "interrupted"},
         "scope_status": {"complete", "incomplete", "partial"},
         "scopeStatus": {"complete", "incomplete", "partial"},

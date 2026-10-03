@@ -203,6 +203,21 @@ def test_panel_judge_expiry_preserves_partial_lane_record_without_raw_never_data
     assert 'private-fixture' not in json.dumps(record)
 
 
+def test_lifecycle_controls_retain_only_bounded_content_free_fields(anti):
+    projected = anti.lifecycle_metadata({
+        'run_control': {'attempts_started': 3, 'deferred_calls': True,
+                        'elapsed_seconds': float('nan'), 'remaining_seconds': 0,
+                        'scope': 'process_local', 'events': [{'model': 'private-fixture'}]},
+        'panel_lane_count': 2, 'judge_attempt_count': 1, 'synthesis_status': 'not_sent',
+        'panel_results': [{'output': 'private-fixture'}],
+    })
+    assert projected == {
+        'run_control': {'eventsRetained': False, 'attempts_started': 3,
+                        'remaining_seconds': 0, 'scope': 'process_local'},
+        'panel_lane_count': 2, 'judge_attempt_count': 1, 'synthesis_status': 'not_sent',
+    }
+
+
 
 def test_chunk_deadline_preserves_completed_coverage_and_counts_unsent_chunk(anti, monkeypatch):
     settings=anti.build_parser().parse_args(['review','--scope','files','--max-prompt-chars','1200',
@@ -284,7 +299,7 @@ def test_terminal_failures_preserve_submitted_attempt_evidence(anti,monkeypatch,
     assert settings._run_control.snapshot()['permits_released']==1
 
 
-@pytest.mark.parametrize('preparation', ['context','json','request'])
+@pytest.mark.parametrize('preparation', ['json','request','opener'])
 def test_preparation_expiry_never_enters_transport_or_marks_submitted(anti,monkeypatch,preparation):
     settings=args(anti, fallback_model=None, budget=1)
     clock=[0.0]
@@ -300,18 +315,17 @@ def test_preparation_expiry_never_enters_transport_or_marks_submitted(anti,monke
             result=encode(value,*values,**kwargs)
             if isinstance(value,dict) and value.get('input')=='fixture':clock[0]=2
             return result
-        request_json=anti.request_json
-        def encoding_at_transport(*values,**kwargs):
-            # Expire while encoding the submitted body, after context assessment.
-            with monkeypatch.context() as scope:
-                scope.setattr(anti.json,'dumps',expire)
-                return request_json(*values,**kwargs)
-        monkeypatch.setattr(anti,'request_json',encoding_at_transport)
-    else:
+        monkeypatch.setattr(anti.json,'dumps',expire)
+    elif preparation=='request':
         request=anti.urllib.request.Request
         def expire(*values,**kwargs):
             result=request(*values,**kwargs);clock[0]=2;return result
         monkeypatch.setattr(anti.urllib.request,'Request',expire)
+    else:
+        def expire(*handlers):
+            clock[0]=2
+            return argparse.Namespace(open=lambda *a,**k:pytest.fail('no late POST'))
+        monkeypatch.setattr(anti.urllib.request,'build_opener',expire)
     monkeypatch.setattr(anti.urllib.request,'urlopen',lambda *a,**k:pytest.fail('no late POST'))
     with pytest.raises(anti.RunDeadlineExceeded) as caught:
         anti.generate_with_fallback(settings,model='claude-sonnet-4-6',prompt='fixture',max_output_tokens=32,
@@ -378,12 +392,10 @@ def test_deferred_judge_retry_retains_first_judge_evidence_per_policy(anti,monke
                       '--save-output',retention,'--no-progress'])==1
     assert len(calls)==3
     record=json.loads((tmp_path/'runs/judge-retry.json').read_text())
-    if retention=='full':
-        assert len(record['metadata']['judge_attempts'])==1
-    else:
-        assert record['metadata']['judge_attempt_count']==1
+    assert record['metadata']['judge_attempt_count']==1
     assert record['metadata']['synthesis_status']=='not_sent'
     if retention=='full':
+        assert len(record['metadata']['judge_attempts'])==1
         judges=[entry for entry in record['execution_ledger'] if entry['stage']=='panel_judge_1']
         assert len(judges)==1 and judges[0]['output'].startswith('first-judge-private-fixture')
         assert judges[0]['generation']['submitted'] is True

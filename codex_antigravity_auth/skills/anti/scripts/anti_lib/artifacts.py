@@ -5,18 +5,19 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
-import stat
 from typing import Any
 
 from .cleanup import RUN_ID_RE
 from .persistence import PersistenceError
 from .retention import lifecycle_metadata
 from .data_policy import audit_projection
+from .inventory import read_path
 
 RECORD_SCHEMA_VERSION = 1
 SAVED_RESULT_SCHEMA_VERSION = 2
 LANE_SCHEMA_VERSION = 1
 MAX_LANES = 10000
+MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 STATES = {"running", "success", "partial", "error", "failed", "interrupted"}
 SCOPES = {"complete", "partial"}
 VERIFICATION_STATES = {"not_run", "completed_no_evidence", "tool_checks", "unknown"}
@@ -43,13 +44,16 @@ def _object(raw: bytes) -> dict[str, Any]:
 
 
 def _bytes(path: Path) -> bytes:
-    try:
-        _require(not path.is_symlink() and stat.S_ISREG(path.stat().st_mode), "Artifact must be a regular file", "invalid_reference")
-        return path.read_bytes()
-    except FileNotFoundError as exc:
-        raise ArtifactError("incomplete_publication", "A referenced artifact is missing") from exc
-    except OSError as exc:
-        raise ArtifactError("unreadable_artifact", "A referenced artifact cannot be read") from exc
+    raw, _size, reason = read_path(path, max_file_bytes=MAX_ARTIFACT_BYTES)
+    if reason == "missing":
+        raise ArtifactError("incomplete_publication", "A referenced artifact is missing")
+    if reason in {"symlink", "special_file"}:
+        raise ArtifactError("invalid_reference", "Artifact must be a regular file without symlinks")
+    if reason == "file_byte_limit":
+        raise ArtifactError("artifact_too_large", "Artifact exceeds its bounded read limit")
+    if reason is not None:
+        raise ArtifactError("unreadable_artifact", "A referenced artifact cannot be read safely")
+    return raw
 
 
 def _owned_path(root: Path, value: Any, run_id: str, *, relative: bool) -> Path:

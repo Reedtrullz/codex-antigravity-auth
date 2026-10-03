@@ -1,13 +1,15 @@
-from standalone import without_installed_packages
 """One synthetic credential corpus for the gateway and standalone Anti."""
 
 import json
 import logging
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 
 import pytest
+
+from standalone import without_installed_packages
 
 from codex_antigravity_auth import accounts, observability, redaction, server
 from codex_antigravity_auth.skills.anti.scripts.anti_lib import redaction as anti
@@ -107,7 +109,7 @@ def test_input_limits_replace_oversize_deep_cyclic_and_wide_data():
 
 def test_copied_standalone_helper_uses_same_corpus_without_site_packages(tmp_path):
     destination = tmp_path / "anti_lib"
-    shutil.copytree(core.__file__.rsplit("/", 1)[0], destination, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(Path(core.__file__).parent, destination, ignore=shutil.ignore_patterns("__pycache__"))
     code = """
 import json, sys
 sys.path.insert(0, sys.argv[1])
@@ -136,15 +138,10 @@ def test_mocked_errors_and_captured_account_logs_use_shared_policy(monkeypatch, 
     def failed_discovery(_):
         raise RuntimeError(error)
     monkeypatch.setattr("codex_antigravity_auth.oauth.discover_project_id", failed_discovery)
-    data = {"accounts": [{"email": "fixture@example.invalid", "refreshToken": "synthetic-refresh",
-                           "accessToken": "synthetic-old", "expiresAt": 0}], "activeIndex": 0}
-    monkeypatch.setattr(accounts, "load_accounts", lambda: data)
-    def update(mutation):
-        mutation(data)
-        return data
-    monkeypatch.setattr(accounts, "update_accounts", update)
-    manager = accounts.AccountManager()
+    account = {"email": "fixture@example.invalid", "refreshToken": "synthetic-refresh",
+               "accessToken": "expired", "expiresAt": 0}
+    monkeypatch.setattr(accounts, "update_accounts", lambda mutator: mutator({"accounts": [account]}))
     with caplog.at_level(logging.WARNING, logger=accounts.__name__):
-        assert manager._refresh_snapshot(dict(data["accounts"][0])) == "refreshed"
+        assert accounts.AccountManager()._refresh_snapshot(dict(account)) == "refreshed"
     assert "Project discovery failed" in caplog.text
     assert all(secret not in caplog.text for secret in forbidden)
