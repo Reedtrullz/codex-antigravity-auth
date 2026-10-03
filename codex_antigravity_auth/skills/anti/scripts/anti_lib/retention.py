@@ -167,15 +167,6 @@ def lifecycle_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     """Allow only known numeric counters and fixed enums in never mode."""
     source = metadata if isinstance(metadata, dict) else {}
     result = control_metadata(source)
-    local = source.get('local_policy')
-    if isinstance(local, dict) and local.get('enabled') is True and local.get('destination_scope') == 'declared_loopback':
-        result['local_policy'] = {'enabled':True, 'destination_scope':'declared_loopback',
-                                  'third_party_network_behavior':'not_attested'}
-        digest = local.get('profile_sha256')
-        if digest is None:
-            result['local_policy']['profile_sha256'] = None
-        elif isinstance(digest,str) and re.fullmatch(r'[0-9a-f]{64}',digest):
-            result['local_policy']['profile_sha256'] = digest
     policy = audit_projection(source.get("dataPolicy"))
     if policy is not None:
         result["dataPolicy"] = policy

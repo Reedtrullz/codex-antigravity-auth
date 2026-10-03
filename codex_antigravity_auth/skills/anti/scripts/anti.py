@@ -3,9 +3,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-from contextvars import ContextVar
-
 import contextvars
+from contextvars import ContextVar
 import concurrent.futures
 from collections import deque
 import email.utils
@@ -37,6 +36,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+from anti_lib.console import ConsoleArgumentParser, console_print as print
 from anti_lib.run_control import RunControl, DeadlineExceeded, CURRENT_RUN
 from anti_lib.spend_control import SpendControl, SpendRefused, AdmissionConfigError
 from anti_lib.capabilities import CapabilityRegistry
@@ -44,7 +44,6 @@ from anti_lib import local_policy as local_workflow
 from anti_lib.context_budget import assess as assess_context, calibration as context_calibration
 from anti_lib import checkpoints as chunk_checkpoints
 from anti_lib import media as image_attachments
-
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
     file_reference, read_record, validate_record, coverage_has_loss,
@@ -63,6 +62,7 @@ from anti_lib.context import (
 )
 
 from anti_lib import inventory as review_inventory
+from anti_lib import diff_snapshot
 from anti_lib.data_policy import DataPolicy, PolicyError
 from anti_lib.ledger import execution_entry, prompts_as_text
 from anti_lib.endpoint_policy import open_http_request, validate_endpoint_url
@@ -380,9 +380,11 @@ MAX_PROMPT_CHARS_HELP = (
     "Claude-family review/plan/panel calls still use the conservative safety budget with --chunked auto; "
     "--chunked off refuses any review scope that cannot fit exactly."
 )
-PID_FILE = Path.home() / ".codex" / "anti-gateway.pid"
-LOG_FILE = Path.home() / ".codex" / "anti-gateway.log"
-RUNS_DIR = Path.home() / ".codex" / "anti-runs"
+from anti_lib.namespaces import gateway_home, client_config_path
+
+PID_FILE = gateway_home() / "anti-gateway.pid"
+LOG_FILE = gateway_home() / "anti-gateway.log"
+RUNS_DIR = gateway_home() / "anti-runs"
 RUN_OUTPUT_PREVIEW_CHARS = 1600
 POST_FAILURE_MODEL_PROBE_TIMEOUT = 8.0
 FALLBACK_POLICIES = {"never", "on-retryable", "on-timeout"}
@@ -404,7 +406,9 @@ PANEL_LANE_INSTRUCTION = (
 PANEL_REVIEW_LANE_CONTRACT = (
     "Independent review lane contract: use only the supplied source context. "
     "Do not claim local verification, tool execution, file reads, or actions not present. "
-    "Do not generate code, patches, or implementation steps. Return concise findings and caveats only."
+    "Do not generate code, patches, or implementation steps. Return concise findings and caveats only. "
+    "For diff locations, report diffSide as old or new and use that side's path and line number; omitted diffSide means new. "
+    "A captured line is location evidence only, never proof of the finding."
 )
 
 # Phase 2: role-specific rubrics injected into panel lane prompts
@@ -686,6 +690,13 @@ def settle_spend(*, submitted, usage=None):
 
 def scheduling_metadata(metadata=None, control=None):
     metadata = dict(metadata or {})
+    for source, target in (
+        ('panel_results', 'panel_lane_count'),
+        ('judge_attempts', 'judge_attempt_count'),
+        ('consult_attempts', 'consult_attempt_count'),
+    ):
+        if isinstance(metadata.get(source), list):
+            metadata[target] = len(metadata[source])
     control = control or CURRENT_RUN.get()
     if control is not None:
         snapshot = control.snapshot()
@@ -697,8 +708,6 @@ def scheduling_metadata(metadata=None, control=None):
             metadata['local_policy'] = {'enabled':True, 'destination_scope':'declared_loopback',
                                         'profile_sha256':local.get('profile_sha256'),
                                         'third_party_network_behavior':'not_attested'}
-        for source, target in (('panel_results','panel_lane_count'),('judge_attempts','judge_attempt_count'),('consult_attempts','consult_attempt_count')):
-            if isinstance(metadata.get(source), list): metadata[target] = len(metadata[source])
         policy = getattr(control, 'spend_control', None)
         if policy is not None:
             metadata['admission_controls'] = policy.snapshot()
@@ -1427,7 +1436,7 @@ def transport_entry_timeout(method, timeout, *, payload=None, body=None, url=Non
         if policy is not None and policy.enabled:
             if not isinstance(payload, dict) or not isinstance(body, bytes) or type(payload.get('max_output_tokens')) is not int:
                 raise SpendAdmissionError('admission refused: request/output reservation is unknown')
-            suffix = '/local/responses' if getattr(control, 'local_policy', None) else '/responses'
+            suffix = '/local/responses' if isinstance(url, str) and url.endswith('/local/responses') else '/responses'
             gateway = url[:-len(suffix)] if isinstance(url, str) and url.endswith(suffix) else None
             ticket = policy.reserve(payload.get('model'), len(body), payload['max_output_tokens'], gateway=gateway)
             _SPEND_TICKET.set((policy, ticket, submitted_count))
@@ -1442,12 +1451,13 @@ def transport_entry_timeout(method, timeout, *, payload=None, body=None, url=Non
 
 
 def open_gateway_request(request, *, timeout, payload=None, body=None):
-    local = getattr(CURRENT_RUN.get(), 'local_policy', None)
-    if local is not None:
-        local_workflow.loopback_url(request.full_url)
-    return open_http_request(request, timeout=timeout, loopback_only=local is not None, before_open=lambda prepared, selected_timeout:
-        transport_entry_timeout(prepared.get_method(), selected_timeout, payload=payload, body=body,
-                                url=prepared.full_url))
+    return open_http_request(
+        request,
+        timeout=timeout,
+        before_open=lambda prepared, value: transport_entry_timeout(
+            prepared.get_method(), value, payload=payload, body=body, url=prepared.full_url,
+        ),
+    )
 
 
 def request_json(
@@ -2365,8 +2375,9 @@ def changed_paths(
     selected: list[str],
     *,
     rev_range: str | None = None,
+    enumerate_selected: bool = False,
 ) -> tuple[list[str], list[str]]:
-    if selected:
+    if selected and not enumerate_selected:
         return filter_paths(selected, root=root)
     diff_args: list[str]
     if scope == "staged":
@@ -2384,7 +2395,8 @@ def changed_paths(
         raise AntiError(f"unsupported review scope: {scope}")
     raw = run_git_bytes(
         root,
-        [*diff_args, "--no-ext-diff", "--no-textconv", "--name-status", "--diff-filter=ACMRTD", "-z"],
+        [*diff_args, "--no-ext-diff", "--no-textconv", "--name-status", "--diff-filter=ACMRTD", "-z",
+         *(["--", *(":(literal)" + path for path in selected)] if selected else [])],
     )
     fields = raw.split(b"\0")
     names: list[str] = []
@@ -2409,14 +2421,21 @@ def changed_paths(
 def diff_for_paths(root: Path, scope: str, paths: list[str], *, rev_range: str | None = None) -> str:
     if not paths or scope in {"files", "repository"}:
         return ""
+    options = ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+               "--full-index", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", "--submodule=short",
+               "--word-diff=none", "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= "]
     if scope == "staged":
-        return run_git(root, ["-c", "core.quotePath=false", "diff", "--cached", "--no-ext-diff", "--no-textconv", "--", *paths])
-    if scope == "diff":
+        options.append("--cached")
+    elif scope == "diff":
         if not rev_range:
             raise AntiError("--scope diff requires --base or --changed-files")
-        rev_range = validate_git_rev_range(rev_range, source="revision range")
-        return run_git(root, ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", rev_range, "--", *paths])
-    return run_git(root, ["-c", "core.quotePath=false", "diff", "HEAD", "--no-ext-diff", "--no-textconv", "--", *paths])
+        options.append(validate_git_rev_range(rev_range, source="revision range"))
+    else:
+        options.append("HEAD")
+    try:
+        return run_git_bytes(root, [*options, "--", *(":(literal)" + path for path in paths)]).decode("utf-8")
+    except UnicodeError:
+        raise AntiError("Git patch contains non-UTF-8 text; refusing replacement-based source evidence") from None
 
 
 def file_is_tracked(root: Path, rel_path: str) -> bool:
@@ -2624,7 +2643,13 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
         raise AntiError(str(exc)) from None
     policy_paths(args, root, [*paths, *excluded])
     diff_paths = [path for path in paths if path not in untracked_paths]
+    if selected and diff_paths and args.scope in {"working-tree", "staged", "diff"}:
+        # The current index cannot identify deleted or rename-old paths. Query
+        # the selected diff's names once instead of treating those paths as files.
+        changed, _ = changed_paths(root, args.scope, diff_paths, rev_range=rev_range, enumerate_selected=True)
+        known_tracked.update(changed)
     diff = diff_for_paths(root, args.scope, diff_paths, rev_range=rev_range)
+    captured_diff = diff_snapshot.capture(diff, diff_paths) if diff else None
     notes: list[str] = []
     file_texts: list[tuple[str, str]] = []
     file_records: list[dict[str, Any]] = []
@@ -2710,6 +2735,7 @@ def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
         "excluded": excluded,
         "diff": diff,
         "diff_paths": diff_paths,
+        "diff_snapshot": captured_diff,
         "file_texts": file_texts,
         "file_records": file_records,
         "source_commit": source_commit(root),
@@ -2764,6 +2790,9 @@ def assemble_review_prompt_from_context(
     metadata["sourceCommit"] = context.get("source_commit")
     metadata["workspace_root"] = context.get("workspace_root")
     metadata["declared_files"] = list(context.get("paths") or [])
+    if context.get("diff_snapshot") is not None:
+        metadata["diffSnapshot"] = diff_snapshot.summary(context["diff_snapshot"])
+        metadata["diff_ranges"] = [{"start":0, "end":metadata["diff_chars"], "chunkId":None}] if metadata["diff_chars"] else []
     if context.get("inventory") is not None:
         metadata["inventory"] = context["inventory"]
     if not metadata.get("status") == "incomplete" and context.get("diff"):
@@ -2959,7 +2988,9 @@ def build_review_chunk_prompts(
             omission_reasons=omission_reasons,
         )
         diff_parts = split_text_by_budget(diff, diff_budget)
+        diff_offset = 0
         for index, diff_part in enumerate(diff_parts, start=1):
+            diff_start, diff_offset = diff_offset, diff_offset + len(diff_part)
             label = f"diff part {index}/{len(diff_parts)}"
             scope_line = f"{context['scope_line']} ({label})"
             prompt, caveats, metadata = build_review_prompt(
@@ -2976,6 +3007,7 @@ def build_review_chunk_prompts(
             )
             metadata["chunk_kind"] = "diff"
             metadata["chunk_label"] = label
+            metadata["diff_ranges"] = [{"start":diff_start, "end":diff_offset}]
             if not prompt_fits(prompt, max_prompt_chars) or metadata.get("diff_truncated"):
                 metadata["diff_truncated"] = True
                 omitted_items.append(f"{label} (diff part exceeds {max_prompt_chars} chars)")
@@ -3127,6 +3159,8 @@ def build_review_chunk_prompts(
     metadata["sourceCommit"] = context.get("source_commit")
     metadata["declared_files"] = list(context.get("paths") or [])
     metadata["required_files"] = required
+    # Planning alone cannot certify which diff rows were submitted.
+    metadata["diff_ranges"] = []
     metadata["omission_reasons"] = omission_reasons
     if context.get("inventory") is not None:
         metadata["inventory"] = context["inventory"]
@@ -3573,8 +3607,13 @@ def run_chunked_review(
 
     def update_chunk_coverage() -> None:
         completed = sum(1 for item in chunk_generation if item.get("status") == "success")
-        failed = sum(1 for item in chunk_generation if item.get("status") != "success" and (item.get("submitted") is True or item.get("reused") is True))
-        attempted = sum(1 for item in chunk_generation if (item.get("submitted") is True or item.get("reused") is True))
+        failed = sum(1 for item in chunk_generation if item.get("status") != "success" and item.get("submitted") is True)
+        attempted = sum(1 for item in chunk_generation if item.get("submitted") is True)
+        chunk_metadata["diff_ranges"] = [
+            {**span, "chunkId":chunk.get("id")}
+            for generation, chunk in zip(chunk_generation, chunks) if generation.get("submitted") is True
+            for span in chunk.get("metadata", {}).get("diff_ranges", [])
+        ]
         for record in chunk_metadata.get("coverage", []):
             path = str(record.get("path") or "")
             if not path:
@@ -3657,6 +3696,7 @@ def run_chunked_review(
                     else "not_sent"
                 ),
                 "source_ranges": chunk.get("metadata", {}).get("source_ranges", {}),
+                "diff_ranges": chunk.get("metadata", {}).get("diff_ranges", []),
             }
             for index, chunk in enumerate(chunks, start=1)
         ]
@@ -3747,6 +3787,7 @@ def run_chunked_review(
             "included_items": list(chunk_metadata.get("included_items") or []),
             "coverage": [dict(record) for record in chunk_metadata.get("coverage", [])],
             "failure_diagnostics": bounded_failure_diagnostics(execution_ledger),
+            "_execution_ledger": execution_ledger,
             **overrides,
         }
 
@@ -3873,6 +3914,7 @@ def run_chunked_review(
         "included_items": chunk_metadata["included_items"],
         "coverage": chunk_metadata.get("coverage", []),
         "sourceCommit": chunk_metadata.get("sourceCommit"),
+        "diff_ranges": chunk_metadata.get("diff_ranges", []),
         "prompt_budget_chars": max_prompt_chars,
         **synthesis_metadata,
         "_execution_ledger": execution_ledger,
@@ -4796,8 +4838,48 @@ def strip_fenced_json_blocks(text: str) -> str:
     )
 
 
-def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
+_FINDING_STRING_LIMITS = {
+    "claim": 1600, "verify": 1200, "severity": 40, "id": 80,
+    "file": 500, "evidence": 2000, "sourceCommit": 128,
+    "chunkId": 160, "laneId": 160, "excerptSha256": 64, "scopeStatus": 40,
+}
+
+
+def finding_validation_error(value: Any) -> str | None:
     if not isinstance(value, dict):
+        return "finding must be an object"
+    for field in _FINDING_STRING_LIMITS:
+        raw = value.get(field)
+        if raw is not None and not isinstance(raw, str):
+            return f"{field} must be a string"
+    if not str(value.get("claim") or "").strip() or not str(value.get("verify") or "").strip():
+        return "claim and verify must be nonempty strings"
+    confidence = value.get("confidence", 0.5)
+    if type(confidence) not in (int, float):
+        return "confidence must be a finite number"
+    try:
+        if not math.isfinite(float(confidence)):
+            return "confidence must be a finite number"
+    except (ValueError, OverflowError):
+        return "confidence must be a finite number"
+    line = value.get("line")
+    if line is not None and (type(line) is not int or not 1 <= line <= 2_147_483_647):
+        return "line must be a positive integer at most 2147483647, or null"
+    lanes = value.get("lanes")
+    if lanes is not None and (not isinstance(lanes, list) or any(not isinstance(lane, str) for lane in lanes)):
+        return "lanes must be a list of strings"
+    return None
+
+
+def finding_was_truncated(value: dict[str, Any]) -> bool:
+    if any(len(redact_sensitive_text(value.get(field) or "").strip()) > limit for field, limit in _FINDING_STRING_LIMITS.items()):
+        return True
+    lanes = value.get("lanes") or []
+    return len(lanes) > 12 or any(len(redact_sensitive_text(lane).strip()) > 120 for lane in lanes)
+
+
+def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
+    if finding_validation_error(value):
         return None
     claim = clean_string(value.get("claim"), max_chars=1600)
     verify = clean_string(value.get("verify"), max_chars=1200)
@@ -4806,20 +4888,15 @@ def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
     severity = clean_string(value.get("severity"), max_chars=40).lower()
     if severity not in {"critical", "high", "medium", "low", "info"}:
         severity = "medium"
-    finding_id = clean_string(value.get("id"), max_chars=80) or f"F{index:03d}"
-    finding_id = re.sub(r"[^A-Za-z0-9_.:-]+", "-", finding_id).strip("-._:") or f"F{index:03d}"
-    lanes = clean_string_list(value.get("lanes"), max_items=12, max_chars=120)
-    # Phase 1: enriched findings schema
-    try:
-        confidence = float(value.get("confidence", 0.5))
-    except (TypeError, ValueError):
-        confidence = 0.5
-    confidence = max(0.0, min(1.0, confidence))
+    finding_id = clean_string(value.get("id"), max_chars=80)
+    finding_id = re.sub(r"[^A-Za-z0-9_.:-]+", "-", finding_id).strip("-._:")
+    lanes = sorted(set(clean_string_list(value.get("lanes"), max_items=12, max_chars=120)))
+    confidence = max(0.0, min(1.0, float(value.get("confidence", 0.5))))
     file_path = clean_string(value.get("file"), max_chars=500) or None
     line = value.get("line")
-    if isinstance(line, (int, float)) and line > 0:
-        line = int(line)
-    else:
+    # Coordinates are advisory: invalid values make the location unknown, but
+    # must not discard an otherwise usable finding or become fabricated lines.
+    if type(line) is not int or not 0 < line <= diff_snapshot.MAX_COORDINATE:
         line = None
     evidence = clean_string(value.get("evidence"), max_chars=2000) or "unverified"
     # Model-supplied verification labels are untrusted; only the local
@@ -4829,10 +4906,15 @@ def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
     if excerpt_sha256 and not re.fullmatch(r"[0-9a-f]{64}", excerpt_sha256):
         excerpt_sha256 = None
     # Build fingerprint for cross-lane dedup
-    fp_key = f"{file_path or ''}:{line or ''}:{claim.lower().strip()}"
+    full_file = redact_sensitive_text(value.get("file") or "").strip()
+    full_claim = redact_sensitive_text(value["claim"]).lower().strip()
+    fp_key = f"{full_file}:{line or ''}:{full_claim}"
+    side = value.get("diffSide", value.get("side"))
+    if side is not None and (not isinstance(side, str) or side not in {"old", "new"}): side = "unknown"
+    if side == "old": fp_key += ":old"
     fingerprint = "sha256:" + hashlib.sha256(fp_key.encode("utf-8")).hexdigest()[:16]
     return {
-        "id": finding_id,
+        "id": finding_id or "F-" + fingerprint.split(":", 1)[1],
         "claim": claim,
         "severity": severity,
         "lanes": lanes,
@@ -4840,6 +4922,7 @@ def normalize_finding_item(value: Any, index: int) -> dict[str, Any] | None:
         "confidence": confidence,
         "file": file_path,
         "line": line,
+        "diffSide": side,
         "evidence": evidence,
         "fingerprint": fingerprint,
         "sourceCommit": clean_string(value.get("sourceCommit"), max_chars=128) or None,
@@ -4887,37 +4970,42 @@ def parse_panel_findings(text: str) -> tuple[dict[str, Any] | None, str | None, 
     diagnostics["safe_structured"] = sanitize_json(parsed)
 
     findings: list[dict[str, Any]] = []
-    dropped = 0
+    invalid = 0
+    truncated = 0
+    diagnostics["finding_errors"] = []
     for index, item in enumerate(raw_findings, start=1):
-        normalized = normalize_finding_item(item, index)
+        error = finding_validation_error(item)
+        normalized = None if error else normalize_finding_item(item, index)
         if normalized is None:
-            dropped += 1
+            invalid += 1
+            if len(diagnostics["finding_errors"]) < 20:
+                diagnostics["finding_errors"].append({"index": index, "reason": error or "no usable claim or verification"})
         else:
+            truncated += int(finding_was_truncated(item))
             findings.append(normalized)
-    # Phase 1: dedup by fingerprint — merge lanes, keep highest severity, average confidence
-    if findings:
-        SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
-        deduped: dict[str, dict[str, Any]] = {}
-        for f in findings:
-            fp = f.get("fingerprint", "")
-            if fp in deduped:
-                existing = deduped[fp]
-                # merge lanes
-                for lane in f.get("lanes", []):
-                    if lane not in existing["lanes"]:
-                        existing["lanes"].append(lane)
-                # keep highest severity
-                if SEVERITY_ORDER.get(f["severity"], 0) > SEVERITY_ORDER.get(existing["severity"], 0):
-                    existing["severity"] = f["severity"]
-                # average confidence
-                existing["confidence"] = round((existing["confidence"] + f["confidence"]) / 2, 2)
-                # prefer non-default evidence
-                if f.get("evidence", "unverified") != "unverified":
-                    existing["evidence"] = f["evidence"]
-                dropped += 1
-            else:
-                deduped[fp] = f
-        findings = list(deduped.values())
+    diagnostics["finding_errors_omitted"] = invalid - len(diagnostics["finding_errors"])
+    # Merge each group once, with stable representative fields and a true mean.
+    # Confidence is model-reported, not a calibrated probability.
+    severity_order = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for finding in findings:
+        groups.setdefault(finding["fingerprint"], []).append(finding)
+    merged = len(findings) - len(groups)
+    findings = []
+    for fingerprint in sorted(groups):
+        group = sorted(groups[fingerprint], key=lambda item: json.dumps(item, sort_keys=True))
+        finding = dict(group[0])
+        finding["lanes"] = sorted({lane for item in group for lane in item["lanes"]})
+        finding["severity"] = max((item["severity"] for item in group), key=severity_order.get)
+        finding["confidence"] = round(math.fsum(item["confidence"] for item in group) / len(group), 2)
+        evidence = sorted({item["evidence"] for item in group if item["evidence"] != "unverified"})
+        finding["evidence"] = "\n".join(evidence) or "unverified"
+        if len(group) > 1:
+            # Retain distinct model-reported evidence/checks without claiming verification.
+            fields = ("evidence", "verify", "confidence", "lanes", "verificationStatus")
+            contributions = {json.dumps({field: item[field] for field in fields}, sort_keys=True) for item in group}
+            finding["corroboration"] = [json.loads(item) for item in sorted(contributions)]
+        findings.append(finding)
     parse_warning = None
     if diagnostics["repaired"]:
         parse_warning = (
@@ -4937,7 +5025,13 @@ def parse_panel_findings(text: str) -> tuple[dict[str, Any] | None, str | None, 
         "caveats": clean_string_list(parsed.get("caveats") or parsed.get("verification_caveats"), max_items=20, max_chars=700),
         "parse_warning": parse_warning,
         "findings_total": len(raw_findings),
-        "findings_dropped": dropped,
+        "findings_dropped": invalid,
+        "findings_invalid": invalid,
+        "findings_merged": merged,
+        "findings_truncated": truncated,
+        "confidence_kind": "model_reported",
+        "finding_errors": diagnostics["finding_errors"],
+        "finding_errors_omitted": diagnostics["finding_errors_omitted"],
     }
     return sanitize_json(contract), None, diagnostics
 
@@ -4964,6 +5058,7 @@ def enrich_finding_provenance(
     }
     context = metadata.get("_review_context")
     snapshot_texts = dict(context.get("file_texts") or []) if isinstance(context, dict) else {}
+    captured_diff = context.get("diff_snapshot") if isinstance(context, dict) else None
     actual_chunks: dict[str, list[tuple[str, int | None, int | None]]] = {}
     for chunk in metadata.get("chunk_prompts", []):
         if not isinstance(chunk, dict) or not chunk.get("id"):
@@ -4986,6 +5081,11 @@ def enrich_finding_provenance(
         if not isinstance(finding, dict):
             continue
         finding["excerptSha256"] = None
+        finding["sourceExcerpt"] = None
+        finding["excerptRedacted"] = False
+        finding["diffProvenance"] = None
+        finding["locationStatus"] = "unknown"
+        finding["locationReason"] = "outside_captured_source"
         finding["sourceCommit"] = source_commit
         finding["scopeStatus"] = scope
         lanes = finding.get("lanes") if isinstance(finding.get("lanes"), list) else []
@@ -5005,6 +5105,23 @@ def enrich_finding_provenance(
             finding["verificationStatus"] = "unverified"
         line = finding.get("line")
         rel_path = finding.get("file")
+        if isinstance(captured_diff, dict) and record.get("sourceKind") == "diff":
+            side = finding.get("diffSide") or "new"
+            location, reason = diff_snapshot.locate(captured_diff, rel_path, line, side, metadata.get("diff_ranges", []))
+            finding["diffSide"] = side
+            if location is None:
+                finding["line"] = None
+                finding["locationReason"] = reason
+            else:
+                excerpt = location.pop("excerpt")
+                finding["sourceExcerpt"] = redact_sensitive_text(excerpt)
+                finding["excerptRedacted"] = finding["sourceExcerpt"] != excerpt
+                finding["excerptSha256"] = location["excerptSha256"]
+                finding["chunkId"] = location["chunkId"]
+                finding["diffProvenance"] = location
+                finding["locationStatus"] = "mapped"
+                finding["locationReason"] = None
+            continue
         if isinstance(line, int) and line > 0 and isinstance(rel_path, str) and record:
             try:
                 text = snapshot_texts[rel_path]
@@ -5013,6 +5130,8 @@ def enrich_finding_provenance(
                 source_line = ""
             if source_line:
                 finding["excerptSha256"] = hashlib.sha256(source_line.encode("utf-8")).hexdigest()
+                finding["locationStatus"] = "mapped"
+                finding["locationReason"] = None
             else:
                 finding["line"] = None
         else:
@@ -5057,6 +5176,12 @@ def fallback_findings_contract(
             "parse_warning": parse_warning,
             "findings_total": None,
             "findings_dropped": None,
+            "findings_invalid": 0,
+            "findings_merged": 0,
+            "findings_truncated": 0,
+            "confidence_kind": "model_reported",
+            "finding_errors": [],
+            "finding_errors_omitted": 0,
         }
     )
 
@@ -5265,7 +5390,7 @@ def build_panel_synthesis_prompt(
         "source_metadata": {
             key: value
             for key, value in metadata.items()
-            if key not in {"_review_context", "_execution_ledger"}
+            if key not in {"_review_context", "_execution_ledger", "diffSnapshot", "diff_ranges"}
         },
         "source_caveats": caveats,
         "requested_output": output_mode,
@@ -5304,10 +5429,23 @@ def build_panel_synthesis_prompt(
             safe_structured = diagnostics.get("safe_structured")
             if isinstance(safe_structured, dict):
                 material["structuredOutput"] = safe_structured
+                # Keep full corroboration in the final contract, but do not
+                # repeat every duplicate's evidence twice beside the raw lane.
+                projection = []
+                for finding in findings:
+                    item = dict(finding)
+                    corroboration = item.pop("corroboration", None)
+                    if corroboration:
+                        item["corroboration_count"] = len(corroboration)
+                        item["evidence"] = "See structuredOutput.findings for all corroborating evidence and checks."
+                    projection.append(item)
+                material["findings"] = projection
             findings_dropped = int(parsed.get("findings_dropped") or 0)
-            if findings_dropped:
+            findings_truncated = int(parsed.get("findings_truncated") or 0)
+            if findings_dropped or findings_truncated:
                 normalization_warning = (
-                    f"{findings_dropped} finding item(s) were normalized out of Anti's final findings list; "
+                    f"{findings_dropped} invalid finding item(s) were normalized out and "
+                    f"{findings_truncated} finding item(s) were truncated in Anti's final findings list; "
                     "the complete redacted structured lane payload is preserved for judging."
                 )
                 material["structuredNormalizationWarnings"] = [normalization_warning]
@@ -5425,7 +5563,8 @@ def build_panel_synthesis_prompt(
                     "and never describe repeated fallback output as agreement."
                 ),
                 "Return one JSON object and no surrounding prose. The object must contain: summary (string), disagreements (array of strings), findings (array of objects), unverifiable (array of strings), recommended_next_actions (array of strings), and caveats (array of strings).",
-                "Each findings item must contain: id (stable short string), claim (specific claim), severity (critical|high|medium|low|info), lanes (array of model ids that support it), verify (a concrete local check Codex should run before acting), confidence (float 0.0-1.0 indicating how certain you are), file (path to the file if applicable), line (line number if applicable), and evidence (any concrete evidence like test output or type error, or 'unverified').",
+                "Each findings item must contain: id (stable short string), claim (specific claim), severity (critical|high|medium|low|info), lanes (array of model ids that support it), verify (a concrete local check Codex should run before acting), confidence (model-reported float 0.0-1.0, not a calibrated probability), file (path to the file if applicable), line (line number if applicable), and evidence (any concrete evidence like test output or type error, or 'unverified').",
+                "Diff locations use diffSide: old or new, with the original path and line on that side. Omitted diffSide means new. Do not guess a location outside the supplied hunk; use null instead.",
                 "Put speculative or externally dependent observations in unverifiable, not findings. Do not include secrets, credentials, raw account identifiers, or provider keys.",
                 "## Panel Manifest\n```json\n" + json.dumps(manifest, indent=2, sort_keys=True) + "\n```",
                 "## Source Prompt / Context\n" + source.strip(),
@@ -6262,6 +6401,8 @@ def maybe_summarize_panel_review(
         raise failure
     prompt_summary_metadata = dict(summary_metadata)
     prompt_summary_metadata.pop("_execution_ledger", None)
+    prompt_summary_metadata.pop("diffSnapshot", None)
+    prompt_summary_metadata.pop("diff_ranges", None)
     metadata = {
         **metadata,
         "panel_review_context": "chunked-summary",
@@ -6280,6 +6421,7 @@ def maybe_summarize_panel_review(
         "included_items", "omitted_files", "omitted_chunk_count", "planned_chunk_count",
         "completed_chunk_count", "failed_chunk_count", "chunk_count", "chunk_prompts",
         "chunk_generation", "sourceCommit",
+        "diff_ranges", "diffSnapshot",
     ):
         if key in summary_metadata:
             metadata[key] = summary_metadata[key]
@@ -6758,8 +6900,13 @@ def command_panel(args: argparse.Namespace) -> int:
     def run_judge(prompt: str, max_output_tokens: int) -> tuple[str, str, dict[str, Any]]:
         try:
             result = policy_generate(
-                args, stage="judge", model=judge_model, prompt=prompt, max_output_tokens=max_output_tokens,
-                model_ids=model_ids, purpose="panel judge",
+                args,
+                stage="judge",
+                model=judge_model,
+                prompt=prompt,
+                max_output_tokens=max_output_tokens,
+                model_ids=model_ids,
+                purpose="panel judge",
             )
         except AntiError as exc:
             exc.run_metadata = scheduling_metadata({**metadata, 'scope_status':'partial',
@@ -6872,10 +7019,10 @@ def command_panel(args: argparse.Namespace) -> int:
         parse_diagnostics.get("repaired")
         or parse_diagnostics.get("parse_error")
         or findings_caveat
-        or (isinstance(findings, dict) and findings.get("findings_dropped", 0))
+        or (isinstance(findings, dict) and (findings.get("findings_dropped", 0) or findings.get("findings_truncated", 0)))
     ):
         metadata["judge_input_status"] = "partial"
-        metadata["judge_input_loss_reason"] = "judge output was repaired, unparsable, or dropped findings"
+        metadata["judge_input_loss_reason"] = "judge output was repaired, unparsable, or lost finding content"
     metadata["judge_truncated"] = judge_truncated
     metadata["estimated_total"] = estimated_total
     metadata["estimated_cost"] = running_cost
@@ -8712,7 +8859,7 @@ def add_generation_control_args(
 
 
 def add_codex_config_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path")
+    parser.add_argument("--config", default=str(client_config_path()), help="Codex config path")
     parser.add_argument("--provider", default="antigravity", help="Codex provider id")
     parser.add_argument("--provider-name", default="Google Antigravity", help="Codex provider display name")
 
@@ -8734,7 +8881,7 @@ def command_local_profile(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Antigravity Opus/Sonnet sidecar helper for Codex")
+    parser = ConsoleArgumentParser(description="Antigravity Opus/Sonnet sidecar helper for Codex")
     sub = parser.add_subparsers(dest="command", required=True)
 
     panel = sub.add_parser(

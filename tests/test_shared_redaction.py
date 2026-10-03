@@ -1,13 +1,15 @@
-from standalone import without_installed_packages
 """One synthetic credential corpus for the gateway and standalone Anti."""
 
 import json
 import logging
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 
 import pytest
+
+from standalone import without_installed_packages
 
 from codex_antigravity_auth import accounts, observability, redaction, server
 from codex_antigravity_auth.skills.anti.scripts.anti_lib import redaction as anti
@@ -107,7 +109,7 @@ def test_input_limits_replace_oversize_deep_cyclic_and_wide_data():
 
 def test_copied_standalone_helper_uses_same_corpus_without_site_packages(tmp_path):
     destination = tmp_path / "anti_lib"
-    shutil.copytree(core.__file__.rsplit("/", 1)[0], destination, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(Path(core.__file__).parent, destination, ignore=shutil.ignore_patterns("__pycache__"))
     code = """
 import json, sys
 sys.path.insert(0, sys.argv[1])

@@ -1,3 +1,4 @@
+from .console import console_print as print
 import logging
 import copy
 import math
@@ -6,8 +7,9 @@ import time
 from typing import Any, Callable
 
 from .account_state import AccountState, scoped_cooldown_expiry
-from .oauth import refresh_access_token, token_expires_in_seconds
+from .oauth import OAuthRefreshError, refresh_access_token, token_expires_in_seconds
 from .redaction import redact_secret_text
+from .process_logs import account_ref
 from .response_protocol import AttemptOutcome
 from .storage import (
     accounts_json_path_read_only,
@@ -42,12 +44,30 @@ _refresh_locks: dict[str, threading.Lock] = {}
 _refresh_locks_lock = threading.Lock()
 
 
+class AccountRefreshInProgress(RuntimeError):
+    """No eligible account is available while its refresh owner is active."""
+
+
 def _get_refresh_lock(email: str) -> threading.Lock:
     """Return a per-account lock for serializing token refresh attempts."""
     with _refresh_locks_lock:
         if email not in _refresh_locks:
             _refresh_locks[email] = threading.Lock()
         return _refresh_locks[email]
+
+
+def _refresh_failure_outcome(exc: Exception) -> AttemptOutcome:
+    if isinstance(exc, OAuthRefreshError):
+        if exc.kind == "credential_rejected":
+            return AttemptOutcome(scope="account", category="auth")
+        if exc.kind == "reauth_required":
+            return AttemptOutcome(scope="account", category="auth", curable_auth=True)
+        if exc.kind == "throttle":
+            return AttemptOutcome(scope="account", category="rate_limit")
+        if exc.kind == "client_configuration":
+            return AttemptOutcome(scope="account", category="invalid_request")
+    # Untyped failures do not prove that a stored credential is invalid.
+    return AttemptOutcome(scope="account", category="transport")
 
 
 def _refresh_blocked(data: dict[str, Any], email: str) -> bool:
@@ -177,7 +197,7 @@ class AccountManager:
             if current is None or stopped():
                 return "changed"
 
-            failure = False
+            failure_outcome: AttemptOutcome | None = None
             try:
                 refreshed = refresh_access_token(current["refreshToken"])
                 token = refreshed["access_token"]
@@ -187,10 +207,12 @@ class AccountManager:
                     try:
                         from .oauth import discover_project_id
                         discovered_project = discover_project_id(token)
-                    except Exception:
-                        _log.warning("Project discovery failed during token refresh")
-            except Exception:
-                failure = True
+                        if discovered_project:
+                            _log.info("Discovered project for %s", account_ref(email))
+                    except Exception as exc:
+                        _log.warning("Project discovery failed for %s: %s", account_ref(email), type(exc).__name__)
+            except Exception as exc:
+                failure_outcome = _refresh_failure_outcome(exc)
 
             if stopped():
                 return "stopped"
@@ -204,10 +226,10 @@ class AccountManager:
                             or not self._same_credentials(account, current)
                             or _refresh_blocked(data, email)):
                         return False
-                    if failure:
+                    if failure_outcome is not None:
                         self._sync_state_from_storage(data)
                         self._state_owner.apply_cooldown(
-                            email, family, AttemptOutcome(scope="account", category="auth"),
+                            email, family, failure_outcome,
                         )
                         result = "failed"
                     else:
@@ -229,6 +251,7 @@ class AccountManager:
         excluded: set[str] = set()
         attempted: dict[str, list[dict]] = {}
         refreshed_emails: set[str] = set()
+        refresh_in_progress = False
         while True:
             selected = None
             snapshot = None
@@ -293,6 +316,8 @@ class AccountManager:
                         return dirty
                 update_accounts(mutate)
             if selected is not None or snapshot is None:
+                if selected is None and refresh_in_progress:
+                    raise AccountRefreshInProgress()
                 return selected
             email = str(snapshot["email"])
             attempted.setdefault(email, []).append(snapshot)
@@ -300,6 +325,8 @@ class AccountManager:
             result = self._refresh_snapshot(snapshot, family=family)
             if result == "refreshed":
                 refreshed_emails.add(email)
+            if result == "busy":
+                refresh_in_progress = True
             if result in {"busy", "failed", "stopped"}:
                 excluded.add(email)
 
@@ -353,10 +380,8 @@ class AccountManager:
                 duration = state.apply_cooldown(email, family, outcome)
 
             self._mutate_state(mutation)
-            print(
-                f"[*] Account {email} flagged as cooling down for {duration}s. "
-                f"Reason: {redact_secret_text(reason)}"
-            )
+            _log.warning("Account %s cooling down for %ss (scope=%s category=%s)",
+                         account_ref(email), duration, outcome.scope, outcome.category)
 
     def record_attempt(
         self,

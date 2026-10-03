@@ -129,14 +129,17 @@ def collect(root: Path, *, roots=(), exclusions=(), include_untracked=False, sel
                         'package_roots':packages, 'inventory_complete':True}
 
 
-def read_file(root: Path, rel: str, budget: int):
+def read_file(root: Path, rel: str, budget: int, *, max_file_bytes: int | None = None):
     """Read only regular files, with bounded bytes and path identity rechecks."""
+    limit = MAX_FILE_BYTES if max_file_bytes is None else max_file_bytes
+    if type(limit) is not int or limit < 0 or type(budget) is not int or budget < 0:
+        return None, 0, 'invalid_byte_limit'
     kind = path_kind(root, rel)
     if kind != 'file': return None, 0, kind
     path = root / rel
     try:
         before = path.lstat()
-        if before.st_size > MAX_FILE_BYTES: return None, before.st_size, 'file_byte_limit'
+        if before.st_size > limit: return None, before.st_size, 'file_byte_limit'
         if before.st_size > budget: return None, before.st_size, 'total_byte_limit'
         flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
         with os.fdopen(_open_file(root, rel, flags), 'rb') as stream:
@@ -144,16 +147,34 @@ def read_file(root: Path, rel: str, budget: int):
             if not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
                 return None, before.st_size, 'changed_during_read'
             if path_kind(root, rel) != 'file': return None, before.st_size, 'changed_during_read'
-            raw = stream.read(min(MAX_FILE_BYTES, budget) + 1)
+            raw = stream.read(min(limit, budget) + 1)
             after = os.fstat(stream.fileno())
         final = path.lstat()
-        identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-        if identity(before) != identity(after) or identity(after) != identity(final):
+        # Windows Python 3.12 lstat reports creation time as ctime while
+        # fstat reports metadata-change time. Compare like timestamps across
+        # APIs, retaining each API's ctime check across the captured read.
+        identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+                                getattr(info, 'st_birthtime_ns', info.st_ctime_ns) if os.name == 'nt' else info.st_ctime_ns)
+        if (identity(before) != identity(opened) or identity(opened) != identity(after)
+                or identity(after) != identity(final) or before.st_ctime_ns != final.st_ctime_ns
+                or opened.st_ctime_ns != after.st_ctime_ns):
             return None, before.st_size, 'changed_during_read'
-        if len(raw) > min(MAX_FILE_BYTES, budget): return None, len(raw), 'source_byte_limit'
+        if len(raw) > min(limit, budget): return None, len(raw), 'source_byte_limit'
         return raw, len(raw), None
     except OSError:
         return None, 0, 'unreadable'
+
+
+def read_path(path: Path, *, max_file_bytes: int | None = None):
+    """Capture an absolute or relative path with the same bounded no-follow checks."""
+    limit = MAX_FILE_BYTES if max_file_bytes is None else max_file_bytes
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    root = Path(absolute.anchor)
+    try:
+        rel = absolute.relative_to(root).as_posix()
+    except ValueError:
+        return None, 0, 'unreadable'
+    return read_file(root, rel, limit, max_file_bytes=limit)
 
 
 def _open_file(root: Path, rel: str, flags: int):

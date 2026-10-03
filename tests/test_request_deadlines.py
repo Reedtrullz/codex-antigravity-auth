@@ -173,6 +173,85 @@ def test_late_account_acquisition_is_released_without_dispatch(monkeypatch, setu
     asyncio.run(scenario())
 
 
+def test_refresh_in_progress_is_retryable_and_logged_without_a_lease(monkeypatch, setup_route):
+    state = setup_route("google")
+
+    async def acquire(*_args):
+        raise server.AccountRefreshInProgress()
+
+    monkeypatch.setattr(server, "acquire_active_account_for_request", acquire)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(server.create_response(Request("google")))
+
+    assert caught.value.status_code == 503
+    assert caught.value.headers["Retry-After"] == "1"
+    assert state.release.await_count == 0
+    assert state.records[-1]["http_status"] == 503
+    assert state.records[-1]["error_class"] == "account_refresh_in_progress"
+
+
+@pytest.mark.parametrize("seam,route", [
+    ("google_json", "google"),
+    ("google_parse", "google"),
+    ("openai_oauth_sse", "openai_oauth"),
+    ("openai_json", "openai"),
+])
+@pytest.mark.parametrize(
+    "failure_type,reason",
+    [(budgets.RequestDeadlineExceeded, "deadline"), (ClientDisconnect, "disconnect")],
+    ids=["deadline", "disconnect"],
+)
+def test_sync_decode_and_translation_failures_keep_outer_deadline_or_disconnect(
+    monkeypatch, setup_route, seam, route, failure_type, reason,
+):
+    state = setup_route(route, timeout=0.2)
+    response = success_response(route)
+    clients = []
+
+    class Client:
+        def __init__(self, **_kwargs):
+            self.closed = 0
+            clients.append(self)
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            self.closed += 1
+        async def post(self, *_args, **_kwargs):
+            return response
+
+    def fail(*_args, **_kwargs):
+        raise failure_type()
+
+    monkeypatch.setattr(server.httpx, "AsyncClient", Client)
+    if seam in {"google_json", "openai_json"}:
+        monkeypatch.setattr(response, "json", fail)
+    elif seam == "google_parse":
+        monkeypatch.setattr(server.GoogleTransport, "parse_response", fail)
+    else:
+        monkeypatch.setattr(server, "_collect_openai_sse_terminal", fail)
+
+    if reason == "deadline":
+        with pytest.raises(HTTPException) as caught:
+            asyncio.run(server.create_response(Request(route)))
+        assert caught.value.status_code == 504
+        expected_error = "request_deadline_exceeded"
+    else:
+        with pytest.raises(ClientDisconnect):
+            asyncio.run(server.create_response(Request(route)))
+        expected_error = "cancelled"
+
+    assert clients and all(client.closed == 1 for client in clients)
+    assert state.release.await_count == (1 if route == "google" else 0)
+    terminal = [row for row in state.records if row["lifecycle_phase"] == "terminal"]
+    assert len(terminal) == 1
+    assert terminal[0]["error_class"] == expected_error
+    assert terminal[0]["status"] == ("failed" if reason == "deadline" else "cancelled")
+    if reason == "deadline":
+        assert terminal[0]["http_status"] == 504
+    else:
+        assert terminal[0]["cancelled"] is True
+
+
 @pytest.mark.parametrize("phase", ["idle", "total"])
 def test_stream_event_idle_and_total_policies_fail_once_without_replay(monkeypatch, phase):
     monkeypatch.setattr(budgets, "DRAIN_SECONDS", 0.01)

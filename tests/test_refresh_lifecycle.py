@@ -68,6 +68,33 @@ def test_delayed_foreground_allows_healthy_selection_and_removal(pool, monkeypat
     assert data["accountState"]["cooldowns"] == {}
 
 
+def test_only_expiring_account_reports_refresh_in_progress(pool):
+    data, _update = pool
+    data["accounts"] = data["accounts"][:1]
+    email = data["accounts"][0]["email"]
+    lock = accounts._get_refresh_lock(email)
+    entered, release = threading.Event(), threading.Event()
+
+    def background_refresh_owner():
+        with lock:
+            entered.set()
+            assert release.wait(2)
+
+    owner = threading.Thread(target=background_refresh_owner)
+    owner.start()
+    try:
+        assert entered.wait(1)
+        manager = accounts.AccountManager()
+        with pytest.raises(accounts.AccountRefreshInProgress):
+            manager.acquire_account("gemini-3.8-flash")
+        assert manager.in_flight_count(email) == 0
+        assert data["accountState"]["cooldowns"] == {}
+    finally:
+        release.set()
+        owner.join(timeout=2)
+    assert not owner.is_alive()
+
+
 @pytest.mark.parametrize("background_first", [False, True])
 def test_refresh_single_flight_across_managers_and_foreground_background(pool, monkeypatch, background_first):
     data, _update = pool

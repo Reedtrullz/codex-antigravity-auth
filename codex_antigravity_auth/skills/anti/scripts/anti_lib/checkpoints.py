@@ -7,12 +7,12 @@ import math
 import os
 from pathlib import Path
 import re
-import stat
 import uuid
 
 from .artifacts import validate_record, RECORD_SCHEMA_VERSION, ArtifactError
 from .cleanup import RUN_ID_RE, TERMINAL_STATES, assert_not_deleted
 from .errors import AntiError
+from .inventory import read_path
 from .persistence import atomic_write_json, file_lock, fsync_directory
 from .redaction import sanitize_json
 from .retention import control_metadata
@@ -49,13 +49,14 @@ def require(condition, message):
 
 
 def read_json(path):
-    require(not path.is_symlink(), 'Checkpoint path is a symlink; preserve it for inspection')
+    raw, _size, reason = read_path(path, max_file_bytes=MAX_FILE_BYTES)
+    if reason == 'symlink':
+        require(False, 'Checkpoint path is a symlink; preserve it for inspection')
+    if reason == 'file_byte_limit':
+        require(False, 'Checkpoint exceeds its file limit')
+    if reason is not None:
+        raise CheckpointError('Checkpoint is missing or invalid; preserve the original run')
     try:
-        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
-        with os.fdopen(os.open(path, flags), 'rb') as handle:
-            require(stat.S_ISREG(os.fstat(handle.fileno()).st_mode), 'Checkpoint must be a regular file')
-            raw = handle.read(MAX_FILE_BYTES + 1)
-        require(len(raw) <= MAX_FILE_BYTES, 'Checkpoint exceeds its file limit')
         return json.loads(raw), raw
     except (OSError, ValueError, RecursionError) as exc:
         raise CheckpointError('Checkpoint is missing or invalid; preserve the original run') from exc
