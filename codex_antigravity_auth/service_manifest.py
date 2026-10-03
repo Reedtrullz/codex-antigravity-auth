@@ -127,8 +127,24 @@ def reference_stat(value):
     path = value.get('opEnvFile')
     if not path:
         return None
-    info = Path(path).stat()
-    return {'size': info.st_size, 'mtimeNs': info.st_mtime_ns}
+    from .setup_profiles import SetupError, _read_file
+    path = Path(path).absolute()
+    before = path.lstat()
+    try:
+        raw = _read_file(path, limit=MAX_BYTES)
+    except SetupError:
+        raise ValueError('Unsafe or unstable environment reference') from None
+    if raw is None:
+        raise FileNotFoundError('Environment reference disappeared during capture')
+    after = path.lstat()
+    identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    # The reader anchors parents and verifies owner, single-link identity and
+    # stable bytes. Recheck the path so the retained mtime describes those bytes;
+    # compare path stats only, preserving Windows' distinct fstat ctime semantics.
+    if identity(before) != identity(after) or len(raw) != after.st_size:
+        raise ValueError('Environment reference changed during capture')
+    return {'size': len(raw), 'mtimeNs': after.st_mtime_ns,
+            'sha256': hashlib.sha256(raw).hexdigest()}
 
 
 def new_manifest(value, platform, definition_hash, marker):
@@ -152,9 +168,14 @@ def validate(value):
     if not isinstance(value['definitionHash'], str) or not DIGEST.fullmatch(value['definitionHash']):
         raise ValueError('Malformed service definition hash')
     ref = value['referenceStat']
-    if ref is not None and (not isinstance(ref, dict) or set(ref) != {'size','mtimeNs'}
-                            or any(type(v) is not int or v < 0 for v in ref.values())):
-        raise ValueError('Malformed service reference metadata')
+    if ref is not None:
+        # Legacy metadata remains readable for explicit repair. It cannot match
+        # a current byte fingerprint, so inspection reports drift until repaired.
+        if (not isinstance(ref, dict) or set(ref) not in ({'size','mtimeNs'}, {'size','mtimeNs','sha256'})
+                or any(type(ref[key]) is not int or ref[key] < 0 for key in ('size','mtimeNs'))
+                or ref['size'] > MAX_BYTES
+                or ('sha256' in ref and (not isinstance(ref['sha256'], str) or not DIGEST.fullmatch(ref['sha256'])))):
+            raise ValueError('Malformed service reference metadata')
     if bool(value['settings']['opEnvFile']) != (ref is not None):
         raise ValueError('Incoherent service reference metadata')
     return value
