@@ -8874,6 +8874,27 @@ def add_inventory_args(parser):
     parser.add_argument("--exclude-path", action="append", help="Literal file or directory to exclude from repository inventory; repeatable")
 
 
+def command_benchmark(args: argparse.Namespace) -> int:
+    from anti_lib import benchmark
+    from anti_lib.reports import write_export
+    data = benchmark.corpus()
+    if args.benchmark_command == 'corpus':
+        result = data
+    elif args.benchmark_command == 'template':
+        result = benchmark.template(data)
+    else:
+        result = benchmark.evaluate(benchmark.read_json(args.replay), benchmark.read_json(args.adjudications), data)
+    text = json.dumps(result, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False)
+    if args.output:
+        try:
+            write_export(Path(args.output).expanduser(), text)
+        except OSError as exc:
+            raise AntiError('Cannot publish benchmark output; choose a new file in an existing directory') from exc
+    else:
+        print(text)
+    return (1 if result.get('status') == 'invalid' else 2 if result.get('status') == 'inconclusive' else 0)
+
+
 def command_local_profile(args: argparse.Namespace) -> int:
     value = local_workflow.profile(args.base_url,
         [resolve_model(model, default=model) for model in args.model],
@@ -9129,6 +9150,16 @@ def build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--dry-run", action="store_true")
     workflow.add_argument("prompt_parts", nargs="*")
     workflow.set_defaults(func=command_workflow)
+
+    benchmark_parser = sub.add_parser('benchmark', help='Offline controlled replay; never calls models or changes routing')
+    benchmark_sub = benchmark_parser.add_subparsers(dest='benchmark_command', required=True)
+    for operation in ('corpus', 'template', 'replay'):
+        operation_parser = benchmark_sub.add_parser(operation)
+        operation_parser.add_argument('--output', help='New local JSON output file; refuses existing paths (default: stdout)')
+        if operation == 'replay':
+            operation_parser.add_argument('--replay', required=True, help='Bounded version1 replay JSON; treated only as data')
+            operation_parser.add_argument('--adjudications', required=True, help='Separate explicit local evidence JSON; no model self-grading')
+        operation_parser.set_defaults(func=command_benchmark)
 
     runs = sub.add_parser("runs", help="List, show, or clean sanitized Anti run records")
     runs_sub = runs.add_subparsers(dest="runs_command", required=True)
