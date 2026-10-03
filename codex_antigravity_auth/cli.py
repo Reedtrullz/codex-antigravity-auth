@@ -1,3 +1,5 @@
+from .endpoint_policy import open_http_request, is_loopback_endpoint
+from .skills.anti.scripts.anti_lib.local_policy import environment_enabled as local_environment_enabled
 from .console import console_print as print
 from .console import ConsoleArgumentParser, safe_terminal_text
 import sys
@@ -5,11 +7,14 @@ import os
 import argparse
 import getpass
 import http.server
+from html import escape as html_escape
 import hashlib
 import math
 import re
 import shlex
 import socketserver
+import socket
+import threading
 import subprocess
 import time
 import json
@@ -20,6 +25,7 @@ import urllib.request
 from importlib import metadata as importlib_metadata
 from importlib.resources import as_file, files
 from pathlib import Path
+from .namespaces import client_config_path, client_skills_path, namespace_diagnostics, root_path
 from urllib.parse import parse_qs, urlparse
 from .byok import (
     PROVIDER_PRESETS,
@@ -102,7 +108,7 @@ DEFAULT_CODEX_SKILLS_DIR = "~/.codex/skills"
 BUNDLED_CODEX_SKILL_NAME = "anti"
 CODEX_PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 GATEWAY_PID_TEMPLATE = "antigravity-gateway-{port}.pid"
-GATEWAY_LOG_TEMPLATE = "antigravity-gateway-{port}.log"
+GATEWAY_LOG_TEMPLATE = "antigravity-process-logs/gateway-{port}.log"
 GATEWAY_READY_TIMEOUT_SECONDS = 10.0
 GATEWAY_READY_RETRY_INTERVAL_SECONDS = 0.25
 VERSION_CACHE_FILE = "antigravity-version-check.json"
@@ -111,6 +117,45 @@ PYPI_PROJECT_JSON_URL = "https://pypi.org/pypi/codex-antigravity-auth/json"
 
 
 class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
+    def handle(self):
+        # TCPServer.timeout only bounds accept(). Bound a connected client's
+        # whole request too, including partial headers or a slow byte stream.
+        deadline = getattr(self.server, "callback_deadline", None)
+        remaining = deadline - time.monotonic() if deadline is not None else 1.0
+        timeout = max(0.001, min(1.0, remaining))
+        self.connection.settimeout(timeout)
+        request_deadline = time.monotonic() + timeout
+        raw = self.rfile.raw
+        readinto = raw.readinto
+
+        def read_before_deadline(buffer):
+            remaining = request_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("OAuth callback request deadline exceeded")
+            self.connection.settimeout(min(1.0, remaining))
+            return readinto(buffer)
+
+        # Buffered readline may perform many receives as headers drip in.
+        # Recompute remaining time per receive rather than resetting an idle timeout.
+        raw.readinto = read_before_deadline
+        self._request_expired = False
+
+        def stop_request():
+            self._request_expired = True
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        timer = threading.Timer(timeout, stop_request)
+        timer.daemon = True
+        timer.start()
+        try:
+            super().handle()
+        finally:
+            timer.cancel()
+            timer.join()
+
     def log_message(self, format, *args):
         # Suppress logging of HTTP requests to keep CLI clean
         pass
@@ -121,57 +166,55 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        query = parse_qs(parsed.query)
+    def _page(self, status: int, title: str, message: str) -> None:
+        body = (
+            '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<title>{html_escape(title)}</title></head><body>'
+            f'<h1>{html_escape(title)}</h1><p>{html_escape(message)}</p></body></html>'
+        )
+        self._write_html(status, body.encode("utf-8"))
 
-        if "code" in query:
-            code = query["code"][0]
-            state = query.get("state", [None])[0]
-            expected_state_id = getattr(self.server, "expected_state_id", None)
-            if expected_state_id:
-                try:
-                    returned_state = decode_state(state or "")
-                except Exception:
-                    returned_state = {}
-                if returned_state.get("id") != expected_state_id:
-                    self._write_html(400, b"""
-                    <html>
-                    <head><style>body { font-family: sans-serif; text-align: center; margin-top: 50px; background-color: #f4f7f6; }</style></head>
-                    <body>
-                        <h1 style="color: #f44336;">Authentication Failed</h1>
-                        <p>The OAuth callback state did not match the active login attempt.</p>
-                    </body>
-                    </html>
-                    """)
-                    return
-            # Store globally on server to be grabbed by parent thread
-            self.server.auth_code = code
+    def do_GET(self):
+        deadline = getattr(self.server, "callback_deadline", None)
+        if self._request_expired or (deadline is not None and time.monotonic() >= deadline):
+            return
+        parsed = urlparse(self.path)
+        if parsed.path != "/oauth-callback":
+            self._page(404, "Not found", "Use the registered OAuth callback path.")
+            return
+        if self.server.auth_code is not None or self.server.auth_error is not None:
+            self._page(409, "Callback already received", "Return to the terminal for the login result.")
+            return
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        state_values = query.get("state", [])
+        state = state_values[0] if len(state_values) == 1 else ""
+        try:
+            returned_state = decode_state(state)
+        except Exception:
+            returned_state = {}
+        expected = self.server.expected_state_id
+        if not expected or returned_state.get("id") != expected:
+            self._page(400, "Authorization rejected", "The callback state did not match this login attempt.")
+            return
+        codes, errors = query.get("code", []), query.get("error", [])
+        if errors and not codes and len(errors) == 1 and errors[0]:
+            self.server.auth_error = errors[0][:200]
             self.server.auth_state = state
-            self._write_html(200, b"""
-            <html>
-            <head><style>body { font-family: sans-serif; text-align: center; margin-top: 50px; background-color: #f4f7f6; }</style></head>
-            <body>
-                <h1 style="color: #4caf50;">Authentication Successful!</h1>
-                <p>You can close this tab and return to the terminal.</p>
-            </body>
-            </html>
-            """)
-        else:
-            self._write_html(400, b"""
-            <html>
-            <head><style>body { font-family: sans-serif; text-align: center; margin-top: 50px; background-color: #f4f7f6; }</style></head>
-            <body>
-                <h1 style="color: #f44336;">Authentication Failed</h1>
-                <p>Could not retrieve authorization code.</p>
-            </body>
-            </html>
-            """)
+            self._page(200, "Authorization declined", "Login was not completed. Return to the terminal to retry.")
+            return
+        if len(codes) != 1 or not codes[0] or errors:
+            self._page(400, "Authorization rejected", "The callback must contain one authorization code or provider error.")
+            return
+        self.server.auth_code = codes[0]
+        self.server.auth_state = state
+        self._page(200, "Authorization received", "Return to the terminal. Sign-in completes after token exchange and account setup.")
 
 class OAuthServer(socketserver.TCPServer):
     allow_reuse_address = True
     auth_code = None
     auth_state = None
+    auth_error = None
     expected_state_id = None
 
 def normalize_epoch_seconds(value):
@@ -419,7 +462,7 @@ def verify_codex_skill(skill_path: Path) -> bool:
 def run_install_skill(args) -> None:
     try:
         action, destination, backup_path = install_codex_skill(
-            Path(os.path.expanduser(args.skill_dir)),
+            client_skills_path(args.skill_dir),
             force=args.force,
             dry_run=args.dry_run,
         )
@@ -455,6 +498,17 @@ def _confirm_account_mutation(prompt: str, *, yes: bool, non_interactive_error: 
 
 def run_accounts_command(args) -> None:
     action = getattr(args, "accounts_action", None) or "list"
+    if action == "explain":
+        from .account_diagnostics import account_eligibility_lines, account_eligibility_report
+        report = account_eligibility_report(args.model)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            for line in account_eligibility_lines(report):
+                print(line)
+        if not report["ok"]:
+            raise SystemExit(1)
+        return
     if action == "list":
         data = load_accounts()
         accounts = data.get("accounts", [])
@@ -506,7 +560,38 @@ def run_accounts_command(args) -> None:
     raise SystemExit(f"Unsupported accounts action: {action}")
 
 
+def run_model_observation_command(args) -> None:
+    from . import model_observations as observations
+    operation = args.models_command if args.command == "models" else args.provider_command
+    failed = False
+    try:
+        if operation == "explain":
+            result = observations.describe_model(args.id, base_url=args.base_url)
+        elif operation == "probe":
+            result = observations.probe(args.id, network=args.network, base_url=args.base_url,
+                token_env=args.gateway_token_env, timeout=args.timeout)
+            failed = not result["generationOk"]
+        elif operation == "discover":
+            result = observations.discover(args.provider, network=args.network, timeout=args.timeout)
+            failed = result["state"] == "invalid" or bool(args.network and result["record"]["status"] != "complete")
+        elif operation == "import-discovery":
+            result = observations.import_discovered(args.provider, args.model, write=args.write, accept_digest=args.accept_digest)
+        else:
+            result = observations.import_overlay(args.path, write=args.write, accept_digest=args.accept_digest)
+    except (ValueError, OSError, RuntimeError) as exc:
+        message = str(exc) if isinstance(exc, observations.ObservationError) else "Model operation failed: configuration or input is invalid."
+        result = {"status":"error", "message":message}
+        failed = True
+    output = {"schemaVersion":1, "operation":operation, **result}
+    # JSON is also the concise text preview: it shows the entire proposal and
+    # digest without hiding fields behind an implicit save or a live probe.
+    print(json.dumps(output, indent=2, sort_keys=True))
+    if failed: raise SystemExit(1)
+
+
 def run_models_command(args) -> None:
+    if args.models_command in {"explain", "probe", "import"}:
+        return run_model_observation_command(args)
     if args.models_command == "list":
         try:
             overlays = load_model_overlays(strict=True)
@@ -1164,7 +1249,7 @@ def gateway_start_command(base_url: str, *, unified: bool = False) -> str:
 
 
 def run_configure_codex(args) -> None:
-    config_path = Path(os.path.expanduser(args.config))
+    config_path = client_config_path(args.config)
     activate = bool(getattr(args, "activate", False))
     provider_id, provider_name = unified_provider_defaults(args)
     # Keep argparse namespace coherent for the write-command echo.
@@ -1218,6 +1303,15 @@ def run_configure_codex(args) -> None:
     print("[*] Optional sidecar skill: codex-antigravity install-skill")
 
 
+def configure_local_gateway_environment(args):
+    if getattr(args, 'local_only', False) is True or local_environment_enabled():
+        if not is_loopback_endpoint(args.host) or getattr(args, 'allow_remote', False):
+            raise SystemExit('Local-only gateway mode requires a loopback host and no --allow-remote')
+        if getattr(args, 'op_env_file', None) or getattr(args, 'op_environment', None):
+            raise SystemExit('Local-only gateway mode does not launch the 1Password network wrapper; supply local configuration instead')
+        os.environ['ANTIGRAVITY_LOCAL_ONLY'] = '1'
+        os.environ['CODEX_ANTIGRAVITY_NO_UPDATE_CHECK'] = '1'
+
 def _main():
     _ensure_split_modules()
     parser = ConsoleArgumentParser(description="Codex Antigravity Auth CLI Utility")
@@ -1225,6 +1319,7 @@ def _main():
 
     # login
     login_parser = subparsers.add_parser("login", help="Authenticate Google Antigravity account(s) into the rotation pool")
+    login_parser.add_argument("--no-browser", action="store_true", help="Print the OAuth URL without opening a browser")
     login_parser.add_argument("--count", type=positive_int, default=1, help="Number of browser login flows to run")
     login_parser.add_argument("--select-account", action="store_true", help="Force Google's account chooser during login")
 
@@ -1232,6 +1327,7 @@ def _main():
         "setup",
         help="Primary guided setup for using Antigravity Claude from Codex",
     )
+    setup_parser.add_argument("--no-browser", action="store_true", help="Print the OAuth URL without opening a browser")
     setup_parser.add_argument("--check", action="store_true", help="Run read-only setup and Codex readiness checks")
     setup_parser.add_argument("--json", action="store_true", help="Print setup/readiness status as JSON")
     setup_parser.add_argument("--write", action="store_true", help="Run login and write the Codex provider block")
@@ -1287,6 +1383,7 @@ def _main():
         "setup-google",
         help="Write Codex config and sign Google Antigravity account(s) into rotation",
     )
+    setup_google_parser.add_argument("--no-browser", action="store_true", help="Print the OAuth URL without opening a browser")
     setup_google_parser.add_argument("--accounts", type=positive_int, default=1, help="Number of browser login flows to run")
     setup_google_parser.add_argument("--skip-codex-config", action="store_true", help="Do not write ~/.codex/config.toml")
     setup_google_parser.add_argument(
@@ -1347,6 +1444,9 @@ def _main():
     accounts_parser = subparsers.add_parser("accounts", help="List or manage configured Google accounts")
     accounts_sub = accounts_parser.add_subparsers(dest="accounts_action")
     accounts_sub.add_parser("list", help="List configured Google accounts")
+    accounts_explain = accounts_sub.add_parser("explain", help="Explain local Google eligibility without refreshing or changing state")
+    accounts_explain.add_argument("--model", required=True, help="Google model whose family to inspect")
+    accounts_explain.add_argument("--json", action="store_true", help="Print sanitized eligibility as JSON")
     accounts_remove = accounts_sub.add_parser("remove", help="Remove a Google account from the encrypted rotation store")
     accounts_remove.add_argument("email", help="Google account email to remove")
     accounts_remove.add_argument("--yes", action="store_true", help="Confirm removal without prompting")
@@ -1444,11 +1544,38 @@ def _main():
     models_remove = models_sub.add_parser("remove", help="Remove a local model catalog overlay")
     models_remove.add_argument("id")
     models_sub.add_parser("doctor", help="Validate model overlay and runtime definitions")
+    explain = models_sub.add_parser("explain", help="Explain declared capabilities, cached discovery and recent probe evidence without network access")
+    explain.add_argument("id")
+    explain.add_argument("--base-url", default="http://127.0.0.1:51122/v1", help="Gateway identity used to match prior probe evidence")
+    explain.add_argument("--json", action="store_true")
+    probe = models_sub.add_parser("probe", help="Explicitly test one model's text generation and record a short-lived observation")
+    probe.add_argument("id")
+    probe.add_argument("--network", action="store_true", help="Allow this one bounded generation request")
+    probe.add_argument("--base-url", default="http://127.0.0.1:51122/v1")
+    probe.add_argument("--gateway-token-env", default="ANTIGRAVITY_GATEWAY_TOKEN")
+    probe.add_argument("--timeout", type=float, default=10)
+    probe.add_argument("--json", action="store_true")
+    overlay_import = models_sub.add_parser("import", help="Preview a local TOML overlay import before explicitly saving it")
+    overlay_import.add_argument("path")
+    overlay_import.add_argument("--write", action="store_true")
+    overlay_import.add_argument("--accept-digest", help="Exact digest printed by the reviewed preview")
+    overlay_import.add_argument("--json", action="store_true")
 
     provider_parser = subparsers.add_parser("provider", help="Manage BYOK OpenAI-compatible providers")
     provider_sub = provider_parser.add_subparsers(dest="provider_command", required=True)
     provider_sub.add_parser("list", help="List BYOK providers")
     provider_sub.add_parser("presets", help="List built-in BYOK provider presets")
+    discover = provider_sub.add_parser("discover", help="Read cached discovery, or explicitly fetch the provider's optional model catalog")
+    discover.add_argument("provider")
+    discover.add_argument("--network", action="store_true", help="Fetch a bounded catalog; never probe generation or save declarations")
+    discover.add_argument("--timeout", type=float, default=10)
+    discover.add_argument("--json", action="store_true")
+    discovered_import = provider_sub.add_parser("import-discovery", help="Preview selected discovered IDs before explicitly saving declarations")
+    discovered_import.add_argument("provider")
+    discovered_import.add_argument("--model", action="append", required=True)
+    discovered_import.add_argument("--write", action="store_true")
+    discovered_import.add_argument("--accept-digest", help="Exact digest printed by the reviewed preview")
+    discovered_import.add_argument("--json", action="store_true")
     provider_set = provider_sub.add_parser("set", help="Configure a BYOK provider")
     provider_set.add_argument("provider", help="Provider id, e.g. openrouter, deepseek, xai, kimi, ollama, opencode, custom")
     provider_set.add_argument("--api-key", help="API key to store encrypted")
@@ -1467,8 +1594,18 @@ def _main():
     provider_remove = provider_sub.add_parser("remove", help="Remove a stored BYOK provider config")
     provider_remove.add_argument("provider")
 
+    namespace_parser = subparsers.add_parser("namespace", help="Inspect client/gateway roots without credential access")
+    namespace_sub = namespace_parser.add_subparsers(dest="namespace_command", required=True)
+    namespace_sub.add_parser("show", help="Print read-only namespace relationship as JSON")
+    copy_state = namespace_sub.add_parser("copy-state", help="Plan or copy gateway configuration to an unused root")
+    copy_state.add_argument("--source", required=True, help="Existing absolute gateway state root")
+    copy_state.add_argument("--destination", required=True, help="New absolute gateway state root")
+    copy_state.add_argument("--write", action="store_true", help="Publish the copy; stop state writers first (default is dry run)")
+
     # start
     start_parser = subparsers.add_parser("start", help="Start the local Responses API gateway server")
+    start_parser.add_argument("--client-home", help="Explicit client config/auth root (CODEX_HOME)")
+    start_parser.add_argument("--state-home", help="Explicit gateway state root (ANTIGRAVITY_STATE_HOME)")
     start_parser.add_argument("--port", type=int, default=51122, help="Gateway server port (default: 51122)")
     start_parser.add_argument("--host", default="127.0.0.1", help="Gateway server host (default: 127.0.0.1)")
     start_parser.add_argument(
@@ -1476,6 +1613,9 @@ def _main():
         action="store_true",
         help="Require bearer authentication for all clients, including loopback; allow non-loopback binds with a strong ANTIGRAVITY_GATEWAY_TOKEN",
     )
+    start_parser.add_argument("--local-only", action="store_true", help="Allow only configured loopback provider endpoints; disable cloud refresh/update work")
+    start_parser.add_argument("--process-log", help=argparse.SUPPRESS)
+    start_parser.add_argument("--quiet-runtime-console", action="store_true", help=argparse.SUPPRESS)
     start_parser.add_argument("--background", action="store_true", help="Start the gateway as a background process with pid/log files")
     start_parser.add_argument(
         "--op-env-file",
@@ -1499,8 +1639,30 @@ def _main():
     status_parser.add_argument("--json", action="store_true", help="Print status as JSON")
 
     args = parser.parse_args()
+    if args.command == "start":
+        overrides = {}
+        for option, name in (("client_home", "CODEX_HOME"), ("state_home", "ANTIGRAVITY_STATE_HOME")):
+            value = getattr(args, option, None)
+            if value is not None:
+                try:
+                    overrides[name] = str(root_path(value, label=name))
+                except ValueError as exc:
+                    parser.error(str(exc))
+        os.environ.update(overrides)
 
-    if args.command == "login":
+
+    if args.command == "namespace":
+        try:
+            if args.namespace_command == "show":
+                result = namespace_diagnostics()
+            else:
+                from .namespace_migration import copy_gateway_state
+                result = copy_gateway_state(args.source, args.destination, write=args.write)
+            print(json.dumps(result, indent=2))
+        except (ValueError, RuntimeError, OSError) as exc:
+            print(f"[FAIL] {redact_secret_text(str(exc))}")
+            sys.exit(1)
+    elif args.command == "login":
         run_login(args)
     elif args.command == "setup":
         run_setup(args)
@@ -1536,6 +1698,8 @@ def _main():
     elif args.command == "models":
         run_models_command(args)
     elif args.command == "provider":
+        if args.provider_command in {"discover", "import-discovery"}:
+            return run_model_observation_command(args)
         if args.provider_command == "presets":
             print("[*] Built-in BYOK provider presets:")
             for provider_id, preset in PROVIDER_PRESETS.items():
@@ -1624,18 +1788,17 @@ def _main():
             else:
                 print(f"[*] No stored BYOK provider named {args.provider}")
     elif args.command == "start":
+        configure_local_gateway_environment(args)
         ensure_unified_env_for_gateway(args)
         if args.background:
             start_gateway_background(args)
         else:
             if getattr(args, "op_env_file", None) or getattr(args, "op_environment", None):
                 raise SystemExit("1Password gateway options require `codex-antigravity start --background`.")
-            import uvicorn
+            from .process_logs import run_gateway
             require_safe_gateway_host(args.host, args.allow_remote)
-            if is_unified_model_picker_arg(args):
-                print("[*] Unified model picker enabled: OpenAI + Antigravity + BYOK via one provider.")
-            print(f"[*] Starting local Responses API compatible gateway server on {args.host}:{args.port}...")
-            uvicorn.run("codex_antigravity_auth.server:app", host=args.host, port=args.port, log_level="info", proxy_headers=False)
+            process_path = Path(args.process_log) if args.process_log else gateway_runtime_paths(args.port)[1]
+            run_gateway(args.host, args.port, path=process_path, console=not args.quiet_runtime_console)
     elif args.command == "stop":
         stop_gateway(args)
     elif args.command == "status":

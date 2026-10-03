@@ -1,4 +1,6 @@
-# Gateway Refactor Migration Notes
+# Gateway migration boundaries
+
+[Current source status](../STATUS.md) owns the contract map. The [original migration snapshot](history/2026-10-01/docs/refactor-migration.md) preserves earlier refactor assertions. Dedicated xAI OAuth is removed; xAI uses the BYOK API-key preset. These notes describe this source, not an assertion that pending PRs have shipped.
 
 This refactor preserves the public `/health`, `/v1/models`, and `/v1/responses` routes, existing CLI command names, model aliases, encrypted store paths, and the executable bundled Anti entrypoint.
 
@@ -16,7 +18,7 @@ Before upgrading a production-like local setup, copy the encrypted account/provi
 
 ## Persistence behavior
 
-Account, provider, xAI OAuth, and model-overlay writes use a locked temporary file, `fsync`, atomic replacement, and private permissions. Plaintext JSON is still accepted for compatibility and is encrypted on a normal mutating load. Wrong-key encrypted data is reported as a decryption failure and is not reinterpreted as plaintext.
+Account, provider, and model-overlay writes use a locked temporary file, `fsync`, atomic replacement, and private permissions. Plaintext JSON is still accepted for compatibility and is encrypted on a normal mutating load. Wrong-key encrypted data is reported as a decryption failure and is not reinterpreted as plaintext.
 
 `/health`, `/v1/models`, and doctor/readiness diagnostics use read-only store and OAuth-status probes. They do not create lock files, encryption keys, directories, or migration writes. Mutating operations share one path-scoped cross-process lock; a lock-acquisition failure is surfaced and never triggers an unsafe fallback write.
 

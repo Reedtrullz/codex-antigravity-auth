@@ -116,7 +116,7 @@ def test_standalone_anti_uses_same_console_protection(tmp_path):
 
 
 @pytest.mark.parametrize("outcome", ["busy", "empty", "failure", "success"])
-def test_account_refresh_logging_escapes_labels_and_errors_without_changing_data(monkeypatch, outcome):
+def test_refresh_snapshot_logs_safely_without_changing_account_data(monkeypatch, outcome):
     import io
     import logging
     from unittest.mock import MagicMock
@@ -136,11 +136,14 @@ def test_account_refresh_logging_escapes_labels_and_errors_without_changing_data
     if outcome == "failure":
         discover.side_effect = RuntimeError(TEXT)
     monkeypatch.setattr(oauth, "discover_project_id", discover)
-    account = {"email": TEXT}
-    accounts._apply_token_refresh(account, "synthetic-refresh", wait=False)
+    account = {"email": TEXT, "refreshToken": "synthetic-refresh", "accessToken": "expired", "expiresAt": 0}
+    monkeypatch.setattr(accounts, "update_accounts", lambda mutator: mutator({"accounts": [account]}))
+    result = accounts.AccountManager()._refresh_snapshot(dict(account))
+    assert result == ("busy" if outcome == "busy" else "refreshed")
     rendered = captured.getvalue()
     assert_safe(rendered)
-    assert "\\x1b" in rendered
+    if outcome == "failure":
+        assert "Project discovery failed" in rendered
     assert account["email"] == TEXT
     if outcome == "success":
         assert account["projectId"] == TEXT

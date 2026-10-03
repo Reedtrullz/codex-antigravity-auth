@@ -30,7 +30,14 @@ _STORAGE_KEY = base64.urlsafe_b64encode(b"\0" * 32).decode("ascii")
 
 
 def _deny(message):
-    _violations.append(message)
+    frame = sys._getframe(1)
+    callers = []
+    for _ in range(6):
+        if frame is None:
+            break
+        callers.append(f"{frame.f_code.co_name} ({os.path.basename(frame.f_code.co_filename)}:{frame.f_lineno})")
+        frame = frame.f_back
+    _violations.append(message + "; callers: " + " <- ".join(callers))
     raise AssertionError(message)
 
 
@@ -64,12 +71,18 @@ def assert_no_violations():
         raise AssertionError("Unexpected test isolation violation(s): " + "; ".join(messages))
 
 
-def allow_listener(sock):
+def allow_listener(sock, host="127.0.0.1"):
     """Bind an owned TCP listener; authorization lives only as long as the fixture."""
     global _binding
+    if host == "127.0.0.1" and sock.family == socket.AF_INET:
+        address = (host, 0)
+    elif host == "::1" and sock.family == socket.AF_INET6:
+        address = (host, 0, 0, 0)
+    else:
+        raise ValueError("test listeners may bind only to their matching IPv4/IPv6 loopback address")
     _binding = True
     try:
-        sock.bind(("127.0.0.1", 0))
+        sock.bind(address)
     finally:
         _binding = False
     endpoint = sock.getsockname()[:2]
@@ -151,6 +164,15 @@ def install():
         return original_expanduser(path)
 
     os.path.expanduser = safe_expanduser
+    Path.home = classmethod(lambda cls: cls(safe_expanduser("~")))
+    original_path_expanduser = Path.expanduser
+
+    def safe_path_expanduser(path):
+        if path.parts and path.parts[0] == "~":
+            return type(path)(safe_expanduser("~")).joinpath(*path.parts[1:])
+        return original_path_expanduser(path)
+
+    Path.expanduser = safe_path_expanduser
     original_popen = subprocess.Popen
 
     class IsolatedPopen(original_popen):

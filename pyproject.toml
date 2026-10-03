@@ -38,6 +38,7 @@ dev = [
   "pyyaml>=6.0",
   "ruff>=0.16.9",
   "tomli>=2.0.1; python_version < '3.11'",
+  "jsonschema>=4.18",
 ]
 
 quality = ["pip-audit>=2.10.1"]
@@ -56,7 +57,30 @@ include = ["codex_antigravity_auth*"]
 [tool.setuptools.package-data]
 codex_antigravity_auth = [
   "skill_assets.json",
+  "NATIVE_RESPONSES.md",
+  "design/request-shapes.md",
+  "design/tool-calls.md",
+  "design/google-output.md",
+  "design/capabilities.md",
+  "design/orchestration.md",
+  "PROCESS_LOGS.md",
+  "REQUEST_DEADLINES.md",
+  "design/model-discovery.md",
+  "RESOURCE_LIMITS.md",
+  "HTTP_CLIENTS.md",
   "skills/anti/SKILL.md",
+  "skills/anti/RUN_CONTROL.md",
+  "skills/anti/SPEND_CONTROL.md",
+  "skills/anti/OWNERSHIP.md",
+  "skills/anti/LOCAL_ONLY.md",
+  "skills/anti/CONTEXT_PREFLIGHT.md",
+  "skills/anti/CHUNK_RESUME.md",
+  "skills/anti/ARTIFACTS.md",
+  "skills/anti/BENCHMARK.md",
+  "skills/anti/DATA_POLICY.md",
+  "skills/anti/SCOPES.md",
+  "skills/anti/DIFF_PROVENANCE.md",
+  "skills/anti/schemas/*.json",
   "skills/anti/agents/*.yaml",
   "skills/anti/scripts/*.py",
   "skills/anti/scripts/anti_lib/*.py",

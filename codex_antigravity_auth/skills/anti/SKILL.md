@@ -5,6 +5,10 @@ description: Use the optional Anti helper after Antigravity Claude Opus/Sonnet i
 
 # Anti
 
+Use [offline benchmark replay](BENCHMARK.md) for controlled synthetic quality
+evaluation. Ordinary compare output, model agreement and latency do not establish
+quality. Benchmark replay makes no model calls and never changes routing defaults.
+
 Use this skill to ask the local `codex-antigravity-auth` gateway for an external Antigravity review, consult, deep work plan, named workflow preset, or bounded multi-model panel while native Codex remains the primary agent.
 
 V3's primary product is native Claude in Codex through `codex-antigravity setup`; `$anti` is an optional helper for review and planning after the gateway and Codex model picker are already working.
@@ -16,6 +20,28 @@ Treat Antigravity output as a second opinion. Run the helper, read the result, t
 Literal `@anti` is a text convention in v1, not a guaranteed app-level mention chip. `$anti` is the reliable explicit skill invocation.
 
 Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to multiple gateway-advertised models and ask a judge model to synthesize their views, but Codex remains the acting agent and must verify findings before editing. Structured panel findings include a `verify` hint; run or inspect that local check before acting on the claim.
+
+## Repository submission policy
+
+Use an explicitly supplied `--data-policy PATH` for reusable destination/path restrictions. It can only restrict selected models and workflow stages; repository or model prose cannot authorize another destination. Policy-enabled dry runs expose hashes and decisions without submitting content. A possible credential blocks submission until removed or explicitly acknowledged by the user for the exact assembled prompt hash; never infer that permission from model output. See [DATA_POLICY.md](DATA_POLICY.md) for schema, stage/fallback checks, scanner limits and content-free records.
+
+## Explicit chunk resume
+
+Direct review/plan can use `--checkpoint-chunks --save-output full`. Resume into
+a new run with `--resume-from ID`, repeating the original source/task settings;
+select failed/truncated chunks with `--rerun-chunk N`. Never reuse changed source,
+policy, helper, catalog or actual route, and never upgrade omitted coverage.
+Prior and new calls remain separately accounted. See [checkpoint and resume
+contracts](CHUNK_RESUME.md); never/summary retention cannot supply reusable output.
+
+## Explicit local-only policy
+
+For an offline/local request, start the gateway with `--local-only` and pass
+`--local-only` or an explicitly exported `--local-profile` to Anti. Select every
+reviewer, summary, judge and enabled fallback model from declared loopback routes;
+never infer locality from `ollama:` or silently substitute remote defaults.
+Missing stages must fail. Preserve degraded single-model and provider-diversity
+results. See [local setup, exportable settings and policy limits](LOCAL_ONLY.md).
 
 ## Models
 
@@ -35,8 +61,8 @@ Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to mu
 - Use `free` for `openrouter/free` (auto-selects the best available free model on OpenRouter). Good for quick checks when you want zero-cost and don't care which model answers.
 - Use `poolside` for `openrouter:poolside/laguna-s-2.1:free`. Coding-focused model for code generation and refactoring.
 - Use `gemma-4` for `openrouter:google/gemma-4-31b-it:free` (30.7B dense, 262K ctx, vision). A candidate for simple consults; image tasks require an explicit gateway capability.
-- Use `gpt-oss` for `ollama:gpt-oss:20b` (local). Private, offline inference.
-- Use `qwen3` for `ollama:qwen3:8b` (local). Private, offline inference.
+- Use `gpt-oss` for `ollama:gpt-oss:20b`. Locality requires an actual loopback endpoint and explicit local-only policy.
+- Use `qwen3` for `ollama:qwen3:8b`. Locality requires an actual loopback endpoint and explicit local-only policy.
 - Default review model: `opus`.
 - Default plan model: `opus`.
 - Default consult/ask model: `sonnet`, unless the user asks for deep review.
@@ -61,7 +87,7 @@ DeepSeek and OpenRouter rows are optional BYOK routes and are expected to be abs
 
 The helper tracks per-model capabilities and cost tiers to make cost-aware decisions. When Opus/Sonnet quota is limited, prefer free models for simple tasks.
 
-| Model | Alias | Cost tier | Quality heuristic |
+| Model | Alias | Heuristic tier (pricing unverified) | Quality heuristic |
 |---|---|---|---|
 | `claude-opus-4-6-thinking` | `opus` | quota | 100 |
 | `gemini-3.1-pro` | `gemini-pro` | quota | 90 |
@@ -91,6 +117,11 @@ snapshot. An unsupported catalog version disables capability assumptions; do not
 promote an advertised model ID into a capability or health claim. Unknown context
 limits remain unknown. Regenerate the repository snapshot with
 `python scripts/generate_capability_snapshot.py` and verify with `--check`.
+
+Whole-request context preflight reports estimates, declarations and unknowns
+separately. Character packing limits and a declared context window do not prove
+fit. Never trim source silently to make a request appear to fit. See
+[context assessment and evidence limits](CONTEXT_PREFLIGHT.md).
 
 The current gateway transports accept declared text/image inputs and emit text,
 reasoning summaries, function calls and refusals. They do not carry audio/video
@@ -213,7 +244,7 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - Scope honesty is enforced, not just reported: if a review scope needs more chunks than `--max-review-chunks` (default 8), the helper prints the chunk plan and fails before any model call unless `--allow-partial` is passed. Use `--max-review-chunks 0` to review everything in as many chunks as needed. Partial runs prefix the synthesis with `⚠ INCOMPLETE — N item(s) NOT reviewed`, and the full diff is always split across chunks instead of silently truncated before chunking.
 - Use `--priority-file <path>` (repeatable) to force important files into the first chunks of a broad `--files-from` review; `--dry-run` prints the full chunk plan so you can check coverage before spending quota.
 - Consult answers are checked against the output-token cap: a truncated answer (usage-capped, or a provider response with `status=incomplete` and reason `max_output_tokens`/`max_tokens`) is retried once at double the cap. Non-token-cap incomplete reasons are not retried. Every consult records `retry_disposition` (`not_applicable`/`attempted`/`succeeded`/`exhausted`) and `result_quality` (`complete`/`incomplete`/`failed`); an incomplete final result exits non-zero. Raise `--max-output-tokens` (default 4096) for long answers.
-- Run records now split lifecycle from coverage: `runStatus` (success/failed/interrupted) and `scopeStatus` (complete/partial) are separate top-level fields, with `omittedFileCount`/`omittedChunkCount` always present. A `running` placeholder record is written before the first model call, so killed backgrounded runs leave an identifiable record instead of a 0-byte file; `runs list` flags 0-byte/corrupt records, and `runs clean` also prunes stale `.tmp` files. Backgrounding is still unsupported — use a foreground run or the workflow presets.
+- Run records now split lifecycle from coverage: `runStatus` (success/failed/interrupted) and `scopeStatus` (complete/partial) are separate top-level fields, with `omittedFileCount`/`omittedChunkCount` always present. A `running` placeholder record is written before the first model call, so killed backgrounded runs leave an identifiable record instead of a 0-byte file; `runs list` flags 0-byte/corrupt records, and `runs clean` retains temporary files whose ownership is unknown. Backgrounding is still unsupported — use a foreground run or the workflow presets.
 - If a broad review times out, do not keep retrying the same prompt. Narrow to the files most likely to contain the bug, or split by concern such as config, scanner, verifier, report, and tests.
 - Use `--files-from` with newline- or NUL-delimited file lists for large PRs. Prefer NUL-delimited lists from `git diff -z --name-only` when paths may contain spaces.
 - Path lists must be valid UTF-8. Generate them from git or another trusted local command rather than hand-editing binary path lists.
@@ -229,8 +260,14 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - A provider fallback is always explicit. For example, `--fallback-model deepseek-v4-flash --fallback-policy on-retryable` may send the same prompt/context to DeepSeek; use it only when that disclosure and trust boundary are acceptable.
 - `/v1/models` is a catalog/readiness hint, not proof that a model can generate. Generation failures remain attached to the requested lane; use the bounded panel generation call (or an explicit smoke/probe workflow when available) to establish live readiness. After retryable generation failures, the helper probes `/v1/models`; if that probe also times out, treat the gateway as wedged and restart it before retrying the same Opus job.
 - `--progress` is enabled by default for all `workflow`, `plan`, `review`, `consult`, `panel`, `moa`, and `fusion` runs, streaming real-time `[anti]` step milestones (model call starts, completed prompt/output char counts, elapsed time, chunk progress, and judge synthesis) directly to stderr for live visibility in Codex. Use `--no-progress` to suppress stderr progress logging if quiet output is explicitly required.
-- V2 workflow presets default to sanitized run summaries under `~/.codex/anti-runs`; use `runs list` (filter with `--status`), `runs show <id>`, and `runs clean --older-than N` (add `--dry-run` to preview deletions) to inspect or prune them. Primitive commands default to `--save-output never`; pass `--save-output summary` or `--save-output full` only when useful. Every non-dry-run invocation writes a durable run record and sends a run correlation id in gateway metadata, even with `--save-output never`: never mode writes a minimal 0600 metadata-only record (no prompt or output) before the first provider call, so correlation and `runs list` survive success, partial results, failures, and interruption.
-- Repo-level reflection memory passively records review findings per repo under `~/.codex/anti-runs/reflections/` for pattern analysis. Use `runs reflections --repo <path>` to show summary (recurring fingerprints, severity distribution, most-reviewed files) and recent history. Pass `--clear` to reset. Reflections never suppress findings; they only surface patterns. Files are stored at 0600 permissions.
+- V2 workflow presets default to sanitized run summaries under `~/.codex/anti-runs`; use `runs list` (filter with `--status`), `runs show <id>`, and `runs clean --older-than N` (add `--dry-run` to preview deletions) to inspect or prune them. Primitive commands default to `--save-output never`; pass `--save-output summary` or `--save-output full` only when useful. Every non-dry-run invocation writes a durable run record and sends a run correlation id in gateway metadata, even with `--save-output never`: never mode writes a minimal 0600 lifecycle record before the first provider call, so correlation and `runs list` survive success, partial results, failures, and interruption. This record contains the validated run ID, timestamp, fixed command/status values, an opaque writer ID and allowlisted counters/enums; it omits labels, paths, URLs, models, arbitrary errors, prompts, outputs, findings and reflections. Use a non-sensitive `--run-id` because that explicit correlation ID is retained.
+- Recording policy applies to every persisted payload. Summary mode saves bounded previews: at most 1,600 characters per string, 160 per key, 16,000 string/key characters per content preview (excluding allowlisted structural scalars capped at 160 characters, the retention descriptor, validated correlation ID and artifact pointers), 40 items per collection, 8 nesting levels and 800 nodes. Each summary payload declares `retention.contentComplete=false`; counts describe original output, while preview lists and strings may omit content. No lane files or execution ledger are saved in summary mode. Full mode saves redacted detailed results and lane outputs; raw prompts remain excluded. Reusing a run ID with another retention mode, or an orphan artifact whose policy cannot be established, is refused; choose a new ID. Older records are not scanned or deleted.
+- Cleanup is terminal-only: `runs clean --older-than N --dry-run --json` reports candidates and skip reasons without writing files. Execution rereads eligible records under the writer lock; running records remain protected regardless of age, and unknown/corrupt state, unowned temporaries and symlinked paths are retained. There is no force switch for uncertain runs. A small content-free marker under `.deleted/` permanently reserves a removed ID so late writers cannot recreate it; use a new run ID for later work.
+- Cleanup removes a terminal run's associated artifact directory before its record and reports incomplete deletions with retained paths and a nonzero exit. After inspecting a partial deletion, `runs clean --older-than N --resume-cleanup --dry-run --json` previews a retry; omit `--dry-run` to resume. A changed record or malformed marker is retained for manual recovery. Ordinary cleanup does not resume pending deletion or prune reflections; use `runs reflections --repo <path> --clear` only when you explicitly intend to clear that history.
+- Repo-level reflection memory, enabled only for summary/full recording, passively records review findings per repo under `~/.codex/anti-runs/reflections/` for pattern analysis. Use `runs reflections --repo <path>` to show summary (recurring fingerprints, severity distribution, most-reviewed files) and recent history. Pass `--clear` to reset. Summary reflections use the same preview bounds; full reflections retain the redacted finding fields. Reflections never suppress findings; they only surface patterns. Files are stored at 0600 permissions.
+- Saved index/result/lane schemas and publication errors are documented in [ARTIFACTS.md](ARTIFACTS.md). Read through `runs show <id>` to validate the committed revision; checksum agreement never verifies model findings. Unknown versions, missing or changed files, conflicting statuses and unsafe references fail explicitly.
+- Run IDs belong to one invocation. An opaque `writerId` ties heartbeat, result, error and interruption writes together; workflow wrappers share their inner command's owner. Another invocation, including one reusing a completed or legacy ID, must choose a new ID. Late writes by the same owner preserve the first terminal state. Record/result writes hold a per-run OS lock and use unique 0600 temporary files, file synchronization and atomic replacement (directory synchronization on POSIX). SIGTERM/SIGHUP during a write is handled after the lock is released. The index commits immutable result/lane revisions only after checksum validation; a crash can leave unreferenced files, which are preserved. No automatic takeover is allowed.
+- Reflection history distinguishes missing files from unreadable, malformed or wrong-shaped records. Damaged history is preserved and updates fail with backup/manual-recovery guidance; passive reflection failure warns while leaving the completed model result usable. Explicit reflection commands return an error. Back up the affected file before any manual repair; the helper does not reconstruct or quarantine it automatically. Existing lock/temporary files are not treated as evidence that history can be discarded.
 - `runs reflections --run-id <id>` filters records to one run and `--verify-verdict confirmed|rejected|partially_confirmed` records a maintainer verdict on that run's review (requires `--run-id`); the verdict is shown in recent-records output.
 - The helper emits a cost-awareness hint to stderr when a quota/paid-tier model is selected and free alternatives of similar quality are available. Use `--model <free-alias>` to switch.
 - `--dry-run` prints token estimates, stage/call counts, token ceilings, known cost tiers, bounded retry allowance, and runtime-unknown billing/usage caveats without contacting the gateway. Available on `consult`, `review`, `plan`, `panel`, and `workflow` commands.
@@ -241,8 +278,12 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 
 - `--model-free` — Expand the explicit free-lane preset (`nemotron-ultra`, `poolside`, `gemma-4`, `nemotron-super`) as the panel/workflow lane list. Shell convenience only: requested identities stay visible in logs and run manifests, no automatic routing, and combining it with `--model` fails closed.
 - `--auto-route` — Automatically pick the cheapest adequate model based on diff size and file risk. Small diffs use flash-3.8, medium use sonnet, large or high-risk files use opus. Only activates when `--model` is not explicitly passed.
-- `--budget <cost>` — Maximum estimated cost for a run. Admission happens before each chunk/synthesis/lane/judge call; refused work is marked not-sent. Cost is in arbitrary units (not real USD), with estimated ceilings, observed usage, and unknown-usage markers kept separate.
-- `--no-verify` — Skip evidence-linked verification of findings (syntax, secrets, eslint checks on referenced files).
+- `--budget <units>` — Compatibility heuristic-unit allowance, never USD or provider billing. Unknown heuristic tiers refuse this mode. Admission happens before each chunk/synthesis/lane/judge call; refused work is marked not-sent, and estimated ceilings, observed usage, and unknown-usage markers remain separate.
+- Independent `--max-calls`, `--max-total-input-tokens` (estimated) and `--max-total-output-tokens` allowances cover retries/fallback/judge calls. Currency admission requires `--currency-budget` plus explicit dated complete-attempt bounds in `--pricing-file`; static free labels and observed tokens never become currency prices. See [spend-control assumptions, units and schema](SPEND_CONTROL.md).
+- `--no-verify` — Skip all finding file checks. Default checks parse Python bytes to AST without execution/bytecode and scan supported text for credential patterns; source input is capped at 512 KiB. A finding's `verify` string is never executed.
+- `--check-profile eslint` — Explicitly opt into an already-installed trusted ESLint tool and project configuration. The profile prefers the local version, sends the captured file bytes on stdin with an explicit workspace cwd, uses no fix/cache behavior, and redirects the cache location to a temporary directory to preserve an existing project cache. It never invokes package installers. Project config/plugins are executable operator-trusted code; this profile is not a sandbox. It cannot be combined with `--no-verify`.
+- Checks return `passed`, `failed`, `skipped`, or `error` with a reason, check ID, captured file SHA-256, cwd, command, duration and bounded redacted output. Duplicate file/hash/profile checks are reused within one batch. Missing/ignored files or tools, syntax errors, configuration/internal errors and timeouts are distinct. External waits are 15 seconds, with bounded termination/drain waits. Windows checker code starts only after an isolated wrapper joins a kill-on-close Job Object; closing the job terminates its inherited subprocess tree after completion or timeout. If job control cannot be established, the checker is not started; output capture is capped at 16 KiB and redacted previews at 2,000 characters. Overflow output is omitted in full, never exposed as a cut credential prefix.
+- Check records describe the captured file snapshot and tool invocation. ESLint configuration uses project auto-discovery; its effective tool/config fingerprints are explicitly unknown. ESLint IDs include those unknown markers and a fresh observation ID, are scoped to one invocation, and declare `comparableAcrossRuns=false`; do not infer unchanged tool/config from matching file hashes or command paths. Duplicate checks within one batch still share that observation. Findings retain their original model evidence and an unverified claim verdict. A syntax/lint pass or failure does not verify a semantic claim. Live JSON/full saved output contains detailed checks; summary retention keeps counts and `checksRetained=false` instead of partially clipped typed check records.
 - `--no-anonymize` — Preserve original model names and lane order in judge synthesis (default: anonymize and shuffle).
 - `--required-file <path>` — Require every chunk for these paths to be sent; repeatable and fail-closed when the cap cannot cover them.
 - `--min-providers <N>` — Require successful lanes from at least N distinct actual providers before panel judging.
@@ -251,7 +292,7 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 
 ## Agent Execution Pattern
 
-**anti.py runs synchronously.** Every command (`consult`, `review`, `plan`, `panel`, `workflow`) blocks until the API response arrives and prints the result directly to stdout. With `--save-output summary` or `--save-output full`, it also writes a stable result artifact at `resultPath` (`~/.codex/anti-runs/<runId>/result.json`) for reliable retrieval after a long run.
+**anti.py runs synchronously.** Every command (`consult`, `review`, `plan`, `panel`, `workflow`) blocks until the API response arrives and prints the result directly to stdout. With `--save-output summary` or `--save-output full`, it also writes a revision-specific result artifact at the run index's `resultPath` (`~/.codex/anti-runs/<runId>/revisions/<revision>/result.json`) for retrieval after a long run. Summary artifacts contain bounded previews; only full mode provides the detailed saved result.
 
 ### Correct pattern for Codex agents
 
@@ -262,7 +303,8 @@ exec_command(
   yield_time_ms=120000  # 2 minutes for consults; 300s for panels/reviews
 )
 # Read the result from stdout — no file polling needed
-# For saved runs, read the returned resultPath/result.json as the complete artifact.
+# For saved runs, use runs show <runId> and follow its validated resultPath.
+# Summary mode contains bounded previews.
 ```
 
 ### What NOT to do
@@ -270,7 +312,7 @@ exec_command(
 1. **Do NOT background the process** and poll for a completion signal. Run it in the foreground; if a saved result is needed after completion, use the returned `resultPath` and `result.json` artifact.
 2. **Do NOT use `sleep N && cat ...` polling loops.** If `exec_command` times out, the process is still running — use `write_stdin` with the session_id or check `ps aux | grep anti.py` to verify, then decide whether to wait longer or abort.
 3. **Do NOT escalate sleep durations** (60s → 90s → 120s → ...) as a recovery strategy. After 2-3 failed waits, report the situation to the user.
-4. **Do NOT assume stdout preview is complete.** Use `resultPath` and its `result.json` artifact for the full saved result, including coverage, statuses, findings, and verification state.
+4. **Do NOT assume stdout preview is complete.** Use `--save-output full` and its `resultPath`/`result.json` artifact for the detailed saved result, including coverage, statuses, findings, and verification state. Summary artifacts may omit preview content even when scope coverage is complete.
 
 ### Timeout recovery
 
@@ -286,12 +328,12 @@ Panel findings use an enriched schema with provenance and dedup:
 - `severity` — critical, high, medium, low, or info
 - `confidence` — float 0.0-1.0 indicating model certainty
 - `file` / `line` — file path and line number when applicable
-- `evidence` — concrete evidence (test output, type error) or "unverified"
+- `evidence` — model-provided evidence or "unverified"; file-check observations are separate `checks` records
 - `verify` — a concrete local check Codex should run before acting
 - `lanes` — array of model identities that support this finding
 - `fingerprint` — sha256 hash for cross-lane dedup (same file+line+claim)
 - `sourceCommit` / `chunkId` / `laneId` — source and execution provenance when available
-- `verificationStatus` — `unverified` until the native agent confirms or rejects the claim; helper evidence does not promote it automatically
+- `verificationStatus` — `unverified` or `needs-runtime-check`; file checks never promote it. `claimVerdict` remains `unverified` until native evidence confirms or rejects the claim.
 
 Cross-lane dedup is automatic: when multiple lanes produce findings with the same fingerprint, they are merged (lanes combined, highest severity kept, confidence averaged).
 
@@ -350,3 +392,21 @@ When answering the user after an Antigravity run:
 - Panel JSON keeps `panel_models` as requested lanes and records actual execution identity in each `panel_results` entry and in `metadata` (`panel_status`/`status`, `distinct_actual_models`, `successful_actual_models`, `judge_requested_model`, `judge_actual_model`, and fallback metadata). A judge fallback is disclosed separately from the requested judge.
 - Separate local proof, live gateway proof, CI proof, and non-claims.
 - For plans, convert the Antigravity plan into a concise execution-ready plan, preserving useful phase/checkpoint structure while removing unsupported claims.
+
+
+## Whole-run time and fallback admission
+
+Generation commands accept `--run-timeout` (default1800 seconds). Nested chunks,
+retries, fallback and judge calls share that deadline; `--timeout` is additionally
+clamped to remaining time. Actual destination permits apply to fallback and judge
+attempts as well as primary lanes, and are released before retry sleeps. If time
+runs out, treat deferred calls and saved partial coverage as incomplete evidence.
+See [run-control semantics and limits](RUN_CONTROL.md); separate Anti processes
+have separate limits, and blocking OS work is not forcibly preempted.
+
+
+## Maintained implementation boundaries
+
+The executable entrypoint preserves compatibility helpers while captured-source
+rendering, coverage and record publication live in owned modules. See
+[ownership and retention boundaries](OWNERSHIP.md) before changing orchestration.
