@@ -491,3 +491,8 @@ exports validated retained publications to a self-contained read-only page.
 verdicts. See [HTML reports](codex_antigravity_auth/skills/anti/HTML_REPORTS.md) for
 comparison, keyboard navigation, retention and display limits. No server or
 network publication is started.
+
+
+## HTTP client pooling
+
+The running gateway reuses bounded HTTP connections for generation across Google, native OpenAI and BYOK, with separate pools for each environment-proxy policy. Credentials and timeouts remain per request; shared cookie storage is disabled. See [HTTP client ownership and synthetic measurements](codex_antigravity_auth/HTTP_CLIENTS.md).
