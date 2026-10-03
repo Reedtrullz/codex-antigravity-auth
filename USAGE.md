@@ -490,9 +490,10 @@ No live tournament, model quality ranking or routing-default change is performed
 Use repeatable `--image PATH` for explicit bounded PNG/JPEG files on generation
 commands. Each selected lane, judge and active fallback must declare image support
 in the gateway catalog. Exact bytes are forwarded; pixels and embedded metadata
-are not secret-scanned. Real-media evaluation is still an unmet release gate.
+are not secret-scanned. A bounded screenshot evaluation passed on 3 October 2026;
+this does not certify general visual-review quality.
 See [attachments](codex_antigravity_auth/skills/anti/ATTACHMENTS.md) for examples,
-recording behavior, scope separation and the synthetic-only evidence boundary.
+recording behavior, scope separation and the bounded evaluation evidence.
 
 ### Experimental bounded WAV consult
 

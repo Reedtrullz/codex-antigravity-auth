@@ -122,7 +122,8 @@ transcription or audio-content secret scan is claimed.
 
 All automated tests use generated PCM fixtures and owned fake endpoints. They
 prove byte/MIME/order preservation, bounded refusal, cleanup, privacy and package
-contracts. **No live audio was uploaded during implementation.**
+contracts. The implementation tests did not upload live audio; the subsequent
+authorized evaluation below records its separate results.
 
 A separately authorized live evaluation must pin helper/gateway versions, file
 hashes and actual route/model; compare the same neutral prompt against no-audio
@@ -131,3 +132,29 @@ record outcomes, refusals, latency and bounds. If the OAuth backend rejects or
 ignores audio, report unsupported/unverified. Do not call this feature complete
 as verified listening or infer musical certification from transport success.
 Independent listening and qualified source/arrangement review remain necessary.
+
+## Bounded live evaluation — 3 October 2026
+
+A separately authorized batch used audio source
+`a6c0910f8ebc589b4afe1ca5b5a4d0cf26f23fb2` and observed actual prepared
+`gemini-3.8-flash-tiered` through the existing Antigravity OAuth route.
+Five serial audio/control calls returned HTTP 200 with complete output and exact
+WAV MIME/byte/SHA-256 preservation. Each used the same neutral prompt without
+filenames or transcripts, a 2,048-output-token cap, a 60-second helper deadline,
+and no provider retry, fallback or judge.
+
+| Control | Observed result |
+| --- | --- |
+| No audio | Correctly denied receiving audio |
+| First synthesized speech clip | Exact sentence transcription |
+| Unrelated synthesized speech clip | Exact different sentence transcription |
+| Two descending tones, 880 then 440 Hz | Counted two but incorrectly described ascending pitch |
+| Three rising tones, 440 then 880 then 1,320 Hz | Incorrectly described two descending tones |
+
+Independent PCM inspection reconfirmed the event counts and pitch directions.
+This proves bounded speech discrimination in these controls; **full listening
+acceptance remains unmet**. Do not infer reliable tone counts, pitch order or
+musical-quality review from correct speech transcription. [#160](https://github.com/Reedtrullz/codex-antigravity-auth/pull/160)
+remains a draft and [#98](https://github.com/Reedtrullz/codex-antigravity-auth/issues/98)
+remains open. Catalog and per-run acceptance fields stay conservative; the
+helper does not certify listening from a successful response.
