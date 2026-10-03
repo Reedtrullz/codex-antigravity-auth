@@ -267,7 +267,7 @@ def test_stream_schema_expansion_rejection_is_local_nonretryable_and_releases_pe
 
     schema = {"type": "object", "properties": {"value": {"type": "string"}}}
     clean_json_schema(schema)  # Each inline schema fits; generated placeholders share the request budget.
-    tools = [{"type": "function", "name": f"fixture_{index}", "parameters": schema} for index in range(8)]
+    tools = [{"type": "function", "name": f"f_{index}", "parameters": schema} for index in range(8)]
     payload = {"model": "gemini-3.8-flash", "input": "fixture", "stream": True,
                "tools": tools}
     assert len(json.dumps(payload)) < 1024
