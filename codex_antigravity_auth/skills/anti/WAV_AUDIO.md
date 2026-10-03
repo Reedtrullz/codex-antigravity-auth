@@ -62,7 +62,8 @@ python scripts/anti.py listen --model gemini-3.1-pro \
   --prompt-file listening-prompt.txt --json
 ```
 
-This command requires explicit audio and model selection. It permits at most one
+This command requires explicit audio and model selection, without `--local-profile`.
+It permits at most one
 generation attempt, 2,048 output tokens and a 90-second whole-run deadline. It
 disables source pre-reading, automatic routing, retries and fallback. Smaller
 limits are allowed; looser limits fail before HTTP. A truncated response retains

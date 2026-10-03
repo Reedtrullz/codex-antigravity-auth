@@ -126,6 +126,20 @@ def test_listen_requires_audio_and_explicit_model_before_http(fixture, monkeypat
     assert anti.main(args) == 1
 
 
+def test_listen_cannot_select_first_model_from_local_profile(fixture, tmp_path):
+    anti, _, _, first, _ = fixture
+    profile = tmp_path / 'local-profile.json'
+    profile.write_text(json.dumps({'version': 1, 'local_only': True,
+        'gateway': 'http://127.0.0.1:51122/v1',
+        'models': ['gemini-3.8-flash', 'gemini-3.1-pro'], 'judge': 'gemini-3.8-flash'}))
+    raw = listen_argv(first, '--local-profile', str(profile))
+    index = raw.index('--model')
+    del raw[index:index + 2]
+    args = anti.build_parser().parse_args(raw)
+    with pytest.raises(anti.AntiError, match='listen requires explicit'):
+        anti.run_control(args)
+
+
 def test_listen_dry_run_never_contacts_catalog_and_has_no_retry(fixture, monkeypatch, capsys):
     anti, _, _, first, _ = fixture
     monkeypatch.setattr(anti, 'request_json', lambda *a, **k: pytest.fail('no dry-run HTTP'))
@@ -204,6 +218,7 @@ def test_audio_backend_connection_failure_never_rotates(fixture, monkeypatch):
     monkeypatch.setattr(google_transport.GoogleTransport, 'post', failed)
     result = TestClient(server.app).post('/v1/responses', json=body())
     assert result.status_code == 502 and len(attempts) == 1
+    assert 'after rotation' not in json.dumps(result.json())
     assert not manager._in_flight
 
 

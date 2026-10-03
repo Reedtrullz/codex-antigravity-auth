@@ -600,10 +600,11 @@ class SpendAdmissionError(SpendRefused, AntiError):
 
 
 def run_control(args=None):
+    if getattr(args, 'command', None) == 'listen':
+        if not getattr(args, 'audio', None) or not getattr(args, 'model', None) or getattr(args, 'local_profile', None):
+            raise AntiError('listen requires explicit --audio and --model without --local-profile')
     local_settings = local_workflow.prepare_args(args)
     if getattr(args, 'command', None) == 'listen':
-        if not getattr(args, 'audio', None) or not getattr(args, 'model', None):
-            raise AntiError('listen requires explicit --audio and --model')
         limits = ((getattr(args, 'max_calls', None), 1),
                   (getattr(args, 'max_output_tokens', None), 2048),
                   (getattr(args, 'run_timeout', None), 90),

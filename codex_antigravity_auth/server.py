@@ -2201,6 +2201,9 @@ async def _create_response(request: Request, budget: RequestBudget):
                     res = await request_backend_with_boundary(response_account)
 
             if not res:
+                connection_failure = "Failed to communicate with Antigravity backend" + (
+                    "" if audio_request else " after rotation"
+                )
                 await run_nonstream_diagnostic(
                     record_attempt_outcome,
                     response_account.get("email", ""),
@@ -2218,13 +2221,13 @@ async def _create_response(request: Request, budget: RequestBudget):
                     http_status=502,
                     rotation_attempted=rotation_attempted,
                     error_class="connection_error",
-                    error="Failed to communicate with Antigravity backend after rotation",
+                    error=connection_failure,
                 )
                 raise HTTPException(
                     status_code=502,
                     detail=google_failure_detail(
                         model,
-                        "Failed to communicate with Antigravity backend after rotation",
+                        connection_failure,
                         rotation_attempted=rotation_attempted,
                         attempt_count=len(response_attempts),
                     ),
