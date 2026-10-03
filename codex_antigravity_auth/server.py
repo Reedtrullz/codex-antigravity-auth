@@ -89,6 +89,7 @@ from .response_protocol import (
     response_from_result,
     validate_capabilities,
 )
+from .provider_clients import ProviderClientPool
 from .storage import load_accounts, load_accounts_read_only
 from .unified import (
     OPENAI_UPSTREAM_TIMEOUT_SECONDS,
@@ -124,35 +125,52 @@ def gateway_local_only() -> bool:
 @asynccontextmanager
 async def gateway_lifespan(_app: FastAPI):
     startup_limits = ResourceLimits.from_env()  # Refuse invalid operator policy before serving.
-    global _refresh_ahead_owner
-    if _refresh_ahead_owner is not None:
+    global _refresh_ahead_owner, _provider_client_pool
+    if _refresh_ahead_owner is not None or _provider_client_pool is not None:
         raise RuntimeError("Gateway refresh lifecycle is already running")
     _app.state.local_only_mode = local_environment_enabled()
-    ADMISSION.set_startup_ceiling(startup_limits.inflight)
-    if _app.state.local_only_mode:
-        try:
-            yield
-        finally:
-            ADMISSION.set_startup_ceiling(None)
-            _app.state.local_only_mode = None
-        return
-    owner = _RefreshAheadOwner()
-    _refresh_ahead_owner = owner
+    owner = None
+    pool = None
     try:
-        owner.start()
+        pool = ProviderClientPool(max_connections=startup_limits.inflight, client_factory=httpx.AsyncClient)
+        _provider_client_pool = pool
+        ADMISSION.set_startup_ceiling(startup_limits.inflight)
+        if not _app.state.local_only_mode:
+            owner = _RefreshAheadOwner()
+            _refresh_ahead_owner = owner
+            owner.start()
         yield
     finally:
         try:
-            await owner.close()
+            if owner is not None:
+                await owner.close()
         finally:
-            ADMISSION.set_startup_ceiling(None)
-            _refresh_ahead_owner = None
-            _app.state.local_only_mode = None
+            try:
+                if pool is not None:
+                    await pool.aclose()
+            finally:
+                ADMISSION.set_startup_ceiling(None)
+                _provider_client_pool = None
+                _refresh_ahead_owner = None
+                _app.state.local_only_mode = None
 
 
 app = FastAPI(title="Codex Antigravity Gateway", lifespan=gateway_lifespan)
 account_manager = AccountManager()
 _refresh_ahead_owner: "_RefreshAheadOwner | None" = None
+_provider_client_pool: "ProviderClientPool | None" = None
+
+
+def provider_client(lane, *, timeout, trust_env=True, follow_redirects=False):
+    if type(trust_env) is not bool:
+        raise ValueError("Provider client trust_env policy must be boolean")
+    if follow_redirects is not False:
+        raise ValueError("Provider redirects must remain disabled")
+    if _provider_client_pool is None:
+        # Standalone helpers/tests retain their existing operation ownership.
+        return httpx.AsyncClient(timeout=timeout, trust_env=trust_env, follow_redirects=False)
+    return _provider_client_pool.borrow(lane, timeout=timeout, trust_env=trust_env)
+
 REFRESH_AHEAD_THROTTLE_SECONDS = 60.0
 STREAM_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 REQUEST_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -1402,16 +1420,17 @@ class OwnedStreamingResponse(StreamingResponse):
 async def context_preflight(request: Request):
     """No generation, auth refresh, remote token-count API or request mutation."""
     from .context_preflight import inspect
-    budget = RequestBudget(request, timeout=GOOGLE_BACKEND_TIMEOUT_SECONDS,
-                           release_account=release_account_for_request)
+    budget = _new_request_budget(request)
     try:
         with budget.active():
-            raw = await budget.run(request.json)
+            raw = await budget.run(lambda: read_request_json(request, budget.limits))
             budget.body_read = True
             value = await budget.sync(validate_response_request_body, raw)
             value['model'] = response_model_id(value)
             providers = await budget.sync(all_provider_configs_read_only)
             return await budget.sync(inspect, value, providers)
+    except ResourceLimitError as exc:
+        raise _resource_limit_http_exception(exc) from exc
     except RequestDeadlineExceeded as exc:
         raise HTTPException(status_code=504, detail='Context preflight deadline exceeded') from exc
     except HTTPException:
@@ -1428,8 +1447,15 @@ async def create_local_response(request: Request):
     return await create_response(request)
 
 
-@app.post("/v1/responses")
-async def create_response(request: Request):
+def _resource_limit_http_exception(exc):
+    headers = {"Retry-After": "1"} if exc.status == 503 else None
+    return HTTPException(status_code=exc.status,
+                         detail={"code": exc.code, "message": str(exc)},
+                         headers=headers)
+
+
+def _new_request_budget(request):
+    """Apply the shared request parser, admission ceiling and permit cleanup."""
     try:
         limits = ResourceLimits.from_env()
     except ValueError as exc:
@@ -1437,12 +1463,18 @@ async def create_response(request: Request):
     try:
         permit = ADMISSION.acquire(limits)
     except ResourceLimitError as exc:
-        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)}, headers={"Retry-After": "1"}) from exc
+        raise _resource_limit_http_exception(exc) from exc
     budget = RequestBudget(request, timeout=GOOGLE_BACKEND_TIMEOUT_SECONDS,
                            release_account=release_account_for_request)
     budget.limits = limits
     budget.permit = permit
     budget.register_finalizer(permit.release)
+    return budget
+
+
+@app.post("/v1/responses")
+async def create_response(request: Request):
+    budget = _new_request_budget(request)
     transferred = False
     try:
         with budget.active():
@@ -1453,8 +1485,7 @@ async def create_response(request: Request):
         report = getattr(budget, "report_limit", None)
         if report is not None:
             await shielded_cleanup(lambda: report(exc), timeout=0.05)
-        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)},
-                            headers={"Retry-After": "1"} if exc.status == 503 else None) from exc
+        raise _resource_limit_http_exception(exc) from exc
     except (RequestDeadlineExceeded, ClientDisconnect, asyncio.CancelledError) as exc:
         if not isinstance(exc, RequestDeadlineExceeded) and not budget.terminal_observed:
             budget.cancelled = True
@@ -2085,7 +2116,7 @@ async def _create_response(request: Request, budget: RequestBudget):
     google_transport = GoogleTransport(
         timeout=google_backend_timeout,
         platform_name=await budget.sync(get_platform),
-        client_factory=httpx.AsyncClient,
+        client_factory=lambda **kwargs: provider_client("google", **kwargs),
     )
 
     def account_lease(selected_account: dict) -> AccountLease:
@@ -2887,7 +2918,7 @@ async def _create_response(request: Request, budget: RequestBudget):
 
 async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str, *, telemetry: dict | None = None) -> dict:
     payload, url, headers, timeout = await call_sync(prepare_openai_compatible_request, codex_req, provider, provider_model, stream=False)
-    async with owned_context(httpx.AsyncClient(**httpx_client_options(url, timeout=timeout))) as client:
+    async with owned_context(provider_client("byok", **httpx_client_options(url, timeout=timeout))) as client:
         try:
             res = await limited_post(client, url, payload=payload, headers=headers)
             if telemetry is not None:
@@ -2928,7 +2959,7 @@ async def create_openai_upstream_response(
         payload = await call_sync(_build_payload, codex_req, upstream_model, stream=True)
         payload["store"] = bool(codex_req.get("store", False))
         try:
-            async with owned_context(httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))) as client:
+            async with owned_context(provider_client("native", **httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))) as client:
                 async with response_context(client, url, payload=payload, headers=headers) as res:
                     if telemetry is not None:
                         telemetry["http_status"] = res.status_code
@@ -2950,7 +2981,7 @@ async def create_openai_upstream_response(
             raise HTTPException(status_code=502, detail=openai_failure_detail(display_model, "OpenAI stream could not be collected.")) from exc
     payload = await call_sync(_build_payload, codex_req, upstream_model, stream=False)
     try:
-        async with owned_context(httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))) as client:
+        async with owned_context(provider_client("native", **httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))) as client:
             res = await limited_post(client, url, payload=payload, headers=headers)
             if telemetry is not None:
                 telemetry["http_status"] = res.status_code
@@ -3024,7 +3055,7 @@ async def _open_openai_upstream_stream(
     if auth.kind == "codex_oauth":
         payload["store"] = bool(codex_req.get("store", False))
 
-    client = httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))
+    client = provider_client("native", **httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))
     stream_context = client.stream("POST", url, json=payload, headers=headers)
     state = NativeStreamState(client, stream_context)
     budget = CURRENT_BUDGET.get()
@@ -3170,7 +3201,7 @@ async def openai_compatible_sse_generator(
     response_id = f"resp_{uuid.uuid4().hex[:12]}"
     transport = OpenAICompatibleTransport(
         timeout=timeout,
-        client_factory=httpx.AsyncClient,
+        client_factory=lambda **kwargs: provider_client("byok", **kwargs),
     )
     prepared = PreparedOpenAIRequest(
         payload=payload,
