@@ -63,12 +63,26 @@ memory, not copied into the run directory. [Checkpoint recipes](CHUNK_RESUME.md)
 bind image identities, so a changed attachment cannot reuse old chunk output;
 resume requires selecting the same files/bytes again.
 
-## Evaluation status and release gate
+## Bounded evaluation evidence
 
-This implementation is experimental. Synthetic fixtures can establish exact-byte
-forwarding, lane/fallback restrictions, privacy decisions and recording behavior.
-They do not establish real-media correctness or visual quality. **Real-media
-evaluation is still required before release acceptance:** use separately approved
-non-sensitive screenshots and capable routes, inspect actual provider output,
-compare text-only controls, record omissions and failures, and keep cost/privacy
-bounds explicit. No live provider/image evaluation is claimed by this change.
+On 3 October 2026, a separately authorized evaluation used source head
+`83bad4401803c68ea98dabe1ed6e9ba61cd2651b`, requested `gemini-3.8-flash`, and
+observed actual prepared `gemini-3.8-flash-tiered` at the Antigravity OAuth
+endpoint. Three serial calls correctly read a non-sensitive public pull-request
+screenshot, denied receiving an image in the identical-prompt no-image control,
+and described an unrelated three-green-bar image without inventing page text.
+Observed MIME, byte counts and SHA-256 matched both selected files exactly.
+Each call returned HTTP 200 and complete output, with a 2,048-output-token cap
+and 60-second helper deadline; no provider retry, fallback or judge call occurred.
+The private listeners stopped afterward and their ports refused connections.
+A limited scan of generated diagnostics/records found no selected attachment
+paths, canonical media base64 or checked credential patterns.
+
+This satisfies the initial bounded screenshot acceptance gate for [#157](https://github.com/Reedtrullz/codex-antigravity-auth/pull/157).
+Synthetic tests separately establish byte forwarding, lane/fallback restrictions,
+privacy decisions and recording behavior. These observations do not certify
+other routes, every image, OCR accuracy or general visual-review quality.
+Per-run `provider_image_acceptance` remains `unverified`: the helper does not
+perform semantic evaluation or infer acceptance merely from HTTP success.
+Future media evaluations still require explicit input selection, applicable
+privacy decisions and bounded authorization.

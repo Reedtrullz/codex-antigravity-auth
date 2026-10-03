@@ -7,8 +7,8 @@ description: Use the optional Anti helper after Antigravity Claude Opus/Sonnet i
 
 Explicit local PNG/JPEG attachments use repeatable `--image PATH` and require
 gateway-declared image support at every stage. Read [attachments](ATTACHMENTS.md)
-for limits, unscanned pixels/metadata, retention, and the unmet real-media release
-gate. Do not infer image support from a model name or replace images with text.
+for limits, unscanned pixels/metadata, retention, and bounded real-media
+evaluation evidence. Do not infer image support from a model name or replace images with text.
 
 Use [offline benchmark replay](BENCHMARK.md) for controlled synthetic quality
 evaluation. Ordinary compare output, model agreement and latency do not establish
