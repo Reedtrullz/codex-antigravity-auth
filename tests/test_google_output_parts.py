@@ -192,21 +192,19 @@ def test_actual_google_route_reports_media_failure_without_retry(stream, monkeyp
 
 @pytest.mark.parametrize('reverse', [False, True])
 @pytest.mark.parametrize('first', [{'unknownOutput': {}}, {'text': None}])
-def test_media_error_has_stable_precedence_across_parts_candidates_and_chunks(first, reverse):
+def test_media_error_has_stable_precedence_across_parts_and_chunks(first, reverse):
     parts = [first, {'text': 'usable', 'inlineData': {}}]
     if reverse: parts.reverse()
     direct, streamed, _, _ = outcomes(parts)
     assert direct.terminal.error_code == streamed['error']['code'] == 'unsupported_output_modality'
     bodies = [payload([part]) for part in parts]
-    combined = {'candidates': [body['candidates'][0] for body in bodies]}
-    result = GoogleTransport(timeout=1).parse_response(combined, request=request())
     adapter = GoogleStreamEventAdapter(response_id='resp_fixture', display_model='fixture', request=request())
     adapter.created()
     for body in bodies: adapter.consume(body)
     adapter.mark_done()
     final = next(event['response'] for event in adapter.finish() if isinstance(event, dict) and event.get('type') == 'response.failed')
-    assert result.terminal.error_code == final['error']['code'] == 'unsupported_output_modality'
-    assert semantic_output(result.output)[0] == semantic_output(final['output'])[0] == 'usable'
+    assert direct.terminal.error_code == final['error']['code'] == 'unsupported_output_modality'
+    assert semantic_output(direct.output)[0] == semantic_output(final['output'])[0] == 'usable'
 
 
 @pytest.mark.parametrize('bad', [None, {}, 'invalid', 17])
@@ -214,13 +212,29 @@ def test_media_error_has_stable_precedence_across_parts_candidates_and_chunks(fi
 def test_malformed_parts_container_preserves_siblings_and_fails(bad, reverse):
     bodies = [payload([{'text':'usable'}]), payload(bad)]
     if reverse: bodies.reverse()
-    combined = {'candidates':[body['candidates'][0] for body in bodies]}
-    direct = GoogleTransport(timeout=1).parse_response(combined, request=request())
+    direct = GoogleTransport(timeout=1).parse_response(payload(bad), request=request())
     adapter = GoogleStreamEventAdapter(response_id='resp_fixture',display_model='fixture',request=request())
     adapter.created()
     for body in bodies: adapter.consume(body)
     adapter.mark_done()
     final = next(event['response'] for event in adapter.finish() if isinstance(event,dict) and event.get('type') == 'response.failed')
     assert direct.terminal.error_code == final['error']['code'] == 'malformed_output_part'
-    assert semantic_output(direct.output)[0] == semantic_output(final['output'])[0] == 'usable'
+    assert semantic_output(direct.output)[0] == ''
+    assert semantic_output(final['output'])[0] == 'usable'
     with pytest.raises(RuntimeError, match='cannot reset'): adapter.reset_attempt()
+
+
+@pytest.mark.parametrize('nonprimary', [[{'inlineData': {}}], None])
+def test_unsupported_nonprimary_alternative_cannot_contaminate_selected_output(nonprimary):
+    body = payload([{'text': 'selected'}])
+    body['candidates'][0]['index'] = 0
+    body['candidates'].append({'index': 1, 'finishReason': 'STOP', 'content': {'parts': nonprimary}})
+    direct = GoogleTransport(timeout=1).parse_response(body, request=request())
+    adapter = GoogleStreamEventAdapter(response_id='resp_fixture', display_model='fixture', request=request())
+    adapter.created()
+    adapter.consume(body)
+    adapter.mark_done()
+    streamed = next(event['response'] for event in adapter.finish()
+                    if isinstance(event, dict) and event.get('type') == 'response.completed')
+    assert direct.terminal.kind is TerminalKind.COMPLETED
+    assert semantic_output(direct.output) == semantic_output(streamed['output']) == ('selected', '', [])

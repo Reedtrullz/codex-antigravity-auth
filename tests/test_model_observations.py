@@ -261,7 +261,8 @@ def test_catalog_timeout_and_error_are_visible(monkeypatch, failure):
         time.sleep(.1)
         return []
     monkeypatch.setattr(server,'provider_model_catalog',failed)
-    monkeypatch.setattr(server,'MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS',.005)
+    if failure == 'timeout':
+        monkeypatch.setattr(server,'MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS',.005)
     result = TestClient(server.app).get('/v1/models').json()
     assert result['provider_catalog_diagnostics']['status'] == failure
     assert result['data'] and 'fixture-private-error' not in json.dumps(result)

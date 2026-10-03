@@ -122,8 +122,16 @@ def _run_check(command: list[str], source: bytes, cwd: Path) -> dict[str, Any]:
         with tempfile.TemporaryFile() as stdin:
             stdin.write(source)
             stdin.seek(0)
-            launch = ([sys.executable, "-I", "-S", "-c", _WINDOWS_WRAPPER, json.dumps(command), str(MAX_FILE_BYTES)]
-                      if WINDOWS else command)
+            if WINDOWS:
+                launch = [sys.executable]
+                if os.name == "nt":
+                    # Native Windows uses an isolated stdlib gate before the
+                    # assigned checker starts. POSIX adapter tests keep the
+                    # inherited test startup guard active.
+                    launch.extend(("-I", "-S"))
+                launch.extend(("-c", _WINDOWS_WRAPPER, json.dumps(command), str(MAX_FILE_BYTES)))
+            else:
+                launch = command
             process = subprocess.Popen(launch, stdin=subprocess.PIPE if WINDOWS else stdin,
                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        cwd=str(cwd), shell=False, start_new_session=os.name == "posix")

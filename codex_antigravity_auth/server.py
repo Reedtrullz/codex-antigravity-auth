@@ -1,3 +1,5 @@
+from .console import console_print as print
+import logging
 import json
 import asyncio
 import math
@@ -21,7 +23,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
-from .accounts import AccountManager, classify_backend_status, is_validation_required_error
+from .accounts import AccountManager, AccountRefreshInProgress, classify_backend_status, is_validation_required_error
 from .account_state import scoped_cooldown_expiry
 from .byok import (
     PROVIDER_AUTH_MODE_API_KEY,
@@ -51,6 +53,10 @@ from .models import (
 from .observability import request_log_info, write_request_record
 from .route_lifecycle import write_route_lifecycle
 from .skills.anti.scripts.anti_lib.local_policy import environment_enabled as local_environment_enabled, endpoint_scope, VERSION as LOCAL_POLICY_VERSION
+from .resource_limits import (
+    ADMISSION, ResourceLimits, ResourceLimitError, read_request_json,
+    limited_post, read_response_bytes, response_context, response_json,
+)
 from .request_budget import (
     RequestBudget, RequestDeadlineExceeded, owned_context, shielded_cleanup, stream_with_budget,
     CURRENT_BUDGET, NativeStreamState, call_sync,
@@ -117,14 +123,17 @@ def gateway_local_only() -> bool:
 
 @asynccontextmanager
 async def gateway_lifespan(_app: FastAPI):
+    startup_limits = ResourceLimits.from_env()  # Refuse invalid operator policy before serving.
     global _refresh_ahead_owner
     if _refresh_ahead_owner is not None:
         raise RuntimeError("Gateway refresh lifecycle is already running")
     _app.state.local_only_mode = local_environment_enabled()
+    ADMISSION.set_startup_ceiling(startup_limits.inflight)
     if _app.state.local_only_mode:
         try:
             yield
         finally:
+            ADMISSION.set_startup_ceiling(None)
             _app.state.local_only_mode = None
         return
     owner = _RefreshAheadOwner()
@@ -136,6 +145,7 @@ async def gateway_lifespan(_app: FastAPI):
         try:
             await owner.close()
         finally:
+            ADMISSION.set_startup_ceiling(None)
             _refresh_ahead_owner = None
             _app.state.local_only_mode = None
 
@@ -160,7 +170,10 @@ GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS = 600.0
 STREAM_IDLE_TIMEOUT_SECONDS = 60.0
 STREAM_TOTAL_TIMEOUT_SECONDS = 1800.0
 CLIENT_DISCONNECT_POLL_SECONDS = 0.1
-TEST_CLIENT_HOSTS = {"testserver"}
+TEST_CLIENT_HOSTS = {"testserver", "testclient"}
+PROXY_INDICATOR_HEADERS = frozenset({
+    "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "x-real-ip",
+})
 REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
     native_responses=True,
     parallel_tool_calls=True,
@@ -218,7 +231,9 @@ def request_origin_matches(request: Request, origin: str) -> bool:
     if request_port is None:
         request_port = 443 if request_url.scheme == "https" else 80
     host_matches = parsed_origin.hostname.lower() == (request_url.hostname or "").lower()
-    if not host_matches and is_loopback_host(parsed_origin.hostname) and is_loopback_host(request_url.hostname):
+    if (not host_matches and parsed_origin.hostname.lower() not in TEST_CLIENT_HOSTS
+            and (request_url.hostname or "").lower() not in TEST_CLIENT_HOSTS
+            and is_loopback_host(parsed_origin.hostname) and is_loopback_host(request_url.hostname)):
         host_matches = True
     return (
         parsed_origin.scheme == request_url.scheme
@@ -228,10 +243,33 @@ def request_origin_matches(request: Request, origin: str) -> bool:
 
 
 def request_uses_loopback_host(request: Request, client_host: str | None = None) -> bool:
-    hostname = request.url.hostname
-    if is_loopback_host(hostname):
-        return True
-    return (hostname or "").lower() in TEST_CLIENT_HOSTS and client_host == "testclient"
+    # Some ASGI URL implementations fall back to scope.server for a malformed
+    # Host. Access control must inspect the supplied authority before that
+    # fallback can turn invalid input into an apparently local request.
+    hosts = request.headers.getlist("host")
+    if len(hosts) != 1:
+        return False
+    authority = hosts[0]
+    if (not authority or any(ch.isspace() or ord(ch) < 0x20 or 0x7f <= ord(ch) < 0xa0 for ch in authority)
+            or any(ch in authority for ch in "/?#@\\") or authority.endswith(":")):
+        return False
+    try:
+        parsed = urlparse("//" + authority)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    if authority.startswith("["):
+        suffix = authority[authority.find("]") + 1:]
+        if suffix and not re.fullmatch(r":\d+", suffix):
+            return False
+    elif authority.count(":") > 1:
+        return False
+    if port is not None and not 1 <= port <= 65535:
+        return False
+    if (hostname or "").lower() in TEST_CLIENT_HOSTS:
+        return client_host == "testclient"
+    return is_loopback_host(hostname)
 
 
 def mutating_json_request_guard(request: Request) -> JSONResponse | None:
@@ -247,10 +285,6 @@ def mutating_json_request_guard(request: Request) -> JSONResponse | None:
             status_code=415,
             content={"detail": "Mutating gateway requests must use Content-Type: application/json."},
         )
-
-    client_host = request.client.host if request.client else None
-    if is_loopback_host(client_host) and not request_uses_loopback_host(request, client_host):
-        return JSONResponse(status_code=403, content={"detail": "Loopback gateway requests must use a loopback Host."})
 
     if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
         return JSONResponse(status_code=403, content={"detail": "Cross-site browser requests are not allowed."})
@@ -276,20 +310,25 @@ async def require_remote_gateway_token(request: Request, call_next):
         return response
 
     client_host = request.client.host if request.client else None
-    if is_loopback_host(client_host):
+    allow_remote = os.environ.get("ANTIGRAVITY_ALLOW_REMOTE") == "1"
+    proxy_marked = any(name in request.headers for name in PROXY_INDICATOR_HEADERS)
+    # Header values can never grant the local exemption. In authenticated mode
+    # even a loopback peer may be a reverse proxy acting for a remote client.
+    if is_loopback_host(client_host) and not allow_remote and not proxy_marked:
+        if not request_uses_loopback_host(request, client_host):
+            return JSONResponse(status_code=403, content={"detail": "Loopback gateway requests must use a loopback Host."})
         guard_response = mutating_json_request_guard(request)
         if guard_response is not None:
             return guard_response
         return await guarded_response()
 
-    allow_remote = os.environ.get("ANTIGRAVITY_ALLOW_REMOTE") == "1"
     try:
         token = validate_gateway_token_strength(os.environ.get("ANTIGRAVITY_GATEWAY_TOKEN")) if allow_remote else ""
     except ValueError as e:
         return JSONResponse(status_code=403, content={"detail": str(e)})
     expected_auth = f"Bearer {token}" if token else ""
     supplied_auth = request.headers.get("authorization", "")
-    if allow_remote and token and secrets.compare_digest(supplied_auth, expected_auth):
+    if allow_remote and token and secrets.compare_digest(supplied_auth.encode("utf-8"), expected_auth.encode("ascii")):
         guard_response = mutating_json_request_guard(request)
         if guard_response is not None:
             return guard_response
@@ -952,9 +991,7 @@ async def list_models():
 
 @app.get("/health")
 async def health(request: Request):
-    client_host = request.client.host if request.client else None
-    if not request_uses_loopback_host(request, client_host):
-        raise HTTPException(status_code=403, detail="Health checks are loopback-only.")
+    # The middleware applies the same local/authenticated boundary to every route.
     providers, provider_catalog_status = await provider_health_catalog_fail_soft()
     local_mode = gateway_local_only()
     catalog = [] if local_mode else native_model_catalog()
@@ -1287,6 +1324,20 @@ class OwnedStreamingResponse(StreamingResponse):
     def __init__(self, *args, budget, **kwargs):
         super().__init__(*args, **kwargs)
         self.budget = budget
+        source = self.body_iterator
+        async def owned_body():
+            try:
+                async for chunk in source:
+                    yield chunk
+            finally:
+                callbacks = [budget.close]
+                if hasattr(source, "aclose"):
+                    callbacks.append(source.aclose)
+                try:
+                    await shielded_cleanup(*callbacks)
+                finally:
+                    budget.run_finalizers()
+        self.body_iterator = owned_body()
 
     async def __call__(self, scope, receive, send):
         disconnected = False
@@ -1338,7 +1389,10 @@ class OwnedStreamingResponse(StreamingResponse):
         finally:
             if disconnected and not self.budget.terminal_observed:
                 self.budget.cancelled = True
-            await shielded_cleanup(self.body_iterator.aclose, self.budget.close)
+            try:
+                await shielded_cleanup(self.body_iterator.aclose, self.budget.close)
+            finally:
+                self.budget.run_finalizers()
             if (disconnected or expired) and not self.budget.terminal_observed and not self.budget.abort_reported and self.budget.abort:
                 await shielded_cleanup(lambda: self.budget.abort(expired), timeout=0.05)
         if self.background is not None:
@@ -1377,14 +1431,31 @@ async def create_local_response(request: Request):
 
 @app.post("/v1/responses")
 async def create_response(request: Request):
+    try:
+        limits = ResourceLimits.from_env()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    try:
+        permit = ADMISSION.acquire(limits)
+    except ResourceLimitError as exc:
+        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)}, headers={"Retry-After": "1"}) from exc
     budget = RequestBudget(request, timeout=GOOGLE_BACKEND_TIMEOUT_SECONDS,
                            release_account=release_account_for_request)
+    budget.limits = limits
+    budget.permit = permit
+    budget.register_finalizer(permit.release)
     transferred = False
     try:
         with budget.active():
             response = await _create_response(request, budget)
         transferred = isinstance(response, OwnedStreamingResponse)
         return response
+    except ResourceLimitError as exc:
+        report = getattr(budget, "report_limit", None)
+        if report is not None:
+            await shielded_cleanup(lambda: report(exc), timeout=0.05)
+        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)},
+                            headers={"Retry-After": "1"} if exc.status == 503 else None) from exc
     except (RequestDeadlineExceeded, ClientDisconnect, asyncio.CancelledError) as exc:
         if not isinstance(exc, RequestDeadlineExceeded) and not budget.terminal_observed:
             budget.cancelled = True
@@ -1447,10 +1518,19 @@ async def _create_response(request: Request, budget: RequestBudget):
         await log_request('failed', http_status=403, error_class='local_only_mode_required', attempt_count=0)
         raise HTTPException(status_code=403, detail='Dedicated local generation requires gateway --local-only mode')
 
+    async def report_limit(exc):
+        if getattr(exc, "upstream_status", None) is not None:
+            upstream_observation["http_status"] = exc.upstream_status
+        await log_request("failed", **budget.context, http_status=exc.status,
+                          error_class=exc.code, error=str(exc), terminal_cleanup=True)
+    budget.report_limit = report_limit
+
     try:
-        codex_req = await budget.run(request.json)
+        codex_req = await budget.run(lambda: read_request_json(request, budget.limits))
         budget.body_read = True
     except (RequestDeadlineExceeded, ClientDisconnect):
+        raise
+    except ResourceLimitError:
         raise
     except Exception:
         await log_request("failed", http_status=400, error_class="invalid_json", error="Invalid JSON body")
@@ -1509,6 +1589,8 @@ async def _create_response(request: Request, budget: RequestBudget):
         await log_request("failed", model=model, route="google", stream=stream, http_status=400,
                           error_class=detail["code"], error=detail["message"])
         raise HTTPException(status_code=400, detail=detail)
+    if unified_route in {"openai", "google", "antigravity", "byok"}:
+        budget.permit.bind_route("google" if unified_route == "antigravity" else unified_route)
     if unified_route == "unknown":
         from .unified import unknown_model_error as _unknown_model_error
 
@@ -1618,7 +1700,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     detail=openai_failure_detail(model, message),
                     headers=response_headers,
                 ) from exc
-            except (RequestDeadlineExceeded, ClientDisconnect):
+            except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
                 raise
             except Exception as exc:
                 message = f"OpenAI upstream is unreachable: {safe_request_error(exc)}"
@@ -1744,18 +1826,19 @@ async def _create_response(request: Request, budget: RequestBudget):
     provider_id, provider_model = await budget.sync(split_provider_model, model)
     if provider_id is not None:
         budget.context.update(route="byok", provider=provider_id)
-    try:
-        validate_provider_model_id(provider_id, provider_model)
-    except HTTPException as exc:
-        await log_request("failed", model=model, route="byok", provider=provider_id, stream=stream, http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
-        raise
     from .request_shapes import validate_request_shapes
     try:
+        await budget.sync(validate_provider_model_id, provider_id, provider_model)
         await budget.sync(validate_request_shapes, codex_req, route="byok" if provider_id is not None else "google")
+    except HTTPException as exc:
+        await log_request("failed", model=model, route="byok" if provider_id is not None else "google", provider=provider_id, stream=stream, http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
+        raise
     except ValueError as exc:
-        await log_request("failed", model=model, route="byok" if provider_id is not None else "google",
-                          provider=provider_id, stream=stream, http_status=400, error_class="invalid_request",
-                          error="Request shape is unsupported for this route.", attempt_count=0)
+        await log_request(
+            "failed", model=model, route="byok" if provider_id is not None else "google",
+            provider=provider_id, stream=stream, http_status=400, error_class="invalid_request",
+            error="Request shape is unsupported for this route.", attempt_count=0,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if provider_id is not None:
         # Normalize self-referential prefixes (openrouter:openrouter/x ->
@@ -1976,6 +2059,22 @@ async def _create_response(request: Request, budget: RequestBudget):
             terminal_cleanup=True,
         ))
         raise HTTPException(status_code=504, detail="Antigravity request deadline exceeded")
+    except AccountRefreshInProgress as exc:
+        await log_request(
+            "failed",
+            model=model,
+            route="google",
+            family=family,
+            stream=stream,
+            http_status=503,
+            error_class="account_refresh_in_progress",
+            error="Google account refresh is in progress; retry the request shortly.",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Google account refresh is in progress; retry the request shortly.",
+            headers={"Retry-After": "1"},
+        ) from exc
     if not account:
         await log_request(
             "failed",
@@ -2022,17 +2121,15 @@ async def _create_response(request: Request, budget: RequestBudget):
             response = await google_transport.post(codex_req, account_lease(selected_account))
             upstream_observation["http_status"] = response.status_code
             return response
+        except ResourceLimitError:
+            raise
         except (httpx.HTTPError, OSError, GoogleHTTPError, GoogleStreamPayloadError):
             return None
         except Exception as exc:
             # Transport failures are expected; anything else is a bug that must
             # surface as a 500 (not be silently masked as an account-rotation
             # trigger and turned into a misleading 502).
-            print(
-                f"[gateway] request_backend unexpected error: "
-                f"{type(exc).__name__}: {redact_secret_text(str(exc))[:300]}",
-                file=sys.stderr,
-            )
+            logging.getLogger(__name__).error("request_backend unexpected error: %s", type(exc).__name__)
             raise
 
     async def request_backend_with_boundary(selected_account: dict) -> httpx.Response | None:
@@ -2280,7 +2377,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                 )
 
             try:
-                gemini_resp = await call_sync(res.json)
+                gemini_resp = await call_sync(response_json, res)
                 if isinstance(gemini_resp, list) and gemini_resp:
                     gemini_resp = gemini_resp[0]
                 backend_error = backend_error_from_payload(gemini_resp)
@@ -2354,7 +2451,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     cooldown_category=cooldown_category,
                 )
                 return codex_resp
-            except HTTPException:
+            except (HTTPException, ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
                 raise
             except Exception as e:
                 await run_nonstream_diagnostic(
@@ -2377,6 +2474,31 @@ async def _create_response(request: Request, budget: RequestBudget):
                     error=safe_request_error(e),
                 )
                 raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_request_error(e)}")
+        except AccountRefreshInProgress as exc:
+            if cooldown_category is None:
+                await best_effort_diagnostic(record_attempt_outcome(
+                    response_account.get("email", ""),
+                    model,
+                    AttemptOutcome(scope="none", category="transport"),
+                    status_code=502,
+                    error_class="connection_error",
+                ))
+            await log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=503,
+                rotation_attempted=True,
+                error_class="account_refresh_in_progress",
+                error="Google account refresh is in progress; retry the request shortly.",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Google account refresh is in progress; retry the request shortly.",
+                headers={"Retry-After": "1"},
+            ) from exc
         except RequestDeadlineExceeded:
             await best_effort_diagnostic(log_request(
                 "failed",
@@ -2539,7 +2661,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                 )
                 error_code = exc.code
                 error_message = safe_request_error(exc.message)
-                if adapter.visible_output_started:
+                if adapter.visible_output_started or exc.code == "provider_output_limit":
                     if not adapter.created_emitted:
                         yield serialize_transport_event(adapter.created())
                     for event in adapter.fail(error_code, error_message):
@@ -2557,6 +2679,32 @@ async def _create_response(request: Request, budget: RequestBudget):
                         rotation_attempted=attempt_num > 0,
                     )
                     return
+            except ResourceLimitError as exc:
+                error_code = exc.code
+                error_message = safe_error_detail(exc)
+                await record_stream_attempt(
+                    stream_account,
+                    AttemptOutcome(scope="none", category="invalid_request"),
+                    error_class=error_code,
+                )
+                if not adapter.created_emitted:
+                    yield serialize_transport_event(adapter.created())
+                for event in adapter.fail(error_code, error_message):
+                    yield serialize_transport_event(event)
+                await log_request(
+                    "failed",
+                    model=model,
+                    route="google",
+                    family=family,
+                    stream=True,
+                    http_status=upstream_observation.get("http_status"),
+                    usage=adapter.accumulator.usage,
+                    error_class=error_code,
+                    error=error_message,
+                    rotation_attempted=attempt_num > 0,
+                )
+                stream_terminal_logged = True
+                return
             except Exception as exc:
                 outcome = AttemptOutcome(scope="none", category="transport")
                 await record_stream_attempt(
@@ -2629,7 +2777,15 @@ async def _create_response(request: Request, budget: RequestBudget):
                     return
 
             if attempt_num == 0 and not adapter.visible_output_started:
-                rotated = await run_bounded_operation(lambda: acquire_active_account_for_request(model), release_late_result=True)
+                try:
+                    rotated = await run_bounded_operation(
+                        lambda: acquire_active_account_for_request(model),
+                        release_late_result=True,
+                    )
+                except AccountRefreshInProgress:
+                    rotated = None
+                    error_code = "account_refresh_in_progress"
+                    error_message = "Google account refresh is in progress; retry the request shortly."
                 if rotated and rotated.get("email") != stream_account.get("email"):
                     adapter.reset_attempt()
                     stream_attempts.append(rotated)
@@ -2663,14 +2819,15 @@ async def _create_response(request: Request, budget: RequestBudget):
     async def managed_sse_generator() -> AsyncGenerator[str, None]:
         nonlocal observed_stream_terminal, observed_stream_account
         try:
-            async for chunk in stream_with_budget(sse_generator(), budget):
-                for line in chunk.splitlines():
-                    if line.startswith("data: ") and line != "data: [DONE]":
-                        event = json.loads(line[6:])
-                        if event.get("type") in {"response.completed", "response.incomplete", "response.failed"}:
-                            observed_stream_terminal = event
-                            observed_stream_account = stream_attempts[-1]
-                yield chunk
+            async with aclosing(stream_with_budget(sse_generator(), budget)) as source:
+                async for chunk in source:
+                    for line in chunk.splitlines():
+                        if line.startswith("data: ") and line != "data: [DONE]":
+                            event = json.loads(line[6:])
+                            if event.get("type") in {"response.completed", "response.incomplete", "response.failed"}:
+                                observed_stream_terminal = event
+                                observed_stream_account = stream_attempts[-1]
+                    yield chunk
         finally:
             async def cleanup_stream_accounts() -> None:
                 cancelled = any(
@@ -2744,15 +2901,17 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
     payload, url, headers, timeout = await call_sync(prepare_openai_compatible_request, codex_req, provider, provider_model, stream=False)
     async with owned_context(httpx.AsyncClient(**httpx_client_options(url, timeout=timeout))) as client:
         try:
-            res = await client.post(url, json=payload, headers=headers)
+            res = await limited_post(client, url, payload=payload, headers=headers)
             if telemetry is not None:
                 telemetry["http_status"] = res.status_code
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"{provider['id']} connection error: {safe_error_detail(e)}") from e
     if res.status_code != 200:
         raise HTTPException(status_code=res.status_code, detail=f"{provider['id']} API error: {safe_error_detail(res.text)}")
     try:
-        chat_resp = await call_sync(res.json)
+        chat_resp = await call_sync(response_json, res)
         backend_error = backend_error_from_payload(chat_resp)
         if backend_error:
             code, message = backend_error
@@ -2761,7 +2920,7 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
                 detail=f"{provider['id']} API error: {safe_error_detail(message)}",
             )
         return await call_sync(transform_chat_response, chat_resp, display_model, request=codex_req)
-    except (HTTPException, RequestDeadlineExceeded, ClientDisconnect):
+    except (HTTPException, ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{provider['id']} response translation failed: {safe_error_detail(e)}") from e
@@ -2776,52 +2935,39 @@ async def create_openai_upstream_response(
     headers = openai_request_headers(auth)
     observe_routing_identity(routing_identity('openai', upstream_model, auth=auth, backend=upstream_model))
     if auth.kind == "codex_oauth":
-        # ChatGPT backend is stream-only: collect SSE into one Response object.
+        # Collect validated terminal state incrementally; never buffer the whole
+        # OAuth SSE body before the decoder's limits can apply.
         payload = await call_sync(_build_payload, codex_req, upstream_model, stream=True)
         payload["store"] = bool(codex_req.get("store", False))
         try:
             async with owned_context(httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))) as client:
-                res = await client.post(url, json=payload, headers=headers)
-                if telemetry is not None:
-                    telemetry["http_status"] = res.status_code
+                async with response_context(client, url, payload=payload, headers=headers) as res:
+                    if telemetry is not None:
+                        telemetry["http_status"] = res.status_code
+                    if res.status_code != 200:
+                        raw = await read_response_bytes(res, limit=65536)
+                        message = "OpenAI upstream error: " + safe_error_detail(raw.decode("utf-8", errors="replace"))
+                        if res.status_code in (401, 403):
+                            message = "OpenAI ChatGPT authentication failed or expired. Run `codex login` again."
+                        raise HTTPException(status_code=res.status_code, detail=openai_failure_detail(display_model, message))
+                    adapter = NativeResponsesStreamAdapter(display_model=display_model, request=codex_req)
+                    async for chunk in res.aiter_bytes():
+                        adapter.consume_bytes(chunk)
+                        if adapter.protocol_failed:
+                            break
+                    return adapter.finish()[-1]["response"]
+        except (HTTPException, ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=openai_failure_detail(display_model, f"OpenAI upstream is unreachable: {exc}"),
-            ) from exc
-        if res.status_code != 200:
-            if res.status_code in (401, 403):
-                raise HTTPException(
-                    status_code=res.status_code,
-                    detail=openai_failure_detail(
-                        display_model,
-                        "OpenAI ChatGPT authentication failed or expired. "
-                        f"Run `codex login` again. {safe_error_detail(res.text)}",
-                    ),
-                )
-            raise HTTPException(
-                status_code=res.status_code,
-                detail=openai_failure_detail(display_model, f"OpenAI upstream error: {safe_error_detail(res.text)}"),
-            )
-        try:
-            terminal = await call_sync(_collect_openai_sse_terminal, res.content, display_model, request=codex_req)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=openai_failure_detail(display_model, f"OpenAI stream did not terminate cleanly: {exc}"),
-            ) from exc
-        if terminal is None:
-            raise HTTPException(
-                status_code=502,
-                detail=openai_failure_detail(display_model, "OpenAI stream ended without a terminal response event."),
-            )
-        return terminal
+            raise HTTPException(status_code=502, detail=openai_failure_detail(display_model, "OpenAI stream could not be collected.")) from exc
     payload = await call_sync(_build_payload, codex_req, upstream_model, stream=False)
     try:
         async with owned_context(httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))) as client:
-            res = await client.post(url, json=payload, headers=headers)
+            res = await limited_post(client, url, payload=payload, headers=headers)
             if telemetry is not None:
                 telemetry["http_status"] = res.status_code
+    except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -2842,14 +2988,21 @@ async def create_openai_upstream_response(
             detail=openai_failure_detail(display_model, f"OpenAI upstream error: {safe_error_detail(res.text)}"),
         )
     try:
-        data = await call_sync(res.json)
+        data = await call_sync(response_json, res)
+    except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=502,
             detail=openai_failure_detail(display_model, f"OpenAI returned non-JSON data: {exc}"),
         ) from exc
     try:
-        return await call_sync(OpenAICompatibleTransport(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS).validate_native_response, data, display_model=display_model, request=codex_req)
+        return await call_sync(
+            OpenAICompatibleTransport(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS).validate_native_response,
+            data,
+            display_model=display_model,
+            request=codex_req,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=openai_failure_detail(display_model, "OpenAI returned an invalid native response.")) from exc
 
@@ -2899,7 +3052,9 @@ async def _open_openai_upstream_stream(
             telemetry["http_status"] = response.status_code
         if response.status_code != 200:
             try:
-                body = (await response.aread()).decode("utf-8", errors="replace")
+                body = (await read_response_bytes(response, limit=65536)).decode("utf-8", errors="replace")
+            except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+                raise
             except Exception:
                 body = ""
             raise OpenAIUpstreamHTTPError(response.status_code, body, response.headers.get("retry-after"))
@@ -2947,6 +3102,8 @@ async def openai_upstream_sse_generator(
             yield f"data: {json.dumps(error_event)}\n\n"
             yield "data: [DONE]\n\n"
             return
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception as exc:
             error_event = {
                 "type": "response.failed",
@@ -2994,6 +3151,8 @@ async def openai_upstream_sse_generator(
                     tail_deadline = time.monotonic() + OPENAI_UPSTREAM_TIMEOUT_SECONDS
         except (TimeoutError, httpx.TimeoutException):
             terminal_events = adapter.abort("stream_timeout", "The provider stream timed out before EOF.")
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception:
             terminal_events = adapter.abort("stream_interrupted", "The provider stream was interrupted before EOF.")
         else:
@@ -3044,6 +3203,8 @@ async def openai_compatible_sse_generator(
                 done_sent = True
             else:
                 yield f"data: {json.dumps(event)}\n\n"
+    except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+        raise
     except Exception as exc:
         # Parity with the xAI OAuth SSE generator: surface a client-visible
         # error event plus [DONE] instead of dropping the stream mid-flight.
