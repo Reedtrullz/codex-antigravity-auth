@@ -1421,16 +1421,17 @@ class OwnedStreamingResponse(StreamingResponse):
 async def context_preflight(request: Request):
     """No generation, auth refresh, remote token-count API or request mutation."""
     from .context_preflight import inspect
-    budget = RequestBudget(request, timeout=GOOGLE_BACKEND_TIMEOUT_SECONDS,
-                           release_account=release_account_for_request)
+    budget = _new_request_budget(request)
     try:
         with budget.active():
-            raw = await budget.run(request.json)
+            raw = await budget.run(lambda: read_request_json(request, budget.limits))
             budget.body_read = True
             value = await budget.sync(validate_response_request_body, raw)
             value['model'] = response_model_id(value)
             providers = await budget.sync(all_provider_configs_read_only)
             return await budget.sync(inspect, value, providers)
+    except ResourceLimitError as exc:
+        raise _resource_limit_http_exception(exc) from exc
     except RequestDeadlineExceeded as exc:
         raise HTTPException(status_code=504, detail='Context preflight deadline exceeded') from exc
     except HTTPException:
@@ -1447,8 +1448,15 @@ async def create_local_response(request: Request):
     return await create_response(request)
 
 
-@app.post("/v1/responses")
-async def create_response(request: Request):
+def _resource_limit_http_exception(exc):
+    headers = {"Retry-After": "1"} if exc.status == 503 else None
+    return HTTPException(status_code=exc.status,
+                         detail={"code": exc.code, "message": str(exc)},
+                         headers=headers)
+
+
+def _new_request_budget(request):
+    """Apply the shared request parser, admission ceiling and permit cleanup."""
     try:
         limits = ResourceLimits.from_env()
     except ValueError as exc:
@@ -1456,12 +1464,18 @@ async def create_response(request: Request):
     try:
         permit = ADMISSION.acquire(limits)
     except ResourceLimitError as exc:
-        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)}, headers={"Retry-After": "1"}) from exc
+        raise _resource_limit_http_exception(exc) from exc
     budget = RequestBudget(request, timeout=GOOGLE_BACKEND_TIMEOUT_SECONDS,
                            release_account=release_account_for_request)
     budget.limits = limits
     budget.permit = permit
     budget.register_finalizer(permit.release)
+    return budget
+
+
+@app.post("/v1/responses")
+async def create_response(request: Request):
+    budget = _new_request_budget(request)
     transferred = False
     try:
         with budget.active():
@@ -1472,8 +1486,7 @@ async def create_response(request: Request):
         report = getattr(budget, "report_limit", None)
         if report is not None:
             await shielded_cleanup(lambda: report(exc), timeout=0.05)
-        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)},
-                            headers={"Retry-After": "1"} if exc.status == 503 else None) from exc
+        raise _resource_limit_http_exception(exc) from exc
     except (RequestDeadlineExceeded, ClientDisconnect, asyncio.CancelledError) as exc:
         if not isinstance(exc, RequestDeadlineExceeded) and not budget.terminal_observed:
             budget.cancelled = True

@@ -1,4 +1,5 @@
 import json
+from functools import partial
 import os
 import stat
 import tempfile
@@ -8,20 +9,13 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 from fastapi.testclient import TestClient
+from fake_upstream import test_client_with_peer as fixture_client_with_peer
 
 from codex_antigravity_auth.redaction import REDACTED, redact_secret_text, redact_secrets
 from codex_antigravity_auth.server import app
 
 
-def test_client_with_peer(peer):
-    """Set the ASGI peer without depending on newer TestClient constructor APIs."""
-    async def peer_app(scope, receive, send):
-        if scope["type"] == "http":
-            scope = {**scope, "client": peer}
-        await app(scope, receive, send)
-    return TestClient(peer_app)
-
-
+test_client_with_peer = partial(fixture_client_with_peer, app=app)
 test_client_with_peer.__test__ = False
 
 
