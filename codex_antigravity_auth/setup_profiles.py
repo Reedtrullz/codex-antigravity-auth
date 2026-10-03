@@ -240,7 +240,7 @@ def setup_plan(args, *, profile=None):
         settings = profile["settings"]
     config_entry = client_config_path(args.config).absolute()
     raw = _read_file(config_entry)
-    config = config_entry.resolve()
+    config = Path(os.path.abspath(config_entry))
     try:
         text = raw.decode("utf-8") if raw is not None else ""
     except UnicodeError as exc:
