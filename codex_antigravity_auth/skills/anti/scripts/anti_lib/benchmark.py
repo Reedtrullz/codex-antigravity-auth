@@ -6,12 +6,11 @@ from copy import deepcopy
 import difflib
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
-import stat
 
 from .errors import AntiError
+from .inventory import read_path
 from .redaction import redact_sensitive_text
 
 MAX_FILE_BYTES = 4 * 1024 * 1024
@@ -68,19 +67,8 @@ def _pairs(pairs):
 def read_json(path):
     """Bounded regular-file reads; content is data, never a command or plugin."""
     try:
-        path=Path(path)
-        before=path.lstat()
-        require(stat.S_ISREG(before.st_mode) and not path.is_symlink() and before.st_size<=MAX_FILE_BYTES,
-                'Benchmark input must be a regular file no larger than 4 MiB')
-        fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0))
-        with os.fdopen(fd,'rb') as stream:
-            opened=os.fstat(stream.fileno())
-            require(stat.S_ISREG(opened.st_mode) and (before.st_dev,before.st_ino)==(opened.st_dev,opened.st_ino))
-            raw=stream.read(MAX_FILE_BYTES+1)
-            after=os.fstat(stream.fileno())
-        final=path.lstat()
-        identity=lambda info:(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
-        require(len(raw)<=MAX_FILE_BYTES and identity(before)==identity(after)==identity(final),'Benchmark input changed while reading')
+        raw, _size, reason = read_path(Path(path), max_file_bytes=MAX_FILE_BYTES)
+        require(reason is None, 'Benchmark input must be a stable regular file no larger than 4 MiB')
         value=json.loads(raw.decode('utf-8'),object_pairs_hook=_pairs,
                          parse_constant=lambda _:require(False,'Non-finite benchmark number'))
         return value
