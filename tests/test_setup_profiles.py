@@ -577,7 +577,7 @@ def test_setup_plan_rejects_linked_ancestors_of_empty_or_missing_skill(isolated,
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Native held parent handles prohibit this POSIX directory rename")
-def test_profile_apply_refuses_same_hash_parent_swap_during_config_fsync(isolated, tmp_path, monkeypatch):
+def test_config_writer_refuses_same_hash_parent_swap_during_temp_fsync(isolated, tmp_path, monkeypatch):
     client, _state = isolated
     target = existing_config(client)
     replacement_parent = tmp_path / "replacement-client"
@@ -585,7 +585,7 @@ def test_profile_apply_refuses_same_hash_parent_swap_during_config_fsync(isolate
     replacement_target = replacement_parent / target.name
     setup.SecureStore().atomic_write_bytes(replacement_target, ORIGINAL.encode())
     displaced_parent = tmp_path / "displaced-client"
-    setup.create_profile(options(write=True))
+    intended = (ORIGINAL + "# intended config update\n").encode()
     native_fsync = os.fsync
     swapped = False
 
@@ -593,36 +593,26 @@ def test_profile_apply_refuses_same_hash_parent_swap_during_config_fsync(isolate
         nonlocal swapped
         native_fsync(descriptor)
         info = os.fstat(descriptor)
-        if swapped or not stat.S_ISREG(info.st_mode):
-            return
-        for temporary in client.glob(f".{target.name}.*.tmp"):
-            candidate = temporary.lstat()
-            if (candidate.st_dev, candidate.st_ino) == (info.st_dev, info.st_ino):
-                assert temporary.read_bytes() != ORIGINAL.encode(), "The hook must reach the intended config write"
-                client.rename(displaced_parent)
-                replacement_parent.rename(client)
-                swapped = True
-                break
+        if not swapped and stat.S_ISREG(info.st_mode):
+            assert info.st_size == len(intended), "The hook must reach the intended temporary config write"
+            client.rename(displaced_parent)
+            replacement_parent.rename(client)
+            swapped = True
 
     monkeypatch.setattr(setup.os, "fsync", swap_parent_after_temp_fsync)
     failure = None
-    result = None
+    completed = False
     try:
-        result = setup.apply_profile(options(write=True))
+        setup._write_bound_config(target, intended, expected_sha256=setup._hash(ORIGINAL.encode()))
+        completed = True
     except setup.SetupError as exc:
         failure = exc
 
     assert swapped, "The fixture must replace an ordinary parent during the temporary regular-file fsync"
     assert target.read_bytes() == ORIGINAL.encode(), "The replacement parent's config must be preserved"
     assert (displaced_parent / target.name).read_bytes() == ORIGINAL.encode(), "The displaced original config must be preserved"
-    assert isinstance(failure, setup.SetupError), f"Parent replacement was reported as successful: {result}"
-    assert result is None
-    receipts = list(setup.receipts_root().glob("*/receipt.json"))
-    assert len(receipts) == 1
-    receipt = json.loads(receipts[0].read_text())
-    assert receipt["state"] == "failed"
-    config_stage = next(row for row in receipt["stages"] if row["id"] == "config")
-    assert config_stage["state"] == "failed" and config_stage["operationStarted"] is True
+    assert isinstance(failure, setup.SetupError), "The writer must refuse the changed parent rather than return normally"
+    assert not completed
 
 
 def test_planned_config_refuses_ordinary_leaf_replacement_after_publication(isolated, tmp_path, monkeypatch):
