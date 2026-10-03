@@ -65,7 +65,6 @@ codex_antigravity_auth = [
   "design/orchestration.md",
   "PROCESS_LOGS.md",
   "REQUEST_DEADLINES.md",
-
   "design/model-discovery.md",
   "RESOURCE_LIMITS.md",
   "HTTP_CLIENTS.md",
@@ -78,7 +77,6 @@ codex_antigravity_auth = [
   "skills/anti/CHUNK_RESUME.md",
   "skills/anti/ARTIFACTS.md",
   "skills/anti/WAV_AUDIO.md",
-  "skills/anti/HTML_REPORTS.md",
   "skills/anti/ATTACHMENTS.md",
   "skills/anti/BENCHMARK.md",
   "skills/anti/DATA_POLICY.md",
