@@ -86,3 +86,6 @@ reviewer summaries, including their saved SHA-256 and generation/output evidence
 Both use the same explicit display limits; summary/never modes cannot reconstruct
 raw lane files. Rendering uses only the captured validated bytes, even if a later
 writer changes files while the HTML is being assembled.
+
+POSIX absolute and Windows rooted or drive-qualified location fields are omitted
+on every platform. Relative repository locations remain visible.
