@@ -484,3 +484,13 @@ a versioned synthetic corpus and matched-case evaluation. Independent local
 evidence is separate from model claims; unavailable, invalid and inconclusive
 results remain explicit. See [offline benchmark](codex_antigravity_auth/skills/anti/BENCHMARK.md).
 No live tournament, model quality ranking or routing-default change is performed.
+
+### Experimental Anti image attachments
+
+Use repeatable `--image PATH` for explicit bounded PNG/JPEG files on generation
+commands. Each selected lane, judge and active fallback must declare image support
+in the gateway catalog. Exact bytes are forwarded; pixels and embedded metadata
+are not secret-scanned. A bounded screenshot evaluation passed on 3 October 2026;
+this does not certify general visual-review quality.
+See [attachments](codex_antigravity_auth/skills/anti/ATTACHMENTS.md) for examples,
+recording behavior, scope separation and the bounded evaluation evidence.

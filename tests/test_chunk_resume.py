@@ -548,3 +548,21 @@ def test_lineage_bound_counts_prior_source_and_current_run(tmp_path,prior_count,
         with pytest.raises(cp.CheckpointError,match='lineage'):
             create(tmp_path,'target',resume='source')
         assert not (tmp_path/'target/checkpoints').exists()
+
+
+def test_changed_image_identity_refuses_checkpoint_reuse_before_new_calls(anti_fixture,monkeypatch,capsys):
+    from fake_upstream import upstream
+    anti,repo,providers=anti_fixture
+    bridge_gateway(monkeypatch,anti)
+    image=repo/'synthetic.png';image.write_bytes(b'\x89PNG\r\n\x1a\nfixture-one')
+    options=['--image',str(image)]
+    with upstream(response_fixture(),response_fixture(),(503,{'Content-Type':'application/json'},b'{"error":"synthetic busy"}')) as (base,seen):
+        providers['fixture']=provider_fixture(base)
+        providers['fixture']['capabilities']={'input_modalities':['text','image'],'image_forms':['data_url']}
+        assert anti.main(review_argv('first',*options))==1
+        capsys.readouterr();before=(anti.RUNS_DIR/'first.json').read_bytes()
+        image.write_bytes(b'\x89PNG\r\n\x1a\nfixture-two')
+        assert anti.main(review_argv('second','--resume-from','first','--rerun-chunk','3',*options))==1
+        assert len(seen)==3
+    assert 'changed' in capsys.readouterr().err
+    assert (anti.RUNS_DIR/'first.json').read_bytes()==before
