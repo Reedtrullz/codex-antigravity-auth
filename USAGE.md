@@ -444,3 +444,11 @@ apply to retries, fallback and judge calls. Optional `--currency-budget` require
 an explicit dated `--pricing-file` with complete-attempt charge bounds; unknown
 or stale prices refuse admission. Local usage is not billing. See the packaged
 [spend-control contract](codex_antigravity_auth/skills/anti/SPEND_CONTROL.md).
+## Context preflight
+
+`POST /v1/context/preflight` accepts the intended Responses request body and
+returns a count-only `fit`/`unknown`/`reject` assessment without generation. The
+current catalog limits are declarations, so ordinary routes return `unknown`
+with labeled whole-request estimates. See [context preflight](codex_antigravity_auth/skills/anti/CONTEXT_PREFLIGHT.md)
+for component accounting, evidence requirements, generation behavior and Anti
+usage calibration. Character limits are not tokenizer or context guarantees.
