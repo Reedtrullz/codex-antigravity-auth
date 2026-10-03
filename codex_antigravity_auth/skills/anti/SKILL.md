@@ -105,6 +105,11 @@ promote an advertised model ID into a capability or health claim. Unknown contex
 limits remain unknown. Regenerate the repository snapshot with
 `python scripts/generate_capability_snapshot.py` and verify with `--check`.
 
+Whole-request context preflight reports estimates, declarations and unknowns
+separately. Character packing limits and a declared context window do not prove
+fit. Never trim source silently to make a request appear to fit. See
+[context assessment and evidence limits](CONTEXT_PREFLIGHT.md).
+
 The current gateway transports accept declared text/image inputs and emit text,
 reasoning summaries, function calls and refusals. They do not carry audio/video
 input or generated image/audio/video output. Standalone BYOK capabilities are

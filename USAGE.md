@@ -448,3 +448,21 @@ or stale prices refuse admission. Local usage is not billing. See the packaged
 ## HTTP client pooling
 
 The running gateway reuses bounded HTTP connections for generation across Google, native OpenAI and BYOK, with separate pools for each environment-proxy policy. Credentials and timeouts remain per request; shared cookie storage is disabled. See [HTTP client ownership and synthetic measurements](codex_antigravity_auth/HTTP_CLIENTS.md).
+
+## Model discovery and recent readiness
+
+`provider discover NAME` reads cached evidence; `--network` explicitly fetches a
+bounded optional catalog. `models explain ID --json` stays offline, while
+`models probe ID --network` records one expiring text-generation check. Imports
+are preview-first and require `--write --accept-digest` to save. See the
+[discovery and readiness contract](codex_antigravity_auth/design/model-discovery.md)
+for supported pagination, limits, cache semantics and configuration diagnostics.
+
+## Context preflight
+
+`POST /v1/context/preflight` accepts the intended Responses request body and
+returns a count-only `fit`/`unknown`/`reject` assessment without generation. The
+current catalog limits are declarations, so ordinary routes return `unknown`
+with labeled whole-request estimates. See [context preflight](codex_antigravity_auth/skills/anti/CONTEXT_PREFLIGHT.md)
+for component accounting, evidence requirements, generation behavior and Anti
+usage calibration. Character limits are not tokenizer or context guarantees.

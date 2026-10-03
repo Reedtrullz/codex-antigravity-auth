@@ -41,6 +41,7 @@ from anti_lib.run_control import RunControl, DeadlineExceeded, CURRENT_RUN
 from anti_lib.spend_control import SpendControl, SpendRefused, AdmissionConfigError
 from anti_lib.capabilities import CapabilityRegistry
 from anti_lib import local_policy as local_workflow
+from anti_lib.context_budget import assess as assess_context, calibration as context_calibration
 
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
@@ -1791,6 +1792,7 @@ def post_response(
         metadata[REQUEST_TIMEOUT_METADATA_KEY] = request_timeout
     if metadata:
         payload["metadata"] = metadata
+    context_report = assess_context(payload, declared_tokens=CAPABILITY_REGISTRY.context_limit(model))
     attempts = max(0, retries) + 1
     retryable_statuses = {408, 409, 425, 429, 500, 502, 503, 504}
     last_error: str | None = None
@@ -1898,6 +1900,8 @@ def post_response(
             response_model = extract_response_model(decoded)
             if response_model:
                 response_metadata["backend_model"] = response_model
+            response_metadata['context_preflight'] = context_report
+            response_metadata['context_calibration'] = context_calibration(context_report, extract_usage(decoded))
             control.check(submitted=True)
             return ResponseText(
                 text,

@@ -74,6 +74,7 @@ codex_antigravity_auth = [
   "skills/anti/SPEND_CONTROL.md",
   "skills/anti/OWNERSHIP.md",
   "skills/anti/LOCAL_ONLY.md",
+  "skills/anti/CONTEXT_PREFLIGHT.md",
   "skills/anti/ARTIFACTS.md",
   "skills/anti/DATA_POLICY.md",
   "skills/anti/SCOPES.md",
