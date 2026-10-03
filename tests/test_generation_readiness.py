@@ -97,7 +97,10 @@ def ready_cli(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEX_ANTIGRAVITY_NO_UPDATE_CHECK", "1")
     monkeypatch.delenv("ANTIGRAVITY_STORAGE_KEY", raising=False)
     monkeypatch.setattr("keyring.get_password", lambda *args: None)
-    monkeypatch.setattr(cli, "resolve_oauth_credentials", lambda *, read_only=False, warnings=None: ("client", "secret"))
+    def fixture_credentials(*, read_only=False, warnings=None):
+        assert read_only is True
+        return "client", "secret"
+    monkeypatch.setattr(cli, "resolve_oauth_credentials", fixture_credentials)
     monkeypatch.setattr(cli, "_diagnostic_load_accounts", lambda: {"accounts": [{"email": "fixture@example.com"}]})
     monkeypatch.setattr(cli, "_diagnostic_all_provider_configs", lambda: {})
     monkeypatch.setattr(cli, "gateway_model_ids", lambda *args, **kwargs: {"claude-sonnet-4-6"})
@@ -114,15 +117,17 @@ def ready_cli(monkeypatch, tmp_path):
 def test_doctor_exit_and_diagnostics(monkeypatch, capsys, ready_cli, flags, payload, kind, ok):
     mock_response(monkeypatch, payload)
     monkeypatch.setattr(sys, "argv", ["codex-antigravity", "doctor", "--live", "--config", str(ready_cli), *flags])
-    if ok:
+    if ok and "--json" not in flags:
         cli.main()
     else:
         with pytest.raises(SystemExit) as exc:
             cli.main()
-        assert exc.value.code == 1
+        assert exc.value.code == (0 if ok else 1)
     output = capsys.readouterr().out
     if "--json" in flags:
-        report = json.loads(output)
+        envelope = json.loads(output)
+        assert envelope["schemaVersion"] == 1 and envelope["exitCode"] == (0 if ok else 1)
+        report = envelope["data"]
         live = next(check for check in report["checks"] if check["name"] == "live_generation")
         assert live["status"] == ("pass" if ok else "fail")
         assert live["probe"]["terminal_kind"] == kind

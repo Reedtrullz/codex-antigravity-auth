@@ -54,7 +54,6 @@ class TestServiceResult(unittest.TestCase):
             results = [
                 subprocess.CompletedProcess([], 0, "", ""),
                 subprocess.CompletedProcess([], 1, "", "bootstrap failed"),
-                subprocess.CompletedProcess([], 0, "", ""),
                 subprocess.CompletedProcess([], 1, "", "not loaded"),
             ]
             with patch("codex_antigravity_auth.service.macos_launch_agent_path", return_value=path):
@@ -91,7 +90,7 @@ class TestServiceResult(unittest.TestCase):
         self.assertTrue(result["installed"])
         self.assertTrue(result["loaded"])
         self.assertFalse(result["active"])
-        self.assertEqual(result["state"], "installed_inactive")
+        self.assertEqual(result["state"], "degraded")
 
     def test_macos_running_and_windows_registered_states_are_distinct(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -111,10 +110,10 @@ class TestServiceResult(unittest.TestCase):
             windows = service_status(51122, platform_name="windows")
 
         self.assertTrue(macos["active"])
-        self.assertEqual(macos["state"], "active_unreachable")
+        self.assertEqual(macos["state"], "degraded")
         self.assertTrue(windows["installed"])
         self.assertFalse(windows["active"])
-        self.assertEqual(windows["state"], "installed_inactive")
+        self.assertEqual(windows["state"], "degraded")
 
 
 if __name__ == "__main__":

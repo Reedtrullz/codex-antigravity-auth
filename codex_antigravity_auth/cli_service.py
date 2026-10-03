@@ -17,6 +17,7 @@ from .namespaces import gateway_home
 from . import cli as _cli
 from .process_logs import process_log_info, prepare_log
 from .service import service_log_info
+from .service_drift import observe as observe_service
 
 
 def _codex_home_read_only() -> Path:
@@ -254,18 +255,16 @@ def gateway_status_info(port: int) -> dict:
 def run_gateway_status(args) -> dict:
     info = _cli.reachable_gateway_status_info(args.port, wait=True, timeout=5.0)
     raw_service = _cli.service_status(args.port)
-    info["service"] = {
-        **raw_service,
-        **_cli.observed_service_result(
-            action="status",
-            installed=bool(raw_service.get("installed")),
-            active=bool(raw_service.get("active")),
-            reachable=bool(info.get("reachable")),
-            changed=False,
-            commands=tuple(raw_service.get("commands", ())) if isinstance(raw_service.get("commands", ()), (list, tuple)) else (),
-            error=raw_service.get("error"),
-        ).to_dict(),
-    }
+    observed = _cli.observed_service_result(
+        action="status",
+        installed=bool(raw_service.get("installed")),
+        active=bool(raw_service.get("active")),
+        reachable=bool(info.get("reachable")),
+        changed=False,
+        commands=tuple(raw_service.get("commands", ())) if isinstance(raw_service.get("commands", ()), (list, tuple)) else (),
+        error=raw_service.get("error"),
+    ).to_dict()
+    info["service"] = observe_service({**raw_service, **observed}, info)
     info["request_log"] = _cli.request_log_info()
     info["namespaces"] = _cli.namespace_diagnostics()
     info["process_log"] = process_log_info(_codex_home_read_only(), args.port)
@@ -317,6 +316,14 @@ def run_service_command(args) -> dict:
                 unified_model_picker=bool(getattr(args, "unified_model_picker", False)),
             )
             action = "installed"
+        elif args.service_command in {'repair', 'restart'}:
+            operation = _cli.repair_service if args.service_command == 'repair' else _cli.restart_service
+            options = {'write': bool(getattr(args, 'write', False))}
+            if args.service_command == 'repair':
+                options.update({name: getattr(args, name, None) for name in
+                                ('host', 'op_env_file', 'op_environment', 'unified_model_picker', 'clear_secret_runtime')})
+            info = operation(args.port, **options)
+            action = args.service_command
         elif args.service_command == "uninstall":
             info = _cli.uninstall_service(args.port)
             action = "uninstalled"
@@ -324,7 +331,7 @@ def run_service_command(args) -> dict:
             info = _cli.service_status(args.port)
             action = "status"
         else:
-            raise SystemExit("service requires install, uninstall, or status")
+            raise SystemExit("service requires install, uninstall, status, repair, or restart")
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(_cli.redact_secret_text(str(exc))) from exc
     if action == "installed" and (
@@ -339,9 +346,9 @@ def run_service_command(args) -> dict:
         raise SystemExit(_cli.redact_secret_text(str(detail)))
     gateway = _cli.reachable_gateway_status_info(
         args.port,
-        wait=action == "installed" and bool(info.get("installed")) and bool(info.get("active")),
+        wait=(action == "installed" or (action in {"repair", "restart"} and info.get("changed"))) and bool(info.get("active")),
     )
-    result_action = {"installed": "install", "uninstalled": "uninstall"}.get(action, "status")
+    result_action = {"installed": "install", "uninstalled": "uninstall"}.get(action, action)
     observed = _cli.observed_service_result(
         action=result_action,
         installed=bool(info.get("installed")),
@@ -352,6 +359,9 @@ def run_service_command(args) -> dict:
         error=info.get("error"),
     ).to_dict()
     info = {**info, **observed}
+    info = observe_service(info, gateway)
+    if action in {'installed', 'repair', 'restart'} and info.get('changed', action == 'installed') and not info.get('owned_ready'):
+        info.update(state='failed', error=info.get('error') or 'Service did not reach verified owned readiness')
     result = {"service": info, "gateway": gateway, "namespaces": _cli.namespace_diagnostics(), **service_log_info(args.port)}
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2))
@@ -362,7 +372,8 @@ def run_service_command(args) -> dict:
                 f"{'active' if info.get('active') else 'inactive'}"
             )
         else:
-            print(f"[+] Gateway service {action} for port {args.port}")
+            outcome = 'FAIL' if info.get('state') == 'failed' else ('PLAN' if info.get('plan') else '+')
+            print(f"[{outcome}] Gateway service {action} for port {args.port}")
             if action == "installed":
                 try:
                     onepassword_description = _cli.onepassword_runtime_description(
@@ -383,7 +394,9 @@ def run_service_command(args) -> dict:
                 f"reachable ({gateway.get('reachable_model_count', 0)} model(s) at {gateway.get('reachable_base_url')})"
             )
         else:
-            print(f"    Gateway process: {gateway['status']}")
+            print(f"    Gateway process: {gateway.get('status', 'unknown')}")
+    if not getattr(args, 'json', False) and info.get('state') == 'failed':
+        raise SystemExit(_cli.redact_secret_text(str(info.get('error') or 'Service operation failed')))
     return result
 
 

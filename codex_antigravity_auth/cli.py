@@ -73,7 +73,7 @@ from .oauth import (
     generate_pkce,
     token_expires_in_seconds,
 )
-from .service import install_service, service_status, uninstall_service
+from .service import install_service, service_status, uninstall_service, repair_service, restart_service
 from .secure_store import file_lock
 from .service_manager import observed_service_result
 from .storage import (
@@ -1276,14 +1276,22 @@ def run_configure_codex(args) -> None:
         return
 
     try:
-        changed, backup_path = write_codex_config(
-            config_path,
-            model=args.model,
-            provider_id=provider_id,
-            provider_name=provider_name,
-            base_url=args.base_url,
-            activate=activate,
-        )
+        planned = getattr(args, "_setup_config_plan", None)
+        if planned is not None:
+            from .setup_profiles import write_planned_config
+            changed, backup_path = write_planned_config(
+                planned, model=args.model, provider_id=provider_id, provider_name=provider_name,
+                base_url=args.base_url, activate=activate,
+            )
+        else:
+            changed, backup_path = write_codex_config(
+                config_path,
+                model=args.model,
+                provider_id=provider_id,
+                provider_name=provider_name,
+                base_url=args.base_url,
+                activate=activate,
+            )
     except (OSError, RuntimeError, ValueError) as e:
         raise SystemExit(str(e)) from e
     if changed:
@@ -1314,7 +1322,8 @@ def configure_local_gateway_environment(args):
 
 def _main():
     _ensure_split_modules()
-    parser = ConsoleArgumentParser(description="Codex Antigravity Auth CLI Utility")
+    from .cli_json import JSONArgumentParser
+    parser = JSONArgumentParser(description="Codex Antigravity Auth CLI Utility")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # login
@@ -1328,6 +1337,7 @@ def _main():
         help="Primary guided setup for using Antigravity Claude from Codex",
     )
     setup_parser.add_argument("--no-browser", action="store_true", help="Print the OAuth URL without opening a browser")
+    setup_parser.add_argument("--plan", action="store_true", help="Print intended stages/prerequisites as JSON without checks, writes or network")
     setup_parser.add_argument("--check", action="store_true", help="Run read-only setup and Codex readiness checks")
     setup_parser.add_argument("--json", action="store_true", help="Print setup/readiness status as JSON")
     setup_parser.add_argument("--write", action="store_true", help="Run login and write the Codex provider block")
@@ -1429,7 +1439,7 @@ def _main():
     doctor_parser.add_argument("--config", default="~/.codex/config.toml", help="Codex config path to verify")
     doctor_parser.add_argument("--provider", default=DEFAULT_CODEX_PROVIDER_ID, help="Codex provider id to verify")
     doctor_parser.add_argument("--codex-ready", action="store_true", help="Run native Codex model-picker readiness diagnostics")
-    doctor_parser.add_argument("--json", action="store_true", help="Print doctor status as JSON when used with --codex-ready")
+    doctor_parser.add_argument("--json", action="store_true", help="Print versioned readiness JSON (implies --codex-ready)")
     doctor_parser.add_argument("--gateway-timeout", type=float, default=2.0, help="Gateway model-catalog timeout")
     doctor_parser.add_argument("--live", action="store_true", help="Run an explicit Google /v1/responses live generation smoke")
     doctor_parser.add_argument("--live-model", help="Google model to use for --live; defaults to the selected Codex model")
@@ -1443,7 +1453,8 @@ def _main():
     # accounts
     accounts_parser = subparsers.add_parser("accounts", help="List or manage configured Google accounts")
     accounts_sub = accounts_parser.add_subparsers(dest="accounts_action")
-    accounts_sub.add_parser("list", help="List configured Google accounts")
+    accounts_sub.add_parser("list", help="List configured Google accounts").add_argument("--json", action="store_true", help="Print versioned account metadata")
+
     accounts_explain = accounts_sub.add_parser("explain", help="Explain local Google eligibility without refreshing or changing state")
     accounts_explain.add_argument("--model", required=True, help="Google model whose family to inspect")
     accounts_explain.add_argument("--json", action="store_true", help="Print sanitized eligibility as JSON")
@@ -1515,6 +1526,19 @@ def _main():
     service_status_parser.add_argument("--port", type=int, default=51122, help="Gateway server port")
     service_status_parser.add_argument("--json", action="store_true", help="Print service status as JSON")
 
+    for operation in ('repair', 'restart'):
+        service_operation = service_sub.add_parser(operation, help=f'Plan or explicitly {operation} the recorded service')
+        service_operation.add_argument('--port', type=int, default=51122)
+        service_operation.add_argument('--write', action='store_true', help='Apply the operation (default is preview)')
+        service_operation.add_argument('--json', action='store_true')
+        if operation == 'repair':
+            service_operation.add_argument('--host', default=None)
+            references = service_operation.add_mutually_exclusive_group()
+            references.add_argument('--op-env-file')
+            references.add_argument('--op-environment')
+            references.add_argument('--clear-secret-runtime', action='store_true')
+            service_operation.add_argument('--unified-model-picker', action=argparse.BooleanOptionalAction, default=None)
+
     logs_parser = subparsers.add_parser("logs", help="Show, summarize, or clean sanitized gateway request logs")
     logs_parser.add_argument("logs_action", nargs="?", choices=["show", "clean", "summary"], default="show", help="Log action")
     logs_parser.add_argument("--tail", type=int, default=50, help="Number of recent entries to show")
@@ -1563,8 +1587,9 @@ def _main():
 
     provider_parser = subparsers.add_parser("provider", help="Manage BYOK OpenAI-compatible providers")
     provider_sub = provider_parser.add_subparsers(dest="provider_command", required=True)
-    provider_sub.add_parser("list", help="List BYOK providers")
-    provider_sub.add_parser("presets", help="List built-in BYOK provider presets")
+    provider_sub.add_parser("list", help="List BYOK providers").add_argument("--json", action="store_true", help="Print versioned provider metadata")
+    provider_sub.add_parser("presets", help="List built-in BYOK provider presets").add_argument("--json", action="store_true", help="Print versioned presets")
+
     discover = provider_sub.add_parser("discover", help="Read cached discovery, or explicitly fetch the provider's optional model catalog")
     discover.add_argument("provider")
     discover.add_argument("--network", action="store_true", help="Fetch a bounded catalog; never probe generation or save declarations")
@@ -1613,6 +1638,8 @@ def _main():
         action="store_true",
         help="Require bearer authentication for all clients, including loopback; allow non-loopback binds with a strong ANTIGRAVITY_GATEWAY_TOKEN",
     )
+    start_parser.add_argument("--service-id", help=argparse.SUPPRESS)
+
     start_parser.add_argument("--local-only", action="store_true", help="Allow only configured loopback provider endpoints; disable cloud refresh/update work")
     start_parser.add_argument("--process-log", help=argparse.SUPPRESS)
     start_parser.add_argument("--quiet-runtime-console", action="store_true", help=argparse.SUPPRESS)
@@ -1638,7 +1665,28 @@ def _main():
     status_parser.add_argument("--port", type=int, default=51122, help="Gateway server port (default: 51122)")
     status_parser.add_argument("--json", action="store_true", help="Print status as JSON")
 
+    support = subparsers.add_parser("support-bundle", help="Preview or explicitly export allowlisted local diagnostics")
+    support.add_argument("--config", default="~/.codex/config.toml")
+    support.add_argument("--since", default="24h")
+    support.add_argument("--request-id", action="append", default=[], help="Select a request ID; exported references are unlinkable hashes")
+    support.add_argument("--output", help="New local JSON file; never overwrites")
+    support.add_argument("--write", action="store_true", help="Create the explicit output file (default is dry run)")
+    support.add_argument("--json", action="store_true", help="JSON is always used for this command")
+    from .setup_profiles import add_parsers
+    add_parsers(subparsers)
     args = parser.parse_args()
+    # Observation commands own their evidence/proposal JSON; the operational
+    # envelope covers model listing without replacing those command payloads.
+    command_json = (
+        args.command == "accounts" and getattr(args, "accounts_action", None) == "explain"
+    ) or (
+        args.command == "models" and getattr(args, "models_command", None) in {"explain", "probe", "import"}
+    ) or (
+        args.command == "provider" and getattr(args, "provider_command", None) in {"discover", "import-discovery"}
+    )
+    if (getattr(args, "json", False) and not command_json) or args.command == "support-bundle":
+        from .cli_json import run as run_json
+        raise SystemExit(run_json(args))
     if args.command == "start":
         overrides = {}
         for option, name in (("client_home", "CODEX_HOME"), ("state_home", "ANTIGRAVITY_STATE_HOME")):
@@ -1662,6 +1710,9 @@ def _main():
         except (ValueError, RuntimeError, OSError) as exc:
             print(f"[FAIL] {redact_secret_text(str(exc))}")
             sys.exit(1)
+    elif args.command in {"profiles", "setup-history"}:
+        from .setup_profiles import run_command
+        run_command(args)
     elif args.command == "login":
         run_login(args)
     elif args.command == "setup":
@@ -1789,6 +1840,11 @@ def _main():
                 print(f"[*] No stored BYOK provider named {args.provider}")
     elif args.command == "start":
         configure_local_gateway_environment(args)
+        from .service_manifest import configure_runtime
+        try:
+            configure_runtime(args)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         ensure_unified_env_for_gateway(args)
         if args.background:
             start_gateway_background(args)

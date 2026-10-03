@@ -48,7 +48,7 @@ def isolated_home(monkeypatch, tmp_path):
     monkeypatch.setattr(byok, "PROVIDER_PRESETS", {})
     monkeypatch.setattr("keyring.get_password", lambda *args: None)
     monkeypatch.setattr("keyring.set_password", MagicMock(side_effect=AssertionError("must not create a key")))
-    monkeypatch.setattr(cli, "service_status", lambda **kwargs: {"installed": False, "active": False})
+    monkeypatch.setattr(cli, "service_status", lambda *args, **kwargs: {"installed": False, "active": False})
     monkeypatch.setattr(cli, "gateway_status_info", lambda **kwargs: {"running": False, "status": "stopped"})
     monkeypatch.setattr(cli, "add_gateway_reachability", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "vision_sidecar_readiness", lambda: {"ok": False, "checks": []})
@@ -119,10 +119,13 @@ def test_diagnostic_commands_preserve_real_files(monkeypatch, capsys, isolated_h
     monkeypatch.setattr(os, "chmod", chmod)
     if hasattr(os, "fchmod"):
         monkeypatch.setattr(os, "fchmod", chmod)
+    exit_code = None
     try:
         cli.main()
     except SystemExit as exc:
-        assert exc.code == 1  # Missing/unusable credentials can fail readiness.
+        exit_code = exc.code
+        if "--json" not in command:
+            assert exc.code == 1  # Missing/unusable credentials can fail readiness.
     assert tree_snapshot(isolated_home) == before
     chmod.assert_not_called()
     output = capsys.readouterr().out
@@ -138,7 +141,13 @@ def test_diagnostic_commands_preserve_real_files(monkeypatch, capsys, isolated_h
         elif kind == "directory":
             assert "not a regular file" in output
     if "--json" in command:
-        assert isinstance(json.loads(output), dict)
+        report = json.loads(output)
+        assert report["schemaVersion"] == 1 and report["command"] == command[0]
+        assert exit_code == report["exitCode"] == (1 if report["errors"] else 0)
+        assert report["ok"] is (not bool(report["errors"]))
+        checks = report["data"]["checks"]
+        assert report["errors"] == (["diagnostic_failed"] if any(check["status"] == "fail" for check in checks) else [])
+        assert report["status"] == ("failed" if report["errors"] else "degraded" if report["warnings"] else "ready")
 
 
 @pytest.mark.parametrize("command", COMMANDS)
@@ -215,7 +224,7 @@ def test_explicit_setup_and_login_still_repair_permissions(monkeypatch, isolated
     monkeypatch.setattr(cli, "authorize_antigravity", capture_credentials)
     monkeypatch.setattr(cli, "run_login", lambda args: cli.run_local_oauth_flow())
     monkeypatch.setattr(sys, "argv", ["codex-antigravity", *command])
-    with pytest.raises(StopBeforeNetwork):
+    with pytest.raises(SystemExit if command[0] == "setup" else StopBeforeNetwork):
         cli.main()
     assert observed == [("env-id", FILE_SECRET)]
     assert credentials.read_bytes() == original
@@ -273,6 +282,6 @@ def test_readiness_warns_about_unsafe_credentials_even_without_codex_config(
     assert "Unsafe OAuth credential permissions" in output
     assert "0600" in output and "setup --write" in output
     if json_output:
-        warning = next(check for check in json.loads(output)["checks"] if check["name"] == "google_oauth_credentials_file")
+        warning = next(check for check in json.loads(output)["data"]["checks"] if check["name"] == "google_oauth_credentials_file")
         assert warning["status"] == "warn"
     assert tree_snapshot(isolated_home) == before

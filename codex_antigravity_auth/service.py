@@ -156,12 +156,13 @@ def render_macos_launch_agent(
     op_env_file: str | None = None,
     op_environment: str | None = None,
     unified_model_picker: bool = False,
+    _command: list[str] | None = None,
 ) -> str:
     args = "\n".join(
         f"    <string>{_xml_escape(arg)}</string>"
-        for arg in service_command(
+        for arg in (_command if _command is not None else service_command(
             port, host, op_env_file=op_env_file, op_environment=op_environment, unified_model_picker=unified_model_picker
-        )
+        ))
     )
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -196,12 +197,13 @@ def render_linux_systemd_unit(
     op_env_file: str | None = None,
     op_environment: str | None = None,
     unified_model_picker: bool = False,
+    _command: list[str] | None = None,
 ) -> str:
     command = " ".join(
         shlex.quote(part).replace('%', '%%')
-        for part in service_command(
+        for part in (_command if _command is not None else service_command(
             port, host, op_env_file=op_env_file, op_environment=op_environment, unified_model_picker=unified_model_picker
-        )
+        ))
     )
     return f"""[Unit]
 Description=Codex Antigravity Gateway ({port})
@@ -229,81 +231,19 @@ def _launchd_uid() -> int:
     return getuid() if callable(getuid) else 0
 
 
-def install_service(
-    port: int,
-    host: str,
-    *,
-    platform_name: str | None = None,
-    op_env_file: str | None = None,
-    op_environment: str | None = None,
-    unified_model_picker: bool = False,
-) -> dict[str, Any]:
-    platform_name = platform_name or service_platform()
-    if platform_name == "macos":
-        path = macos_launch_agent_path(port)
-        if path.is_symlink():
-            raise RuntimeError(f"Refusing to overwrite symlinked service file: {path}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            render_macos_launch_agent(
-                port, host, op_env_file=op_env_file, op_environment=op_environment, unified_model_picker=unified_model_picker
-            ),
-            encoding="utf-8",
-        )
-        os.chmod(path, 0o600)
-        uid = _launchd_uid()
-        bootout = _run(["launchctl", "bootout", f"gui/{uid}", str(path)])
-        bootstrap = _run(["launchctl", "bootstrap", f"gui/{uid}", str(path)])
-        enable = _run(["launchctl", "enable", f"gui/{uid}/{service_label(port)}"])
-        status = service_status(port, platform_name=platform_name)
-        error = None
-        if bootstrap.returncode != 0 or enable.returncode != 0 or not status.get("installed") or not status.get("active"):
-            error = "launchd service bootstrap was not observed as active"
-        return _service_result(status, action="install", changed=True, error=error, commands=tuple(map(_command_evidence, (bootout, bootstrap, enable))))
-    if platform_name == "linux":
-        path = linux_systemd_unit_path(port)
-        if path.is_symlink():
-            raise RuntimeError(f"Refusing to overwrite symlinked service file: {path}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            render_linux_systemd_unit(
-                port, host, op_env_file=op_env_file, op_environment=op_environment, unified_model_picker=unified_model_picker
-            ),
-            encoding="utf-8",
-        )
-        os.chmod(path, 0o600)
-        reload_result = _run(["systemctl", "--user", "daemon-reload"])
-        enable_result = _run(["systemctl", "--user", "enable", "--now", path.name])
-        status = service_status(port, platform_name=platform_name)
-        error = None
-        if reload_result.returncode != 0 or enable_result.returncode != 0 or not status.get("installed") or not status.get("active"):
-            error = "systemd user service enable was not observed as active"
-        return _service_result(status, action="install", changed=True, error=error, commands=tuple(map(_command_evidence, (reload_result, enable_result))))
-    if platform_name == "windows":
-        command = " ".join(
-            _windows_quote(part)
-            for part in service_command(
-                port, host, op_env_file=op_env_file, op_environment=op_environment, unified_model_picker=unified_model_picker
-            )
-        )
-        create_result = _run(
-            [
-                "schtasks",
-                "/Create",
-                "/F",
-                "/SC",
-                "ONLOGON",
-                "/TN",
-                service_task_name(port),
-                "/TR",
-                command,
-            ],
-            allow_failure=False,
-        )
-        status = service_status(port, platform_name=platform_name)
-        error = None if status.get("installed") and status.get("active") else "scheduled task was not observed as active"
-        return _service_result(status, action="install", changed=True, error=error, commands=(_command_evidence(create_result),))
-    raise RuntimeError(f"Unsupported service platform: {platform_name}")
+def install_service(port: int, host: str, **kwargs) -> dict[str, Any]:
+    from .service_drift import install
+    return install(port, host, **kwargs)
+
+
+def repair_service(port: int, **kwargs) -> dict[str, Any]:
+    from .service_drift import repair
+    return repair(port, **kwargs)
+
+
+def restart_service(port: int, **kwargs) -> dict[str, Any]:
+    from .service_drift import restart
+    return restart(port, **kwargs)
 
 
 def uninstall_service(port: int, *, platform_name: str | None = None) -> dict[str, Any]:
@@ -348,7 +288,7 @@ def uninstall_service(port: int, *, platform_name: str | None = None) -> dict[st
     raise RuntimeError(f"Unsupported service platform: {platform_name}")
 
 
-def service_status(port: int, *, platform_name: str | None = None) -> dict[str, Any]:
+def _platform_status(port: int, *, platform_name: str | None = None) -> dict[str, Any]:
     platform_name = platform_name or service_platform()
     if platform_name == "macos":
         path = macos_launch_agent_path(port)
@@ -383,6 +323,11 @@ def service_status(port: int, *, platform_name: str | None = None) -> dict[str, 
         changed=False,
         error=f"Unsupported platform: {platform_name}",
     )
+
+
+def service_status(port: int, *, platform_name: str | None = None) -> dict[str, Any]:
+    from .service_drift import status
+    return status(port, platform_name=platform_name)
 
 
 def _run(cmd: list[str], *, allow_failure: bool = True) -> subprocess.CompletedProcess:
