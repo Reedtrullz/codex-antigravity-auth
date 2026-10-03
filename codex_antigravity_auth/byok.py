@@ -4,6 +4,8 @@ import os
 import re
 import math
 from pathlib import Path
+from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory
+
 from .namespaces import gateway_file
 from typing import Any
 from urllib.parse import urlparse
@@ -129,7 +131,7 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
 
 def get_providers_json_path() -> Path:
     p = providers_json_path_read_only()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(p.parent, enforce_existing=True)
     return p
 
 

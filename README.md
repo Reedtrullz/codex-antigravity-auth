@@ -434,6 +434,7 @@ And execute full unit test coverage:
 python3 scripts/run_tests.py
 ```
 
+Protected stores and standalone Anti use descriptor-validated process locks and owner-only file protection. Unsupported locking or Windows ACL facilities fail explicitly; see [private storage and lock files](USAGE.md#private-storage-and-lock-files).
 The offline test runner isolates personal configuration and credentials before test
 collection and denies network access except owned loopback fixtures. See the
 [test contract](test_support/README.md). Install the development extra (`pip
@@ -479,6 +480,8 @@ different ports for simultaneously running instances.
 
 Switching roots never moves files automatically. See [namespace copy and
 migration limits](USAGE.md#namespace-copy) for an explicit dry-run-first copy.
+Protected stores and standalone Anti use descriptor-validated process locks and owner-only file protection. Unsupported locking or Windows ACL facilities fail explicitly; see [private storage and lock files](USAGE.md#private-storage-and-lock-files).
+
 Local finding verdicts and JSON/SARIF/Markdown reports are available through `anti.py runs finding` and `runs export`. They preserve advisory findings and scope gaps without automatic suppression or publication; see the [usage examples](USAGE.md#local-finding-verdicts-and-report-export).
 
 ## Troubleshooting
@@ -538,6 +541,7 @@ Tagged releases are prepared for PyPI Trusted Publishing. The `.github/workflows
 
 Before the first PyPI publish, configure the PyPI project `codex-antigravity-auth` with a trusted publisher for this GitHub repository, workflow file `.github/workflows/publish.yml`, and environment `pypi`. No local PyPI API token is required or expected.
 
+Setup can now emit a no-write `setup --plan`, apply named non-secret `profiles`, and record explicitly restorable local changes. See [setup plans and restoration](codex_antigravity_auth/SETUP.md).
 
 Developer ownership of route telemetry, request resources, Anti scope rendering
 and immutable run publication is mapped in [the orchestration guide](codex_antigravity_auth/design/orchestration.md).

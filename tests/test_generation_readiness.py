@@ -97,7 +97,10 @@ def ready_cli(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEX_ANTIGRAVITY_NO_UPDATE_CHECK", "1")
     monkeypatch.delenv("ANTIGRAVITY_STORAGE_KEY", raising=False)
     monkeypatch.setattr("keyring.get_password", lambda *args: None)
-    monkeypatch.setattr(cli, "resolve_oauth_credentials", lambda *, read_only=False, warnings=None: ("client", "secret"))
+    def fixture_credentials(*, read_only=False, warnings=None):
+        assert read_only is True
+        return "client", "secret"
+    monkeypatch.setattr(cli, "resolve_oauth_credentials", fixture_credentials)
     monkeypatch.setattr(cli, "_diagnostic_load_accounts", lambda: {"accounts": [{"email": "fixture@example.com"}]})
     monkeypatch.setattr(cli, "_diagnostic_all_provider_configs", lambda: {})
     monkeypatch.setattr(cli, "gateway_model_ids", lambda *args, **kwargs: {"claude-sonnet-4-6"})
