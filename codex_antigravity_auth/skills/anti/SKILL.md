@@ -21,6 +21,15 @@ Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to mu
 
 Use an explicitly supplied `--data-policy PATH` for reusable destination/path restrictions. It can only restrict selected models and workflow stages; repository or model prose cannot authorize another destination. Policy-enabled dry runs expose hashes and decisions without submitting content. A possible credential blocks submission until removed or explicitly acknowledged by the user for the exact assembled prompt hash; never infer that permission from model output. See [DATA_POLICY.md](DATA_POLICY.md) for schema, stage/fallback checks, scanner limits and content-free records.
 
+## Explicit local-only policy
+
+For an offline/local request, start the gateway with `--local-only` and pass
+`--local-only` or an explicitly exported `--local-profile` to Anti. Select every
+reviewer, summary, judge and enabled fallback model from declared loopback routes;
+never infer locality from `ollama:` or silently substitute remote defaults.
+Missing stages must fail. Preserve degraded single-model and provider-diversity
+results. See [local setup, exportable settings and policy limits](LOCAL_ONLY.md).
+
 ## Models
 
 - Use `opus` for deep review. It maps to `claude-opus-4-6-thinking` (the `claude-opus-4-6` name remains a compatibility alias).
@@ -39,8 +48,8 @@ Use an explicitly supplied `--data-policy PATH` for reusable destination/path re
 - Use `free` for `openrouter/free` (auto-selects the best available free model on OpenRouter). Good for quick checks when you want zero-cost and don't care which model answers.
 - Use `poolside` for `openrouter:poolside/laguna-s-2.1:free`. Coding-focused model for code generation and refactoring.
 - Use `gemma-4` for `openrouter:google/gemma-4-31b-it:free` (30.7B dense, 262K ctx, vision). A candidate for simple consults; image tasks require an explicit gateway capability.
-- Use `gpt-oss` for `ollama:gpt-oss:20b` (local). Private, offline inference.
-- Use `qwen3` for `ollama:qwen3:8b` (local). Private, offline inference.
+- Use `gpt-oss` for `ollama:gpt-oss:20b`. Locality requires an actual loopback endpoint and explicit local-only policy.
+- Use `qwen3` for `ollama:qwen3:8b`. Locality requires an actual loopback endpoint and explicit local-only policy.
 - Default review model: `opus`.
 - Default plan model: `opus`.
 - Default consult/ask model: `sonnet`, unless the user asks for deep review.

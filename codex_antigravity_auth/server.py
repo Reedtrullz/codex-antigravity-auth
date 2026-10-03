@@ -52,6 +52,7 @@ from .models import (
 )
 from .observability import request_log_info, write_request_record
 from .route_lifecycle import write_route_lifecycle
+from .skills.anti.scripts.anti_lib.local_policy import environment_enabled as local_environment_enabled, endpoint_scope, VERSION as LOCAL_POLICY_VERSION
 from .resource_limits import (
     ADMISSION, ResourceLimits, ResourceLimitError, read_request_json,
     limited_post, read_response_bytes, response_context, response_json,
@@ -116,30 +117,42 @@ class _ClosingStreamingResponse(StreamingResponse):
                     await close()
 
 
+def gateway_local_only() -> bool:
+    captured = getattr(app.state, 'local_only_mode', None)
+    return local_environment_enabled() if captured is None else captured
+
+
 @asynccontextmanager
 async def gateway_lifespan(_app: FastAPI):
     startup_limits = ResourceLimits.from_env()  # Refuse invalid operator policy before serving.
     global _refresh_ahead_owner, _provider_client_pool
-    if _refresh_ahead_owner is not None:
+    if _refresh_ahead_owner is not None or _provider_client_pool is not None:
         raise RuntimeError("Gateway refresh lifecycle is already running")
-    owner = _RefreshAheadOwner()
-    pool = ProviderClientPool(max_connections=startup_limits.inflight, client_factory=httpx.AsyncClient)
-    _refresh_ahead_owner = owner
-    _provider_client_pool = pool
-    ADMISSION.set_startup_ceiling(startup_limits.inflight)
+    _app.state.local_only_mode = local_environment_enabled()
+    owner = None
+    pool = None
     try:
-        owner.start()
+        pool = ProviderClientPool(max_connections=startup_limits.inflight, client_factory=httpx.AsyncClient)
+        _provider_client_pool = pool
+        ADMISSION.set_startup_ceiling(startup_limits.inflight)
+        if not _app.state.local_only_mode:
+            owner = _RefreshAheadOwner()
+            _refresh_ahead_owner = owner
+            owner.start()
         yield
     finally:
         try:
-            await owner.close()
+            if owner is not None:
+                await owner.close()
         finally:
             try:
-                await pool.aclose()
+                if pool is not None:
+                    await pool.aclose()
             finally:
                 ADMISSION.set_startup_ceiling(None)
                 _provider_client_pool = None
                 _refresh_ahead_owner = None
+                _app.state.local_only_mode = None
 
 
 app = FastAPI(title="Codex Antigravity Gateway", lifespan=gateway_lifespan)
@@ -161,7 +174,7 @@ def provider_client(lane, *, timeout, trust_env=True, follow_redirects=False):
 REFRESH_AHEAD_THROTTLE_SECONDS = 60.0
 STREAM_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 REQUEST_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-MUTATING_JSON_PATHS = {"/v1/responses"}
+MUTATING_JSON_PATHS = {"/v1/responses", "/v1/local/responses"}
 MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS = 2.0
 GOOGLE_BACKEND_TIMEOUT_SECONDS = 60.0
 GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS = 1.0
@@ -436,6 +449,8 @@ class _RefreshAheadOwner:
 
 
 def schedule_refresh_accounts_ahead(*, force: bool = False) -> bool:
+    if gateway_local_only():
+        return False
     # Requests without a running lifespan may not create unowned background work.
     owner = _refresh_ahead_owner
     if owner is None:
@@ -764,6 +779,9 @@ def provider_model_catalog(created: int, *, diagnostics: list | None = None) -> 
         except ValueError:
             diagnostic["status"] = "invalid_configuration"
             continue
+        if gateway_local_only() and endpoint_scope(provider.get('baseUrl')) != 'loopback':
+            diagnostic['status'] = 'excluded_by_local_policy'
+            continue
         try:
             validate_supported_provider_kind(provider)
         except ValueError:
@@ -792,6 +810,10 @@ def provider_model_catalog(created: int, *, diagnostics: list | None = None) -> 
                 continue
             catalog_model_id = normalize_byok_model_id(provider_model, provider_id)
             model_id = f"{provider_id}:{catalog_model_id}"
+            if gateway_local_only() and classify_route(model_id, provider_configs=providers) != "byok":
+                diagnostic["status"] = "partial"
+                diagnostic["omitted_models"] += 1
+                continue
             if model_id in seen_model_ids:
                 continue
             seen_model_ids.add(model_id)
@@ -822,6 +844,7 @@ def provider_model_catalog(created: int, *, diagnostics: list | None = None) -> 
                 aliases=[], capabilities=capabilities, context_window=context_window,
                 declaration_source="provider_configuration", declared_capabilities=declared,
             )
+            byok_models[-1]['capabilities']['destination_scope'] = endpoint_scope(provider.get('baseUrl'))
     return byok_models
 
 
@@ -832,8 +855,10 @@ async def provider_model_catalog_fail_soft(created: int, *, with_diagnostics: bo
             run_in_threadpool(provider_model_catalog, created, diagnostics=diagnostics),
             timeout=MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS,
         )
-        state = "partial" if any(item["status"] != "complete" for item in diagnostics) else "complete"
+        state = "partial" if any(item["status"] not in {"complete", "excluded_by_local_policy"} for item in diagnostics) else "complete"
         report = {"status":state, "providers":diagnostics}
+        if gateway_local_only():
+            report['scope'] = 'loopback_routes_only'
     except asyncio.TimeoutError:
         models, report = [], {"status":"timeout", "providers":[]}
     except Exception:
@@ -848,6 +873,8 @@ def provider_health_catalog() -> list[dict]:
     except Exception:
         return providers
     for provider_id, provider in provider_configs.items():
+        if gateway_local_only() and endpoint_scope(provider.get('baseUrl')) != 'loopback':
+            continue
         models = provider.get("models", [])
         count = len(models) if isinstance(models, list) else 0
         if provider.get("_configuration_error"):
@@ -898,9 +925,9 @@ async def list_models():
             input_modalities=m.get("input_modalities", ["text"]),
             supported_reasoning_efforts=native_model_capabilities(m["id"]).reasoning_effort_levels,
         )
-        for m in native_model_catalog_with_input_modalities()
+        for m in ([] if gateway_local_only() else native_model_catalog_with_input_modalities())
     ]
-    if is_unified_mode_enabled():
+    if is_unified_mode_enabled() and not gateway_local_only():
         # Unified picker: same gateway also advertises OpenAI/Codex ids.
         # Registry lives in unified.openai_catalog (env-extendable), so the
         # catalog and the router can never drift apart.
@@ -948,6 +975,7 @@ async def list_models():
     models = list(unique.values())
     return {
         "capability_catalog_version": CATALOG_VERSION,
+        "local_only_policy": {"version":LOCAL_POLICY_VERSION, "enabled":gateway_local_only()},
         "provider_catalog_diagnostics": catalog_diagnostics,
         "collision_policy": "native definitions precede OpenAI registry entries; first canonical catalog identity wins",
         "object": "list",
@@ -960,13 +988,15 @@ async def list_models():
 async def health(request: Request):
     # The middleware applies the same local/authenticated boundary to every route.
     providers, provider_catalog_status = await provider_health_catalog_fail_soft()
-    catalog = native_model_catalog()
-    unified = is_unified_mode_enabled()
+    local_mode = gateway_local_only()
+    catalog = [] if local_mode else native_model_catalog()
+    unified = is_unified_mode_enabled() and not local_mode
     openai_models = openai_catalog() if unified else []
     openai_status = openai_auth_status() if unified else {"configured": False, "detail": "unified picker disabled"}
     return {
         "ok": True,
         "package_version": local_package_version(),
+        "local_only_policy": {"version":LOCAL_POLICY_VERSION, "enabled":local_mode},
         "model_count": len(catalog) + len(openai_models),
         "advertised_native_models": [model["id"] for model in catalog],
         "advertised_openai_models": [model["id"] for model in openai_models],
@@ -978,7 +1008,7 @@ async def health(request: Request):
             "byok": providers,
         },
         "provider_catalog_status": provider_catalog_status,
-        "accounts": account_health_summary(),
+        "accounts": {"status":"not_inspected_local_only"} if local_mode else account_health_summary(),
         "request_log": request_log_info(),
     }
 
@@ -1024,6 +1054,10 @@ def validate_response_request_body(value: object) -> dict:
         if not isinstance(metadata, dict):
             raise HTTPException(status_code=400, detail="metadata must be an object")
         normalized_metadata = {}
+        if 'antigravity_local_only' in metadata:
+            if type(metadata['antigravity_local_only']) is not bool:
+                raise HTTPException(status_code=400, detail='metadata.antigravity_local_only must be boolean')
+            normalized_metadata['antigravity_local_only'] = metadata['antigravity_local_only']
         run_id = metadata.get("run_id")
         if run_id is not None:
             if not isinstance(run_id, str) or not REQUEST_RUN_ID_RE.fullmatch(run_id):
@@ -1360,6 +1394,12 @@ class OwnedStreamingResponse(StreamingResponse):
             await self.background()
 
 
+@app.post('/v1/local/responses')
+async def create_local_response(request: Request):
+    request.state.require_local_mode = True
+    return await create_response(request)
+
+
 @app.post("/v1/responses")
 async def create_response(request: Request):
     try:
@@ -1440,6 +1480,9 @@ async def _create_response(request: Request, budget: RequestBudget):
                           error_class="request_deadline_exceeded" if expired else "cancelled",
                           cancelled=not expired, terminal_cleanup=True)
     budget.abort = abort_request
+    if getattr(getattr(request, 'state', None), 'require_local_mode', False) is True and not gateway_local_only():
+        await log_request('failed', http_status=403, error_class='local_only_mode_required', attempt_count=0)
+        raise HTTPException(status_code=403, detail='Dedicated local generation requires gateway --local-only mode')
 
     async def report_limit(exc):
         if getattr(exc, "upstream_status", None) is not None:
@@ -1463,6 +1506,7 @@ async def _create_response(request: Request, budget: RequestBudget):
         request_metadata = codex_req.pop("metadata", None)
         if isinstance(request_metadata, dict) and isinstance(request_metadata.get("run_id"), str):
             request_run_id = request_metadata["run_id"]
+        budget.local_only = gateway_local_only() or (request_metadata or {}).get('antigravity_local_only') is True
         google_backend_timeout = google_backend_timeout_from_metadata(request_metadata)
         budget.deadline = budget.started + google_request_timeout_from_metadata(request_metadata)
         budget.stream_idle = (request_metadata or {}).get("antigravity_stream_idle_timeout_seconds", STREAM_IDLE_TIMEOUT_SECONDS)
@@ -1481,6 +1525,10 @@ async def _create_response(request: Request, budget: RequestBudget):
     unified_enabled = is_unified_mode_enabled()
     unified_route = await budget.sync(classify_route, model, unified_enabled=unified_enabled)
     budget.context.update(model=model, route="openai" if unified_route.startswith("openai") else "google" if unified_route == "antigravity" else unified_route, stream=stream)
+    if budget.local_only and unified_route != 'byok':
+        await log_request('failed', model=model, route=unified_route, stream=stream, http_status=403,
+                          error_class='local_only_route_forbidden', attempt_count=0)
+        raise HTTPException(status_code=403, detail={'code':'local_only_route_forbidden', 'message':'Local-only mode requires a configured loopback BYOK route.'})
     if unified_route == "antigravity" and required_output_bridge(native_model_definition(model)):
         detail = {"code":"unsupported_output_modality", "message":"Generated image output is not supported by this gateway; select a text-generation model."}
         await log_request("failed", model=model, route="google", stream=stream, http_status=400,
@@ -1749,6 +1797,10 @@ async def _create_response(request: Request, budget: RequestBudget):
                 error=f"BYOK provider '{provider_id}' is not configured",
             )
             raise HTTPException(status_code=404, detail=f"BYOK provider '{provider_id}' is not configured")
+        if budget.local_only and endpoint_scope(provider.get('baseUrl')) != 'loopback':
+            await log_request('failed', model=model, route='byok', provider=provider_id, stream=stream,
+                              http_status=403, error_class='local_only_route_forbidden', attempt_count=0)
+            raise HTTPException(status_code=403, detail={'code':'local_only_route_forbidden', 'message':'The configured provider endpoint is not loopback.'})
         try:
             validate_supported_provider_kind(provider)
         except ValueError as exc:

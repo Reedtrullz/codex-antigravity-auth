@@ -147,6 +147,15 @@ def test_decoded_attachment_limits_apply_before_decoding(monkeypatch, parts):
     assert len(decoded) == (0 if len(parts) == 1 else 1)
 
 
+def test_attachment_error_paths_do_not_echo_arbitrary_user_keys():
+    payload = {"private-sentinel-key": {"type": "input_image", "image_url": "data:image/png;base64,not-base64"}}
+    with pytest.raises(ResourceLimitError) as caught:
+        limits_module.check_request_structure(payload, ResourceLimits())
+    assert caught.value.code == "invalid_attachment_encoding"
+    assert "private-sentinel-key" not in str(caught.value)
+    assert "not-base64" not in str(caught.value)
+
+
 def test_inline_attachment_exact_boundary_and_remote_urls_are_unchanged():
     configured = replace(ResourceLimits(), attachment_bytes=4, attachments_bytes=4)
     payload = {"input": [{"role": "user", "content": [image(b'1234'), {"type": "input_image", "image_url": "https://example.invalid/large.png"}]}]}
@@ -267,7 +276,7 @@ def test_stream_schema_expansion_rejection_is_local_nonretryable_and_releases_pe
 
     schema = {"type": "object", "properties": {"value": {"type": "string"}}}
     clean_json_schema(schema)  # Each inline schema fits; generated placeholders share the request budget.
-    tools = [{"type": "function", "name": f"fixture_{index}", "parameters": schema} for index in range(8)]
+    tools = [{"type": "function", "name": f"f_{index}", "parameters": schema} for index in range(8)]
     payload = {"model": "gemini-3.8-flash", "input": "fixture", "stream": True,
                "tools": tools}
     assert len(json.dumps(payload)) < 1024
