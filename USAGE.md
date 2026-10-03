@@ -435,3 +435,7 @@ apply to retries, fallback and judge calls. Optional `--currency-budget` require
 an explicit dated `--pricing-file` with complete-attempt charge bounds; unknown
 or stale prices refuse admission. Local usage is not billing. See the packaged
 [spend-control contract](codex_antigravity_auth/skills/anti/SPEND_CONTROL.md).
+
+## HTTP client pooling
+
+The running gateway reuses bounded HTTP connections for generation across Google, native OpenAI and BYOK, with separate pools for each environment-proxy policy. Credentials and timeouts remain per request; shared cookie storage is disabled. See [HTTP client ownership and synthetic measurements](codex_antigravity_auth/HTTP_CLIENTS.md).
