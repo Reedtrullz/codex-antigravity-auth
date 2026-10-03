@@ -47,6 +47,16 @@ from anti_lib.artifacts import (
 from anti_lib.chunking import chunk_manifest
 from anti_lib.cleanup import RUN_ID_RE, assert_not_deleted, clean_runs
 from anti_lib.context import ordered_prompt
+from anti_lib.errors import AntiError
+from anti_lib import run_records, context as scope_context
+from anti_lib.run_records import utc_timestamp, new_run_id
+from anti_lib.artifacts import read_record as load_run_record
+from anti_lib.context import (
+    MAX_FILE_BYTES, CHUNK_PART_SUFFIX_RE, GIT_DIFF_TRUNCATION_CAVEAT,
+    truncate_at_line_boundary, file_coverage_record,
+    coverage_is_incomplete, coverage_summary, review_prompt_parts, review_read_omissions, build_review_prompt,
+)
+
 from anti_lib import inventory as review_inventory
 from anti_lib import diff_snapshot
 from anti_lib.data_policy import DataPolicy, PolicyError
@@ -351,7 +361,6 @@ def apply_free_lane_preset(args: argparse.Namespace) -> None:
         if getattr(args, "model", None):
             raise AntiError("--model-free and --model are mutually exclusive; pick one explicit lane list")
         args.model = list(FREE_LANE_PRESET_MODELS)
-MAX_FILE_BYTES = 180_000
 RESULT_SCHEMA_VERSION = 1
 VERIFICATION_REQUIRED_CHECKS = [
     "inspect exact source at sourceCommit",
@@ -361,7 +370,6 @@ VERIFICATION_REQUIRED_CHECKS = [
 ]
 DEFAULT_MAX_PROMPT_CHARS = 120_000
 DEFAULT_MAX_SYNTHESIS_CHARS = DEFAULT_MAX_PROMPT_CHARS
-GIT_DIFF_TRUNCATION_CAVEAT = "Git diff truncated to fit max prompt budget"
 CLAUDE_SAFE_PROMPT_CHARS = 30_000
 MAX_PROMPT_CHARS_HELP = (
     "Maximum prompt chars before chunking; use 0 for unlimited. "
@@ -574,69 +582,9 @@ EXCLUDED_PATTERNS = [
     "*apikey*",
     "*api-key*",
 ]
-CHUNK_PART_SUFFIX_RE = re.compile(r" part \d+/\d+$")
 FAILURE_OUTPUT_PREVIEW_CHARS = 1600
 REVIEW_SYNTHESIS_OVERFLOW_SENTINEL = "ANTI_SYNTHESIS_STATUS: OVERFLOW"
 
-
-class AntiError(Exception):
-    pass
-
-
-_POLICY_STAGE = contextvars.ContextVar("anti_data_policy_stage", default="primary")
-
-
-def data_policy(args):
-    if args is None:
-        return None
-    if hasattr(args, "_data_policy_session"):
-        return args._data_policy_session
-    path = getattr(args, "data_policy", None)
-    acknowledgements = getattr(args, "acknowledge_secret_hash", None) or []
-    if acknowledgements and not path:
-        raise PolicyError("Secret acknowledgements require --data-policy")
-    session = DataPolicy(Path(path).expanduser(), root=find_repo_root(Path.cwd()) or Path.cwd(), acknowledgements=acknowledgements) if path else None
-    args._data_policy_session = session
-    return session
-
-
-def policy_paths(args, root, paths):
-    session = data_policy(args)
-    if session:
-        session.check_paths(paths, root=root)
-
-
-def policy_submit(args, *, model, prompt, base_url, fallback=False):
-    session = data_policy(args)
-    if session:
-        session.check(model=model, prompt=prompt, base_url=base_url, stage=_POLICY_STAGE.get())
-        if fallback:
-            session.check(model=model, prompt=prompt, base_url=base_url, stage="fallback")
-
-
-def policy_generate(args, *, stage, **kwargs):
-    token = _POLICY_STAGE.set(stage)
-    try:
-        return generate_with_fallback(args, **kwargs)
-    finally:
-        _POLICY_STAGE.reset(token)
-
-
-def policy_preflight(args, prompt, routes):
-    session = data_policy(args)
-    if session is None:
-        return False
-    fallback = getattr(args, "fallback_model", None)
-    for model, stage in routes:
-        session.check(model=model, prompt=prompt, base_url=args.base_url, stage=stage)
-        if fallback and getattr(args, "fallback_policy", "never") != "never":
-            resolved = resolve_model(fallback, default=fallback)
-            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage=stage)
-            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage="fallback")
-    if getattr(args, "dry_run", False):
-        print(json.dumps({"dryRun": True, "dataPolicy": session.audit(), "noContentSubmitted": True}, indent=2))
-        return True
-    return False
 
 class RunDeadlineExceeded(DeadlineExceeded, AntiError):
     pass
@@ -726,7 +674,11 @@ def settle_spend(*, submitted, usage=None):
 
 def scheduling_metadata(metadata=None, control=None):
     metadata = dict(metadata or {})
-    for source, target in (('panel_results', 'panel_lane_count'), ('judge_attempts', 'judge_attempt_count')):
+    for source, target in (
+        ('panel_results', 'panel_lane_count'),
+        ('judge_attempts', 'judge_attempt_count'),
+        ('consult_attempts', 'consult_attempt_count'),
+    ):
         if isinstance(metadata.get(source), list):
             metadata[target] = len(metadata[source])
     control = control or CURRENT_RUN.get()
@@ -777,17 +729,64 @@ def read_response_body(response, timeout):
         fragments.append(block)
     return b''.join(fragments)
 
+_POLICY_STAGE = contextvars.ContextVar("anti_data_policy_stage", default="primary")
+
+
+def data_policy(args):
+    if args is None:
+        return None
+    if hasattr(args, "_data_policy_session"):
+        return args._data_policy_session
+    path = getattr(args, "data_policy", None)
+    acknowledgements = getattr(args, "acknowledge_secret_hash", None) or []
+    if acknowledgements and not path:
+        raise PolicyError("Secret acknowledgements require --data-policy")
+    session = DataPolicy(Path(path).expanduser(), root=find_repo_root(Path.cwd()) or Path.cwd(), acknowledgements=acknowledgements) if path else None
+    args._data_policy_session = session
+    return session
+
+
+def policy_paths(args, root, paths):
+    session = data_policy(args)
+    if session:
+        session.check_paths(paths, root=root)
+
+
+def policy_submit(args, *, model, prompt, base_url, fallback=False):
+    session = data_policy(args)
+    if session:
+        session.check(model=model, prompt=prompt, base_url=base_url, stage=_POLICY_STAGE.get())
+        if fallback:
+            session.check(model=model, prompt=prompt, base_url=base_url, stage="fallback")
+
+
+def policy_generate(args, *, stage, **kwargs):
+    token = _POLICY_STAGE.set(stage)
+    try:
+        return generate_with_fallback(args, **kwargs)
+    finally:
+        _POLICY_STAGE.reset(token)
+
+
+def policy_preflight(args, prompt, routes):
+    session = data_policy(args)
+    if session is None:
+        return False
+    fallback = getattr(args, "fallback_model", None)
+    for model, stage in routes:
+        session.check(model=model, prompt=prompt, base_url=args.base_url, stage=stage)
+        if fallback and getattr(args, "fallback_policy", "never") != "never":
+            resolved = resolve_model(fallback, default=fallback)
+            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage=stage)
+            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage="fallback")
+    if getattr(args, "dry_run", False):
+        print(json.dumps({"dryRun": True, "dataPolicy": session.audit(), "noContentSubmitted": True}, indent=2))
+        return True
+    return False
+
 
 def eprint(message: str) -> None:
     print(message, file=sys.stderr)
-
-
-def utc_timestamp() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def new_run_id() -> str:
-    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8]
 
 
 def ensure_run_id(args: argparse.Namespace) -> str | None:
@@ -823,7 +822,6 @@ def write_start_record(args: argparse.Namespace, *, run_id: str) -> None:
         base_url=getattr(args, "base_url", None),
         metadata={"request_log_correlation_id": run_id},
     )
-
 
 
 def progress(args: argparse.Namespace, message: str) -> None:
@@ -921,36 +919,37 @@ def write_preflight_record(
     )
 
 
-def check_record_retention(record_id: str, output_mode: str) -> None:
-    """Do not silently mix policies or delete older artifacts when reusing an ID."""
-    if not RUN_ID_RE.fullmatch(record_id):
-        raise AntiError("run id must contain only letters, numbers, '_' or '-'")
-    if RUNS_DIR.is_symlink():
-        raise AntiError("refusing to write Anti run record through symlinked directory")
-    assert_not_deleted(RUNS_DIR, record_id)
-    path = RUNS_DIR / f"{record_id}.json"
-    if path.is_symlink():
-        raise AntiError("refusing to overwrite symlinked run record")
-    if path.exists():
-        try:
-            previous = json.loads(path.read_text(encoding="utf-8"))
-        except (ValueError, OSError) as exc:
-            raise AntiError("cannot inspect existing run retention; choose a new run id") from exc
-        if not isinstance(previous, dict) or previous.get("save_output") != output_mode:
-            raise AntiError("run id already exists with another retention policy; choose a new run id")
-    artifact_dir = RUNS_DIR / record_id
-    if artifact_dir.is_symlink():
-        raise AntiError("refusing to write result artifact through symlink")
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    if not path.exists() and (artifact_dir.exists() or temporary.exists() or temporary.is_symlink()):
-        raise AntiError("run id has orphan artifacts with unknown retention policy; choose a new run id")
-    if (output_mode == "never" and artifact_dir.exists()) or (
-        output_mode == "summary" and artifact_dir.exists() and any(artifact_dir.glob("lane-*.json"))
-    ):
-        raise AntiError("run id has artifacts incompatible with retention policy; choose a new run id")
-
-
 _RECORD_WRITES = threading.local()
+
+
+def check_record_retention(record_id: str, output_mode: str) -> None:
+    run_records.check_record_retention(record_id, output_mode, runs_dir=RUNS_DIR)
+
+
+def _write_run_record_unlocked(args: argparse.Namespace, **kwargs: Any) -> Path | None:
+    output_mode = save_output_mode(args)
+    kwargs['metadata'] = scheduling_metadata(kwargs.get('metadata'), getattr(args, '_run_control', None))
+    metadata = kwargs['metadata']
+    if kwargs['status'] == 'success' and (metadata.get('run_control', {}).get('deferred_calls') or
+                                       metadata.get('admission_controls', {}).get('assumption_exceeded')):
+        kwargs['status'] = 'partial'
+    session = getattr(args, '_data_policy_session', None)
+    path = run_records.publish_unlocked(
+        args, runs_dir=RUNS_DIR, output_mode=output_mode, timestamp=utc_timestamp(),
+        helper=helper_identity() if output_mode != 'never' else None,
+        output_preview_chars=RUN_OUTPUT_PREVIEW_CHARS, verification_required_checks=VERIFICATION_REQUIRED_CHECKS,
+        policy_audit=session.audit() if session is not None else None, write_json=atomic_write_json, **kwargs)
+    if path is not None and output_mode != 'never':
+        progress(args, f"saved sanitized run record: {path}")
+    return path
+
+
+def iter_run_records() -> list[Path]:
+    return run_records.iter_run_records(RUNS_DIR, warn=eprint)
+
+
+def resolve_run_record_path(run_id: str) -> Path:
+    return run_records.resolve_run_record_path(run_id, runs_dir=RUNS_DIR)
 
 
 def write_run_record(args: argparse.Namespace, **kwargs: Any) -> Path | None:
@@ -992,329 +991,6 @@ def write_run_record(args: argparse.Namespace, **kwargs: Any) -> Path | None:
             _RECORD_WRITES.pending_signal = None
             if pending is not None:
                 _handle_run_signal(*pending)
-
-
-def _write_run_record_unlocked(
-    args: argparse.Namespace,
-    *,
-    mode: str,
-    status: str,
-    models: list[str] | None = None,
-    base_url: str | None = None,
-    prompt_text: str | None = None,
-    output_text: str | None = None,
-    caveats: list[str] | None = None,
-    metadata: dict[str, Any] | None = None,
-    error: str | None = None,
-    execution_ledger: list[dict[str, Any]] | None = None,
-    force_full_output: bool = False,
-) -> Path | None:
-    metadata = scheduling_metadata(metadata, getattr(args, '_run_control', None))
-    if status == 'success' and (metadata.get('run_control', {}).get('deferred_calls') or
-                                metadata.get('admission_controls', {}).get('assumption_exceeded')):
-        status = 'partial'
-    output_mode = save_output_mode(args)
-    record_id = getattr(args, "run_id", None)
-    if not record_id and output_mode != "never":
-        record_id = new_run_id()
-    if record_id:
-        check_record_retention(str(record_id), output_mode)
-    if output_mode == "never":
-        # Minimal lifecycle record: correlation survives even when prompt and
-        # output retention are disabled (bug report root cause 2).
-        record_id = getattr(args, "run_id", None)
-        if not record_id:
-            return None
-        if not RUN_ID_RE.fullmatch(str(record_id)):
-            raise AntiError("run id must contain only letters, numbers, '_' or '-'")
-        if RUNS_DIR.is_symlink():
-            raise AntiError(f"refusing to write Anti run record through symlinked directory: {RUNS_DIR}")
-        os.makedirs(RUNS_DIR, mode=0o700, exist_ok=True)
-        try:
-            os.chmod(RUNS_DIR, 0o700)
-        except OSError:
-            pass
-        commands = {"consult", "review", "plan", "panel", "moa", "fusion", "workflow", "compare"}
-        statuses = {"running", "success", "partial", "error", "interrupted", "failed"}
-        command = getattr(args, "command", mode)
-        record: dict[str, Any] = {
-            "id": str(record_id),
-            "created_at": utc_timestamp(),
-            "command": command if command in commands else "unknown",
-            "mode": mode if mode in commands else "unknown",
-            "status": status if status in statuses else "unknown",
-            "save_output": output_mode,
-            "runStatus": "failed" if status == "error" else status if status in statuses else "unknown",
-            "metadata": {
-                **lifecycle_metadata(metadata),
-                "request_log_correlation_id": str(record_id),
-            },
-        }
-        if error:
-            record["error"] = "interrupted" if status == "interrupted" else "run_failed"
-        record = sanitize_json(record)
-        record["id"] = str(record_id)
-        record["metadata"]["request_log_correlation_id"] = str(record_id)
-        record_path = RUNS_DIR / f"{record['id']}.json"
-        if record_path.exists() and record_path.is_symlink():
-            raise AntiError(f"refusing to overwrite symlinked run record: {record_path}")
-        record["writerId"] = args._anti_writer_id
-        record["recordSchemaVersion"] = RECORD_SCHEMA_VERSION
-        if getattr(args, "_data_policy_session", None):
-            record["metadata"]["dataPolicy"] = args._data_policy_session.audit()
-        validate_record(record, record_path)
-        atomic_write_json(record_path, record)
-        args.run_record_written = status != "running"
-        return record_path
-
-    if RUNS_DIR.is_symlink():
-        raise AntiError(f"refusing to write Anti run record through symlinked directory: {RUNS_DIR}")
-    os.makedirs(RUNS_DIR, mode=0o700, exist_ok=True)
-    try:
-        os.chmod(RUNS_DIR, 0o700)
-    except OSError:
-        pass
-
-    output_chars = len(output_text or "")
-    prompt_chars = len(prompt_text or "")
-    if not RUN_ID_RE.fullmatch(str(record_id)):
-        raise AntiError("run id must contain only letters, numbers, '_' or '-'")
-
-    record: dict[str, Any] = {
-        "id": str(record_id),
-        "created_at": utc_timestamp(),
-        "command": getattr(args, "command", mode),
-        "workflow": getattr(args, "workflow_name", None),
-        "run_label": getattr(args, "run_label", None),
-        "mode": mode,
-        "status": status,
-        "gateway": base_url,
-        "models": models or [],
-        "prompt_chars": prompt_chars,
-        "output_chars": output_chars,
-        "caveats": caveats or [],
-        "metadata": metadata or {},
-        "save_output": output_mode,
-        "helper": helper_identity(),
-    }
-    # B7: split run lifecycle from scope coverage so consumers never confuse
-    # "the command ran" with "the requested scope was fully reviewed".
-    record["runStatus"] = "failed" if status == "error" else status
-    scope_status: str | None = None
-    if isinstance(metadata, dict):
-        # Panel ``status`` is an integrity result (for example
-        # ``degraded_single_model``), while review/plan ``scope_status`` keeps
-        # the older complete/incomplete coverage contract for run records.
-        metadata_status = (
-            metadata.get("scope_status")
-            or metadata.get("scopeStatus")
-            or metadata.get("status")
-        )
-        if metadata_status in {"incomplete", "partial"}:
-            scope_status = "partial"
-        elif metadata_status == "complete":
-            scope_status = "complete"
-        omitted_items = metadata.get("omitted_files") or metadata.get("chunk_omitted_items") or []
-        manifest_file_count = metadata.get("omitted_file_count")
-        record["omittedFileCount"] = int(
-            manifest_file_count if manifest_file_count is not None else len(omitted_items)
-        )
-        record["omittedChunkCount"] = int(metadata.get("omitted_chunk_count") or 0)
-    record["scopeStatus"] = scope_status or ("complete" if status == "success" else "partial")
-    if error:
-        record["error"] = error
-    if output_mode == "summary" and output_text:
-        record["output_preview"] = redact_sensitive_text(output_text)[:RUN_OUTPUT_PREVIEW_CHARS]
-    elif output_mode == "full":
-        if prompt_text is not None:
-            record["prompt_sha256"] = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
-            record["prompt_chars"] = len(prompt_text)
-        if output_text is not None:
-            record["output_text"] = output_text
-        if execution_ledger is not None:
-            record["execution_ledger"] = execution_ledger
-
-    if output_mode == "summary":
-        # Keep structured check counts and identities, but omit the potentially
-        # large check descriptors from persisted summaries before clipping.
-        summary_metadata = dict(record.get("metadata") or {})
-        verification_metadata = summary_metadata.get("verification")
-        if isinstance(verification_metadata, dict) and "checks" in verification_metadata:
-            summary_metadata["verification"] = {key: value for key, value in verification_metadata.items() if key != "checks"}
-            summary_metadata["verification"]["checksRetained"] = False
-        findings_metadata = summary_metadata.get("findings")
-        if isinstance(findings_metadata, dict) and isinstance(findings_metadata.get("findings"), list):
-            findings_metadata = dict(findings_metadata)
-            findings_metadata["findings"] = [
-                {key: value for key, value in finding.items() if key != "checks"}
-                if isinstance(finding, dict) else finding
-                for finding in findings_metadata["findings"]
-            ]
-            summary_metadata["findings"] = findings_metadata
-        metadata = summary_metadata
-        record["metadata"] = summary_metadata
-        # Preserve fixed lifecycle fields and the metadata consumed by the
-        # result artifact before applying the shared content budget. Large
-        # panel transcripts must not exhaust that budget ahead of checks and
-        # chunk counts.
-        structure = summary_structure(record, (
-            "id", "created_at", "command", "mode", "status", "runStatus", "scopeStatus", "save_output",
-            "prompt_chars", "output_chars", "omittedFileCount", "omittedChunkCount",
-        ))
-        metadata_for_preview = record.get("metadata")
-        ordered = {key: value for key, value in record.items() if key not in structure and key != "metadata"}
-        if isinstance(metadata_for_preview, dict):
-            priority = (
-            "request_log_correlation_id", "runStatus", "scopeStatus", "scope_status", "panel_status",
-            "consult_attempts",
-            "planned_chunk_count", "completed_chunk_count", "failed_chunk_count", "not_sent_chunk_count",
-            "omitted_chunk_count", "verification", "coverage", "findings", "failure_diagnostics", "panel_results",
-            )
-            ordered["metadata"] = {key: metadata_for_preview[key] for key in priority if key in metadata_for_preview}
-            ordered["metadata"].update({key: value for key, value in metadata_for_preview.items() if key not in ordered["metadata"]})
-        record = summary_projection(ordered)
-        record.update(structure)
-        if not isinstance(record.get("metadata"), dict):
-            record["metadata"] = {}
-        record["metadata"].update(lifecycle_metadata(metadata))
-        record["retention"] = summary_retention()
-    record = sanitize_json(record)
-    if not isinstance(record, dict):
-        raise AntiError("Full run record exceeds the structured redaction limit")
-    # The record id is generated by us or validated by RUN_ID_RE; never let
-    # value redaction mangle it (e.g. a run id shaped like user_12345678).
-    record["id"] = str(record_id)
-    if record.get("metadata", {}).get("request_log_correlation_id") is not None:
-        record["metadata"]["request_log_correlation_id"] = str(record_id)
-    run_record_path = RUNS_DIR / f"{record['id']}.json"
-    run_dir = RUNS_DIR / str(record_id)
-    revisions_dir = run_dir / "revisions"
-    for directory in (run_dir, revisions_dir):
-        if directory.is_symlink():
-            raise AntiError("refusing to publish artifacts through a symlink")
-        directory.mkdir(mode=0o700, exist_ok=True)
-    revision_id = uuid.uuid4().hex
-    artifact_dir = revisions_dir / revision_id
-    artifact_dir.mkdir(mode=0o700)  # Never overwrite an existing revision.
-    artifact_path = artifact_dir / "result.json"
-    raw_lane_paths: list[str] = []
-    if output_mode == "full" and execution_ledger:
-        for index, entry in enumerate(execution_ledger, start=1):
-            lane_path = artifact_dir / f"lane-{index:04d}.json"
-            lane = sanitize_json(entry)
-            if not isinstance(lane, dict):
-                raise AntiError("Raw lane exceeds the structured redaction limit")
-            lane.update({"laneSchemaVersion": LANE_SCHEMA_VERSION, "runId": str(record_id), "revisionId": revision_id})
-            atomic_write_json(lane_path, lane)
-            raw_lane_paths.append(str(lane_path))
-    artifact_scope_status = record.get("scopeStatus") or ("complete" if status == "success" else "partial")
-    artifact_metadata = metadata if isinstance(metadata, dict) else {}
-    artifact_run_status = "failed" if status == "error" else status
-    finding_contract = artifact_metadata.get("findings")
-    if not isinstance(finding_contract, dict):
-        finding_contract = {}
-    artifact = {
-        "schemaVersion": SAVED_RESULT_SCHEMA_VERSION,
-        "runId": str(record_id),
-        "createdAt": record["created_at"],
-        "sourceCommit": artifact_metadata.get("sourceCommit") or artifact_metadata.get("source_commit"),
-        "helper": record.get("helper"),
-        "mode": mode,
-        "runStatus": artifact_run_status,
-        "scopeStatus": artifact_scope_status,
-        "panelStatus": artifact_metadata.get("panel_status") or artifact_metadata.get("panelStatus"),
-        "coverage": coverage_summary(artifact_metadata),
-        "requestedModels": artifact_metadata.get("requested_models") or record.get("models", []),
-        "actualModels": artifact_metadata.get("actual_models", []),
-        "actualProviders": artifact_metadata.get("actual_providers", []),
-        "lanes": artifact_metadata.get("panel_results", []),
-        "findings": finding_contract.get("findings", []),
-        "disagreements": finding_contract.get("disagreements", []),
-        "unverifiable": finding_contract.get("unverifiable", []),
-        "recommendedNextActions": finding_contract.get("recommended_next_actions", []),
-        "summary": finding_contract.get("summary"),
-        "output_text": output_text,
-        "failureDiagnostics": artifact_metadata.get("failure_diagnostics", []),
-        "verification": artifact_metadata.get(
-            "verification",
-            {
-                "status": "not_run",
-                "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
-                "performedBy": None,
-                "evidence": [],
-            },
-        ),
-        "caveats": record.get("caveats", []),
-        "error": record.get("error"),
-        "artifacts": {
-            "runRecordPath": str(run_record_path),
-            "resultPath": str(artifact_path),
-            "rawLanePaths": raw_lane_paths,
-        },
-        "resultPath": str(artifact_path),
-    }
-    if coverage_has_loss(artifact["coverage"]):
-        artifact["coverage"]["status"] = "partial"
-    if artifact["coverage"]["status"] == "partial" or record.get("omittedFileCount", 0) or record.get("omittedChunkCount", 0):
-        record["scopeStatus"] = artifact["scopeStatus"] = "partial"
-    if output_mode == "summary":
-        artifact.pop("output_text", None)
-        artifact["output_preview"] = redact_sensitive_text(output_text or "")[:RUN_OUTPUT_PREVIEW_CHARS]
-        artifact["output_chars"] = output_chars
-        structure = summary_structure(artifact, (
-            "schemaVersion", "runId", "createdAt", "mode", "runStatus", "scopeStatus", "panelStatus", "output_chars",
-        ))
-        coverage_structure = summary_structure(artifact["coverage"], (
-            "status", "chunksExpected", "chunksCompleted", "chunksFailed", "chunksOmitted", "chunksNotSent",
-        ))
-        verification = artifact.get("verification")
-        verification = verification if isinstance(verification, dict) else {"status": "unknown"}
-        verification_structure = summary_structure(verification, ("status", "performedBy", "evidenceCount"))
-        pointers = artifact["artifacts"]
-        ordered_artifact = {key: artifact[key] for key in ("verification", "output_preview")}
-        ordered_artifact.update({key: value for key, value in artifact.items()
-                                 if key not in structure and key not in {"artifacts", "resultPath"}})
-        artifact = summary_projection(ordered_artifact)
-        artifact.update(structure)
-        artifact["runId"] = str(record_id)
-        artifact["coverage"] = {**artifact.get("coverage", {}), **coverage_structure}
-        artifact["verification"] = {**artifact.get("verification", {}), **verification_structure}
-        artifact["artifacts"] = pointers
-        artifact["resultPath"] = str(artifact_path)
-        artifact["retention"] = summary_retention()
-    if output_mode == "full":
-        artifact["retention"] = record["retention"] = {"mode": "full", "contentComplete": True}
-    artifact = sanitize_json(artifact)
-    if not isinstance(artifact, dict):
-        raise AntiError("Full result exceeds the structured redaction limit")
-    artifact["writerId"] = args._anti_writer_id
-    artifact["runId"] = str(record_id)
-    artifact["revisionId"] = revision_id
-    artifact.setdefault("lanes", [])
-    # Preview clipping must not redact trusted publication identity/path aliases.
-    artifact["artifacts"] = {"runRecordPath": str(run_record_path), "resultPath": str(artifact_path), "rawLanePaths": raw_lane_paths}
-    artifact["resultPath"] = str(artifact_path)
-    atomic_write_json(artifact_path, artifact)
-    record["resultPath"] = str(artifact_path)
-    record["writerId"] = args._anti_writer_id
-    record["recordSchemaVersion"] = RECORD_SCHEMA_VERSION
-    record["publication"] = {
-        "revision": revision_id,
-        "result": file_reference(RUNS_DIR, artifact_path),
-        "lanes": [file_reference(RUNS_DIR, Path(path)) for path in raw_lane_paths],
-    }
-    path = run_record_path
-    if getattr(args, "_data_policy_session", None):
-        record.setdefault("metadata", {})["dataPolicy"] = args._data_policy_session.audit()
-    validate_record(record, path)
-    fsync_directory(revisions_dir)
-    fsync_directory(run_dir)
-    # This is the publication commit. Earlier immutable files alone grant no
-    # terminal authority; an interrupted replacement leaves the old index valid.
-    atomic_write_json(path, record)
-    args.run_record_written = status != "running"
-    progress(args, f"saved sanitized run record: {path}")
-    return path
 
 
 def error_is_retryable(error: str) -> bool:
@@ -1631,7 +1307,6 @@ def cheapest_models_for_task(
     return [m[0] for m in candidates]
 
 
-
 def estimate_tokens(text: str) -> int:
     """Rough token count: ~4 chars per token for English text."""
     return max(1, len(text) // 4)
@@ -1743,13 +1418,14 @@ def request_json(
     timeout: float = 10.0,
     token_env: str = DEFAULT_TOKEN_ENV,
 ) -> tuple[int, dict[str, Any]]:
+    control = CURRENT_RUN.get()
+    if control is not None:
+        timeout = control.timeout(timeout)
+
     try:
         url = validate_endpoint_url(url, allow_query=True)
     except ValueError as exc:
         raise AntiError(str(exc)) from exc
-    control = CURRENT_RUN.get()
-    if control is not None:
-        timeout = control.timeout(timeout)
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {"Accept": "application/json"}
     if body is not None:
@@ -2053,8 +1729,9 @@ def post_response(
     budget_purpose: str | None = None,
     policy_fallback: bool = False,
 ) -> ResponseText:
-    policy_submit(budget_args, model=model, prompt=prompt, base_url=base_url, fallback=policy_fallback)
     control = run_control(budget_args)
+
+    policy_submit(budget_args, model=model, prompt=prompt, base_url=base_url, fallback=policy_fallback)
     requested_model = model
     available_model_ids = model_ids
     if available_model_ids is None:
@@ -2691,45 +2368,12 @@ def file_is_tracked(root: Path, rel_path: str) -> bool:
     return proc.returncode == 0
 
 
-def read_text_file(
-    root: Path,
-    rel_path: str,
-    *,
-    truncate: bool = True,
-) -> tuple[str, str | None]:
-    path = root / rel_path
-    if not path.is_file():
-        return "", f"{rel_path}: not a regular file"
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        return "", f"{rel_path}: {exc}"
-    return decode_source_bytes(rel_path, raw, truncate=truncate)
+def read_text_file(root: Path, rel_path: str, *, truncate: bool = True) -> tuple[str, str | None]:
+    return scope_context.read_text_file(root, rel_path, truncate=truncate, max_bytes=MAX_FILE_BYTES)
 
 
-def decode_source_bytes(
-    rel_path: str,
-    raw: bytes,
-    *,
-    truncate: bool = True,
-) -> tuple[str, str | None]:
-    if b"\0" in raw:
-        return "", f"{rel_path}: binary file skipped"
-    note = None
-    if truncate and len(raw) > MAX_FILE_BYTES:
-        original_len = len(raw)
-        raw = raw[:MAX_FILE_BYTES]
-        note = f"{rel_path}: truncated to {MAX_FILE_BYTES} bytes ({original_len} original bytes)"
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        if note and exc.start >= max(0, len(raw) - 4):
-            raw = raw[: exc.start]
-            text = raw.decode("utf-8")
-            note += "; trimmed partial UTF-8 character at truncation boundary"
-        else:
-            return "", f"{rel_path}: non-UTF-8 file skipped"
-    return text, note
+def decode_source_bytes(rel_path: str, raw: bytes, *, truncate: bool = True) -> tuple[str, str | None]:
+    return scope_context.decode_source_bytes(rel_path, raw, truncate=truncate, max_bytes=MAX_FILE_BYTES)
 
 
 def source_commit(root: Path) -> str | None:
@@ -2737,267 +2381,11 @@ def source_commit(root: Path) -> str | None:
     return value or None
 
 
-def file_coverage_record(
-    root: Path,
-    rel_path: str,
-    text: str,
-    note: str | None,
-    *,
-    source_kind: str = "file",
-    raw: bytes | None = None,
-) -> dict[str, Any]:
-    """Describe the exact source bytes available to the review planner."""
-    if raw is None:
-        path = root / rel_path
-        try:
-            raw = path.read_bytes()
-        except OSError as exc:
-            return {
-                "path": rel_path,
-                "sha256": None,
-                "bytesDeclared": 0,
-                "bytesSent": 0,
-                "chunksExpected": 0,
-                "chunksSent": 0,
-                "contentStatus": "omitted",
-                "reason": str(exc),
-                "sourceKind": source_kind,
-            }
-    status = "complete"
-    if note:
-        status = "omitted" if any(word in note.lower() for word in ("binary", "non-utf", "not a regular")) else "truncated"
-    return {
-        "path": rel_path,
-        "sha256": hashlib.sha256(raw).hexdigest(),
-        "bytesDeclared": len(raw),
-        "bytesSent": len(text.encode("utf-8")),
-        "chunksExpected": 0,
-        "chunksSent": 0,
-        "contentStatus": status,
-        "reason": note,
-        "sourceKind": source_kind,
-    }
-
-
-def coverage_is_incomplete(records: list[dict[str, Any]] | None) -> bool:
-    return any(
-        record.get("contentStatus") in {"truncated", "omitted", "partial", "failed", "error"}
-        or int(record.get("bytesSent") or 0) < int(record.get("bytesDeclared") or 0)
-        for record in (records or [])
-    )
-
-
-def coverage_summary(metadata: dict[str, Any] | None) -> dict[str, Any]:
-    """Return one stable coverage shape for stdout and saved result artifacts."""
-    metadata = metadata or {}
-    records = [
-        dict(record)
-        for record in (metadata.get("coverage") or [])
-        if isinstance(record, dict) and record.get("path")
-    ]
-
-    def unique(values: list[Any]) -> list[str]:
-        result: list[str] = []
-        for value in values:
-            text = str(value)
-            if text and text not in result:
-                result.append(text)
-        return result
-
-    def source_path(value: Any) -> str:
-        text = str(value)
-        text = CHUNK_PART_SUFFIX_RE.sub("", text)
-        if " (" in text:
-            text = text.split(" (", 1)[0]
-        return text
-
-    declared = unique(
-        list(metadata.get("declared_files") or [])
-        + [record.get("path") for record in records]
-    )
-    included = unique(
-        [source_path(path) for path in (metadata.get("included_files") or [])]
-        + [
-            record["path"]
-            for record in records
-            if record.get("contentStatus") == "complete"
-            and (
-                int(record.get("chunksSent") or 0) > 0
-                or int(record.get("bytesDeclared") or 0) == 0
-            )
-        ]
-    )
-    omitted: list[str] = []
-    truncated: list[str] = []
-    partial: list[str] = []
-    failed: list[str] = []
-    for record in records:
-        path = str(record["path"])
-        status = str(record.get("contentStatus") or "")
-        try:
-            byte_incomplete = int(record.get("bytesSent") or 0) < int(record.get("bytesDeclared") or 0)
-        except (TypeError, ValueError):
-            byte_incomplete = True
-        try:
-            chunks_completed = int(
-                record.get("chunksCompleted", record.get("chunksSent")) or 0
-            )
-            chunk_incomplete = chunks_completed < int(record.get("chunksExpected") or 0)
-        except (TypeError, ValueError):
-            chunk_incomplete = True
-        if status == "truncated" or (byte_incomplete and status not in {"omitted", "failed", "error"}):
-            truncated.append(path)
-        if status in {"omitted", "error", "failed"}:
-            omitted.append(path)
-        if status == "partial" or chunk_incomplete:
-            partial.append(path)
-        if chunk_incomplete and status not in {"omitted", "failed", "error", "partial"}:
-            partial.append(path)
-        if status in {"error", "failed"}:
-            failed.append(path)
-    declared_set = set(declared)
-    for item in metadata.get("omitted_files") or metadata.get("chunk_omitted_items") or []:
-        path = source_path(item)
-        if path in declared_set:
-            record = next((item for item in records if item.get("path") == path), None)
-            if record and record.get("contentStatus") == "partial":
-                partial.append(path)
-            else:
-                omitted.append(path)
-
-    planned_chunks = metadata.get("planned_chunk_count")
-    sent_chunks = metadata.get("completed_chunk_count", metadata.get("chunk_count"))
-    if planned_chunks is None:
-        planned_chunks = sum(int(record.get("chunksExpected") or 0) for record in records)
-    if sent_chunks is None:
-        sent_chunks = sum(int(record.get("chunksSent") or 0) for record in records)
-    try:
-        planned_chunks = max(0, int(planned_chunks or 0))
-    except (TypeError, ValueError):
-        planned_chunks = 0
-    try:
-        sent_chunks = max(0, int(sent_chunks or 0))
-    except (TypeError, ValueError):
-        sent_chunks = 0
-    try:
-        omitted_chunks = max(0, int(metadata.get("omitted_chunk_count") or planned_chunks - sent_chunks))
-    except (TypeError, ValueError):
-        omitted_chunks = max(0, planned_chunks - sent_chunks)
-    try:
-        failed_chunks = max(0, int(metadata.get("failed_chunk_count") or 0))
-    except (TypeError, ValueError):
-        failed_chunks = 0
-    try:
-        not_sent_chunks = max(0, int(metadata.get("not_sent_chunk_count") or 0))
-    except (TypeError, ValueError):
-        not_sent_chunks = 0
-    if failed_chunks or not_sent_chunks:
-        omitted_chunks = max(0, planned_chunks - sent_chunks - failed_chunks)
-    metadata_status = str(
-        metadata.get("scope_status")
-        or metadata.get("scopeStatus")
-        or metadata.get("status")
-        or ""
-    )
-    incomplete = bool(
-        omitted
-        or truncated
-        or partial
-        or failed
-        or omitted_chunks
-        or metadata_status in {"incomplete", "partial"}
-        or metadata.get("diff_truncated")
-        or metadata.get("assembly_over_budget")
-        or bool((metadata.get("run_control") or {}).get("deferred_calls"))
-    )
-    result = {
-        "status": "partial" if incomplete else "complete",
-        "declaredFiles": declared,
-        "includedFiles": unique(included),
-        "omittedFiles": unique(omitted),
-        "truncatedFiles": unique(truncated),
-        "partialFiles": unique(partial),
-        "failedFiles": unique(failed),
-        "chunksExpected": planned_chunks,
-        "chunksCompleted": min(sent_chunks, planned_chunks) if planned_chunks else sent_chunks,
-        "chunksFailed": max(int(metadata.get("failed_chunk_count") or 0), len(failed)),
-        "chunksOmitted": omitted_chunks,
-        "chunksNotSent": not_sent_chunks or omitted_chunks,
-        "chunks": [
-            {
-                key: item.get(key)
-                for key in ("id", "index", "kind", "label", "prompt_chars", "status", "model_used")
-                if item.get(key) is not None
-            }
-            for item in (metadata.get("chunk_prompts") or [])
-            if isinstance(item, dict)
-        ],
-        "files": records,
-    }
-    return result
-
-
 def apply_prompt_limit(prompt: str, max_prompt_chars: int, caveats: list[str]) -> str:
     if max_prompt_chars > 0 and len(prompt) > max_prompt_chars:
         caveats.append(f"Prompt truncated to {max_prompt_chars} characters")
         return prompt[:max_prompt_chars]
     return prompt
-
-
-def truncate_at_line_boundary(text: str, max_chars: int) -> str:
-    if max_chars <= 0 or len(text) <= max_chars:
-        return text
-    truncated = text[:max_chars]
-    newline = truncated.rfind("\n")
-    if newline > max_chars // 2:
-        return truncated[:newline]
-    return truncated
-
-
-def review_prompt_parts(
-    *,
-    scope_line: str,
-    diff: str,
-    included_files: list[tuple[str, str]],
-    omitted_files: list[str],
-    excluded: list[str],
-    caveats: list[str],
-    omission_reasons: dict[str, str] | None = None,
-) -> list[str]:
-    incomplete = bool(omitted_files) or any("truncated" in caveat.lower() for caveat in caveats)
-    manifest_lines = [
-        "## Review Manifest",
-        f"- status: {'incomplete' if incomplete else 'complete'}",
-        f"- scope: {scope_line}",
-        f"- included_files: {', '.join(path for path, _text in included_files) if included_files else 'none'}",
-        f"- omitted_files: {', '.join(omitted_files) if omitted_files else 'none'}",
-        f"- excluded_paths: {', '.join(excluded[:20]) if excluded else 'none'}",
-    ]
-    if omission_reasons:
-        manifest_lines.append("- omission_reasons:")
-        manifest_lines.extend(f"  - {path}: {reason}" for path, reason in omission_reasons.items())
-    if caveats:
-        manifest_lines.append("- helper_warnings:")
-        manifest_lines.extend(f"  - {caveat}" for caveat in caveats)
-    else:
-        manifest_lines.append("- helper_warnings: none")
-
-    parts = [
-        "You are an Antigravity sidecar reviewer for a Codex coding session.",
-        "Review independently. Lead with concrete defects, regressions, security risks, install/usability problems, or missing tests. Be concise; no code or patches.",
-        "Use file paths and precise behavior references. If no issues, say so and list caveats; group duplicates; do not restate source.",
-        "Treat the Review Manifest as authoritative. Helper warnings, omitted files, and partial diffs are scope caveats, not source-code defects.",
-        "\n".join(manifest_lines),
-    ]
-    if diff.strip():
-        parts.append("## Git Diff\n```diff\n" + diff + "\n```")
-    if included_files:
-        blocks = [f"### {rel}\n```text\n{text}\n```" for rel, text in included_files]
-        parts.append("## File Contents\n" + "\n\n".join(blocks))
-    if not diff.strip() and not included_files:
-        parts.append("No diff or file content was available in the requested scope. Explain that limitation.")
-    return parts
-
 
 
 def extract_file_paths_from_prompt(prompt: str) -> list[str]:
@@ -3112,127 +2500,6 @@ def build_consult_file_context(
         return prompt, caveats, []
     
     return enhanced_prompt, caveats, read_files
-
-
-def review_read_omissions(records):
-    return {str(record['path']): str(record.get('reason') or record.get('contentStatus') or 'incomplete capture')
-            for record in records or [] if record.get('path') and coverage_is_incomplete([record])}
-
-
-def build_review_prompt(
-    *,
-    scope_line: str,
-    diff: str,
-    file_texts: list[tuple[str, str]],
-    excluded: list[str],
-    initial_caveats: list[str],
-    max_prompt_chars: int,
-    file_records: list[dict[str, Any]] | None = None,
-) -> tuple[str, list[str], dict[str, Any]]:
-    caveats = list(initial_caveats)
-    diff_for_prompt = diff
-    records_by_path = {
-        str(record.get("path")): record
-        for record in (file_records or [])
-        if record.get("path")
-    }
-
-    def is_includable(rel: str, text: str) -> bool:
-        # An empty regular file is still covered; without its manifest entry,
-        # the historical truthiness check misreported it as omitted.
-        record = records_by_path.get(rel)
-        return bool(text) or bool(record and record.get("contentStatus") == "complete")
-
-    omission_reasons = review_read_omissions(file_records)
-    omitted_files = list(dict.fromkeys([*omission_reasons,
-        *(rel for rel, text in file_texts if not is_includable(rel, text))]))
-    candidates = [(rel, text) for rel, text in file_texts if is_includable(rel, text)]
-    included: list[tuple[str, str]] = []
-
-    if max_prompt_chars > 0 and diff_for_prompt:
-        prompt_without_files = "\n\n".join(
-            review_prompt_parts(
-                scope_line=scope_line,
-                diff=diff_for_prompt,
-                included_files=[],
-                omitted_files=list(dict.fromkeys([*omitted_files, *(rel for rel, _text in candidates)])),
-                excluded=excluded,
-                caveats=caveats,
-                omission_reasons=omission_reasons,
-            )
-        )
-        if len(prompt_without_files) > max_prompt_chars:
-            base_parts = review_prompt_parts(
-                scope_line=scope_line,
-                diff="",
-                included_files=[],
-                omitted_files=list(dict.fromkeys([*omitted_files, *(rel for rel, _text in candidates)])),
-                excluded=excluded,
-                caveats=caveats,
-                omission_reasons=omission_reasons,
-            )
-            base_len = len("\n\n".join(base_parts))
-            available = max(0, max_prompt_chars - base_len - len("\n\n## Git Diff\n```diff\n\n```"))
-            diff_for_prompt = truncate_at_line_boundary(diff_for_prompt, available)
-            caveats.append(
-                f"{GIT_DIFF_TRUNCATION_CAVEAT} ({len(diff)} original chars, {len(diff_for_prompt)} included)"
-            )
-
-    for index, (rel, text) in enumerate(candidates):
-        trial_included = [*included, (rel, text)]
-        # Remaining source parts are future chunks, not omitted scope. Listing
-        # them in every trial manifest can consume the entire prompt budget
-        # before any source content is admitted.
-        trial_omitted = list(omitted_files)
-        trial_prompt = "\n\n".join(
-            review_prompt_parts(
-                scope_line=scope_line,
-                diff=diff_for_prompt,
-                included_files=trial_included,
-                omitted_files=trial_omitted,
-                excluded=excluded,
-                caveats=caveats,
-                omission_reasons=omission_reasons,
-            )
-        )
-        if max_prompt_chars <= 0 or len(trial_prompt) <= max_prompt_chars:
-            included = trial_included
-        else:
-            omitted_files.append(f"{rel} (omitted to keep whole-file prompt under {max_prompt_chars} chars)")
-
-    prompt = "\n\n".join(
-        review_prompt_parts(
-            scope_line=scope_line,
-            diff=diff_for_prompt,
-            included_files=included,
-            omitted_files=omitted_files,
-            excluded=excluded,
-            caveats=caveats,
-            omission_reasons=omission_reasons,
-        )
-    )
-    metadata = {
-        "status": "incomplete"
-        if omitted_files
-        or any("truncated" in item.lower() for item in caveats)
-        or coverage_is_incomplete(file_records)
-        else "complete",
-        "prompt_chars": len(prompt),
-        "diff_chars": len(diff_for_prompt),
-        "diff_original_chars": len(diff),
-        "diff_truncated": diff_for_prompt != diff,
-        "included_files": [rel for rel, _text in included],
-        "omitted_files": omitted_files,
-        "omission_reasons": omission_reasons,
-        "excluded_paths": excluded,
-        "helper_warnings": caveats,
-        "coverage": [dict(record) for record in (file_records or [])],
-    }
-    for record in metadata["coverage"]:
-        if record.get("path") in metadata["included_files"]:
-            record["chunksExpected"] = 1
-            record["chunksSent"] = 1
-    return prompt, caveats, metadata
 
 
 def collect_review_context(args: argparse.Namespace) -> dict[str, Any]:
@@ -9012,11 +8279,12 @@ def command_workflow(args: argparse.Namespace) -> int:
     progress(args, "workflow expands to: " + workflow_command_for_progress(expanded))
     parser = build_parser()
     expanded_args = parser.parse_args(expanded)
+    expanded_args._run_control = run_control(args)
+    expanded_args.run_timeout = expanded_args._run_control.limit
+
     expanded_args.data_policy = getattr(args, "data_policy", None)
     expanded_args.acknowledge_secret_hash = getattr(args, "acknowledge_secret_hash", None)
     expanded_args._data_policy_session = data_policy(args)
-    expanded_args._run_control = run_control(args)
-    expanded_args.run_timeout = expanded_args._run_control.limit
     expanded_args.workflow_name = args.name
     if getattr(args, "_anti_writer_id", None):
         expanded_args._anti_writer_id = args._anti_writer_id
@@ -9039,55 +8307,6 @@ def command_workflow(args: argparse.Namespace) -> int:
             args.run_id = expanded_args.run_id
         if getattr(expanded_args, "run_record_written", False):
             args.run_record_written = True
-
-
-def iter_run_records() -> list[Path]:
-    if RUNS_DIR.is_symlink():
-        raise AntiError(f"refusing to read Anti run records through symlinked directory: {RUNS_DIR}")
-    if not RUNS_DIR.exists():
-        return []
-    records: list[Path] = []
-    # Newest records first by actual write time; filenames are not
-    # trustworthy for ordering because custom run ids are not timestamped.
-    for path in sorted(RUNS_DIR.glob("*.json"), key=lambda p: (p.stat().st_mtime, p.name), reverse=True):
-        if path.is_symlink() or not path.is_file():
-            eprint(f"[anti] skipping non-regular run record: {path}")
-            continue
-        records.append(path)
-    return records
-
-
-def load_run_record(path: Path) -> dict[str, Any]:
-    return read_record(path)
-
-
-def resolve_run_record_path(run_id: str) -> Path:
-    if not RUN_ID_RE.fullmatch(run_id):
-        raise AntiError("run id must contain only letters, numbers, '_' or '-'")
-    if not RUNS_DIR.exists():
-        raise AntiError(f"run record not found: {run_id}")
-    if RUNS_DIR.is_symlink():
-        raise AntiError(f"refusing to read Anti run records through symlinked directory: {RUNS_DIR}")
-
-    root = RUNS_DIR.resolve()
-    path = RUNS_DIR / f"{run_id}.json"
-    if not path.exists():
-        matches = list(RUNS_DIR.glob(f"{run_id}*.json"))
-        if len(matches) == 1:
-            path = matches[0]
-    if not path.exists():
-        if (RUNS_DIR / run_id).exists():
-            raise ArtifactError("incomplete_publication", "Run artifacts exist without a committed index")
-        raise AntiError(f"run record not found: {run_id}")
-    if path.is_symlink():
-        raise ArtifactError("invalid_reference", "Run index is a symlink")
-
-    resolved = path.resolve()
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise AntiError(f"run record path escaped Anti run directory: {run_id}") from exc
-    return path
 
 
 def command_runs(args: argparse.Namespace) -> int:
@@ -9290,9 +8509,10 @@ def add_generation_control_args(
     *,
     default_save_output: str = "never",
 ) -> None:
+    parser.add_argument("--run-timeout", type=float, default=1800.0, help="Whole-run provider deadline in seconds (default: 1800; maximum: 86400)")
+
     parser.add_argument("--data-policy", help="Explicit path to a version 1 restrictive repository submission policy")
     parser.add_argument("--acknowledge-secret-hash", action="append", help="Explicitly acknowledge this exact assembled prompt SHA-256; repeatable")
-    parser.add_argument("--run-timeout", type=float, default=1800.0, help="Whole-run provider deadline in seconds (default: 1800; maximum: 86400)")
     parser.add_argument("--auto-route", action="store_true", help="Automatically pick the cheapest adequate model based on diff size and risk")
     parser.add_argument("--fallback-model", help="Fallback model alias/id for retryable or timeout failures")
     parser.add_argument(

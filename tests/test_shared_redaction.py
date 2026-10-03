@@ -138,10 +138,15 @@ def test_mocked_errors_and_captured_account_logs_use_shared_policy(monkeypatch, 
     def failed_discovery(_):
         raise RuntimeError(error)
     monkeypatch.setattr("codex_antigravity_auth.oauth.discover_project_id", failed_discovery)
-    account = {"email": "fixture@example.invalid", "refreshToken": "synthetic-refresh",
-               "accessToken": "expired", "expiresAt": 0}
-    monkeypatch.setattr(accounts, "update_accounts", lambda mutator: mutator({"accounts": [account]}))
+    data = {"accounts": [{"email": "fixture@example.invalid", "refreshToken": "synthetic-refresh",
+                           "accessToken": "synthetic-old", "expiresAt": 0}], "activeIndex": 0}
+    monkeypatch.setattr(accounts, "load_accounts", lambda: data)
+    def update(mutation):
+        mutation(data)
+        return data
+    monkeypatch.setattr(accounts, "update_accounts", update)
+    manager = accounts.AccountManager()
     with caplog.at_level(logging.WARNING, logger=accounts.__name__):
-        assert accounts.AccountManager()._refresh_snapshot(dict(account)) == "refreshed"
+        assert manager._refresh_snapshot(dict(data["accounts"][0])) == "refreshed"
     assert "Project discovery failed" in caplog.text
     assert all(secret not in caplog.text for secret in forbidden)

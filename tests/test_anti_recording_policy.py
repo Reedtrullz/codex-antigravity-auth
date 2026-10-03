@@ -261,3 +261,37 @@ def test_exhausted_preview_budget_preserves_result_structure_and_reflection_coun
     assert saved["save_output"] == "summary"
     assert reflections.get_summary(root)["total_findings"] == 80
     assert all(LONG not in text for text in all_files(root).values())
+
+
+
+def test_control_receipts_preserve_only_bounded_numbers_and_fixed_labels(isolated_anti):
+    from anti_lib.retention import lifecycle_metadata
+    source={'judge_attempt_count':1, 'panel_lane_count':2, 'synthesis_status':'not_sent',
+        'run_control':{'scope':'process_local','attempts_started':3,'permits_released':3,
+                       'elapsed_seconds':10**1000,'remaining_seconds':float('nan'),
+                       'events':[{'prompt':LONG}]},
+        'admission_controls':{'enabled':True,'refused_attempts':1,'committed':{'calls':3,'output_tokens':6},
+            'attempts':[{'model':LONG,'prompt':LONG}], 'currency_reserved':'1E-9',
+            'currency':{'currency':'USD','sha256':'a'*64,'gateway':LONG,'source':LONG,
+                        'basis':'user_declared_complete_attempt_ceiling','provider_price_verified':False}}}
+    result=lifecycle_metadata(source)
+    assert result==lifecycle_metadata(result)
+    assert result['judge_attempt_count']==1 and result['panel_lane_count']==2
+    assert result['run_control']['attempts_started']==3
+    assert 'elapsed_seconds' not in result['run_control'] and 'remaining_seconds' not in result['run_control']
+    assert result['admission_controls']['committed']['output_tokens']==6
+    assert result['admission_controls']['currency_reserved']=='1E-9'
+    assert 'source' not in result['admission_controls']['currency']
+    assert SENTINEL not in json.dumps(result) and LONG not in json.dumps(result)
+    assert len(json.dumps(result))<3000
+    anti, _reflections, _root = isolated_anti
+    token = anti.CURRENT_RUN.set(None)
+    try:
+        derived = anti.scheduling_metadata({'consult_attempts': [{'model': LONG}, {'prompt': LONG}],
+                                            'retry_disposition': 'exhausted'})
+        path = write(anti, 'never', metadata=derived)
+    finally:
+        anti.CURRENT_RUN.reset(token)
+    saved = json.loads(path.read_text())['metadata']
+    assert saved['consult_attempt_count'] == 2 and saved['retry_disposition'] == 'exhausted'
+    assert 'consult_attempts' not in saved and SENTINEL not in path.read_text()
