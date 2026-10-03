@@ -7,6 +7,7 @@ from __future__ import annotations
 import atexit
 import base64
 from contextlib import contextmanager
+from contextvars import ContextVar
 import os
 from pathlib import Path
 import shutil
@@ -21,13 +22,22 @@ _allowed_endpoints: set[tuple[str, int]] = set()
 _binding = False
 _violations: list[str] = []
 _protected_paths: list[Path] = []
+_validated_spawn = ContextVar("validated_test_spawn", default=None)
+_allowed_ruff_check = ContextVar("allowed_test_ruff_check", default=None)
 _SAFE_ENV = {"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL",
              "TMPDIR", "TEMP", "TMP", "VIRTUAL_ENV"}
 _STORAGE_KEY = base64.urlsafe_b64encode(b"\0" * 32).decode("ascii")
 
 
 def _deny(message):
-    _violations.append(message)
+    frame = sys._getframe(1)
+    callers = []
+    for _ in range(6):
+        if frame is None:
+            break
+        callers.append(f"{frame.f_code.co_name} ({os.path.basename(frame.f_code.co_filename)}:{frame.f_lineno})")
+        frame = frame.f_back
+    _violations.append(message + "; callers: " + " <- ".join(callers))
     raise AssertionError(message)
 
 
@@ -41,6 +51,19 @@ def expected_denial():
         del _violations[before:]
 
 
+@contextmanager
+def allow_ruff_check():
+    """Authorize only the installed lint checker for one explicit fixture."""
+    from ruff import find_ruff_bin
+
+    executable = str(Path(find_ruff_bin()).resolve())
+    token = _allowed_ruff_check.set(executable)
+    try:
+        yield executable
+    finally:
+        _allowed_ruff_check.reset(token)
+
+
 def assert_no_violations():
     if _violations:
         messages = list(_violations)
@@ -51,11 +74,15 @@ def assert_no_violations():
 def allow_listener(sock, host="127.0.0.1"):
     """Bind an owned TCP listener; authorization lives only as long as the fixture."""
     global _binding
-    if host not in {"127.0.0.1", "::1"}:
-        raise ValueError("Owned test listeners require an explicit loopback address")
+    if host == "127.0.0.1" and sock.family == socket.AF_INET:
+        address = (host, 0)
+    elif host == "::1" and sock.family == socket.AF_INET6:
+        address = (host, 0, 0, 0)
+    else:
+        raise ValueError("test listeners may bind only to their matching IPv4/IPv6 loopback address")
     _binding = True
     try:
-        sock.bind((host, 0))
+        sock.bind(address)
     finally:
         _binding = False
     endpoint = sock.getsockname()[:2]
@@ -137,6 +164,15 @@ def install():
         return original_expanduser(path)
 
     os.path.expanduser = safe_expanduser
+    Path.home = classmethod(lambda cls: cls(safe_expanduser("~")))
+    original_path_expanduser = Path.expanduser
+
+    def safe_path_expanduser(path):
+        if path.parts and path.parts[0] == "~":
+            return type(path)(safe_expanduser("~")).joinpath(*path.parts[1:])
+        return original_path_expanduser(path)
+
+    Path.expanduser = safe_path_expanduser
     original_popen = subprocess.Popen
 
     class IsolatedPopen(original_popen):
@@ -171,10 +207,16 @@ def install():
                 if index == len(argv) or argv[index] not in permitted:
                     _deny("test subprocess is not an allowed local Git operation")
                 argv[1:1] = ["-c", "core.hooksPath=" + str(root / "empty-hooks"), "-c", "core.fsmonitor=false", "-c", "credential.helper="]
+            elif _allowed_ruff_check.get() == str(Path(argv[0]).resolve()) and argv[1:2] == ["check"]:
+                pass
             else:
-                _deny("test subprocess must be the guarded Python interpreter or local Git")
+                _deny("test subprocess must be guarded Python, local Git or an authorized Ruff check")
             kwargs["env"] = env
-            super().__init__(argv, **kwargs)
+            token = _validated_spawn.set((argv[0], argv, env))
+            try:
+                super().__init__(argv, **kwargs)
+            finally:
+                _validated_spawn.reset(token)
 
     subprocess.Popen = IsolatedPopen
 
@@ -190,6 +232,10 @@ def install():
             if not _binding:
                 _deny("test listener must be created by the fake-upstream fixture")
         elif event in {"os.system", "os.exec", "os.posix_spawn", "os.spawn"}:
+            if event == "os.posix_spawn" and _validated_spawn.get() is not None:
+                executable, argv, env = args
+                if (os.fsdecode(executable), [os.fsdecode(a) for a in argv], env) == _validated_spawn.get():
+                    return
             _deny("unguarded subprocess creation is forbidden in tests")
         elif event in {"open", "os.remove", "os.rmdir", "os.mkdir", "os.rename", "os.chmod", "os.chown", "os.truncate", "os.listdir", "os.scandir", "os.link", "os.symlink"}:
             paths = args[:2] if event in {"os.rename", "os.link", "os.symlink"} else args[:1]

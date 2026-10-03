@@ -12,14 +12,16 @@ import uuid
 
 import httpx
 
+from .endpoint_policy import httpx_client_options, validate_endpoint_url
 from .request_budget import call_sync, owned_context
 from .sse import SSELineError, iter_sse_data
-from .endpoint_policy import httpx_client_options, validate_endpoint_url
 
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
 from .response_protocol import (
     AttemptOutcome,
     ProviderResult,
+    POLICY_FINISH_REASONS,
+    PrimaryAlternativeSelector,
     ProviderTerminal,
     ResponseEventBuilder,
     TerminalKind,
@@ -159,6 +161,7 @@ class GoogleResponseAccumulator:
         self._safety_block: dict[str, Any] | None = None
         self._usage = normalize_usage()
         self._malformed = False
+        self._primary = PrimaryAlternativeSelector()
         self._done = False
 
     @property
@@ -195,15 +198,21 @@ class GoogleResponseAccumulator:
                 usage.get("totalTokenCount"),
             )
 
-        candidates = payload.get("candidates", [])
-        if not isinstance(candidates, list):
+        try:
+            candidates = self._primary.select(payload.get("candidates", []))
+        except ValueError:
+            self._malformed = True
             return []
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
             finish_reason = candidate.get("finishReason")
-            if isinstance(finish_reason, str) and finish_reason:
+            if finish_reason is not None and not isinstance(finish_reason, str):
+                self._malformed = True
+            if isinstance(finish_reason, str):
                 self._finish_reason = finish_reason
+                if finish_reason.strip().lower() in POLICY_FINISH_REASONS:
+                    self._safety_block = self._safety_block or {"blockReason": finish_reason.strip().upper()}
             content = candidate.get("content")
             if content is None:
                 continue
@@ -252,7 +261,7 @@ class GoogleResponseAccumulator:
             self.tool_error = self.tool_error or "conflicting_function_call"
         output.extend(item for item in self._function_calls if counts[item["call_id"]] == 1
                       and item["call_id"] not in self._bad_call_ids and item["name"] not in self._partial_names)
-        if self._safety_block and not output:
+        if self._safety_block:
             output.append(refusal_item(self._safety_block))
         terminal = classify_terminal(
             output=output,
@@ -298,6 +307,7 @@ class GoogleStreamEventAdapter:
             created_at=int(time.time()),
         )
         self.accumulator = GoogleResponseAccumulator(tool_validator=self.tool_validator)
+        self._primary = PrimaryAlternativeSelector()
         self.created_emitted = False
         self.visible_output_started = False
         self.text_active = False
@@ -321,6 +331,7 @@ class GoogleStreamEventAdapter:
         if self.visible_output_started:
             raise RuntimeError("cannot reset a Google stream after visible output")
         self.accumulator = GoogleResponseAccumulator(tool_validator=self.tool_validator)
+        self._primary = PrimaryAlternativeSelector()
 
     def consume(self, payload: object) -> list[dict[str, Any]]:
         if self.provider_done:
@@ -335,7 +346,12 @@ class GoogleStreamEventAdapter:
         if not isinstance(payload, dict):
             self.accumulator.mark_malformed()
             return []
-        parts = self.accumulator.consume(payload)
+        try:
+            candidates = self._primary.select(payload.get("candidates", []))
+        except ValueError as exc:
+            self.accumulator.consume({**payload, "candidates": []})
+            raise GoogleStreamPayloadError("invalid_alternatives", str(exc)) from exc
+        parts = self.accumulator.consume({**payload, "candidates": candidates})
         events: list[dict[str, Any]] = []
         for part in parts:
             if part.has_function or part.output_error:
@@ -397,7 +413,7 @@ class GoogleStreamEventAdapter:
             events.extend(self.builder.finish_text())
         result = ProviderResult(
             output=(),
-            usage=normalize_usage(),
+            usage=self.accumulator.usage,
             terminal=ProviderTerminal(
                 TerminalKind.FAILED,
                 code,
@@ -454,12 +470,9 @@ class GoogleTransport:
     async def post(self, request: dict[str, Any], lease: AccountLease) -> httpx.Response:
         url = f"{self.endpoint}/v1internal:generateContent"
         payload = await call_sync(self.build_request, request, lease)
+        headers = await call_sync(self.build_headers, lease)
         async with owned_context(self.client_factory(**httpx_client_options(url, timeout=self.timeout))) as client:
-            return await client.post(
-                url,
-                json=payload,
-                headers=await call_sync(self.build_headers, lease),
-            )
+            return await client.post(url, json=payload, headers=headers)
 
     async def execute(
         self,
@@ -485,13 +498,9 @@ class GoogleTransport:
     async def stream(self, request: dict[str, Any], lease: AccountLease):
         url = f"{self.endpoint}/v1internal:streamGenerateContent?alt=sse"
         payload = await call_sync(self.build_request, request, lease)
+        headers = await call_sync(self.build_headers, lease)
         async with owned_context(self.client_factory(**httpx_client_options(url, timeout=self.timeout))) as client:
-            async with owned_context(client.stream(
-                "POST",
-                url,
-                json=payload,
-                headers=await call_sync(self.build_headers, lease),
-            )) as response:
+            async with owned_context(client.stream("POST", url, json=payload, headers=headers)) as response:
                 yield response
 
     async def stream_events(
@@ -557,9 +566,11 @@ class GoogleTransport:
             accumulator.mark_malformed()
             return accumulator.finalize()
 
-        candidates = unwrapped.get("candidates", [])
-        if not isinstance(candidates, list):
+        try:
+            candidates = PrimaryAlternativeSelector().select(unwrapped.get("candidates", []))
+        except ValueError:
             accumulator = GoogleResponseAccumulator()
+            accumulator.consume({**unwrapped, "candidates": []})
             accumulator.mark_malformed()
             return accumulator.finalize()
 
@@ -572,7 +583,9 @@ class GoogleTransport:
             if not isinstance(candidate, dict):
                 continue
             candidate_reason = candidate.get("finishReason")
-            if isinstance(candidate_reason, str) and candidate_reason:
+            if candidate_reason is not None and not isinstance(candidate_reason, str):
+                malformed = True
+            if isinstance(candidate_reason, str):
                 finish_reason = candidate_reason
             transformed = transform_gemini_candidate(candidate, tool_validator=tool_validator)
             tool_error = tool_error or transformed.get("tool_error")
@@ -596,9 +609,11 @@ class GoogleTransport:
         output = [item for item in output if item.get("type") != "function_call" or (
             ids[item["call_id"]] == 1 and item["call_id"] not in partial_ids and item["name"] not in partial_names)]
         safety_block = unwrapped.get("promptFeedback")
-        if not isinstance(safety_block, dict):
+        if not isinstance(safety_block, dict) or not safety_block.get("blockReason"):
             safety_block = None
-        if safety_block and not output:
+        if isinstance(finish_reason, str) and finish_reason.strip().lower() in POLICY_FINISH_REASONS:
+            safety_block = safety_block or {"blockReason": finish_reason.strip().upper()}
+        if safety_block:
             output.append(refusal_item(safety_block))
 
         usage = unwrapped.get("usageMetadata")
