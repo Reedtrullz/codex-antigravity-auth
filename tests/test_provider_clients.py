@@ -3,6 +3,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock
 
+import anyio
 import httpx
 import pytest
 
@@ -306,7 +307,20 @@ def test_local_only_https_dispatch_uses_real_endpoint_policy(monkeypatch, setup_
 @pytest.mark.parametrize('stream', [False, True])
 @pytest.mark.parametrize('stop', ['cancel', 'deadline'])
 def test_gateway_stop_keeps_shared_client_usable_and_returns_admission(monkeypatch, setup_route, route, stream, stop):
+    # Exercise stop-after-transport with warm prep; request-deadline prep cases live separately.
     state = setup_route(route, timeout=0.08)
+    slow_first_thread_start = (route, stream, stop) == ('byok', True, 'deadline')
+    if slow_first_thread_start:
+        real_run_sync = anyio.to_thread.run_sync
+        delay_pending = [True]
+
+        async def delayed_first_run_sync(function, *args, **kwargs):
+            if delay_pending[0]:
+                delay_pending[0] = False
+                await asyncio.sleep(0.12)
+            return await real_run_sync(function, *args, **kwargs)
+
+        monkeypatch.setattr(anyio.to_thread, 'run_sync', delayed_first_run_sync)
     from fastapi import HTTPException
     from codex_antigravity_auth.resource_limits import Admission
     admission = Admission()
@@ -334,6 +348,10 @@ def test_gateway_stop_keeps_shared_client_usable_and_returns_admission(monkeypat
             return client
         monkeypatch.setattr(server.httpx, 'AsyncClient', factory)
         async with server.gateway_lifespan(server.app):
+            lane = 'native' if route.startswith('openai') else route
+            await anyio.to_thread.run_sync(lambda: None)
+            async with server.provider_client(lane, timeout=1):
+                pass  # Warm the worker and shared MockTransport client before RequestBudget starts.
             async def operation():
                 response = await server.create_response(Request(route, stream=stream))
                 if stream:
@@ -354,7 +372,6 @@ def test_gateway_stop_keeps_shared_client_usable_and_returns_admission(monkeypat
             assert closed == [True]
             assert admission.total == 0 and not admission.routes
             assert len(made) == 1 and not made[0].is_closed
-            lane = 'native' if route.startswith('openai') else route
             async with server.provider_client(lane, timeout=1) as lease:
                 response = await lease.post('https://fixture.invalid/next')
                 assert response.json() == {'fixture': True}
