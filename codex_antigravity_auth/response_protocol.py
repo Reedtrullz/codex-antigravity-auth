@@ -118,6 +118,7 @@ class ProviderCapabilities:
     input_modalities: frozenset[str] = frozenset({"text"})
     image_forms: frozenset[str] = frozenset({"url", "data_url"})
     image_detail: bool = True
+    pcm_wav_probe: bool = False
     reasoning_effort_parameter: str | None = None
     reasoning_effort_levels: tuple[str, ...] = ()
     reasoning_replay: bool = True
@@ -357,7 +358,7 @@ def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabil
     from .input_fidelity import validate_input
     try:
         validate_input(request, capabilities.input_modalities, capabilities.image_forms, image_detail=capabilities.image_detail,
-                       native_passthrough=capabilities.native_responses)
+                       native_passthrough=capabilities.native_responses, pcm_wav_probe=capabilities.pcm_wav_probe)
     except ValueError as exc:
         raise CapabilityError(str(exc)) from exc
 

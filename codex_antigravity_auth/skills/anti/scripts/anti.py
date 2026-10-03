@@ -44,6 +44,7 @@ from anti_lib import local_policy as local_workflow
 from anti_lib.context_budget import assess as assess_context, calibration as context_calibration
 from anti_lib import checkpoints as chunk_checkpoints
 from anti_lib import media as image_attachments
+from anti_lib import wav_audio
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
     file_reference, read_record, validate_record, coverage_has_loss,
@@ -599,7 +600,22 @@ class SpendAdmissionError(SpendRefused, AntiError):
 
 
 def run_control(args=None):
+    if getattr(args, 'command', None) == 'listen':
+        if not getattr(args, 'audio', None) or not getattr(args, 'model', None) or getattr(args, 'local_profile', None):
+            raise AntiError('listen requires explicit --audio and --model without --local-profile')
     local_settings = local_workflow.prepare_args(args)
+    if getattr(args, 'command', None) == 'listen':
+        limits = ((getattr(args, 'max_calls', None), 1),
+                  (getattr(args, 'max_output_tokens', None), 2048),
+                  (getattr(args, 'run_timeout', None), 90),
+                  (getattr(args, 'timeout', None), 90))
+        if any(value is None or not math.isfinite(float(value)) or value < 0 or value > ceiling
+               for value, ceiling in limits):
+            raise AntiError('listen limits: at most one attempt, 2048 output tokens and 90 seconds')
+        if (getattr(args, 'retry', None) != 0 or getattr(args, 'fallback_model', None)
+                or getattr(args, 'fallback_policy', None) != 'never'
+                or getattr(args, 'auto_route', False) or not getattr(args, 'no_pre_read', False)):
+            raise AntiError('listen disables retries, fallback, automatic routing and source pre-reading')
     if args is not None and hasattr(args, 'timeout'):
         if not math.isfinite(float(args.timeout)) or float(args.timeout) <= 0:
             raise AntiError('HTTP timeout must be finite and greater than zero')
@@ -629,10 +645,22 @@ def run_control(args=None):
                     raise AntiError('Invalid attempt admission configuration: check numeric limits and pricing-file fields') from exc
     if local_settings is not None:
         current.local_policy = local_settings
-    if args is not None and (getattr(args, 'image', None) or getattr(args, '_media_session', None)):
+    audio_paths=getattr(args,'audio',None)
+    if audio_paths:
+        if not getattr(args,'model',None) or getattr(args,'auto_route',False):
+            raise AntiError('WAV consult requires an explicit --model; automatic routing is disabled')
+        if getattr(args,'command',None) not in {'consult','ask','listen'} or getattr(args,'image',None):
+            raise AntiError('WAV input is consult/ask/listen-only and cannot be combined with images')
+        if not getattr(args,'probe_unverified_audio',False) and not getattr(args,'dry_run',False):
+            raise AntiError('Audio backend acceptance is unverified; --probe-unverified-audio explicitly authorizes the upload')
+    elif getattr(args,'probe_unverified_audio',False):
+        raise AntiError('--probe-unverified-audio requires --audio')
+    if args is not None and (audio_paths or getattr(args, 'image', None) or getattr(args, '_media_session', None)):
         with _BUDGET_STATE_INIT_LOCK:
             if not hasattr(args, '_media_session'):
-                args._media_session = image_attachments.capture(args.image, policy=data_policy(args))
+                args._media_session = (wav_audio.capture(audio_paths,policy=data_policy(args),probe=getattr(args,'probe_unverified_audio',False),
+                                                        single_backend_attempt=getattr(args,'command',None)=='listen')
+                                       if audio_paths else image_attachments.capture(args.image,policy=data_policy(args)))
             previous = getattr(current, 'media', None)
             if previous is not None and previous is not args._media_session:
                 raise AntiError('Attachment capture cannot change during a run')
@@ -1869,6 +1897,9 @@ def post_response(
                     status, decoded = request_json(
                         "POST", response_url, payload=payload, timeout=attempt_timeout, token_env=token_env,
                     )
+                if getattr(media,'kind',None)=='audio' and (status!=200 or decoded.get('status')=='failed'):
+                    decoded={'detail':'Audio probe failed; backend listening remains unverified','status':'failed','error':{'message':'Audio probe failed; backend listening remains unverified'},
+                             **{key:decoded[key] for key in ('_retry_after_seconds','_retry_after_unsupported') if key in decoded}}
                 control.check(submitted=True)
         except AntiError as exc:
             submitted = (_CALL_SUBMITTED.get() or 0) > submitted_before
@@ -1953,7 +1984,7 @@ def post_response(
                 response_metadata['gateway_routing_identity'] = decoded['_gateway_routing_identity']
             if media is not None:
                 response_metadata['request_content_sha256'] = media.content_sha256(prompt)
-                response_metadata['image_count'] = len(media.images)
+                response_metadata['audio_count' if getattr(media,'kind',None)=='audio' else 'image_count'] = len(media.images)
             response_metadata['context_preflight'] = context_report
             response_metadata['context_calibration'] = context_calibration(context_report, extract_usage(decoded))
             control.check(submitted=True)
@@ -2010,7 +2041,7 @@ def _pre_flight_cost_suggestion(
     alternatives = [
         m for m in model_ids
         if model_cost_tier(m) == "free" and model_quality_rank(m) >= quality - 15
-        and (captured_media(args) is None or image_attachments.supports(CAPABILITY_REGISTRY, m))
+        and (captured_media(args) is None or captured_media(args).supports(CAPABILITY_REGISTRY, m))
     ]
     if not alternatives:
         return
@@ -4477,7 +4508,7 @@ def format_dry_run(
     media = captured_media()
     if media is not None:
         payload['media_coverage'] = media.report()
-        payload['unknowns'].append('image costs and provider acceptance are unknown; displayed token estimates cover text only')
+        payload['unknowns'].append(('audio' if getattr(media,'kind',None)=='audio' else 'image')+' costs and provider acceptance are unknown; displayed token estimates cover text only')
     if output_json:
         return json.dumps(payload, indent=2, sort_keys=True)
     lines = [
@@ -4493,7 +4524,7 @@ def format_dry_run(
     lines.append(f"  possible retries: {payload['possible_retries']}; pricing: heuristic tiers only (provider prices unknown)")
     lines.append("  unknowns: provider billing and missing runtime usage")
     if media is not None:
-        lines.append("  images: captured, not sent; image costs and provider acceptance unknown; token estimates cover text only")
+        lines.append("  attachments: captured, not sent; media costs and provider acceptance unknown; token estimates cover text only")
     if budget_limit is not None:
         lines.append(f"  heuristic-unit budget: {float(budget_limit):.4f}")
     return "\n".join(lines)
@@ -7224,7 +7255,8 @@ def command_panel(args: argparse.Namespace) -> int:
 
 @controlled_command
 def command_consult(args: argparse.Namespace) -> int:
-    progress(args, f"consult: querying model {getattr(args, 'model', 'sonnet')}")
+    mode = "listen" if getattr(args, "command", None) == "listen" else "consult"
+    progress(args, f"{mode}: querying model {getattr(args, 'model', 'sonnet')}")
     auto_route_model = None
     auto_route_reason = None
     if getattr(args, "auto_route", False) and args.model is None:
@@ -7252,10 +7284,10 @@ def command_consult(args: argparse.Namespace) -> int:
     if policy_preflight(args, prompt, [(model, "primary")]):
         return 0
     if args.dry_run:
-        print(format_dry_run(mode="consult", model=model,
+        print(format_dry_run(mode=mode, model=model,
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
             output_json=args.json, stage_plan=[
-                {"name": "consult", "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 1},
+                {"name": mode, "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 0 if mode == "listen" else 1},
             ], budget_limit=args.budget))
         if not read_files:
             print()
@@ -7268,7 +7300,7 @@ def command_consult(args: argparse.Namespace) -> int:
             model=model,
             prompt=prompt,
             max_output_tokens=args.max_output_tokens,
-            purpose="consult",
+            purpose=mode,
         )
     except AntiError as exc:
         raise
@@ -7276,9 +7308,9 @@ def command_consult(args: argparse.Namespace) -> int:
     usage = generation_metadata.get("usage")
     output_status = lane_output_status(text, usage, args.max_output_tokens, generation_metadata)
     last_prompt_chars = len(prompt)
-    retry_disposition = "not_applicable"
+    retry_disposition = "disabled" if mode == "listen" else "not_applicable"
     last_call_cap = args.max_output_tokens
-    if output_status == "truncated":
+    if output_status == "truncated" and mode != "listen":
         retry_cap = min(PANEL_LANE_RETRY_CEILING_TOKENS, args.max_output_tokens * 2)
         retry_disposition = "attempted"
         progress(
@@ -7351,7 +7383,7 @@ def command_consult(args: argparse.Namespace) -> int:
     recorded_prompt = prompts_as_text(execution_ledger) if execution_ledger else prompt
     write_run_record(
         args,
-        mode="consult",
+        mode=mode,
         status="success" if output_status == "success" else "partial",
         models=[model_used],
         base_url=args.base_url,
@@ -7363,7 +7395,7 @@ def command_consult(args: argparse.Namespace) -> int:
         force_full_output=False,
     )
     print_result(
-        mode="consult",
+        mode=mode,
         model=model_used,
         base_url=args.base_url,
         text=text,
@@ -8836,11 +8868,12 @@ def add_generation_control_args(
     parser: argparse.ArgumentParser,
     *,
     default_save_output: str = "never",
+    default_run_timeout: float = 1800.0,
 ) -> None:
     parser.add_argument('--image', action='append', help='Attach an explicit local PNG/JPEG unchanged to every stage; at most 4 images, 2 MiB each, 4 MiB total')
     parser.add_argument('--local-only', action='store_true', help='Require local-only gateway enforcement and loopback routes at every stage')
     parser.add_argument('--local-profile', help='Explicit non-secret local settings profile; excludes separate gateway/model/judge/fallback flags')
-    parser.add_argument("--run-timeout", type=float, default=1800.0, help="Whole-run provider deadline in seconds (default: 1800; maximum: 86400)")
+    parser.add_argument("--run-timeout", type=float, default=default_run_timeout, help=f"Whole-run provider deadline in seconds (default: {default_run_timeout:g})")
 
     parser.add_argument("--data-policy", help="Explicit path to a version 1 restrictive repository submission policy")
     parser.add_argument("--acknowledge-secret-hash", action="append", help="Explicitly acknowledge this exact assembled text-and-image identity SHA-256; repeatable")
@@ -8988,20 +9021,31 @@ def build_parser() -> argparse.ArgumentParser:
     panel.add_argument("prompt_parts", nargs="*", help="Positional ask/planning prompt text")
     panel.set_defaults(func=command_panel)
 
-    consult = sub.add_parser("consult", aliases=["ask"], help="Ask Antigravity an explicit prompt")
-    add_gateway_args(consult, default_timeout=120.0)
-    add_generation_control_args(consult)
-    consult.add_argument("--model", default=None, help="opus, sonnet, or full model id")
-    consult.add_argument("--prompt", help="Prompt text")
-    consult.add_argument("--prompt-file", help="Read prompt text from file")
-    consult.add_argument("--no-pre-read", action="store_true", dest="no_pre_read", help="Disable automatic file pre-reading for consult prompts")
-    consult.add_argument("--max-output-tokens", type=positive_int, default=4096)
-    consult.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help="Maximum prompt chars before truncation; use 0 for unlimited")
-    consult.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
-    consult.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
-    consult.add_argument("--json", action="store_true", help="Emit structured JSON output")
-    consult.add_argument("prompt_parts", nargs="*", help="Positional prompt text")
-    consult.set_defaults(func=command_consult)
+    for command, aliases, description in (
+        ('consult', ['ask'], 'Ask Antigravity an explicit prompt'),
+        ('listen', [], 'One bounded advisory listen to explicitly selected PCM WAV clips'),
+    ):
+        consult = sub.add_parser(command, aliases=aliases, help=description)
+        listening = command == "listen"
+        add_gateway_args(consult, default_timeout=90.0 if listening else 120.0)
+        add_generation_control_args(consult, default_run_timeout=90.0 if listening else 1800.0)
+        consult.add_argument("--model", default=None, help="opus, sonnet, or full model id")
+        consult.add_argument("--prompt", help="Prompt text")
+        consult.add_argument("--prompt-file", help="Read prompt text from file")
+        consult.add_argument("--no-pre-read", action="store_true", dest="no_pre_read", help="Disable automatic file pre-reading for consult prompts")
+        consult.add_argument("--max-output-tokens", type=positive_int, default=2048 if listening else 4096)
+        consult.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help="Maximum prompt chars before truncation; use 0 for unlimited")
+        consult.add_argument("--retry", type=non_negative_int, default=1, help="Retry transient gateway/backend failures")
+        consult.add_argument("--dry-run", action="store_true", help="Print assembled prompt with token and cost estimates without contacting gateway")
+        consult.add_argument("--json", action="store_true", help="Emit structured JSON output")
+        consult.add_argument("prompt_parts", nargs="*", help="Positional prompt text")
+        consult.add_argument('--audio',action='append',help='Explicit local PCM WAV for advisory consult; at most two files,2MiB each,30seconds each')
+        consult.add_argument('--probe-unverified-audio',action='store_true',help='Explicitly authorize WAV upload to an advertised experimental Gemini route; does not establish verified listening')
+        consult.set_defaults(func=command_consult)
+        if command == 'listen':
+            consult.set_defaults(max_calls=1, retry=0, max_output_tokens=2048,
+                                 run_timeout=90.0, timeout=90.0, no_pre_read=True,
+                                 fallback_policy='never')
 
     compare = sub.add_parser("compare", help="Send one bounded prompt through each requested model and compare outcomes")
     add_gateway_args(compare, default_timeout=120.0)

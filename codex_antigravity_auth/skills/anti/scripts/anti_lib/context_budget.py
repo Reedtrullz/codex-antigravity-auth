@@ -64,7 +64,7 @@ def unknown_inputs(request):
         value = pending.pop()
         if isinstance(value, dict):
             kind = value.get('type')
-            if isinstance(kind, str) and kind in {'image', 'input_image', 'image_url', 'input_audio', 'input_video', 'input_file'}:
+            if isinstance(kind, str) and kind in {'image', 'input_image', 'image_url', 'antigravity_audio', 'input_audio', 'input_video', 'input_file'}:
                 reasons.add('media_token_cost')
             if any(key in value for key in ('inlineData', 'fileData', 'encrypted_content')):
                 reasons.add('media_or_opaque_token_cost')

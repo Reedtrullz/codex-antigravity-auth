@@ -525,6 +525,7 @@ def capabilities_for_native_definition(definition: NativeModel | None) -> Provid
         streaming_usage=True,
         input_modalities=frozenset(definition.input_modalities if definition else {"text"}),
         image_detail=False,
+        pcm_wav_probe=bool(definition and definition.family=="gemini" and definition.backend_id.startswith("gemini-") and not required_output_bridge(definition)),
         reasoning_replay=False,
         reasoning_effort_levels=(("low", "medium", "high", "xhigh") if definition.reasoning_mapping == "thinking_budget" else ("low", "medium", "high")) if definition and definition.reasoning_mapping else (),
         reasoning_effort_parameter=definition.reasoning_mapping if definition else None,

@@ -494,3 +494,13 @@ are not secret-scanned. A bounded screenshot evaluation passed on 3 October 2026
 this does not certify general visual-review quality.
 See [attachments](codex_antigravity_auth/skills/anti/ATTACHMENTS.md) for examples,
 recording behavior, scope separation and the bounded evaluation evidence.
+
+### Experimental bounded WAV consult
+
+`python scripts/anti.py consult --model gemini-3.8-flash --audio excerpt.wav
+--probe-unverified-audio --no-pre-read --prompt 'Describe the supplied sound.'`
+explicitly uploads a bounded PCM WAV through an eligible experimental route.
+Omit probe intent and use `--dry-run --json` for local capture/format validation.
+This is a private gateway extension with unverified backend listening, not generic
+Responses audio support. Read [WAV_AUDIO.md](codex_antigravity_auth/skills/anti/WAV_AUDIO.md)
+for limits, privacy, retry/fallback rules and required live acceptance controls.
