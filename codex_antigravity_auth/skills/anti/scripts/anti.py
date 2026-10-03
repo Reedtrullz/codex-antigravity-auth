@@ -7219,13 +7219,11 @@ def command_consult(args: argparse.Namespace) -> int:
     if output_status == "truncated":
         retry_cap = min(PANEL_LANE_RETRY_CEILING_TOKENS, args.max_output_tokens * 2)
         retry_disposition = "attempted"
-        last_call_cap = retry_cap
         progress(
             args,
             f"consult output hit the {args.max_output_tokens}-token cap; retrying once at {retry_cap} tokens",
         )
         retry_prompt = prompt + "\n\n" + lane_retry_instruction()
-        last_prompt_chars = len(retry_prompt)
         try:
             text, model_used, retry_metadata = generate_with_fallback(
                 args,
@@ -7234,20 +7232,29 @@ def command_consult(args: argparse.Namespace) -> int:
                 max_output_tokens=retry_cap,
                 purpose="consult (retry)",
             )
-        except AntiError as exc:
-            raise
-        attempts_metadata.append(retry_metadata)
-        usage = retry_metadata.get("usage")
-        output_status = lane_output_status(text, usage, retry_cap, retry_metadata)
-        if output_status == "success":
-            retry_disposition = "succeeded"
-        else:
+        except SpendAdmissionError as exc:
+            if getattr(exc, "submitted", False):
+                raise
             retry_disposition = "exhausted"
-        caveats.append("Consult output was truncated at the token cap and retried once at a higher cap")
-        if output_status == "truncated":
             caveats.append(
-                "Consult output still truncated at the higher output cap; raise --max-output-tokens for the full answer"
+                "Automatic consult retry was not submitted because admission controls refused it; "
+                "retaining the original incomplete output"
             )
+        else:
+            last_call_cap = retry_cap
+            last_prompt_chars = len(retry_prompt)
+            attempts_metadata.append(retry_metadata)
+            usage = retry_metadata.get("usage")
+            output_status = lane_output_status(text, usage, retry_cap, retry_metadata)
+            if output_status == "success":
+                retry_disposition = "succeeded"
+            else:
+                retry_disposition = "exhausted"
+            caveats.append("Consult output was truncated at the token cap and retried once at a higher cap")
+            if output_status == "truncated":
+                caveats.append(
+                    "Consult output still truncated at the higher output cap; raise --max-output-tokens for the full answer"
+                )
     metadata = {
         "prompt_chars": last_prompt_chars,
         "budget_limit": args.budget,

@@ -308,6 +308,9 @@ def test_consult_preserves_partial_when_token_cap_retry_is_not_admitted(
     assert record['metadata']['incomplete_details'] == {'reason': 'max_output_tokens'}
     assert record['metadata']['result_quality'] == 'incomplete'
     assert record['metadata']['usage_totals']['output_tokens'] == 512
+    assert record['metadata']['consult_attempt_count'] == 1
+    assert record['prompt_chars'] == len('Synthetic bounded consult.')
+    assert any('admission' in caveat and 'not submitted' in caveat for caveat in record['caveats'])
     artifact = json.loads(Path(record['resultPath']).read_text())
     assert artifact[retained_field] == partial_text
     assert artifact['runStatus'] == artifact['scopeStatus'] == 'partial'
@@ -319,6 +322,38 @@ def test_consult_preserves_partial_when_token_cap_retry_is_not_admitted(
     assert result['metadata']['status'] == 'truncated'
     assert result['metadata']['result_quality'] == 'incomplete'
     assert result['verification']['status'] == 'not_run'
+
+
+@pytest.mark.parametrize('retry,refused_attempts,error_detail', [
+    (0, 0, 'HTTP 503'),
+    (1, 1, 'calls admission limit'),
+])
+def test_consult_submitted_retry_errors_remain_errors(
+    anti, monkeypatch, tmp_path, capsys, retry, refused_attempts, error_detail,
+):
+    monkeypatch.setattr(anti, 'fetch_model_ids', lambda *a, **k: {'fixture:model'})
+    monkeypatch.setattr(anti, '_install_run_signal_handlers', lambda args: None)
+    monkeypatch.setattr(anti.time, 'sleep', lambda seconds: None)
+    partial = response('Synthetic incomplete output.', {'input_tokens': 10, 'output_tokens': 512, 'total_tokens': 522})
+    partial.update(status='incomplete', incomplete_details={'reason': 'max_output_tokens'})
+    calls = open_sequence(monkeypatch, anti, [(200, partial), (503, {'error': 'synthetic busy'})])
+
+    code = anti.main([
+        'consult', '--model', 'fixture:model', '--prompt', 'Synthetic bounded consult.',
+        '--max-output-tokens', '512', '--max-calls', '2', '--retry', str(retry),
+        '--run-id', 'submitted-retry-error', '--save-output', 'full',
+        '--no-progress', '--no-pre-read', '--json',
+    ])
+
+    assert code == 1
+    assert [call['max_output_tokens'] for call in calls] == [512, 1024]
+    record = json.loads((tmp_path / 'runs/submitted-retry-error.json').read_text())
+    assert record['status'] == 'error' and record['runStatus'] == 'failed'
+    assert error_detail in record['error']
+    admission = record['metadata']['admission_controls']
+    assert admission['committed']['calls'] == 2 and admission['reserved']['calls'] == 0
+    assert admission['refused_attempts'] == refused_attempts
+    assert capsys.readouterr().out == ''
 
 
 def test_currency_quote_must_cover_gateway_internal_attempts(anti,tmp_path):
