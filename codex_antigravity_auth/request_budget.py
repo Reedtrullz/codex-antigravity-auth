@@ -88,6 +88,7 @@ class RequestBudget:
         self.release_account = release_account
         self.accounts = []
         self.closers = []
+        self.finalizers = []
         self.closed = False
         self.abort = None
         self.abort_reported = False
@@ -113,6 +114,17 @@ class RequestBudget:
         else:
             self.closers.append(closer)
 
+    def register_finalizer(self, callback):
+        if self.closed:
+            callback()
+        else:
+            self.finalizers.append(callback)
+
+    def run_finalizers(self):
+        callbacks, self.finalizers = self.finalizers, []
+        for callback in callbacks:
+            callback()
+
     async def close(self):
         if self.closed:
             return
@@ -120,7 +132,10 @@ class RequestBudget:
         accounts, self.accounts = self.accounts, []
         callbacks = self.closers + [partial(self.release_account, email) for email in accounts]
         self.closers = []
-        await shielded_cleanup(*callbacks)
+        try:
+            await shielded_cleanup(*callbacks)
+        finally:
+            self.run_finalizers()
 
     async def release(self, email):
         if email in self.accounts:

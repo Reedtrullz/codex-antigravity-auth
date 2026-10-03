@@ -439,6 +439,10 @@ evidence is separate from model claims; unavailable, invalid and inconclusive
 results remain explicit. See [offline benchmark](codex_antigravity_auth/skills/anti/BENCHMARK.md).
 No live tournament, model quality ranking or routing-default change is performed.
 
+## Resource limits and overload
+
+Generation admission defaults to 32 in-flight requests per process and 16 per backend route. Excess requests receive HTTP503 with Retry-After. Incoming bodies default to32MiB, inline attachments have separate decoded limits, and JSON/schema/SSE/provider accumulation are bounded without accepting clipped requests as complete. Set operator environment overrides for larger contexts or images; increasing the in-flight ceiling above its startup value requires a gateway restart. See [resource limits and admission](codex_antigravity_auth/RESOURCE_LIMITS.md) for units, ranges, failure codes and ownership.
+
 ## Anti whole-run deadlines
 
 Anti generation commands accept `--run-timeout` (default 1800 seconds). This budget
@@ -456,3 +460,11 @@ apply to retries, fallback and judge calls. Optional `--currency-budget` require
 an explicit dated `--pricing-file` with complete-attempt charge bounds; unknown
 or stale prices refuse admission. Local usage is not billing. See the packaged
 [spend-control contract](codex_antigravity_auth/skills/anti/SPEND_CONTROL.md).
+## Context preflight
+
+`POST /v1/context/preflight` accepts the intended Responses request body and
+returns a count-only `fit`/`unknown`/`reject` assessment without generation. The
+current catalog limits are declarations, so ordinary routes return `unknown`
+with labeled whole-request estimates. See [context preflight](codex_antigravity_auth/skills/anti/CONTEXT_PREFLIGHT.md)
+for component accounting, evidence requirements, generation behavior and Anti
+usage calibration. Character limits are not tokenizer or context guarantees.

@@ -12,6 +12,7 @@ import re
 from typing import Any
 from .models import DEFAULT_GEMINI_MODEL_ID, resolve_backend_model
 from .schema import clean_json_schema
+from .resource_limits import ResourceLimitError, current_limits, json_loads_limited
 
 FUNCTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 JSON_SCHEMA_NAME_PATTERN = FUNCTION_NAME_PATTERN
@@ -96,9 +97,18 @@ def function_call_arguments_json(value: Any) -> str:
 
 
 def function_call_arguments_string(value: Any) -> str:
-    from .tool_calls import parse_arguments, dump_arguments
-    parsed = parse_arguments(value, object_allowed=True)
-    return value if isinstance(value, str) else dump_arguments(parsed)
+    from .tool_calls import dump_arguments
+    if isinstance(value, str):
+        # Bound the original JSON before the duplicate-key-aware tool parser.
+        try:
+            json_loads_limited(value)
+        except ResourceLimitError:
+            raise
+        except (ValueError, RecursionError):
+            # Let the strict tool parser report malformed JSON consistently.
+            pass
+    validated = clean_function_call_args(value)
+    return value if isinstance(value, str) else dump_arguments(validated)
 
 
 def safe_project_id(value: Any) -> str | None:
@@ -117,7 +127,9 @@ def _function_call_args(value: Any) -> dict[str, Any]:
         return value
     if isinstance(value, str):
         try:
-            parsed = json.loads(value)
+            parsed = json_loads_limited(value)
+        except ResourceLimitError:
+            raise
         except Exception:
             return {"arguments": value}
         return parsed if isinstance(parsed, dict) else {}
@@ -131,7 +143,9 @@ def _function_response_payload(value: Any) -> dict[str, Any]:
         stripped = value.strip()
         if stripped:
             try:
-                parsed = json.loads(stripped)
+                parsed = json_loads_limited(stripped)
+            except ResourceLimitError:
+                raise
             except Exception:
                 parsed = None
             if isinstance(parsed, dict):
@@ -426,12 +440,14 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     gemini_tools = []
     codex_tools = codex_req.get("tools")
     if isinstance(codex_tools, list) and codex_tools:
+        limits = current_limits()
+        schema_budget = [limits.json_nodes, limits.body_bytes]
         declarations = []
         for tool in codex_tools:
             fn = response_function_tool(tool)
             if not fn:
                 continue
-            params = clean_json_schema(fn.get("parameters", {}))
+            params = clean_json_schema(fn.get("parameters", {}), _budget=schema_budget)
             declarations.append({
                 "name": fn.get("name"),
                 "description": fn.get("description", ""),
