@@ -547,10 +547,10 @@ def test_journal_config_writer_never_follows_a_late_leaf_link(isolated, tmp_path
             pytest.skip("fixture symlink creation unavailable")
         return native_configure(args)
     monkeypatch.setattr(cli, "run_configure_codex", replace_then_configure)
-    with pytest.raises((setup.SetupError, SystemExit)):
+    with pytest.raises((setup.SetupError, SystemExit)) as failure:
         cli_setup.run_setup(options(write=True, json=True))
     assert external.read_text() == ORIGINAL
-    assert target.is_symlink()
+    assert target.is_symlink(), str(failure.value)
 
 
 @pytest.mark.parametrize("existing", [False, True])
