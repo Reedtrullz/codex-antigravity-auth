@@ -8533,6 +8533,8 @@ def command_workflow(args: argparse.Namespace) -> int:
     progress(args, "workflow expands to: " + workflow_command_for_progress(expanded))
     parser = build_parser()
     expanded_args = parser.parse_args(expanded)
+    expanded_args._local_policy = local_workflow.prepare_args(args)
+    expanded_args.local_only = expanded_args._local_policy is not None
     expanded_args._run_control = run_control(args)
     expanded_args.run_timeout = expanded_args._run_control.limit
 
@@ -8763,6 +8765,8 @@ def add_generation_control_args(
     *,
     default_save_output: str = "never",
 ) -> None:
+    parser.add_argument('--local-only', action='store_true', help='Require local-only gateway enforcement and loopback routes at every stage')
+    parser.add_argument('--local-profile', help='Explicit non-secret local settings profile; excludes separate gateway/model/judge/fallback flags')
     parser.add_argument("--run-timeout", type=float, default=1800.0, help="Whole-run provider deadline in seconds (default: 1800; maximum: 86400)")
 
     parser.add_argument("--data-policy", help="Explicit path to a version 1 restrictive repository submission policy")
