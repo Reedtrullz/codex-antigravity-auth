@@ -475,3 +475,12 @@ requires the original source/task identity, reuses verified completed chunks and
 always resynthesizes. Failed/truncated chunks need explicit `--rerun-chunk N`.
 See [chunk resume](codex_antigravity_auth/skills/anti/CHUNK_RESUME.md) for retention,
 route receipts, coverage, combined reporting and per-invocation allowance scope.
+
+### Offline review-quality replay
+
+`python scripts/anti.py benchmark corpus`, `benchmark template`, and
+`benchmark replay --replay replay.json --adjudications adjudications.json` provide
+a versioned synthetic corpus and matched-case evaluation. Independent local
+evidence is separate from model claims; unavailable, invalid and inconclusive
+results remain explicit. See [offline benchmark](codex_antigravity_auth/skills/anti/BENCHMARK.md).
+No live tournament, model quality ranking or routing-default change is performed.
