@@ -11,6 +11,7 @@
         ],
         "audio_input": {
           "backend_acceptance": "unverified",
+          "backend_attempt_limit": 1,
           "content_type": "antigravity_audio",
           "format": "pcm_wav",
           "listening_verification": "not_run",
@@ -118,6 +119,7 @@
         ],
         "audio_input": {
           "backend_acceptance": "unverified",
+          "backend_attempt_limit": 1,
           "content_type": "antigravity_audio",
           "format": "pcm_wav",
           "listening_verification": "not_run",
@@ -225,6 +227,7 @@
         ],
         "audio_input": {
           "backend_acceptance": "unverified",
+          "backend_attempt_limit": 1,
           "content_type": "antigravity_audio",
           "format": "pcm_wav",
           "listening_verification": "not_run",
@@ -326,6 +329,7 @@
         ],
         "audio_input": {
           "backend_acceptance": "unsupported",
+          "backend_attempt_limit": 1,
           "content_type": "antigravity_audio",
           "format": "pcm_wav",
           "listening_verification": "not_run",
@@ -433,6 +437,7 @@
         ],
         "audio_input": {
           "backend_acceptance": "unsupported",
+          "backend_attempt_limit": 1,
           "content_type": "antigravity_audio",
           "format": "pcm_wav",
           "listening_verification": "not_run",
@@ -536,6 +541,7 @@
         "aliases": [],
         "audio_input": {
           "backend_acceptance": "unsupported",
+          "backend_attempt_limit": 1,
           "content_type": "antigravity_audio",
           "format": "pcm_wav",
           "listening_verification": "not_run",
@@ -631,6 +637,7 @@
         ],
         "audio_input": {
           "backend_acceptance": "unverified",
+          "backend_attempt_limit": 1,
           "content_type": "antigravity_audio",
           "format": "pcm_wav",
           "listening_verification": "not_run",
@@ -739,6 +746,7 @@
         ],
         "audio_input": {
           "backend_acceptance": "unverified",
+          "backend_attempt_limit": 1,
           "content_type": "antigravity_audio",
           "format": "pcm_wav",
           "listening_verification": "not_run",

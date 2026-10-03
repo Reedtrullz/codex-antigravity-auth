@@ -1,4 +1,4 @@
-# Experimental PCM WAV consult input
+# Experimental PCM WAV listening input
 
 Anti can capture explicit local WAV files for a bounded advisory consult. The
 encoder and fake-upstream transport are tested; **audio acceptance/listening on
@@ -29,7 +29,7 @@ The flag requires `--audio` and does not bypass privacy or capability checks.
 
 | Property | Bound |
 | --- | --- |
-| Commands | `consult` / `ask`; no panel, judge, review, plan, workflow or streaming audio |
+| Commands | `listen`, `consult` / `ask`; no panel, judge, review, plan, workflow or streaming audio |
 | Files | One or two explicit local regular files; no symlinks in any path component |
 | Encoding | Classic RIFF/WAVE, uncompressed PCM format1,16-bit samples, mono or stereo |
 | Sample rates | 8,000 /16,000 /22,050 /24,000 /32,000 /44,100 /48,000Hz |
@@ -51,6 +51,37 @@ embedded WAV metadata are preserved unchanged, including during retries and an
 explicitly configured capable fallback. The input order is stable; source filenames
 and transcripts are not automatically included as listening clues. Metadata uses
 ordinal indices, MIME, bytes, frames, duration, sample rate/channels and SHA-256.
+
+## One-attempt listening profile
+
+Use `listen` for music-review adapters such as Keyspilli:
+
+```sh
+python scripts/anti.py listen --model gemini-3.1-pro \
+  --audio reference.wav --audio candidate.wav --probe-unverified-audio \
+  --prompt-file listening-prompt.txt --json
+```
+
+This command requires explicit audio and model selection. It permits at most one
+generation attempt, 2,048 output tokens and a 90-second whole-run deadline. It
+disables source pre-reading, automatic routing, retries and fallback. Smaller
+limits are allowed; looser limits fail before HTTP. A truncated response retains
+its partial output, records `retry_disposition: disabled` and exits nonzero without
+a second attempt. `--dry-run` captures and validates the selected bytes without
+HTTP or upload, and does not require the probe flag.
+
+The gateway also disables internal account rotation for audio requests, including
+connection, authentication and quota failures. Explicit `consult` retry/fallback
+settings still work at the helper layer; each gateway audio request dispatches at
+most once to Google.
+`listen` requires the catalog's exact integer `backend_attempt_limit: 1`; older
+gateways with an unbounded audio contract are refused before generation.
+
+The JSON result reuses the consult envelope with `mode: listen`. Musical JSON, its
+timing validation and the aggregate request/resume ledger belong to the calling
+adapter. Anti's receipt records media identity and submission evidence; it does
+not manufacture native AUDIO token counts or turn an empty finding list into
+musical approval. Existing `consult` / `ask` retry behavior is unchanged.
 
 ## Gateway extension and capability evidence
 

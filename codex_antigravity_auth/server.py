@@ -2178,7 +2178,9 @@ async def _create_response(request: Request, budget: RequestBudget):
         cooldown_category: str | None = None
         try:
             res = await request_backend_with_boundary(response_account)
-            if not res:
+            # Audio is an explicitly bounded upload. Do not silently submit the
+            # same captured recording again through another account.
+            if not res and not audio_request:
                 new_account = await run_bounded_operation(
                     lambda: acquire_active_account_for_request(model),
                     release_late_result=True,
@@ -2249,11 +2251,13 @@ async def _create_response(request: Request, budget: RequestBudget):
                     status_code=res.status_code,
                     error_class="validation_required" if is_validation else None,
                 )
-                new_account = await run_bounded_operation(
-                    lambda: acquire_active_account_for_request(model),
-                    release_late_result=True,
-                )
-                rotation_attempted = True
+                new_account = None
+                if not audio_request:
+                    new_account = await run_bounded_operation(
+                        lambda: acquire_active_account_for_request(model),
+                        release_late_result=True,
+                    )
+                    rotation_attempted = True
                 if new_account:
                     response_attempts.append(new_account)
                     response_account = new_account
@@ -2368,7 +2372,8 @@ async def _create_response(request: Request, budget: RequestBudget):
                     status_code=429,
                     detail=google_failure_detail(
                         model,
-                        "Antigravity account rate limit reached. Auto-switching to next account.",
+                        ("Antigravity account rate limit reached. Audio was not resubmitted."
+                         if audio_request else "Antigravity account rate limit reached. Auto-switching to next account."),
                         retry_after_seconds=retry_after_seconds,
                         retry_after_source=retry_after_source,
                         rotation_attempted=rotation_attempted,

@@ -67,7 +67,7 @@ def contract(*, canonical_id: str, backend_id: str, route: str, family: str,
     }
     result['audio_input'] = {'version':1,'format':'pcm_wav','transport_supported':capabilities.pcm_wav_probe,
         'backend_acceptance':'unverified' if capabilities.pcm_wav_probe else 'unsupported',
-        'requires_probe_opt_in':True,'content_type':'antigravity_audio','streaming':False,
+        'requires_probe_opt_in':True,'content_type':'antigravity_audio','streaming':False,'backend_attempt_limit':1,
         'max_files':2,'max_file_bytes':2*1024*1024,'max_total_bytes':4*1024*1024,'max_duration_seconds':30,
         'listening_verification':'not_run'}
     return result

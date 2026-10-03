@@ -86,6 +86,142 @@ def argv(path,*extra):
             '--prompt','Describe the supplied sound.','--json','--no-progress','--retry','0',*extra]
 
 
+def listen_argv(path, *extra):
+    return ['listen', '--model', 'gemini-3.8-flash', '--audio', str(path),
+            '--probe-unverified-audio', '--prompt', 'Describe the supplied piano clips.',
+            '--json', '--no-progress', *extra]
+
+
+def test_listen_defaults_are_a_single_bounded_audio_attempt(fixture):
+    anti, _, _, first, _ = fixture
+    args = anti.build_parser().parse_args(listen_argv(first))
+    assert args.max_calls == 1 and args.retry == 0
+    assert args.max_output_tokens == 2048
+    assert args.run_timeout == 90 and args.timeout == 90
+    assert args.no_pre_read is True and args.fallback_policy == 'never'
+
+
+@pytest.mark.parametrize('extra', [
+    ['--max-calls', '2'], ['--retry', '1'], ['--max-output-tokens', '2049'],
+    ['--run-timeout', '91'], ['--timeout', '91'],
+    ['--fallback-model', 'gemini-3.1-pro'], ['--fallback-policy', 'on-retryable'],
+    ['--auto-route'], ['--run-timeout', 'nan'], ['--timeout', 'inf'],
+])
+def test_listen_loose_limits_refuse_before_any_http(fixture, monkeypatch, capsys, extra):
+    anti, _, _, first, _ = fixture
+    monkeypatch.setattr(anti, 'request_json', lambda *a, **k: pytest.fail('no listen HTTP'))
+    assert anti.main(listen_argv(first, *extra)) == 1
+    assert 'listen' in capsys.readouterr().err.lower()
+
+
+@pytest.mark.parametrize('missing', ['audio', 'model'])
+def test_listen_requires_audio_and_explicit_model_before_http(fixture, monkeypatch, missing):
+    anti, _, _, first, _ = fixture
+    monkeypatch.setattr(anti, 'request_json', lambda *a, **k: pytest.fail('no listen HTTP'))
+    args = listen_argv(first)
+    index = args.index('--' + missing)
+    del args[index:index + 2]
+    if missing == 'audio':
+        args.remove('--probe-unverified-audio')
+    assert anti.main(args) == 1
+
+
+def test_listen_dry_run_never_contacts_catalog_and_has_no_retry(fixture, monkeypatch, capsys):
+    anti, _, _, first, _ = fixture
+    monkeypatch.setattr(anti, 'request_json', lambda *a, **k: pytest.fail('no dry-run HTTP'))
+    args = listen_argv(first, '--dry-run')
+    args.remove('--probe-unverified-audio')
+    assert anti.main(args) == 0
+    result, _ = json.JSONDecoder().raw_decode(capsys.readouterr().out)
+    assert result['mode'] == 'listen'
+    assert result['media_coverage']['status'] == 'not_sent'
+    assert result['stages'][0]['possible_retries'] == 0
+
+
+def test_listen_complete_output_pins_both_clips_without_pre_read(fixture, monkeypatch, capsys):
+    anti, _, _, first, second = fixture
+    bridge(monkeypatch, anti)
+    monkeypatch.setattr(anti, 'build_consult_file_context',
+                        lambda *a, **k: pytest.fail('listen must not pre-read source files'))
+    with upstream(response('{"summary":"Synthetic music fixture","findings":[]}')) as (base, seen):
+        endpoint(monkeypatch, base)
+        assert anti.main(listen_argv(first, '--audio', str(second), '--save-output', 'full')) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert len(seen) == 1 and result['mode'] == 'listen'
+    assert result['metadata']['result_quality'] == 'complete'
+    media = result['metadata']['media_coverage']
+    assert media['gateway_attempts'] == 1 and media['captured_count'] == 2
+    assert [x['sha256'] for x in media['audio']] == [audio.inspect_wav(p.read_bytes())['sha256'] for p in (first, second)]
+    assert media['provider_audio_acceptance'] == 'unverified'
+    assert media['listening_verification'] == 'not_run'
+
+
+def test_listen_truncated_output_is_retained_without_second_post(fixture, monkeypatch, capsys):
+    anti, _, _, first, _ = fixture
+    bridge(monkeypatch, anti)
+    raw = json.loads(response('Retained partial musical observation.')[2])
+    raw['response']['candidates'][0]['finishReason'] = 'MAX_TOKENS'
+    with upstream((200, {'Content-Type': 'application/json'}, json.dumps(raw).encode())) as (base, seen):
+        endpoint(monkeypatch, base)
+        assert anti.main(listen_argv(first)) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert len(seen) == 1 and result['runStatus'] == 'partial'
+    assert result['output_text'] == 'Retained partial musical observation.'
+    assert result['metadata']['result_quality'] == 'incomplete'
+    assert result['metadata']['retry_disposition'] == 'disabled'
+
+
+def test_listen_retryable_transport_error_makes_one_post(fixture, monkeypatch):
+    anti, _, _, first, _ = fixture
+    bridge(monkeypatch, anti)
+    with upstream((503, {'Content-Type': 'application/json'}, b'{"error":"synthetic"}')) as (base, seen):
+        endpoint(monkeypatch, base)
+        assert anti.main(listen_argv(first)) == 1
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize('status', [401, 403, 429])
+def test_audio_backend_auth_or_quota_failure_never_rotates(fixture, monkeypatch, status):
+    _, manager, _, _, _ = fixture
+    storage.save_accounts({'accounts': [
+        {'email': f'audio-{index}@example.invalid', 'accessToken': 'synthetic-only',
+         'expiresAt': time.time() + 3600, 'projectId': 'fixture'} for index in range(2)
+    ]})
+    with upstream((status, {'Content-Type': 'application/json'}, b'{"error":"synthetic"}')) as (base, seen):
+        endpoint(monkeypatch, base)
+        result = TestClient(server.app).post('/v1/responses', json=body())
+    assert len(seen) == 1
+    assert result.status_code in {status, 503}
+    assert not manager._in_flight
+
+
+def test_audio_backend_connection_failure_never_rotates(fixture, monkeypatch):
+    _, manager, _, _, _ = fixture
+    attempts = []
+    async def failed(self, request, lease):
+        attempts.append(request)
+        raise OSError('synthetic transport failure')
+    monkeypatch.setattr(google_transport.GoogleTransport, 'post', failed)
+    result = TestClient(server.app).post('/v1/responses', json=body())
+    assert result.status_code == 502 and len(attempts) == 1
+    assert not manager._in_flight
+
+
+@pytest.mark.parametrize('limit', [None, 0, 2, True])
+def test_listen_refuses_gateway_without_exact_backend_attempt_bound(fixture, monkeypatch, limit):
+    anti, _, _, first, _ = fixture
+    catalog_for_helper(anti)
+    contract = anti.CAPABILITY_REGISTRY.entries['gemini-3.8-flash']['audio_input']
+    if limit is None:
+        contract.pop('backend_attempt_limit', None)
+    else:
+        contract['backend_attempt_limit'] = limit
+    args = anti.build_parser().parse_args(listen_argv(first))
+    anti.run_control(args)
+    with pytest.raises(anti.wav_audio.AudioError, match='single backend attempt'):
+        anti.captured_media(args).require(anti.CAPABILITY_REGISTRY, args.model, 'primary')
+
+
 def endpoint(monkeypatch,base):
     monkeypatch.setattr(server,'GoogleTransport',lambda **kw:google_transport.GoogleTransport(endpoint=base,**kw))
 

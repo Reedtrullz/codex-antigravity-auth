@@ -151,7 +151,7 @@ class Audio:
         return {'type':PART_TYPE,'mime_type':'audio/wav','data':self.encoded,'probe_unverified':True}
 
 
-def capture(paths, *, policy=None, probe=False):
+def capture(paths, *, policy=None, probe=False, single_backend_attempt=False):
     require(isinstance(paths,(list,tuple)) and 1<=len(paths)<=MAX_FILES,'Select one or two explicit local WAV files')
     selected=[]
     for value in paths:
@@ -169,15 +169,16 @@ def capture(paths, *, policy=None, probe=False):
         require(raw is not None and reason is None,'Audio capture refused; use regular no-follow files within2MiB each/4MiB total')
         descriptor={'index':index,**inspect_wav(raw)};remaining-=len(raw)
         attachments.append(Audio(descriptor,base64.b64encode(raw).decode('ascii')))
-    return Session(tuple(attachments),probe=probe)
+    return Session(tuple(attachments),probe=probe,single_backend_attempt=single_backend_attempt)
 
 
 class Session(MediaSession):
     kind='audio'
 
-    def __init__(self,attachments,*,probe):
+    def __init__(self,attachments,*,probe,single_backend_attempt=False):
         super().__init__(attachments)
         self.probe=probe is True
+        self.single_backend_attempt=single_backend_attempt is True
 
     def supports(self,registry,model):
         caps=registry.entries.get(str(model).lower()) or registry.entries.get(registry.canonical(str(model))) or {}
@@ -196,6 +197,10 @@ class Session(MediaSession):
     def require(self,registry,model,stage):
         require(self.probe,'Audio requires --probe-unverified-audio to authorize an upload to this unverified backend')
         require(self.supports(registry,model),'Audio requires an advertised experimental Gemini PCM-WAV route; text-only fallback is refused')
+        if self.single_backend_attempt:
+            caps=registry.entries.get(str(model).lower()) or registry.entries.get(registry.canonical(str(model))) or {}
+            limit=caps.get('audio_input',{}).get('backend_attempt_limit')
+            require(type(limit) is int and limit==1,'listen requires a gateway advertising a single backend attempt for audio')
         with self.lock:
             if len(self.checked)<128:self.checked.add((str(model),str(stage)))
 
