@@ -1276,14 +1276,22 @@ def run_configure_codex(args) -> None:
         return
 
     try:
-        changed, backup_path = write_codex_config(
-            config_path,
-            model=args.model,
-            provider_id=provider_id,
-            provider_name=provider_name,
-            base_url=args.base_url,
-            activate=activate,
-        )
+        planned = getattr(args, "_setup_config_plan", None)
+        if planned is not None:
+            from .setup_profiles import write_planned_config
+            changed, backup_path = write_planned_config(
+                planned, model=args.model, provider_id=provider_id, provider_name=provider_name,
+                base_url=args.base_url, activate=activate,
+            )
+        else:
+            changed, backup_path = write_codex_config(
+                config_path,
+                model=args.model,
+                provider_id=provider_id,
+                provider_name=provider_name,
+                base_url=args.base_url,
+                activate=activate,
+            )
     except (OSError, RuntimeError, ValueError) as e:
         raise SystemExit(str(e)) from e
     if changed:
