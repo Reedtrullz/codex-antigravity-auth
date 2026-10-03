@@ -421,3 +421,13 @@ is shared by chunks, retries, fallback and judge calls; each actual destination
 acquires a process-local permit for each attempt. Deadline-deferred work is saved
 as partial coverage under the selected retention mode. See [run controls and
 cooperative timeout limits](codex_antigravity_auth/skills/anti/RUN_CONTROL.md).
+
+
+## Anti admission and cost units
+
+`--budget` remains a heuristic-unit limit. Independent `--max-calls`,
+`--max-total-input-tokens` (estimated) and `--max-total-output-tokens` allowances
+apply to retries, fallback and judge calls. Optional `--currency-budget` requires
+an explicit dated `--pricing-file` with complete-attempt charge bounds; unknown
+or stale prices refuse admission. Local usage is not billing. See the packaged
+[spend-control contract](codex_antigravity_auth/skills/anti/SPEND_CONTROL.md).

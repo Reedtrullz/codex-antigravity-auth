@@ -3,6 +3,7 @@
   "files": [
     "RUN_CONTROL.md",
     "SKILL.md",
+    "SPEND_CONTROL.md",
     "ARTIFACTS.md",
     "DATA_POLICY.md",
     "DIFF_PROVENANCE.md",
@@ -31,6 +32,7 @@
     "scripts/anti_lib/windows_job.py",
     "scripts/anti_lib/run_control.py",
     "scripts/anti_lib/runner.py",
+    "scripts/anti_lib/spend_control.py",
     "scripts/anti_lib/verifier.py",
     "schemas/raw-lane-v1.json",
     "schemas/run-index-v1.json",
