@@ -5,14 +5,15 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import socket
 import subprocess
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import Mock
+from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 
 import pytest
+from fake_upstream import upstream
 
 from codex_antigravity_auth import cli, service, service_drift as drift, service_manifest as manifest
 
@@ -232,24 +233,24 @@ def test_runtime_endpoint_avoids_account_provider_and_catalog_access(monkeypatch
 
 
 def test_loopback_runtime_probe_observes_only_its_synthetic_listener(tmp_path, monkeypatch):
-    # Restore the real bounded probe, still under the credential-free runner.
-    from importlib import reload
-    probe = reload(drift).probe_runtime
+    # Real bounded probe and HTTP policy, still under the credential-free runner.
     identity = {'serviceId': 'a'*32, 'launchHash': 'b'*64, 'packageVersion': '2.4.2', 'pid': 123}
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            assert self.path == '/health/runtime'
-            body = json.dumps({'ok': True, 'service': identity}).encode()
-            self.send_response(200); self.send_header('Content-Length', str(len(body))); self.end_headers()
-            self.wfile.write(body)
-        def log_message(self, *args): pass
-    listener = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-    worker = threading.Thread(target=listener.serve_forever, daemon=True)
-    worker.start()
-    try:
-        assert probe(listener.server_port) == identity
-    finally:
-        listener.shutdown(); listener.server_close(); worker.join(2)
+    body = json.dumps({'ok': True, 'service': identity}).encode()
+    original_getaddrinfo = socket.getaddrinfo
+    monkeypatch.setenv('ANTIGRAVITY_GATEWAY_TOKEN', 'fixture-runtime-token')
+    with upstream((200, {'Content-Type': 'application/json'}, body)) as (base, requests):
+        port = urlparse(base).port
+
+        def resolve_owned_localhost(name, destination_port, *args, **kwargs):
+            if name == 'localhost' and destination_port == port:
+                name = '127.0.0.1'
+            return original_getaddrinfo(name, destination_port, *args, **kwargs)
+
+        monkeypatch.setattr(socket, 'getaddrinfo', resolve_owned_localhost)
+        assert drift.probe_runtime(port) == identity
+        assert len(requests) == 1 and requests[0]['path'] == '/health/runtime'
+        assert requests[0]['headers']['Authorization'] == 'Bearer fixture-runtime-token'
+        assert requests[0]['body'] == ''
 
 
 @pytest.mark.parametrize('phase', ['backup','intent','definition'])

@@ -53,6 +53,8 @@ def upstream(*responses):
         def log_message(self, *args):
             pass
 
+        do_GET = do_POST
+
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler, bind_and_activate=False)
     endpoint = allow_listener(server.socket)
     server.server_address = endpoint
