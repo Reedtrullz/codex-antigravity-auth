@@ -194,7 +194,7 @@ def test_byok_dispatch_preserves_endpoint_client_policy(monkeypatch, setup_route
     state = setup_route('byok', timeout=5)
     original = httpx.AsyncClient
     endpoint = {'base_url': 'https://provider.fixture.invalid/v1', 'local_only_https': False}
-    created, requests = [], []
+    created, requests, policies = [], [], []
 
     async def handler(request):
         requests.append(request)
@@ -207,7 +207,10 @@ def test_byok_dispatch_preserves_endpoint_client_policy(monkeypatch, setup_route
                             'apiKey': 'synthetic-only', 'models': ['model']}}
 
     def factory(**kwargs):
-        client = original(transport=httpx.MockTransport(handler), **kwargs)
+        async def observed_handler(request):
+            policies.append(kwargs['trust_env'])
+            return await handler(request)
+        client = original(transport=httpx.MockTransport(observed_handler), **kwargs)
         created.append((client, dict(kwargs)))
         return client
 
@@ -248,9 +251,10 @@ def test_byok_dispatch_preserves_endpoint_client_policy(monkeypatch, setup_route
             assert all(client.is_closed for client, _ in created)
 
     asyncio.run(dispatch_twice())
-    assert len(requests) == len(created) == 3
+    assert len(requests) == 3
+    assert len(created) == (2 if pooled else 3)
     assert [request.url.scheme for request in requests] == ['https', 'http', 'https']
-    assert [options['trust_env'] for _, options in created] == [True, False, False]
+    assert policies == [True, False, False]
     assert all(options['follow_redirects'] is False for _, options in created)
     assert all(request.headers['authorization'] == 'Bearer synthetic-only' for request in requests)
     assert state.release.await_count == 0
