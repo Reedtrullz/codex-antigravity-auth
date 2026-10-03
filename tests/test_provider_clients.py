@@ -193,7 +193,8 @@ def test_gateway_routes_reuse_clients_and_release_response_ownership(monkeypatch
 def test_byok_dispatch_preserves_endpoint_client_policy(monkeypatch, setup_route, pooled):
     state = setup_route('byok', timeout=5)
     original = httpx.AsyncClient
-    endpoint = {'base_url': 'https://provider.fixture.invalid/v1', 'local_only_https': False}
+    monkeypatch.delenv('ANTIGRAVITY_LOCAL_ONLY', raising=False)
+    endpoint = {'base_url': 'https://provider.fixture.invalid/v1'}
     created, requests, policies = [], [], []
 
     async def handler(request):
@@ -215,15 +216,6 @@ def test_byok_dispatch_preserves_endpoint_client_policy(monkeypatch, setup_route
         return client
 
     monkeypatch.setattr(server, 'all_provider_configs', configs)
-    original_options = server.httpx_client_options
-
-    def options(url, *, timeout):
-        result = original_options(url, timeout=timeout)
-        if endpoint['local_only_https']:
-            result['trust_env'] = False  # Model the explicit caller policy without importing PR #154.
-        return result
-
-    monkeypatch.setattr(server, 'httpx_client_options', options)
     monkeypatch.setattr(server.httpx, 'AsyncClient', factory)
 
     async def dispatch_twice():
@@ -236,28 +228,78 @@ def test_byok_dispatch_preserves_endpoint_client_policy(monkeypatch, setup_route
                 await request_once()  # Ordinary remote HTTPS keeps HTTPX environment support.
                 endpoint['base_url'] = 'http://127.0.0.1:51129/v1'
                 await request_once()  # Plaintext loopback bypasses environment proxies.
-                endpoint['base_url'] = 'https://127.0.0.1:51129/v1'
-                endpoint['local_only_https'] = True
-                await request_once()  # An explicit local-only TLS policy also survives dispatch.
             assert all(client.is_closed for client, _ in created)
         else:
             monkeypatch.setattr(server, '_provider_client_pool', None)
             await request_once()
             endpoint['base_url'] = 'http://127.0.0.1:51129/v1'
             await request_once()
-            endpoint['base_url'] = 'https://127.0.0.1:51129/v1'
-            endpoint['local_only_https'] = True
-            await request_once()
             assert all(client.is_closed for client, _ in created)
 
     asyncio.run(dispatch_twice())
-    assert len(requests) == 3
-    assert len(created) == (2 if pooled else 3)
-    assert [request.url.scheme for request in requests] == ['https', 'http', 'https']
-    assert policies == [True, False, False]
+    assert len(requests) == len(created) == 2
+    assert [request.url.scheme for request in requests] == ['https', 'http']
+    assert policies == [True, False]
     assert all(options['follow_redirects'] is False for _, options in created)
     assert all(request.headers['authorization'] == 'Bearer synthetic-only' for request in requests)
     assert state.release.await_count == 0
+
+
+@pytest.mark.parametrize('pooled', [False, True], ids=['standalone-client', 'local-lifespan-pool'])
+def test_local_only_https_dispatch_uses_real_endpoint_policy(monkeypatch, setup_route, pooled):
+    state = setup_route('byok', timeout=5)
+    monkeypatch.setenv('ANTIGRAVITY_LOCAL_ONLY', '1')
+    monkeypatch.setattr(server.app.state, 'local_only_mode', None, raising=False)
+    endpoint = {'base_url': 'https://127.0.0.1:51129/v1'}
+    created, requests = [], []
+    original = httpx.AsyncClient
+
+    async def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={
+            'choices': [{'index': 0, 'message': {'content': 'fixture'}, 'finish_reason': 'stop'}],
+        })
+
+    def factory(**kwargs):
+        client = original(transport=httpx.MockTransport(handler), **kwargs)
+        created.append((client, dict(kwargs)))
+        return client
+
+    monkeypatch.setattr(server, 'all_provider_configs', lambda: {
+        'fixture': {'id': 'fixture', 'kind': 'openai_chat', 'baseUrl': endpoint['base_url'],
+                    'apiKey': 'synthetic-only', 'models': ['model']},
+    })
+    monkeypatch.setattr(server.httpx, 'AsyncClient', factory)
+    monkeypatch.setattr(server, '_RefreshAheadOwner', lambda: pytest.fail('local mode must not create OAuth refresh owner'))
+
+    async def dispatch():
+        async def request_once():
+            response = await server.create_response(Request('byok'))
+            assert response['status'] == 'completed'
+
+        if pooled:
+            async with server.gateway_lifespan(server.app):
+                assert server._refresh_ahead_owner is None
+                assert server._provider_client_pool is not None
+                assert server.ADMISSION.startup_ceiling == server.ResourceLimits.from_env().inflight
+                await request_once()
+                assert not created[0][0].is_closed
+            assert created[0][0].is_closed
+            assert server._provider_client_pool is None
+        else:
+            monkeypatch.setattr(server, '_provider_client_pool', None)
+            await request_once()
+            assert created[0][0].is_closed
+
+    asyncio.run(dispatch())
+    assert len(created) == len(requests) == 1
+    assert requests[0].url.scheme == 'https'
+    assert created[0][1]['trust_env'] is False
+    assert created[0][1]['follow_redirects'] is False
+    assert requests[0].headers['authorization'] == 'Bearer synthetic-only'
+    assert state.release.await_count == 0
+    if pooled:
+        assert server.ADMISSION.startup_ceiling is None
 
 
 @pytest.mark.parametrize('route', ['google', 'byok', 'openai', 'openai_oauth'])

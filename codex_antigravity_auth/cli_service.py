@@ -466,6 +466,7 @@ def run_logs_command(args) -> None:
 
 
 def start_gateway_background(args) -> dict:
+    _cli.configure_local_gateway_environment(args)
     _cli.require_safe_gateway_host(args.host, args.allow_remote)
     _cli.ensure_unified_env_for_gateway(args)
     pid_path, log_path = _cli.gateway_runtime_paths(args.port)

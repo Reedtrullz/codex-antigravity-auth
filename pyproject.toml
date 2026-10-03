@@ -65,6 +65,7 @@ codex_antigravity_auth = [
   "design/orchestration.md",
   "PROCESS_LOGS.md",
   "REQUEST_DEADLINES.md",
+
   "design/model-discovery.md",
   "RESOURCE_LIMITS.md",
   "HTTP_CLIENTS.md",
@@ -72,6 +73,7 @@ codex_antigravity_auth = [
   "skills/anti/RUN_CONTROL.md",
   "skills/anti/SPEND_CONTROL.md",
   "skills/anti/OWNERSHIP.md",
+  "skills/anti/LOCAL_ONLY.md",
   "skills/anti/ARTIFACTS.md",
   "skills/anti/DATA_POLICY.md",
   "skills/anti/SCOPES.md",
