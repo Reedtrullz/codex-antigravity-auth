@@ -1451,9 +1451,13 @@ def transport_entry_timeout(method, timeout, *, payload=None, body=None, url=Non
 
 
 def open_gateway_request(request, *, timeout, payload=None, body=None):
+    local = getattr(CURRENT_RUN.get(), 'local_policy', None)
+    if local is not None:
+        local_workflow.loopback_url(request.full_url)
     return open_http_request(
         request,
         timeout=timeout,
+        loopback_only=local is not None,
         before_open=lambda prepared, value: transport_entry_timeout(
             prepared.get_method(), value, payload=payload, body=body, url=prepared.full_url,
         ),
