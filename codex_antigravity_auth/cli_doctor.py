@@ -1,6 +1,7 @@
 """Version-check, probe, readiness, and doctor commands (split from cli.py)."""
 
 from __future__ import annotations
+from .console import console_print as print
 
 import json
 import os
@@ -412,7 +413,7 @@ def google_family_rotation_status(data: dict, family: str) -> dict:
 
 
 def _read_codex_config_for_readiness(config: str) -> tuple[Path, str | None, str | None]:
-    config_path = Path(os.path.expanduser(config))
+    config_path = _cli.client_config_path(config)
     if not config_path.is_file():
         return config_path, None, f"Codex config not found: {config_path}"
     try:
@@ -474,13 +475,18 @@ def codex_ready_report(
     parsed_gateway = urlparse(expected_base_url)
     gateway_port = parsed_gateway.port or 51122
 
+    parsed = {}
+    if not config_error:
+        try:
+            parsed = _cli.parse_codex_config(config_content or "")
+        except ValueError as exc:
+            config_error = str(exc)
     if config_error:
         add("codex_config", "fail", config_error)
     else:
         inspector = _cli.inspect_codex_gateway_config if require_active_provider else _cli.inspect_codex_provider_block_config
         ready, reason = inspector(config_content or "", provider_id=provider_id, expected_base_url=expected_base_url)
         add("codex_config", "pass" if ready else "fail", reason, path=str(config_path))
-        parsed = _cli.parse_codex_config(config_content or "")
         active_model = str(selected_model or parsed.get("active_model") or "")
         try:
             canonical_model = _cli.validate_codex_model_id(active_model)
@@ -610,6 +616,12 @@ def codex_ready_report(
                 else:
                     add("google_rotation", "fail", f"No Google accounts configured for {family}", **rotation)
 
+    if route in {"google", "unknown"}:
+        credential_warnings: list[str] = []
+        _cli.resolve_oauth_credentials(read_only=True, warnings=credential_warnings)
+        for warning in credential_warnings:
+            add("google_oauth_credentials_file", "warn", _cli.redact_secret_text(warning))
+
     if live:
         probe_model = live_model or selected_for_catalog or _cli.DEFAULT_CODEX_MODEL_ID
         probe_model, live_model_error = _cli._validate_google_live_model(probe_model)
@@ -653,10 +665,13 @@ def codex_ready_report(
             status = "warn"
         else:
             status = "pass"
+        detail = f"{store.get('format')} store; migration {store.get('migration')}"
+        if store.get("error"):
+            detail += f"; {_cli.redact_secret_text(str(store['error']))}"
         add(
             name,
             status,
-            f"{store.get('format')} store; migration {store.get('migration')}",
+            detail,
             store=store,
         )
     if not capability_mismatches:
@@ -729,6 +744,7 @@ def codex_ready_report(
         "checks": checks,
         "request_log": _cli.request_log_info(),
         "diagnostics": {
+            "namespaces": _cli.namespace_diagnostics(),
             **storage_diagnostics,
             "service": service_snapshot,
             "provider_capability_mismatches": capability_mismatches,
@@ -777,7 +793,7 @@ def run_doctor(
     print("           GOOGLE ANTIGRAVITY AUTH DOCTOR           ")
     print("=" * 60)
     healthy = True
-    codex_config = Path(os.path.expanduser(config))
+    codex_config = _cli.client_config_path(config)
     codex_config_content = None
     codex_config_model = ""
     if codex_config.is_file():
@@ -792,7 +808,10 @@ def run_doctor(
     if byok_only:
         print("[INFO] Google OAuth Client Credentials: skipped (--byok-only)")
     else:
-        cid, csec = _cli.resolve_oauth_credentials()
+        credential_warnings: list[str] = []
+        cid, csec = _cli.resolve_oauth_credentials(read_only=True, warnings=credential_warnings)
+        for warning in credential_warnings:
+            print(f"[WARN] Google OAuth Client Credentials: {_cli.redact_secret_text(warning)}")
         if cid and csec:
             print(f"[PASS] Google OAuth Client Credentials: Configured (Client ID: ...{cid[-15:]})")
         else:

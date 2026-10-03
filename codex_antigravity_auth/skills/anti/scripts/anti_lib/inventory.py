@@ -147,8 +147,14 @@ def read_file(root: Path, rel: str, budget: int):
             raw = stream.read(min(MAX_FILE_BYTES, budget) + 1)
             after = os.fstat(stream.fileno())
         final = path.lstat()
-        identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-        if identity(before) != identity(after) or identity(after) != identity(final):
+        # Windows Python 3.12 lstat reports creation time as ctime while
+        # fstat reports metadata-change time. Compare like timestamps across
+        # APIs, retaining each API's ctime check across the captured read.
+        identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+                                getattr(info, 'st_birthtime_ns', info.st_ctime_ns) if os.name == 'nt' else info.st_ctime_ns)
+        if (identity(before) != identity(opened) or identity(opened) != identity(after)
+                or identity(after) != identity(final) or before.st_ctime_ns != final.st_ctime_ns
+                or opened.st_ctime_ns != after.st_ctime_ns):
             return None, before.st_size, 'changed_during_read'
         if len(raw) > min(MAX_FILE_BYTES, budget): return None, len(raw), 'source_byte_limit'
         return raw, len(raw), None

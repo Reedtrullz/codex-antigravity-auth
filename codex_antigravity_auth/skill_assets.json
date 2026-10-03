@@ -45,6 +45,10 @@
     "scripts/anti_lib/windows_job.py",
     "tests/fixtures/v5-lane-opus.json",
     "tests/fixtures/v5-lane-sonnet.json",
-    "tests/test_anti.py"
+    "tests/test_anti.py",
+    "DIFF_PROVENANCE.md",
+    "scripts/anti_lib/console.py",
+    "scripts/anti_lib/diff_snapshot.py",
+    "scripts/anti_lib/namespaces.py"
   ]
 }

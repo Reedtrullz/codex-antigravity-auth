@@ -1,4 +1,3 @@
-from standalone import without_installed_packages
 """Inspect every persisted fixture file; never contact a provider or real store."""
 import argparse
 import importlib.util
@@ -9,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from standalone import without_installed_packages
+
 SCRIPT = Path(__file__).resolve().parents[1] / "codex_antigravity_auth/skills/anti/scripts/anti.py"
 SENTINEL = "synthetic-private-content-"
 LONG = SENTINEL + "x" * 4000 + "-private-tail"
@@ -17,6 +18,9 @@ SECRET = "sk-syntheticfixture01234567890123456789"
 
 @pytest.fixture
 def isolated_anti(monkeypatch, tmp_path):
+    script_dir = str(SCRIPT.resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
     spec = importlib.util.spec_from_file_location("anti_recording_fixture", SCRIPT)
     anti = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(anti)
@@ -58,7 +62,8 @@ def test_never_records_only_allowlisted_lifecycle(isolated_anti, status):
     assert SENTINEL not in files[path]
     record = json.loads(files[path])
     assert record["status"] == status
-    assert record["metadata"] == {"request_log_correlation_id": "fixture-run", "output_chars": 4000, "scope_status": "partial"}
+    assert record["metadata"] == {"request_log_correlation_id": "fixture-run", "output_chars": 4000,
+                                  "scope_status": "partial", "panel_lane_count": 1}
     assert "resultPath" not in record
     if sys.platform != "win32":
         assert path.stat().st_mode & 0o777 == 0o600
@@ -279,3 +284,14 @@ def test_control_receipts_preserve_only_bounded_numbers_and_fixed_labels(isolate
     assert 'source' not in result['admission_controls']['currency']
     assert SENTINEL not in json.dumps(result) and LONG not in json.dumps(result)
     assert len(json.dumps(result))<3000
+    anti, _reflections, _root = isolated_anti
+    token = anti.CURRENT_RUN.set(None)
+    try:
+        derived = anti.scheduling_metadata({'consult_attempts': [{'model': LONG}, {'prompt': LONG}],
+                                            'retry_disposition': 'exhausted'})
+        path = write(anti, 'never', metadata=derived)
+    finally:
+        anti.CURRENT_RUN.reset(token)
+    saved = json.loads(path.read_text())['metadata']
+    assert saved['consult_attempt_count'] == 2 and saved['retry_disposition'] == 'exhausted'
+    assert 'consult_attempts' not in saved and SENTINEL not in path.read_text()
