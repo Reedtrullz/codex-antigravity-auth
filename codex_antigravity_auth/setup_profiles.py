@@ -117,15 +117,32 @@ def _read_file(path: Path, limit=MAX_BYTES):
 
 def _write_bound_config(path: Path, content: bytes, *, expected_sha256):
     with _parent_handle(path) as parent:
+        def check_parent():
+            _check_path(path)
+            if parent is not None:
+                held = os.fstat(parent)
+                current = path.parent.lstat()
+                if (not stat.S_ISDIR(current.st_mode)
+                        or (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino)):
+                    raise SetupError("Config parent changed during publication; setup mutation refused")
         def unchanged():
+            check_parent()
             current = _read_file(path)
+            check_parent()
             if (_hash(current) if current is not None else None) != expected_sha256:
                 raise SetupError("Config changed since its snapshot; setup mutation refused")
+        def verify_published():
+            check_parent()
+            if _read_file(path) != content:
+                raise SetupError("Published config differs from the intended bytes; inspect the target before retrying")
+            check_parent()
         unchanged()
         if parent is None:
             # Held parent handles prevent path redirection; atomic replacement
             # replaces a leaf entry rather than following it.
+            check_parent()
             SecureStore()._atomic_write_bytes_unlocked(path, content)
+            verify_published()
             return
         temporary = f".{path.name}.{uuid.uuid4().hex}.tmp"
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
@@ -136,8 +153,10 @@ def _write_bound_config(path: Path, content: bytes, *, expected_sha256):
                 stream.flush()
                 os.fsync(stream.fileno())
             unchanged()
+            check_parent()
             os.replace(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent)
             os.fsync(parent)
+            verify_published()
         finally:
             try:
                 os.unlink(temporary, dir_fd=parent)
