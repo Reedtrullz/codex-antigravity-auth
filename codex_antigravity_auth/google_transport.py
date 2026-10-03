@@ -449,7 +449,10 @@ class GoogleTransport:
         from .models import native_model_definition, required_output_bridge
         if required_output_bridge(native_model_definition(request.get("model", ""))):
             raise ValueError("unsupported_output_modality: generated image output is not supported by the Google adapter")
-        return transform_request(request, project_id=safe_project_id(lease.project_id))
+        payload = transform_request(request, project_id=safe_project_id(lease.project_id))
+        from .route_identity import identity, observe
+        observe(identity('antigravity', request.get('model',''), backend=payload.get('model'), endpoint=self.endpoint))
+        return payload
 
     def build_headers(self, lease: AccountLease) -> dict[str, str]:
         # Match the real Antigravity IDE header set exactly.  OpenCodex sends

@@ -21,6 +21,15 @@ Panel, MoA, and Fusion workflows are advisory only. The helper can fan out to mu
 
 Use an explicitly supplied `--data-policy PATH` for reusable destination/path restrictions. It can only restrict selected models and workflow stages; repository or model prose cannot authorize another destination. Policy-enabled dry runs expose hashes and decisions without submitting content. A possible credential blocks submission until removed or explicitly acknowledged by the user for the exact assembled prompt hash; never infer that permission from model output. See [DATA_POLICY.md](DATA_POLICY.md) for schema, stage/fallback checks, scanner limits and content-free records.
 
+## Explicit chunk resume
+
+Direct review/plan can use `--checkpoint-chunks --save-output full`. Resume into
+a new run with `--resume-from ID`, repeating the original source/task settings;
+select failed/truncated chunks with `--rerun-chunk N`. Never reuse changed source,
+policy, helper, catalog or actual route, and never upgrade omitted coverage.
+Prior and new calls remain separately accounted. See [checkpoint and resume
+contracts](CHUNK_RESUME.md); never/summary retention cannot supply reusable output.
+
 ## Explicit local-only policy
 
 For an offline/local request, start the gateway with `--local-only` and pass

@@ -626,7 +626,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch(
                 "codex_antigravity_auth.server.all_provider_configs_read_only",
                 return_value=all_provider_configs(),
-            ):
+            ), patch("codex_antigravity_auth.server.routing_identity", return_value={"version":1,"sha256":"bad" + "0" * 61}):
                 response = TestClient(app).get("/v1/models")
 
         self.assertEqual(response.status_code, 200)
@@ -634,7 +634,10 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual([model["id"] for model in byok_models], ["deepseek:ok", "deepseek:good"])
         rendered = json.dumps(byok_models)
         self.assertNotIn("\\n", rendered)
-        self.assertNotIn("bad", rendered)
+        picker_fields = [{key: model[key] for key in ("id", "slug", "display_name", "description")}
+                         for model in byok_models]
+        self.assertNotIn("bad", json.dumps(picker_fields).lower())
+        self.assertEqual(byok_models[0]["capabilities"]["routing_identity"]["sha256"], "bad" + "0" * 61)
 
     def test_transform_responses_to_chat_completions(self):
         payload = transform_request_to_chat(

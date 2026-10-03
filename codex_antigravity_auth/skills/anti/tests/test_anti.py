@@ -20,6 +20,11 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "anti.py"
 
+# Canonicalize only the parent of newly created owned test fixtures. macOS
+# exposes /var through a symlink; application-selected paths still undergo
+# the unchanged no-follow capture checks.
+tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
+
 _ACTIVE_TEST_RUNS_DIR: list[Path] = []
 
 
