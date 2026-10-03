@@ -18,6 +18,18 @@ from fake_upstream import upstream
 from codex_antigravity_auth import cli, service, service_drift as drift, service_manifest as manifest
 
 
+def runtime_test_client(app, *, peer, hostname='localhost'):
+    from fastapi.testclient import TestClient
+
+    async def peer_app(scope, receive, send):
+        if scope['type'] == 'http':
+            scope = {**scope, 'client': (peer, 51200) if peer is not None else None}
+        await app(scope, receive, send)
+
+    # ASGI peer scope works across the declared minimum Starlette versions.
+    return TestClient(peer_app, base_url='http://' + hostname)
+
+
 @pytest.fixture
 def host(tmp_path, monkeypatch):
     monkeypatch.setattr(service, '_service_home', lambda: tmp_path)
@@ -223,12 +235,11 @@ def test_runtime_identity_uses_actual_launch_settings_without_paths_in_response(
 
 
 def test_runtime_endpoint_avoids_account_provider_and_catalog_access(monkeypatch):
-    from fastapi.testclient import TestClient
     from codex_antigravity_auth import server
     monkeypatch.setattr(manifest, 'runtime_identity', lambda: {'serviceId': 'fixture'})
     monkeypatch.setattr(server, 'provider_health_catalog_fail_soft', Mock(side_effect=AssertionError('no catalog')))
     monkeypatch.setattr(server, 'account_health_summary', Mock(side_effect=AssertionError('no accounts')))
-    response = TestClient(server.app, client=('127.0.0.1', 51199), base_url='http://localhost').get('/health/runtime')
+    response = runtime_test_client(server.app, peer='127.0.0.1').get('/health/runtime')
     assert response.status_code == 200 and response.json()['service'] == {'serviceId': 'fixture'}
 
 
@@ -460,14 +471,13 @@ def test_confirmed_missing_windows_task_is_created_without_force(host):
 @pytest.mark.parametrize('peer,hostname,expected', [('127.0.0.1','localhost',200), ('::1','localhost',200),
     ('192.0.2.1','localhost',403), ('2001:db8::1','localhost',403), ('127.0.0.1','example.invalid',403), (None,'localhost',403)])
 def test_runtime_endpoint_requires_loopback_peer_and_host_even_with_remote_token(monkeypatch, peer, hostname, expected):
-    from fastapi.testclient import TestClient
     from codex_antigravity_auth import server
     monkeypatch.setenv('ANTIGRAVITY_ALLOW_REMOTE', '1')
     token = 'fixture-only-' + 'x' * 40
     monkeypatch.setenv('ANTIGRAVITY_GATEWAY_TOKEN', token)
     identity = {'serviceId':'a' * 32, 'pid':123}
     monkeypatch.setattr(manifest, 'runtime_identity', lambda: identity)
-    response = TestClient(server.app, client=(peer, 51200) if peer is not None else None, base_url='http://' + hostname).get(
+    response = runtime_test_client(server.app, peer=peer, hostname=hostname).get(
         '/health/runtime', headers={'Authorization':'Bearer ' + token})
     assert response.status_code == expected
     if expected != 200:
