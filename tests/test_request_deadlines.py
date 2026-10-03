@@ -192,6 +192,7 @@ def test_refresh_in_progress_is_retryable_and_logged_without_a_lease(monkeypatch
 
 @pytest.mark.parametrize("seam,route", [
     ("google_json", "google"),
+    ("google_parse", "google"),
     ("openai_oauth_sse", "openai_oauth"),
     ("openai_json", "openai"),
 ])
@@ -227,6 +228,8 @@ def test_sync_decode_and_translation_failures_keep_outer_deadline_or_disconnect(
     if seam in {"google_json", "openai_json"}:
         # Both routes use the bounded shared decoder, not HTTPX Response.json().
         monkeypatch.setattr(server, "response_json", fail)
+    elif seam == "google_parse":
+        monkeypatch.setattr(server.GoogleTransport, "parse_response", fail)
     else:
         # OAuth responses are decoded incrementally by the terminal-authority adapter.
         monkeypatch.setattr(server.NativeResponsesStreamAdapter, "consume_bytes", fail)
