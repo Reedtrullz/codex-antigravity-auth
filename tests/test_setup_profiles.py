@@ -1,7 +1,9 @@
 """Synthetic setup state and injected local callbacks; no live login, gateway or keyring."""
 import argparse
 import json
+import os
 from pathlib import Path
+import stat
 import sys
 from unittest.mock import Mock
 
@@ -572,3 +574,93 @@ def test_setup_plan_rejects_linked_ancestors_of_empty_or_missing_skill(isolated,
         setup.setup_plan(options(install_skill=True, skill_dir=str(alias / "skills")))
     assert not client.exists() and not state.exists()
     assert not (actual / "skills" / "anti" / "SKILL.md").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Native held parent handles prohibit this POSIX directory rename")
+def test_profile_apply_refuses_same_hash_parent_swap_during_config_fsync(isolated, tmp_path, monkeypatch):
+    client, _state = isolated
+    target = existing_config(client)
+    replacement_parent = tmp_path / "replacement-client"
+    replacement_parent.mkdir(mode=0o700)
+    replacement_target = replacement_parent / target.name
+    setup.SecureStore().atomic_write_bytes(replacement_target, ORIGINAL.encode())
+    displaced_parent = tmp_path / "displaced-client"
+    setup.create_profile(options(write=True))
+    native_fsync = os.fsync
+    swapped = False
+
+    def swap_parent_after_temp_fsync(descriptor):
+        nonlocal swapped
+        native_fsync(descriptor)
+        info = os.fstat(descriptor)
+        if swapped or not stat.S_ISREG(info.st_mode):
+            return
+        for temporary in client.glob(f".{target.name}.*.tmp"):
+            candidate = temporary.lstat()
+            if (candidate.st_dev, candidate.st_ino) == (info.st_dev, info.st_ino):
+                assert temporary.read_bytes() != ORIGINAL.encode(), "The hook must reach the intended config write"
+                client.rename(displaced_parent)
+                replacement_parent.rename(client)
+                swapped = True
+                break
+
+    monkeypatch.setattr(setup.os, "fsync", swap_parent_after_temp_fsync)
+    failure = None
+    result = None
+    try:
+        result = setup.apply_profile(options(write=True))
+    except setup.SetupError as exc:
+        failure = exc
+
+    assert swapped, "The fixture must replace an ordinary parent during the temporary regular-file fsync"
+    assert target.read_bytes() == ORIGINAL.encode(), "The replacement parent's config must be preserved"
+    assert (displaced_parent / target.name).read_bytes() == ORIGINAL.encode(), "The displaced original config must be preserved"
+    assert isinstance(failure, setup.SetupError), f"Parent replacement was reported as successful: {result}"
+    assert result is None
+    receipts = list(setup.receipts_root().glob("*/receipt.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text())
+    assert receipt["state"] == "failed"
+    config_stage = next(row for row in receipt["stages"] if row["id"] == "config")
+    assert config_stage["state"] == "failed" and config_stage["operationStarted"] is True
+
+
+def test_planned_config_refuses_ordinary_leaf_replacement_after_publication(isolated, tmp_path, monkeypatch):
+    client, _state = isolated
+    target = existing_config(client)
+    args = options()
+    plan = setup.setup_plan(args)
+    merge_options = dict(model=args.model, provider_id=args.provider, provider_name=args.provider_name,
+                         base_url=args.base_url, activate=args.activate)
+    intended = cli.merge_codex_config(ORIGINAL, **merge_options).encode()
+    assert intended != ORIGINAL.encode()
+    replacement = tmp_path / "replacement-config.toml"
+    setup.SecureStore().atomic_write_bytes(replacement, ORIGINAL.encode())
+    native_replace = os.replace
+    swapped = False
+    published = None
+
+    def replace_then_swap_leaf(source, destination, *positional, **kwargs):
+        nonlocal swapped, published
+        result = native_replace(source, destination, *positional, **kwargs)
+        selected = Path(destination)
+        if not swapped and (selected == target or
+                            (selected == Path(target.name) and kwargs.get("dst_dir_fd") is not None)):
+            published = target.read_bytes()
+            assert published == intended, "The fixture must run after native publication of the intended bytes"
+            native_replace(replacement, target)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(setup.os, "replace", replace_then_swap_leaf)
+    failure = None
+    result = None
+    try:
+        result = setup.write_planned_config(plan, **merge_options)
+    except setup.SetupError as exc:
+        failure = exc
+
+    assert swapped and published == intended
+    assert target.read_bytes() == ORIGINAL.encode()
+    assert isinstance(failure, setup.SetupError), f"Changed success was returned for different visible bytes: {result}"
+    assert result is None
