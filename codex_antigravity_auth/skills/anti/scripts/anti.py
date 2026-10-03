@@ -40,6 +40,9 @@ from anti_lib.console import ConsoleArgumentParser, console_print as print
 from anti_lib.run_control import RunControl, DeadlineExceeded, CURRENT_RUN
 from anti_lib.spend_control import SpendControl, SpendRefused, AdmissionConfigError
 from anti_lib.capabilities import CapabilityRegistry
+from anti_lib import local_policy as local_workflow
+from anti_lib.context_budget import assess as assess_context, calibration as context_calibration
+from anti_lib import checkpoints as chunk_checkpoints
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
     file_reference, read_record, validate_record, coverage_has_loss,
@@ -586,65 +589,6 @@ FAILURE_OUTPUT_PREVIEW_CHARS = 1600
 REVIEW_SYNTHESIS_OVERFLOW_SENTINEL = "ANTI_SYNTHESIS_STATUS: OVERFLOW"
 
 
-class AntiError(Exception):
-    pass
-
-
-_POLICY_STAGE = contextvars.ContextVar("anti_data_policy_stage", default="primary")
-
-
-def data_policy(args):
-    if args is None:
-        return None
-    if hasattr(args, "_data_policy_session"):
-        return args._data_policy_session
-    path = getattr(args, "data_policy", None)
-    acknowledgements = getattr(args, "acknowledge_secret_hash", None) or []
-    if acknowledgements and not path:
-        raise PolicyError("Secret acknowledgements require --data-policy")
-    session = DataPolicy(Path(path).expanduser(), root=find_repo_root(Path.cwd()) or Path.cwd(), acknowledgements=acknowledgements) if path else None
-    args._data_policy_session = session
-    return session
-
-
-def policy_paths(args, root, paths):
-    session = data_policy(args)
-    if session:
-        session.check_paths(paths, root=root)
-
-
-def policy_submit(args, *, model, prompt, base_url, fallback=False):
-    session = data_policy(args)
-    if session:
-        session.check(model=model, prompt=prompt, base_url=base_url, stage=_POLICY_STAGE.get())
-        if fallback:
-            session.check(model=model, prompt=prompt, base_url=base_url, stage="fallback")
-
-
-def policy_generate(args, *, stage, **kwargs):
-    token = _POLICY_STAGE.set(stage)
-    try:
-        return generate_with_fallback(args, **kwargs)
-    finally:
-        _POLICY_STAGE.reset(token)
-
-
-def policy_preflight(args, prompt, routes):
-    session = data_policy(args)
-    if session is None:
-        return False
-    fallback = getattr(args, "fallback_model", None)
-    for model, stage in routes:
-        session.check(model=model, prompt=prompt, base_url=args.base_url, stage=stage)
-        if fallback and getattr(args, "fallback_policy", "never") != "never":
-            resolved = resolve_model(fallback, default=fallback)
-            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage=stage)
-            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage="fallback")
-    if getattr(args, "dry_run", False):
-        print(json.dumps({"dryRun": True, "dataPolicy": session.audit(), "noContentSubmitted": True}, indent=2))
-        return True
-    return False
-
 class RunDeadlineExceeded(DeadlineExceeded, AntiError):
     pass
 
@@ -736,7 +680,11 @@ def settle_spend(*, submitted, usage=None):
 
 def scheduling_metadata(metadata=None, control=None):
     metadata = dict(metadata or {})
-    for source, target in (('panel_results', 'panel_lane_count'), ('judge_attempts', 'judge_attempt_count')):
+    for source, target in (
+        ('panel_results', 'panel_lane_count'),
+        ('judge_attempts', 'judge_attempt_count'),
+        ('consult_attempts', 'consult_attempt_count'),
+    ):
         if isinstance(metadata.get(source), list):
             metadata[target] = len(metadata[source])
     control = control or CURRENT_RUN.get()
@@ -748,8 +696,6 @@ def scheduling_metadata(metadata=None, control=None):
             metadata['local_policy'] = {'enabled':True, 'destination_scope':'declared_loopback',
                                         'profile_sha256':local.get('profile_sha256'),
                                         'third_party_network_behavior':'not_attested'}
-        for source, target in (('panel_results','panel_lane_count'),('judge_attempts','judge_attempt_count'),('consult_attempts','consult_attempt_count')):
-            if isinstance(metadata.get(source), list): metadata[target] = len(metadata[source])
         policy = getattr(control, 'spend_control', None)
         if policy is not None:
             metadata['admission_controls'] = policy.snapshot()
@@ -793,6 +739,61 @@ def read_response_body(response, timeout):
         if not block: break
         fragments.append(block)
     return b''.join(fragments)
+
+_POLICY_STAGE = contextvars.ContextVar("anti_data_policy_stage", default="primary")
+
+
+def data_policy(args):
+    if args is None:
+        return None
+    if hasattr(args, "_data_policy_session"):
+        return args._data_policy_session
+    path = getattr(args, "data_policy", None)
+    acknowledgements = getattr(args, "acknowledge_secret_hash", None) or []
+    if acknowledgements and not path:
+        raise PolicyError("Secret acknowledgements require --data-policy")
+    session = DataPolicy(Path(path).expanduser(), root=find_repo_root(Path.cwd()) or Path.cwd(), acknowledgements=acknowledgements) if path else None
+    args._data_policy_session = session
+    return session
+
+
+def policy_paths(args, root, paths):
+    session = data_policy(args)
+    if session:
+        session.check_paths(paths, root=root)
+
+
+def policy_submit(args, *, model, prompt, base_url, fallback=False):
+    session = data_policy(args)
+    if session:
+        session.check(model=model, prompt=prompt, base_url=base_url, stage=_POLICY_STAGE.get())
+        if fallback:
+            session.check(model=model, prompt=prompt, base_url=base_url, stage="fallback")
+
+
+def policy_generate(args, *, stage, **kwargs):
+    token = _POLICY_STAGE.set(stage)
+    try:
+        return generate_with_fallback(args, **kwargs)
+    finally:
+        _POLICY_STAGE.reset(token)
+
+
+def policy_preflight(args, prompt, routes):
+    session = data_policy(args)
+    if session is None:
+        return False
+    fallback = getattr(args, "fallback_model", None)
+    for model, stage in routes:
+        session.check(model=model, prompt=prompt, base_url=args.base_url, stage=stage)
+        if fallback and getattr(args, "fallback_policy", "never") != "never":
+            resolved = resolve_model(fallback, default=fallback)
+            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage=stage)
+            session.check(model=resolved, prompt=prompt, base_url=args.base_url, stage="fallback")
+    if getattr(args, "dry_run", False):
+        print(json.dumps({"dryRun": True, "dataPolicy": session.audit(), "noContentSubmitted": True}, indent=2))
+        return True
+    return False
 
 
 def eprint(message: str) -> None:
@@ -1002,329 +1003,6 @@ def write_run_record(args: argparse.Namespace, **kwargs: Any) -> Path | None:
             _RECORD_WRITES.pending_signal = None
             if pending is not None:
                 _handle_run_signal(*pending)
-
-
-def _write_run_record_unlocked(
-    args: argparse.Namespace,
-    *,
-    mode: str,
-    status: str,
-    models: list[str] | None = None,
-    base_url: str | None = None,
-    prompt_text: str | None = None,
-    output_text: str | None = None,
-    caveats: list[str] | None = None,
-    metadata: dict[str, Any] | None = None,
-    error: str | None = None,
-    execution_ledger: list[dict[str, Any]] | None = None,
-    force_full_output: bool = False,
-) -> Path | None:
-    metadata = scheduling_metadata(metadata, getattr(args, '_run_control', None))
-    if status == 'success' and (metadata.get('run_control', {}).get('deferred_calls') or
-                                metadata.get('admission_controls', {}).get('assumption_exceeded')):
-        status = 'partial'
-    output_mode = save_output_mode(args)
-    record_id = getattr(args, "run_id", None)
-    if not record_id and output_mode != "never":
-        record_id = new_run_id()
-    if record_id:
-        check_record_retention(str(record_id), output_mode)
-    if output_mode == "never":
-        # Minimal lifecycle record: correlation survives even when prompt and
-        # output retention are disabled (bug report root cause 2).
-        record_id = getattr(args, "run_id", None)
-        if not record_id:
-            return None
-        if not RUN_ID_RE.fullmatch(str(record_id)):
-            raise AntiError("run id must contain only letters, numbers, '_' or '-'")
-        if RUNS_DIR.is_symlink():
-            raise AntiError(f"refusing to write Anti run record through symlinked directory: {RUNS_DIR}")
-        os.makedirs(RUNS_DIR, mode=0o700, exist_ok=True)
-        try:
-            os.chmod(RUNS_DIR, 0o700)
-        except OSError:
-            pass
-        commands = {"consult", "review", "plan", "panel", "moa", "fusion", "workflow", "compare"}
-        statuses = {"running", "success", "partial", "error", "interrupted", "failed"}
-        command = getattr(args, "command", mode)
-        record: dict[str, Any] = {
-            "id": str(record_id),
-            "created_at": utc_timestamp(),
-            "command": command if command in commands else "unknown",
-            "mode": mode if mode in commands else "unknown",
-            "status": status if status in statuses else "unknown",
-            "save_output": output_mode,
-            "runStatus": "failed" if status == "error" else status if status in statuses else "unknown",
-            "metadata": {
-                **lifecycle_metadata(metadata),
-                "request_log_correlation_id": str(record_id),
-            },
-        }
-        if error:
-            record["error"] = "interrupted" if status == "interrupted" else "run_failed"
-        record = sanitize_json(record)
-        record["id"] = str(record_id)
-        record["metadata"]["request_log_correlation_id"] = str(record_id)
-        record_path = RUNS_DIR / f"{record['id']}.json"
-        if record_path.exists() and record_path.is_symlink():
-            raise AntiError(f"refusing to overwrite symlinked run record: {record_path}")
-        record["writerId"] = args._anti_writer_id
-        record["recordSchemaVersion"] = RECORD_SCHEMA_VERSION
-        if getattr(args, "_data_policy_session", None):
-            record["metadata"]["dataPolicy"] = args._data_policy_session.audit()
-        validate_record(record, record_path)
-        atomic_write_json(record_path, record)
-        args.run_record_written = status != "running"
-        return record_path
-
-    if RUNS_DIR.is_symlink():
-        raise AntiError(f"refusing to write Anti run record through symlinked directory: {RUNS_DIR}")
-    os.makedirs(RUNS_DIR, mode=0o700, exist_ok=True)
-    try:
-        os.chmod(RUNS_DIR, 0o700)
-    except OSError:
-        pass
-
-    output_chars = len(output_text or "")
-    prompt_chars = len(prompt_text or "")
-    if not RUN_ID_RE.fullmatch(str(record_id)):
-        raise AntiError("run id must contain only letters, numbers, '_' or '-'")
-
-    record: dict[str, Any] = {
-        "id": str(record_id),
-        "created_at": utc_timestamp(),
-        "command": getattr(args, "command", mode),
-        "workflow": getattr(args, "workflow_name", None),
-        "run_label": getattr(args, "run_label", None),
-        "mode": mode,
-        "status": status,
-        "gateway": base_url,
-        "models": models or [],
-        "prompt_chars": prompt_chars,
-        "output_chars": output_chars,
-        "caveats": caveats or [],
-        "metadata": metadata or {},
-        "save_output": output_mode,
-        "helper": helper_identity(),
-    }
-    # B7: split run lifecycle from scope coverage so consumers never confuse
-    # "the command ran" with "the requested scope was fully reviewed".
-    record["runStatus"] = "failed" if status == "error" else status
-    scope_status: str | None = None
-    if isinstance(metadata, dict):
-        # Panel ``status`` is an integrity result (for example
-        # ``degraded_single_model``), while review/plan ``scope_status`` keeps
-        # the older complete/incomplete coverage contract for run records.
-        metadata_status = (
-            metadata.get("scope_status")
-            or metadata.get("scopeStatus")
-            or metadata.get("status")
-        )
-        if metadata_status in {"incomplete", "partial"}:
-            scope_status = "partial"
-        elif metadata_status == "complete":
-            scope_status = "complete"
-        omitted_items = metadata.get("omitted_files") or metadata.get("chunk_omitted_items") or []
-        manifest_file_count = metadata.get("omitted_file_count")
-        record["omittedFileCount"] = int(
-            manifest_file_count if manifest_file_count is not None else len(omitted_items)
-        )
-        record["omittedChunkCount"] = int(metadata.get("omitted_chunk_count") or 0)
-    record["scopeStatus"] = scope_status or ("complete" if status == "success" else "partial")
-    if error:
-        record["error"] = error
-    if output_mode == "summary" and output_text:
-        record["output_preview"] = redact_sensitive_text(output_text)[:RUN_OUTPUT_PREVIEW_CHARS]
-    elif output_mode == "full":
-        if prompt_text is not None:
-            record["prompt_sha256"] = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
-            record["prompt_chars"] = len(prompt_text)
-        if output_text is not None:
-            record["output_text"] = output_text
-        if execution_ledger is not None:
-            record["execution_ledger"] = execution_ledger
-
-    if output_mode == "summary":
-        # Keep structured check counts and identities, but omit the potentially
-        # large check descriptors from persisted summaries before clipping.
-        summary_metadata = dict(record.get("metadata") or {})
-        verification_metadata = summary_metadata.get("verification")
-        if isinstance(verification_metadata, dict) and "checks" in verification_metadata:
-            summary_metadata["verification"] = {key: value for key, value in verification_metadata.items() if key != "checks"}
-            summary_metadata["verification"]["checksRetained"] = False
-        findings_metadata = summary_metadata.get("findings")
-        if isinstance(findings_metadata, dict) and isinstance(findings_metadata.get("findings"), list):
-            findings_metadata = dict(findings_metadata)
-            findings_metadata["findings"] = [
-                {key: value for key, value in finding.items() if key != "checks"}
-                if isinstance(finding, dict) else finding
-                for finding in findings_metadata["findings"]
-            ]
-            summary_metadata["findings"] = findings_metadata
-        metadata = summary_metadata
-        record["metadata"] = summary_metadata
-        # Preserve fixed lifecycle fields and the metadata consumed by the
-        # result artifact before applying the shared content budget. Large
-        # panel transcripts must not exhaust that budget ahead of checks and
-        # chunk counts.
-        structure = summary_structure(record, (
-            "id", "created_at", "command", "mode", "status", "runStatus", "scopeStatus", "save_output",
-            "prompt_chars", "output_chars", "omittedFileCount", "omittedChunkCount",
-        ))
-        metadata_for_preview = record.get("metadata")
-        ordered = {key: value for key, value in record.items() if key not in structure and key != "metadata"}
-        if isinstance(metadata_for_preview, dict):
-            priority = (
-            "request_log_correlation_id", "runStatus", "scopeStatus", "scope_status", "panel_status",
-            "consult_attempts",
-            "planned_chunk_count", "completed_chunk_count", "failed_chunk_count", "not_sent_chunk_count",
-            "omitted_chunk_count", "verification", "coverage", "findings", "failure_diagnostics", "panel_results",
-            )
-            ordered["metadata"] = {key: metadata_for_preview[key] for key in priority if key in metadata_for_preview}
-            ordered["metadata"].update({key: value for key, value in metadata_for_preview.items() if key not in ordered["metadata"]})
-        record = summary_projection(ordered)
-        record.update(structure)
-        if not isinstance(record.get("metadata"), dict):
-            record["metadata"] = {}
-        record["metadata"].update(lifecycle_metadata(metadata))
-        record["retention"] = summary_retention()
-    record = sanitize_json(record)
-    if not isinstance(record, dict):
-        raise AntiError("Full run record exceeds the structured redaction limit")
-    # The record id is generated by us or validated by RUN_ID_RE; never let
-    # value redaction mangle it (e.g. a run id shaped like user_12345678).
-    record["id"] = str(record_id)
-    if record.get("metadata", {}).get("request_log_correlation_id") is not None:
-        record["metadata"]["request_log_correlation_id"] = str(record_id)
-    run_record_path = RUNS_DIR / f"{record['id']}.json"
-    run_dir = RUNS_DIR / str(record_id)
-    revisions_dir = run_dir / "revisions"
-    for directory in (run_dir, revisions_dir):
-        if directory.is_symlink():
-            raise AntiError("refusing to publish artifacts through a symlink")
-        directory.mkdir(mode=0o700, exist_ok=True)
-    revision_id = uuid.uuid4().hex
-    artifact_dir = revisions_dir / revision_id
-    artifact_dir.mkdir(mode=0o700)  # Never overwrite an existing revision.
-    artifact_path = artifact_dir / "result.json"
-    raw_lane_paths: list[str] = []
-    if output_mode == "full" and execution_ledger:
-        for index, entry in enumerate(execution_ledger, start=1):
-            lane_path = artifact_dir / f"lane-{index:04d}.json"
-            lane = sanitize_json(entry)
-            if not isinstance(lane, dict):
-                raise AntiError("Raw lane exceeds the structured redaction limit")
-            lane.update({"laneSchemaVersion": LANE_SCHEMA_VERSION, "runId": str(record_id), "revisionId": revision_id})
-            atomic_write_json(lane_path, lane)
-            raw_lane_paths.append(str(lane_path))
-    artifact_scope_status = record.get("scopeStatus") or ("complete" if status == "success" else "partial")
-    artifact_metadata = metadata if isinstance(metadata, dict) else {}
-    artifact_run_status = "failed" if status == "error" else status
-    finding_contract = artifact_metadata.get("findings")
-    if not isinstance(finding_contract, dict):
-        finding_contract = {}
-    artifact = {
-        "schemaVersion": SAVED_RESULT_SCHEMA_VERSION,
-        "runId": str(record_id),
-        "createdAt": record["created_at"],
-        "sourceCommit": artifact_metadata.get("sourceCommit") or artifact_metadata.get("source_commit"),
-        "helper": record.get("helper"),
-        "mode": mode,
-        "runStatus": artifact_run_status,
-        "scopeStatus": artifact_scope_status,
-        "panelStatus": artifact_metadata.get("panel_status") or artifact_metadata.get("panelStatus"),
-        "coverage": coverage_summary(artifact_metadata),
-        "requestedModels": artifact_metadata.get("requested_models") or record.get("models", []),
-        "actualModels": artifact_metadata.get("actual_models", []),
-        "actualProviders": artifact_metadata.get("actual_providers", []),
-        "lanes": artifact_metadata.get("panel_results", []),
-        "findings": finding_contract.get("findings", []),
-        "disagreements": finding_contract.get("disagreements", []),
-        "unverifiable": finding_contract.get("unverifiable", []),
-        "recommendedNextActions": finding_contract.get("recommended_next_actions", []),
-        "summary": finding_contract.get("summary"),
-        "output_text": output_text,
-        "failureDiagnostics": artifact_metadata.get("failure_diagnostics", []),
-        "verification": artifact_metadata.get(
-            "verification",
-            {
-                "status": "not_run",
-                "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
-                "performedBy": None,
-                "evidence": [],
-            },
-        ),
-        "caveats": record.get("caveats", []),
-        "error": record.get("error"),
-        "artifacts": {
-            "runRecordPath": str(run_record_path),
-            "resultPath": str(artifact_path),
-            "rawLanePaths": raw_lane_paths,
-        },
-        "resultPath": str(artifact_path),
-    }
-    if coverage_has_loss(artifact["coverage"]):
-        artifact["coverage"]["status"] = "partial"
-    if artifact["coverage"]["status"] == "partial" or record.get("omittedFileCount", 0) or record.get("omittedChunkCount", 0):
-        record["scopeStatus"] = artifact["scopeStatus"] = "partial"
-    if output_mode == "summary":
-        artifact.pop("output_text", None)
-        artifact["output_preview"] = redact_sensitive_text(output_text or "")[:RUN_OUTPUT_PREVIEW_CHARS]
-        artifact["output_chars"] = output_chars
-        structure = summary_structure(artifact, (
-            "schemaVersion", "runId", "createdAt", "mode", "runStatus", "scopeStatus", "panelStatus", "output_chars",
-        ))
-        coverage_structure = summary_structure(artifact["coverage"], (
-            "status", "chunksExpected", "chunksCompleted", "chunksFailed", "chunksOmitted", "chunksNotSent",
-        ))
-        verification = artifact.get("verification")
-        verification = verification if isinstance(verification, dict) else {"status": "unknown"}
-        verification_structure = summary_structure(verification, ("status", "performedBy", "evidenceCount"))
-        pointers = artifact["artifacts"]
-        ordered_artifact = {key: artifact[key] for key in ("verification", "output_preview")}
-        ordered_artifact.update({key: value for key, value in artifact.items()
-                                 if key not in structure and key not in {"artifacts", "resultPath"}})
-        artifact = summary_projection(ordered_artifact)
-        artifact.update(structure)
-        artifact["runId"] = str(record_id)
-        artifact["coverage"] = {**artifact.get("coverage", {}), **coverage_structure}
-        artifact["verification"] = {**artifact.get("verification", {}), **verification_structure}
-        artifact["artifacts"] = pointers
-        artifact["resultPath"] = str(artifact_path)
-        artifact["retention"] = summary_retention()
-    if output_mode == "full":
-        artifact["retention"] = record["retention"] = {"mode": "full", "contentComplete": True}
-    artifact = sanitize_json(artifact)
-    if not isinstance(artifact, dict):
-        raise AntiError("Full result exceeds the structured redaction limit")
-    artifact["writerId"] = args._anti_writer_id
-    artifact["runId"] = str(record_id)
-    artifact["revisionId"] = revision_id
-    artifact.setdefault("lanes", [])
-    # Preview clipping must not redact trusted publication identity/path aliases.
-    artifact["artifacts"] = {"runRecordPath": str(run_record_path), "resultPath": str(artifact_path), "rawLanePaths": raw_lane_paths}
-    artifact["resultPath"] = str(artifact_path)
-    atomic_write_json(artifact_path, artifact)
-    record["resultPath"] = str(artifact_path)
-    record["writerId"] = args._anti_writer_id
-    record["recordSchemaVersion"] = RECORD_SCHEMA_VERSION
-    record["publication"] = {
-        "revision": revision_id,
-        "result": file_reference(RUNS_DIR, artifact_path),
-        "lanes": [file_reference(RUNS_DIR, Path(path)) for path in raw_lane_paths],
-    }
-    path = run_record_path
-    if getattr(args, "_data_policy_session", None):
-        record.setdefault("metadata", {})["dataPolicy"] = args._data_policy_session.audit()
-    validate_record(record, path)
-    fsync_directory(revisions_dir)
-    fsync_directory(run_dir)
-    # This is the publication commit. Earlier immutable files alone grant no
-    # terminal authority; an interrupted replacement leaves the old index valid.
-    atomic_write_json(path, record)
-    args.run_record_written = status != "running"
-    progress(args, f"saved sanitized run record: {path}")
-    return path
 
 
 def error_is_retryable(error: str) -> bool:
@@ -1752,13 +1430,14 @@ def request_json(
     timeout: float = 10.0,
     token_env: str = DEFAULT_TOKEN_ENV,
 ) -> tuple[int, dict[str, Any]]:
+    control = CURRENT_RUN.get()
+    if control is not None:
+        timeout = control.timeout(timeout)
+
     try:
         url = validate_endpoint_url(url, allow_query=True)
     except ValueError as exc:
         raise AntiError(str(exc)) from exc
-    control = CURRENT_RUN.get()
-    if control is not None:
-        timeout = control.timeout(timeout)
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {"Accept": "application/json"}
     if body is not None:
@@ -2070,8 +1749,9 @@ def post_response(
     budget_purpose: str | None = None,
     policy_fallback: bool = False,
 ) -> ResponseText:
-    policy_submit(budget_args, model=model, prompt=prompt, base_url=base_url, fallback=policy_fallback)
     control = run_control(budget_args)
+
+    policy_submit(budget_args, model=model, prompt=prompt, base_url=base_url, fallback=policy_fallback)
     requested_model = model
     available_model_ids = model_ids
     if available_model_ids is None:
@@ -8849,11 +8529,12 @@ def command_workflow(args: argparse.Namespace) -> int:
     progress(args, "workflow expands to: " + workflow_command_for_progress(expanded))
     parser = build_parser()
     expanded_args = parser.parse_args(expanded)
+    expanded_args._run_control = run_control(args)
+    expanded_args.run_timeout = expanded_args._run_control.limit
+
     expanded_args.data_policy = getattr(args, "data_policy", None)
     expanded_args.acknowledge_secret_hash = getattr(args, "acknowledge_secret_hash", None)
     expanded_args._data_policy_session = data_policy(args)
-    expanded_args._run_control = run_control(args)
-    expanded_args.run_timeout = expanded_args._run_control.limit
     expanded_args.workflow_name = args.name
     if getattr(args, "_anti_writer_id", None):
         expanded_args._anti_writer_id = args._anti_writer_id
@@ -9078,9 +8759,10 @@ def add_generation_control_args(
     *,
     default_save_output: str = "never",
 ) -> None:
+    parser.add_argument("--run-timeout", type=float, default=1800.0, help="Whole-run provider deadline in seconds (default: 1800; maximum: 86400)")
+
     parser.add_argument("--data-policy", help="Explicit path to a version 1 restrictive repository submission policy")
     parser.add_argument("--acknowledge-secret-hash", action="append", help="Explicitly acknowledge this exact assembled prompt SHA-256; repeatable")
-    parser.add_argument("--run-timeout", type=float, default=1800.0, help="Whole-run provider deadline in seconds (default: 1800; maximum: 86400)")
     parser.add_argument("--auto-route", action="store_true", help="Automatically pick the cheapest adequate model based on diff size and risk")
     parser.add_argument("--fallback-model", help="Fallback model alias/id for retryable or timeout failures")
     parser.add_argument(

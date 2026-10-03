@@ -284,3 +284,14 @@ def test_control_receipts_preserve_only_bounded_numbers_and_fixed_labels(isolate
     assert 'source' not in result['admission_controls']['currency']
     assert SENTINEL not in json.dumps(result) and LONG not in json.dumps(result)
     assert len(json.dumps(result))<3000
+    anti, _reflections, _root = isolated_anti
+    token = anti.CURRENT_RUN.set(None)
+    try:
+        derived = anti.scheduling_metadata({'consult_attempts': [{'model': LONG}, {'prompt': LONG}],
+                                            'retry_disposition': 'exhausted'})
+        path = write(anti, 'never', metadata=derived)
+    finally:
+        anti.CURRENT_RUN.reset(token)
+    saved = json.loads(path.read_text())['metadata']
+    assert saved['consult_attempt_count'] == 2 and saved['retry_disposition'] == 'exhausted'
+    assert 'consult_attempts' not in saved and SENTINEL not in path.read_text()
