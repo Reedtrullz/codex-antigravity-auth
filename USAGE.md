@@ -484,3 +484,21 @@ a versioned synthetic corpus and matched-case evaluation. Independent local
 evidence is separate from model claims; unavailable, invalid and inconclusive
 results remain explicit. See [offline benchmark](codex_antigravity_auth/skills/anti/BENCHMARK.md).
 No live tournament, model quality ranking or routing-default change is performed.
+
+### Experimental Anti image attachments
+
+Use repeatable `--image PATH` for explicit bounded PNG/JPEG files on generation
+commands. Each selected lane, judge and active fallback must declare image support
+in the gateway catalog. Exact bytes are forwarded; pixels and embedded metadata
+are not secret-scanned. Real-media evaluation is still an unmet release gate.
+See [attachments](codex_antigravity_auth/skills/anti/ATTACHMENTS.md) for examples,
+recording behavior, scope separation and the synthetic-only evidence boundary.
+
+### Local HTML run reports
+
+`python scripts/anti.py runs report RUN_ID --compare OTHER_ID --output compare.html`
+exports validated retained publications to a self-contained read-only page.
+`runs export --format html` shows retained reflection evidence and local finding
+verdicts. See [HTML reports](codex_antigravity_auth/skills/anti/HTML_REPORTS.md) for
+comparison, keyboard navigation, retention and display limits. No server or
+network publication is started.

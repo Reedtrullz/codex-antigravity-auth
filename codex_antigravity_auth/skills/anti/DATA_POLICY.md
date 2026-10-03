@@ -87,3 +87,12 @@ A decision records preflight authorization, not successful provider execution or
 independent verification of the gateway. Retries of an unchanged immutable payload
 reuse its authorization; ordinary generation metadata records attempt counts.
 Saved-file shape/checksum validation does not make these records signed evidence.
+
+Image submissions use audit schema version 2, adding `unscannedMediaCount` to
+image-bearing decision rows. The legacy `promptSha256` field then identifies the
+assembled text-and-image request: SHA-256 of compact sorted JSON containing
+`version: 1`, `promptSha256` (the UTF-8 text digest), and ordered `images`
+(index, MIME, byte count and SHA-256). Text-only audit version 1 and its digest
+remain unchanged. Policy configuration is still version 1. This binds
+acknowledgements to the captured images without scanning pixels or retaining
+paths/base64. See [attachments](ATTACHMENTS.md) for limits and evaluation status.

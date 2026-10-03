@@ -51,7 +51,7 @@ finding counts; never mode still writes no reflections. Capture carries actual
 models/providers and known scope gaps. Legacy records have unknown provenance;
 a requested model is never silently presented as an actual model.
 
-`runs export --repo PATH [--run-id ID] --format json|sarif|markdown` reads retained
+`runs export --repo PATH [--run-id ID] --format json|sarif|markdown|html` reads retained
 reflection history without modifying it. JSON follows
 [review report v1](schemas/review-report-v1.json). SARIF uses the
 [OASIS 2.1.0 contract](https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/sarif-v2.1.0-os.html);
@@ -110,3 +110,7 @@ the owning run directory. The index's `metadata.checkpoint.manifest` is their
 committed reference; resume verifies their schema and bytes under the source
 record lock. A new resume run copies the needed immutable history and preserves
 the original index. See [checkpoint ownership and limits](CHUNK_RESUME.md).
+
+[Static HTML reports](HTML_REPORTS.md) provide saved-run publication views and
+reflection-verdict exports, including local two-run comparison. Display bounds
+and publication consistency never upgrade claim verification or source coverage.

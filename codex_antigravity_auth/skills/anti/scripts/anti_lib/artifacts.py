@@ -82,13 +82,13 @@ def file_reference(root: Path, path: Path) -> dict[str, str]:
     return {"path": path.relative_to(root).as_posix(), "sha256": hashlib.sha256(_bytes(path)).hexdigest()}
 
 
-def _checked_reference(root: Path, reference: Any, run_id: str, expected: str) -> tuple[Path, dict[str, Any]]:
+def _checked_reference(root: Path, reference: Any, run_id: str, expected: str, *, read_bytes=None) -> tuple[Path, dict[str, Any]]:
     _require(isinstance(reference, dict), "Publication reference must be an object")
     _require(reference.get("path") == expected, "Publication reference does not match its revision", "invalid_reference")
     digest = reference.get("sha256")
     _require(isinstance(digest, str) and bool(re.fullmatch(r"[0-9a-f]{64}", digest)), "Publication checksum is missing or invalid")
     path = _owned_path(root, reference["path"], run_id, relative=True)
-    raw = _bytes(path)
+    raw = (read_bytes or _bytes)(path)
     _require(hashlib.sha256(raw).hexdigest() == digest, "Artifact checksum differs from the committed index", "checksum_mismatch")
     return path, _object(raw)
 
@@ -194,8 +194,9 @@ def _result_shape(result: dict[str, Any], run_id: str, record: dict[str, Any], *
             _require(isinstance(result[key], list), f"Invalid {key} collection")
 
 
-def validate_record(record: dict[str, Any], path: Path) -> dict[str, Any]:
+def validate_record(record: dict[str, Any], path: Path, *, read_bytes=None) -> dict[str, Any]:
     """Return a read adapter with publicationStatus; never change saved bytes."""
+    read_bytes = read_bytes or _bytes
     root = path.parent
     _require(not root.is_symlink(), "Run directory is a symlink", "invalid_reference")
     current = "recordSchemaVersion" in record
@@ -212,14 +213,14 @@ def validate_record(record: dict[str, Any], path: Path) -> dict[str, Any]:
         # never infer completeness from existence or silently upgrade trust.
         if record.get("resultPath"):
             result_path = _owned_path(root, record["resultPath"], run_id, relative=False)
-            result = _object(_bytes(result_path))
+            result = _object(read_bytes(result_path))
             _result_shape(result, run_id, record, current=False)
             artifacts = result.get("artifacts", {})
             _require(isinstance(artifacts, dict), "Invalid legacy artifact references")
             lanes = artifacts.get("rawLanePaths", [])
             _require(isinstance(lanes, list), "Invalid legacy lane references")
             for reference in lanes:
-                _object(_bytes(_owned_path(root, reference, run_id, relative=False)))
+                _object(read_bytes(_owned_path(root, reference, run_id, relative=False)))
         return {**record, "publicationStatus": "legacy_unverified"}
     state = record.get("status")
     _require(isinstance(state, str) and state in STATES, "Invalid index lifecycle")
@@ -252,7 +253,7 @@ def validate_record(record: dict[str, Any], path: Path) -> dict[str, Any]:
     revision = publication.get("revision")
     _require(isinstance(revision, str) and bool(re.fullmatch(r"[0-9a-f]{32}", revision)), "Invalid publication revision")
     prefix = f"{run_id}/revisions/{revision}"
-    result_path, result = _checked_reference(root, publication.get("result"), run_id, f"{prefix}/result.json")
+    result_path, result = _checked_reference(root, publication.get("result"), run_id, f"{prefix}/result.json", read_bytes=read_bytes)
     _result_shape(result, run_id, record, current=True)
     _require(_retention_agrees(result.get("retention"), mode), "Index and result retention disagree", "retention_mismatch")
     _require(result.get("revisionId") == revision and result.get("writerId") == owner, "Result revision/writer differs from its index", "identity_mismatch")
@@ -262,7 +263,7 @@ def validate_record(record: dict[str, Any], path: Path) -> dict[str, Any]:
     _require(mode == "full" or not references, "Summary mode must not publish raw lanes")
     expected_paths = []
     for index, reference in enumerate(references, start=1):
-        lane_path, lane = _checked_reference(root, reference, run_id, f"{prefix}/lane-{index:04d}.json")
+        lane_path, lane = _checked_reference(root, reference, run_id, f"{prefix}/lane-{index:04d}.json", read_bytes=read_bytes)
         _require(type(lane.get("laneSchemaVersion")) is int and lane["laneSchemaVersion"] == LANE_SCHEMA_VERSION,
                  "Unsupported lane schema version", "unsupported_version")
         _require(lane.get("runId") == run_id and lane.get("revisionId") == revision, "Lane identity differs from its publication", "identity_mismatch")
@@ -280,3 +281,70 @@ def validate_record(record: dict[str, Any], path: Path) -> dict[str, Any]:
 def read_record(path: Path) -> dict[str, Any]:
     _require(not path.parent.is_symlink(), "Run directory is a symlink", "invalid_reference")
     return validate_record(_object(_bytes(path)), path)
+
+
+def read_publication(path: Path) -> dict[str, Any]:
+    """Read a bounded consistent publication for local export; never repair it."""
+    from .inventory import path_kind, read_file
+    path = Path(path).absolute()
+    captured = {}
+    total = 0
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            _require(key not in result, "Duplicate artifact JSON key")
+            result[key] = value
+        return result
+
+    def read_bytes(selected):
+        nonlocal total
+        selected = Path(selected).absolute()
+        if selected in captured:
+            return captured[selected][0]
+        _require(len(captured) < 258, "HTML export allows at most256 lane files; use the JSON CLI for larger publications", "export_limit")
+        remaining = min(8 * 1024 * 1024, 16 * 1024 * 1024 - total)
+        try:
+            anchor = Path(selected.anchor)
+            relative = selected.relative_to(anchor).as_posix()
+            _require(path_kind(anchor, relative) == "file", "HTML input must be a regular file without symlink parents", "invalid_reference")
+            raw, _size, reason = read_file(anchor, relative, remaining, max_file_bytes=8 * 1024 * 1024)
+            if reason in {"file_byte_limit", "total_byte_limit", "source_byte_limit"}:
+                raise ArtifactError("export_limit", "HTML publication exceeds8MiB/file or16MiB total")
+            if reason == "changed_during_read":
+                raise ArtifactError("changed_during_read", "Artifact changed during read")
+            if reason is not None:
+                raise ArtifactError("invalid_reference", "HTML input must be a regular file without symlink parents")
+            value = json.loads(raw, object_pairs_hook=unique_object,
+                               parse_constant=lambda _: _require(False, "Non-finite artifact number"))
+            _require(isinstance(value, dict), "Saved artifact must be an object")
+            captured[selected] = (raw, value)
+            total += len(raw)
+            return raw
+        except ArtifactError:
+            raise
+        except (OSError, ValueError, UnicodeError, RecursionError) as exc:
+            raise ArtifactError("invalid_artifact", "Cannot read bounded HTML input") from exc
+
+    read_bytes(path)
+    try:
+        record = validate_record(captured[path][1], path, read_bytes=read_bytes)
+    except (TypeError, ValueError, KeyError, RecursionError) as exc:
+        raise ArtifactError("invalid_artifact", "Malformed publication fields") from exc
+    result = None
+    if record.get("resultPath"):
+        selected = Path(record["resultPath"])
+        selected = selected if selected.is_absolute() else path.parent / selected
+        _require(selected in captured, "Result was not in the validated publication", "invalid_reference")
+        result = captured[selected][1]
+    lanes = []
+    if result is not None:
+        for reference in result.get("artifacts", {}).get("rawLanePaths", []):
+            selected = Path(reference)
+            selected = selected if selected.is_absolute() else path.parent / selected
+            _require(selected in captured, "Lane was not in the validated publication", "invalid_reference")
+            raw, value = captured[selected]
+            lanes.append({"sha256":hashlib.sha256(raw).hexdigest(), "value":value})
+    return {"record":record, "result":result, "lanes":lanes,
+            "indexSha256":hashlib.sha256(captured[path][0]).hexdigest(),
+            "filesRead":len(captured), "bytesRead":total}
