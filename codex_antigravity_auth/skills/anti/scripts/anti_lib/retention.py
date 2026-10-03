@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 from itertools import islice
 from typing import Any
 
@@ -98,26 +99,70 @@ def summary_retention() -> dict[str, Any]:
     }
 
 
+def control_metadata(source: dict[str, Any]) -> dict[str, Any]:
+    """Fixed-size content-free counters shared by never and summary receipts."""
+    def numbers(value, keys, *, nullable=False):
+        result = {}
+        if not isinstance(value, dict): return result
+        for key in keys:
+            item = value.get(key)
+            if type(item) is int and 0 <= item <= 2**63 - 1:
+                result[key] = item
+            elif nullable and key in value and item is None:
+                result[key] = None
+        return result
+
+    result = {}
+    runtime = source.get('run_control')
+    if isinstance(runtime, dict):
+        projected = numbers(runtime, ('attempts_started','permits_acquired','permits_released','deferred_calls','events_omitted'))
+        for key in ('limit_seconds','elapsed_seconds','remaining_seconds'):
+            value = runtime.get(key)
+            if type(value) in (int,float) and 0 <= value <= 2**63 - 1 and math.isfinite(value):
+                projected[key] = value
+        if runtime.get('scope') == 'process_local': projected['scope'] = 'process_local'
+        if type(runtime.get('deadline_exceeded')) is bool: projected['deadline_exceeded'] = runtime['deadline_exceeded']
+        projected['eventsRetained'] = False
+        result['run_control'] = projected
+    admission = source.get('admission_controls')
+    if isinstance(admission, dict):
+        projected = numbers(admission, ('refused_attempts','attempts_omitted'))
+        for key in ('enabled','assumption_exceeded'):
+            if type(admission.get(key)) is bool: projected[key] = admission[key]
+        for key in ('token_limit_guarantee','billing_guarantee'):
+            if admission.get(key) is False: projected[key] = False
+        for key in ('limits','reserved','committed','observed_tokens','missing_usage_attempts'):
+            if isinstance(admission.get(key), dict):
+                projected[key] = numbers(admission[key], ('calls','input_tokens','output_tokens'), nullable=key=='limits')
+        for key in ('currency_budget','currency_reserved','currency_committed_ceiling'):
+            value = admission.get(key)
+            if value is None and key in admission:
+                projected[key] = None
+            elif isinstance(value,str) and len(value) <= 32 and re.fullmatch(r'[0-9]{1,12}(?:\.[0-9]{1,9})?(?:E-[1-9])?',value):
+                projected[key] = value
+        currency = admission.get('currency')
+        if currency is None and 'currency' in admission:
+            projected['currency'] = None
+        elif isinstance(currency,dict):
+            quote = {}
+            if isinstance(currency.get('currency'),str) and re.fullmatch(r'[A-Z]{3}',currency['currency']):
+                quote['currency'] = currency['currency']
+            if isinstance(currency.get('sha256'),str) and re.fullmatch(r'[0-9a-f]{64}',currency['sha256']):
+                quote['sha256'] = currency['sha256']
+            if currency.get('basis') == 'user_declared_complete_attempt_ceiling':
+                quote['basis'] = currency['basis']
+            if currency.get('provider_price_verified') is False:
+                quote['provider_price_verified'] = False
+            projected['currency'] = quote
+        projected['attemptsRetained'] = False
+        result['admission_controls'] = projected
+    return result
+
+
 def lifecycle_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     """Allow only known numeric counters and fixed enums in never mode."""
     source = metadata if isinstance(metadata, dict) else {}
-    result = {}
-    runtime = source.get("run_control")
-    if isinstance(runtime, dict):
-        projected = {"eventsRetained": False}
-        for key in ("attempts_started", "permits_acquired", "permits_released", "deferred_calls", "events_omitted"):
-            value = runtime.get(key)
-            if type(value) is int and 0 <= value <= 2**63 - 1:
-                projected[key] = value
-        for key in ("limit_seconds", "elapsed_seconds", "remaining_seconds"):
-            value = runtime.get(key)
-            if type(value) in (int, float) and 0 <= value <= 2**63 - 1 and math.isfinite(value):
-                projected[key] = value
-        if runtime.get("scope") == "process_local":
-            projected["scope"] = "process_local"
-        if type(runtime.get("deadline_exceeded")) is bool:
-            projected["deadline_exceeded"] = runtime["deadline_exceeded"]
-        result["run_control"] = projected
+    result = control_metadata(source)
     policy = audit_projection(source.get("dataPolicy"))
     if policy is not None:
         result["dataPolicy"] = policy

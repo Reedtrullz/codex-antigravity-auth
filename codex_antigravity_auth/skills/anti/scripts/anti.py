@@ -38,6 +38,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from anti_lib.console import ConsoleArgumentParser, console_print as print
 from anti_lib.run_control import RunControl, DeadlineExceeded, CURRENT_RUN
+from anti_lib.spend_control import SpendControl, SpendRefused, AdmissionConfigError
 from anti_lib.capabilities import CapabilityRegistry
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
@@ -130,8 +131,8 @@ MODEL_CAPABILITIES = {
     for model in set(MODEL_ALIASES.values()) | set(CAPABILITY_REGISTRY.entries)
 }
 
-# Cost tiers: free < quota < paid
-# free = no metering (OpenRouter free tier and Ollama local)
+# Compatibility heuristic tiers: free < quota < paid
+# free = zero heuristic rate only; provider billing is unverified
 # quota = Google Antigravity quota (shared across accounts)
 # paid = metered billing (not currently in rotation)
 MODEL_COST_TIER: dict[str, str] = {
@@ -163,7 +164,7 @@ MODEL_COST_TIER: dict[str, str] = {
 }
 
 # Rough cost estimates per 1K tokens (prompt + output combined). These are
-# internal cost units, not USD, and are intentionally conservative defaults.
+# compatibility heuristic units, not USD, measured prices or monetary upper bounds.
 COST_PER_1K_TOKENS: dict[str, float] = {
     "free": 0.0,
     "quota": 0.002,
@@ -179,6 +180,7 @@ def model_pricing_metadata(model: str) -> dict[str, Any]:
         "tier": tier or "unknown",
         "basis": "heuristic_tier" if tier else "unknown",
         "provider_price_known": False,
+        "units": "heuristic_units", "currency": None, "free_tier_verified": False,
     }
 
 def estimate_call_cost(model: str, prompt_chars: int, max_output_tokens: int) -> float:
@@ -211,7 +213,7 @@ def reserve_budget_call(
     estimate = estimate_call_cost(model, prompt_chars, max_output_tokens)
     if getattr(args, "budget", None) is not None and base_model_id(model) not in MODEL_COST_TIER:
         error = AntiError(
-            f"budget admission refused for {purpose}; price for model {model!r} is unknown"
+            f"budget admission refused for {purpose}; heuristic tier for model {model!r} is unknown"
         )
         error.submitted = False  # type: ignore[attr-defined]
         raise error
@@ -258,16 +260,18 @@ def settle_budget_call(
         if not observed:
             state["unknown"] = True
         entry = reservation["entry"]
-        entry.update({"status": "settled", "observed_cost": actual, "usage_known": observed})
+        entry.update({"status": "settled", "observed_cost": actual, "usage_known": observed,
+                      "heuristic_units": actual, "basis": "usage_scaled_heuristic" if observed else "estimated_heuristic", "currency": None})
 
 
 def budget_metadata(args: argparse.Namespace) -> dict[str, Any]:
     state = getattr(args, "_anti_budget_state", None)
     if state is None or getattr(args, "budget", None) is None:
-        return {"budget_limit": getattr(args, "budget", None)}
+        return {"budget_limit": getattr(args, "budget", None), "cost_units": "heuristic_units", "heuristic_currency": None}
     with state["lock"]:
         used = state["reserved"] + state["committed"]
         return {
+            "cost_units": "heuristic_units", "heuristic_currency": None,
             "budget_limit": float(args.budget),
             "budget_reserved": state["reserved"],
             "budget_committed": state["committed"],
@@ -638,10 +642,16 @@ class RunDeadlineExceeded(DeadlineExceeded, AntiError):
     pass
 
 
+class SpendAdmissionError(SpendRefused, AntiError):
+    pass
+
+
 def run_control(args=None):
     if args is not None and hasattr(args, 'timeout'):
         if not math.isfinite(float(args.timeout)) or float(args.timeout) <= 0:
             raise AntiError('HTTP timeout must be finite and greater than zero')
+    if getattr(args, 'budget', None) is not None and (not math.isfinite(float(args.budget)) or float(args.budget) < 0):
+        raise AntiError('heuristic-unit budget must be finite and nonnegative')
     current = getattr(args, '_run_control', None) if args is not None else None
     current = current or CURRENT_RUN.get()
     if current is None:
@@ -650,6 +660,20 @@ def run_control(args=None):
                                  default_cap=getattr(args, 'max_parallel', 2), error_type=RunDeadlineExceeded)
         except (ValueError, TypeError) as exc:
             raise AntiError(str(exc)) from exc
+    if not hasattr(current, 'spend_control'):
+        with _BUDGET_STATE_INIT_LOCK:
+            if not hasattr(current, 'spend_control'):
+                try:
+                    current.spend_control = SpendControl(
+                        max_calls=getattr(args, 'max_calls', None),
+                        max_input_tokens=getattr(args, 'max_total_input_tokens', None),
+                        max_output_tokens=getattr(args, 'max_total_output_tokens', None),
+                        currency_budget=getattr(args, 'currency_budget', None),
+                        pricing_file=getattr(args, 'pricing_file', None), error_type=SpendAdmissionError)
+                except AdmissionConfigError as exc:
+                    raise AntiError('Invalid attempt admission configuration: ' + str(exc)) from exc
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    raise AntiError('Invalid attempt admission configuration: check numeric limits and pricing-file fields') from exc
     if args is not None:
         args._run_control = current
     return current
@@ -658,18 +682,24 @@ def run_control(args=None):
 def controlled_command(function):
     @functools.wraps(function)
     def wrapped(args, *values, **kwargs):
-        with run_control(args).bind():
-            return function(args, *values, **kwargs)
+        with run_control(args).bind() as control:
+            result = function(args, *values, **kwargs)
+            policy = getattr(control, 'spend_control', None)
+            if result == 0 and policy is not None and policy.assumption_exceeded:
+                return 1
+            return result
     return wrapped
 
 
 _CALL_SUBMITTED = ContextVar('anti_call_submitted', default=None)
+_SPEND_TICKET = ContextVar('anti_spend_ticket', default=None)
 
 
 def controlled_post(function):
     @functools.wraps(function)
     def wrapped(**kwargs):
         token = _CALL_SUBMITTED.set(0)
+        spend_token = _SPEND_TICKET.set(None)
         try:
             with run_control(kwargs.get('budget_args')).bind():
                 return function(**kwargs)
@@ -677,8 +707,21 @@ def controlled_post(function):
             exc.submitted = bool(getattr(exc, 'submitted', False) or _CALL_SUBMITTED.get())
             raise
         finally:
+            # Any exceptional transport path retains a submitted reservation;
+            # preparation failures release it without spending the allowance.
+            settle_spend(submitted=bool(_CALL_SUBMITTED.get()))
+            _SPEND_TICKET.reset(spend_token)
             _CALL_SUBMITTED.reset(token)
     return wrapped
+
+
+def settle_spend(*, submitted, usage=None):
+    reservation = _SPEND_TICKET.get()
+    if reservation is not None:
+        policy, ticket, marker_before = reservation
+        entered = (_CALL_SUBMITTED.get() or 0) > marker_before
+        policy.settle(ticket, submitted=bool(submitted and entered), usage=usage)
+        _SPEND_TICKET.set(None)
 
 
 def scheduling_metadata(metadata=None, control=None):
@@ -690,6 +733,13 @@ def scheduling_metadata(metadata=None, control=None):
     if control is not None:
         snapshot = control.snapshot()
         metadata['run_control'] = snapshot
+        policy = getattr(control, 'spend_control', None)
+        if policy is not None:
+            metadata['admission_controls'] = policy.snapshot()
+            if metadata['admission_controls']['assumption_exceeded']:
+                metadata.update(scopeStatus='partial', scope_status='partial', runStatus='partial')
+        metadata['cost_units'] = 'heuristic_units'
+        metadata['provider_billing_observed'] = False
         if snapshot['deferred_calls']:
             metadata.update(scopeStatus='partial', scope_status='partial')
             if metadata.get('runStatus') not in {'failed', 'error', 'interrupted'}:
@@ -960,7 +1010,8 @@ def _write_run_record_unlocked(
     force_full_output: bool = False,
 ) -> Path | None:
     metadata = scheduling_metadata(metadata, getattr(args, '_run_control', None))
-    if metadata.get('run_control', {}).get('deferred_calls') and status == 'success':
+    if status == 'success' and (metadata.get('run_control', {}).get('deferred_calls') or
+                                metadata.get('admission_controls', {}).get('assumption_exceeded')):
         status = 'partial'
     output_mode = save_output_mode(args)
     record_id = getattr(args, "run_id", None)
@@ -1652,16 +1703,36 @@ def _retry_after_seconds(value: object) -> float | None:
     return delay
 
 
-def transport_entry_timeout(method, timeout):
+def transport_entry_timeout(method, timeout, *, payload=None, body=None, url=None):
     control = CURRENT_RUN.get()
     if control is not None:
         timeout = control.timeout(timeout)
     submitted_count = _CALL_SUBMITTED.get()
     if method.upper() == 'POST' and submitted_count is not None:
+        policy = getattr(control, 'spend_control', None)
+        if policy is not None and policy.enabled:
+            if not isinstance(payload, dict) or not isinstance(body, bytes) or type(payload.get('max_output_tokens')) is not int:
+                raise SpendAdmissionError('admission refused: request/output reservation is unknown')
+            suffix = '/local/responses' if isinstance(url, str) and url.endswith('/local/responses') else '/responses'
+            gateway = url[:-len(suffix)] if isinstance(url, str) and url.endswith(suffix) else None
+            ticket = policy.reserve(payload.get('model'), len(body), payload['max_output_tokens'], gateway=gateway)
+            _SPEND_TICKET.set((policy, ticket, submitted_count))
+        if control is not None:
+            timeout = control.timeout(timeout)
         _CALL_SUBMITTED.set(submitted_count + 1)
         if control is not None:
             control.mark_submitted()
     return timeout
+
+
+def open_gateway_request(request, *, timeout, payload=None, body=None):
+    return open_http_request(
+        request,
+        timeout=timeout,
+        before_open=lambda prepared, value: transport_entry_timeout(
+            prepared.get_method(), value, payload=payload, body=body, url=prepared.full_url,
+        ),
+    )
 
 
 def request_json(
@@ -1694,8 +1765,7 @@ def request_json(
 
     retry_after_header: object = None
     try:
-        with open_http_request(req, timeout=timeout,
-                               before_open=lambda prepared, value: transport_entry_timeout(prepared.get_method(), value)) as res:
+        with open_gateway_request(req, timeout=timeout, payload=payload, body=body) as res:
             raw = read_response_body(res, timeout)
             status = int(res.status)
     except urllib.error.HTTPError as exc:
@@ -1703,7 +1773,7 @@ def request_json(
             raw = read_response_body(exc, timeout)
         status = int(exc.code)
         retry_after_header = exc.headers.get("Retry-After")
-    except DeadlineExceeded:
+    except (DeadlineExceeded, SpendRefused):
         raise
     except Exception as exc:
         raise AntiError(f"request to {url} failed: {exc}") from exc
@@ -2053,6 +2123,7 @@ def post_response(
         except AntiError as exc:
             submitted = (_CALL_SUBMITTED.get() or 0) > submitted_before
             exc.submitted = submitted  # type: ignore[attr-defined]
+            settle_spend(submitted=submitted)
             if submitted:
                 settle_budget_call(retry_reservation, model=model, generation=None,
                                    prompt_chars=len(prompt), max_output_tokens=max_output_tokens)
@@ -2073,6 +2144,7 @@ def post_response(
                 f"model={model}, prompt_chars={len(prompt)}, timeout={timeout}, gateway={base_url}"
             ) from exc
 
+        settle_spend(submitted=True, usage=extract_usage(decoded))
         if status == 200:
             settle_budget_call(
                 retry_reservation,
@@ -2188,7 +2260,7 @@ def _pre_flight_cost_suggestion(
     top = alternatives[:3]
     eprint(
         f"[anti] cost hint: {model} is {tier}-tier. "
-        f"Free alternative(s) available: {', '.join(top)}. "
+        f"Heuristically free-tier alternatives (pricing unverified): {', '.join(top)}. "
         f"Use --model <alias> to switch."
     )
 
@@ -2279,9 +2351,10 @@ def generate_with_fallback(
         # Preserve structured failure details even though this API historically
         # raises AntiError for failed generations.  run_panel_call consumes the
         # attribute when it records an error lane.
-        error = RunDeadlineExceeded(message) if isinstance(cause, DeadlineExceeded) else AntiError(message)
+        error = (RunDeadlineExceeded(message) if isinstance(cause, DeadlineExceeded) else
+                 SpendAdmissionError(message) if isinstance(cause, SpendRefused) else AntiError(message))
         error.submitted = bool(getattr(cause, 'submitted', False) or any(item.get('submitted') for item in failures))
-        metadata.update(deferred=isinstance(cause, DeadlineExceeded), submitted=error.submitted)
+        metadata.update(deferred=isinstance(cause, DeadlineExceeded), admission_refused=isinstance(cause, SpendRefused), submitted=error.submitted)
         error.generation_metadata = metadata  # type: ignore[attr-defined]
         raise error from cause
 
@@ -2318,7 +2391,7 @@ def generate_with_fallback(
     except AntiError as exc:
         error = redact_sensitive_text(str(exc))
         failures.append({"model": model, "error": error, "submitted": bool(getattr(exc, "submitted", False))})
-        if isinstance(exc, DeadlineExceeded) or not fallback_model or fallback_model == model or not should_use_fallback(error, fallback_policy):
+        if isinstance(exc, (DeadlineExceeded, SpendRefused)) or not fallback_model or fallback_model == model or not should_use_fallback(error, fallback_policy):
             failure_metadata = identity_metadata(
                 actual_model=None,
                 fallback_used=False,
@@ -4820,7 +4893,11 @@ def format_dry_run(
         "estimates": estimates,
         "stages": stages,
         "token_ceilings": {stage["name"]: stage.get("max_output_tokens") for stage in stages},
-        "known_prices": known_prices,
+        "known_prices": known_prices,  # legacy alias for heuristic_tier_rates
+        "heuristic_tier_rates": known_prices,
+        "cost_units": "heuristic_units",
+        "admission_controls": (getattr(CURRENT_RUN.get(), 'spend_control', None).snapshot()
+                               if getattr(CURRENT_RUN.get(), 'spend_control', None) is not None else None),
         "known_provider_prices": {},
         "pricing_basis": "heuristic_tier; provider prices are not known at dry-run time",
         "estimated_cost_total": estimated_cost_total,
@@ -4851,7 +4928,7 @@ def format_dry_run(
     lines.append(f"  possible retries: {payload['possible_retries']}; pricing: heuristic tiers only (provider prices unknown)")
     lines.append("  unknowns: provider billing and missing runtime usage")
     if budget_limit is not None:
-        lines.append(f"  budget: {float(budget_limit):.4f}")
+        lines.append(f"  heuristic-unit budget: {float(budget_limit):.4f}")
     return "\n".join(lines)
 
 
@@ -6611,7 +6688,7 @@ def print_panel_result(
     if metadata.get("collaboration_profile"):
         print(f"- Collaboration: {metadata['collaboration_profile']}")
     if metadata.get("budget_limit") is not None:
-        print(f"- Estimated cost: {float(metadata.get('estimated_cost', metadata.get('estimated_total', 0.0))):.4f} / budget {float(metadata['budget_limit']):.4f}")
+        print(f"- Estimated heuristic units: {float(metadata.get('estimated_cost', metadata.get('estimated_total', 0.0))):.4f} / heuristic budget {float(metadata['budget_limit']):.4f}")
     for result in panel_results:
         stats = "; ".join(
             part
@@ -8712,6 +8789,9 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         common.extend(["--acknowledge-secret-hash", acknowledgement])
     if args.budget is not None:
         common.extend(["--budget", str(args.budget)])
+    for name in ('max_calls', 'max_total_input_tokens', 'max_total_output_tokens', 'currency_budget', 'pricing_file'):
+        if getattr(args, name, None) is not None:
+            common.extend(['--' + name.replace('_', '-'), str(getattr(args, name))])
     if args.max_output_tokens is not None:
         common.extend(["--max-output-tokens", str(args.max_output_tokens)])
     if args.fallback_model:
@@ -9224,7 +9304,12 @@ def add_generation_control_args(
     parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True, help="Print long-call progress to stderr (default: true; use --no-progress to disable)")
     parser.add_argument("--run-label", help="Optional label for saved Anti run metadata")
     parser.add_argument("--run-id", help="Stable run/correlation id for saved and gateway records")
-    parser.add_argument("--budget", type=float, default=None, help="Maximum estimated cost for the entire run (cost units); skip remaining models if exceeded")
+    parser.add_argument("--budget", type=float, default=None, help="Compatibility heuristic-unit budget, never USD or provider billing")
+    parser.add_argument('--max-calls', type=non_negative_int, help='Maximum submitted generation attempts, including retries/fallback/judge')
+    parser.add_argument('--max-total-input-tokens', type=non_negative_int, help='Per-run estimated input-token admission allowance (UTF-8 bytes plus framing; not tokenizer precision)')
+    parser.add_argument('--max-total-output-tokens', type=non_negative_int, help='Per-run sum of requested output-cap reservations; missing usage retains reservations')
+    parser.add_argument('--currency-budget', help='Currency admission amount as a decimal string; requires --pricing-file complete attempt ceilings')
+    parser.add_argument('--pricing-file', help='Explicit dated exact-model pricing bounds; no automatic price lookup')
     parser.add_argument(
         "--save-output",
         choices=sorted(SAVE_OUTPUT_MODES),
