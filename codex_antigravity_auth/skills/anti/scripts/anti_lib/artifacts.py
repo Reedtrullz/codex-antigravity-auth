@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path, PurePosixPath
 import re
 from typing import Any
@@ -286,7 +285,7 @@ def read_record(path: Path) -> dict[str, Any]:
 
 def read_publication(path: Path) -> dict[str, Any]:
     """Read a bounded consistent publication for local export; never repair it."""
-    from .inventory import _open_file, path_kind
+    from .inventory import path_kind, read_file
     path = Path(path).absolute()
     captured = {}
     total = 0
@@ -309,18 +308,13 @@ def read_publication(path: Path) -> dict[str, Any]:
             anchor = Path(selected.anchor)
             relative = selected.relative_to(anchor).as_posix()
             _require(path_kind(anchor, relative) == "file", "HTML input must be a regular file without symlink parents", "invalid_reference")
-            before = selected.lstat()
-            _require(before.st_size <= remaining, "HTML publication exceeds8MiB/file or16MiB total", "export_limit")
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-            with os.fdopen(_open_file(anchor, relative, flags), "rb") as handle:
-                opened = os.fstat(handle.fileno())
-                _require(stat.S_ISREG(opened.st_mode), "Artifact is not a regular file", "invalid_reference")
-                raw = handle.read(remaining + 1)
-                after = os.fstat(handle.fileno())
-            final = selected.lstat()
-            identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-            _require(identity(before) == identity(opened) == identity(after) == identity(final), "Artifact changed during read", "changed_during_read")
-            _require(len(raw) <= remaining, "HTML publication byte limit exceeded", "export_limit")
+            raw, _size, reason = read_file(anchor, relative, remaining, max_file_bytes=8 * 1024 * 1024)
+            if reason in {"file_byte_limit", "total_byte_limit", "source_byte_limit"}:
+                raise ArtifactError("export_limit", "HTML publication exceeds8MiB/file or16MiB total")
+            if reason == "changed_during_read":
+                raise ArtifactError("changed_during_read", "Artifact changed during read")
+            if reason is not None:
+                raise ArtifactError("invalid_reference", "HTML input must be a regular file without symlink parents")
             value = json.loads(raw, object_pairs_hook=unique_object,
                                parse_constant=lambda _: _require(False, "Non-finite artifact number"))
             _require(isinstance(value, dict), "Saved artifact must be an object")
