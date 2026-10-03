@@ -265,10 +265,12 @@ def test_stream_schema_expansion_rejection_is_local_nonretryable_and_releases_pe
     monkeypatch.setattr(server, "release_account_for_request", release)
     monkeypatch.setattr(server, "record_attempt_outcome", record)
 
-    schema = {"type": "object", "$defs": {"leaf": {"type": "string", "description": "x" * 180}},
-              "properties": {str(index): {"$ref": "#/$defs/leaf"} for index in range(10)}}
+    schema = {"type": "object", "properties": {"value": {"type": "string"}}}
+    clean_json_schema(schema)  # Each inline schema fits; generated placeholders share the request budget.
+    tools = [{"type": "function", "name": f"fixture_{index}", "parameters": schema} for index in range(8)]
     payload = {"model": "gemini-3.8-flash", "input": "fixture", "stream": True,
-               "tools": [{"type": "function", "name": "fixture", "parameters": schema}]}
+               "tools": tools}
+    assert len(json.dumps(payload)) < 1024
     dispatched = []
     clients = []
     real_client = httpx.AsyncClient
@@ -528,12 +530,10 @@ def test_google_output_limit_preserves_visible_text_without_rotation(policy, mon
 def test_schema_expansion_budget_is_shared_across_all_tools(policy):
     from codex_antigravity_auth.transform import transform_request
     policy(body_bytes=1400)
-    schema = {"type": "object", "$defs": {"leaf": {"type": "string", "description": "x" * 110}},
-              "properties": {str(index): {"$ref": "#/$defs/leaf"} for index in range(5)}}
-    clean_json_schema(schema)  # One schema fits; their combined expansion does not.
+    schema = {"type": "object", "properties": {"value": {"type": "string"}}}
+    clean_json_schema(schema)  # One inline schema fits; generated placeholders share the aggregate budget.
     request = {"model": "gemini-3.8-flash", "input": "fixture", "tools": [
-        {"type": "function", "name": "first", "parameters": schema},
-        {"type": "function", "name": "second", "parameters": schema},
+        {"type": "function", "name": f"fixture_{index}", "parameters": schema} for index in range(10)
     ]}
     assert len(json.dumps(request)) < 1400
     with pytest.raises(ResourceLimitError) as caught: transform_request(request)
@@ -624,9 +624,19 @@ def test_provider_accumulators_do_not_copy_prefixes_for_tiny_deltas(provider):
             accumulator.consume({"candidates": [{"content": {"parts": [
                 {"text": AppendOnlyDelta("x")}, {"thought": True, "text": AppendOnlyDelta("r")}]} }]})
         else:
+            arguments = '{"x":"' if index == 0 else "x"
+            call = {"index": 0, "function": {
+                "name": AppendOnlyDelta("lookup") if index == 0 else "",
+                "arguments": AppendOnlyDelta(arguments),
+            }}
+            if index == 0:
+                call["id"] = "call_fixture"
             accumulator.consume({"choices": [{"delta": {"content": AppendOnlyDelta("x"), "reasoning_content": AppendOnlyDelta("r"),
-                "tool_calls": [{"index": 0, "function": {"name": AppendOnlyDelta("lookup") if index == 0 else "",
-                                                         "arguments": AppendOnlyDelta("x")}}]}}]})
+                "tool_calls": [call]}}]})
+    if provider == "chat":
+        accumulator.consume({"choices": [{"delta": {"tool_calls": [{
+            "index": 0, "function": {"arguments": AppendOnlyDelta('"}')}
+        }]}}]})
     accumulator.mark_done()
     result = accumulator.finalize()
     text = next(item for item in result.output if item["type"] == "message")
@@ -635,7 +645,8 @@ def test_provider_accumulators_do_not_copy_prefixes_for_tiny_deltas(provider):
     assert reasoning["step_by_step_summary"] == "r" * 2000
     if provider == "chat":
         call = next(item for item in result.output if item["type"] == "function_call")
-        assert call["name"] == "lookup" and call["arguments"] == "x" * 2000
+        assert call["name"] == "lookup" and call["call_id"] == "call_fixture"
+        assert call["arguments"] == '{"x":"' + "x" * 1999 + '"}'
 
 
 @pytest.mark.parametrize("provider", ["google", "chat"])
@@ -682,7 +693,9 @@ def test_byok_stream_tool_assembly_avoids_prefix_copying(monkeypatch):
         async def __aexit__(self, *args): pass
         def stream(self, *args, **kwargs): return Context()
     transport = transport_module.OpenAICompatibleTransport(timeout=1, client_factory=lambda **kw: Client())
-    prepared = transport_module.PreparedOpenAIRequest({}, "https://example.invalid", {}, 1)
+    prepared = transport_module.PreparedOpenAIRequest({"tools": [{"type": "function", "function": {
+        "name": "lookup", "parameters": {"type": "object", "properties": {"x": {"type": "string"}}},
+    }}]}, "https://example.invalid", {}, 1)
     async def scenario():
         return [event async for event in transport.stream_chat_events(prepared, response_id="fixture", display_model="fixture")]
     events = asyncio.run(scenario())
