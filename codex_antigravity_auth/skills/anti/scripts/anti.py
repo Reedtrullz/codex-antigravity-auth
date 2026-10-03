@@ -40,6 +40,9 @@ from anti_lib.console import ConsoleArgumentParser, console_print as print
 from anti_lib.run_control import RunControl, DeadlineExceeded, CURRENT_RUN
 from anti_lib.spend_control import SpendControl, SpendRefused, AdmissionConfigError
 from anti_lib.capabilities import CapabilityRegistry
+from anti_lib import local_policy as local_workflow
+from anti_lib.context_budget import assess as assess_context, calibration as context_calibration
+from anti_lib import checkpoints as chunk_checkpoints
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
     file_reference, read_record, validate_record, coverage_has_loss,
