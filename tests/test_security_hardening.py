@@ -1,4 +1,5 @@
 import json
+from functools import partial
 import os
 import stat
 import tempfile
@@ -8,9 +9,14 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 from fastapi.testclient import TestClient
+from fake_upstream import test_client_with_peer as fixture_client_with_peer
 
 from codex_antigravity_auth.redaction import REDACTED, redact_secret_text, redact_secrets
 from codex_antigravity_auth.server import app
+
+
+test_client_with_peer = partial(fixture_client_with_peer, app=app)
+test_client_with_peer.__test__ = False
 
 
 def assert_mode_if_posix(testcase: unittest.TestCase, path: Path, expected: int) -> None:
@@ -322,7 +328,7 @@ class TestGatewayRemoteAccess(unittest.TestCase):
 
     def test_loopback_responses_reject_testserver_host_from_real_loopback_client(self):
         with patch("codex_antigravity_auth.server.account_manager.acquire_account") as mock_select:
-            response = TestClient(app, client=("127.0.0.1", 50000)).post(
+            response = test_client_with_peer(("127.0.0.1", 50000)).post(
                 "/v1/responses",
                 json={"model": "gemini-3.5-flash-high", "input": "hello"},
                 headers={"Host": "testserver:51122", "Origin": "http://testserver:51122"},
@@ -335,7 +341,7 @@ class TestGatewayRemoteAccess(unittest.TestCase):
     def test_non_loopback_clients_require_opt_in_bearer_token(self):
         with patch("codex_antigravity_auth.server.all_provider_configs", return_value={}):
             with patch.dict(os.environ, {}, clear=True):
-                response = TestClient(app, client=("203.0.113.10", 50000)).get("/v1/models")
+                response = test_client_with_peer(("203.0.113.10", 50000)).get("/v1/models")
 
         self.assertEqual(response.status_code, 403)
 
@@ -346,7 +352,7 @@ class TestGatewayRemoteAccess(unittest.TestCase):
                 {"ANTIGRAVITY_ALLOW_REMOTE": "1", "ANTIGRAVITY_GATEWAY_TOKEN": "x" * 32},
                 clear=True,
             ):
-                response = TestClient(app, client=("203.0.113.10", 50000)).get(
+                response = test_client_with_peer(("203.0.113.10", 50000)).get(
                     "/v1/models",
                     headers={"Authorization": f"Bearer {'x' * 32}"},
                 )
@@ -360,7 +366,7 @@ class TestGatewayRemoteAccess(unittest.TestCase):
                 {"ANTIGRAVITY_ALLOW_REMOTE": "1", "ANTIGRAVITY_GATEWAY_TOKEN": "short"},
                 clear=True,
             ):
-                response = TestClient(app, client=("203.0.113.10", 50000)).get(
+                response = test_client_with_peer(("203.0.113.10", 50000)).get(
                     "/v1/models",
                     headers={"Authorization": "Bearer short"},
                 )

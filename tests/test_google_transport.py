@@ -1,6 +1,8 @@
+from tests.conftest import byte_chunks
 import unittest
 from unittest.mock import patch
 import math
+import httpx
 
 from fastapi.testclient import TestClient
 
@@ -122,7 +124,7 @@ class TestGoogleResponseTranslation(unittest.TestCase):
         self.assertEqual(result.terminal.kind, TerminalKind.FAILED)
         self.assertEqual(result.terminal.error_code, "malformed_provider_response")
 
-    def test_skips_invalid_candidate_when_later_output_is_valid(self):
+    def test_rejects_ambiguous_candidates_instead_of_using_later_output(self):
         result = self.transport.parse_response(
             {
                 "candidates": [
@@ -132,8 +134,8 @@ class TestGoogleResponseTranslation(unittest.TestCase):
             }
         )
 
-        self.assertEqual(result.terminal.kind, TerminalKind.COMPLETED)
-        self.assertEqual(result.output[0]["content"][0]["text"], "valid")
+        self.assertEqual(result.terminal.kind, TerminalKind.FAILED)
+        self.assertEqual(result.output, ())
 
     def test_legacy_transform_response_wrapper_uses_terminal_contract(self):
         empty = transform_response({"candidates": []}, "test-model")
@@ -271,8 +273,9 @@ class TestGoogleHTTPExecution(unittest.IsolatedAsyncioTestCase):
     async def test_posts_non_streaming_request_through_transport(self):
         calls = []
 
-        class Response:
-            status_code = 200
+        class Response(httpx.Response):
+            def __init__(self):
+                super().__init__(200, json={})
 
         class Client:
             async def __aenter__(self):
@@ -329,15 +332,9 @@ class TestGoogleHTTPExecution(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(calls[0][1].endswith("/v1internal:streamGenerateContent?alt=sse"))
 
     async def test_execute_returns_result_and_typed_http_failure(self):
-        class Response:
+        class Response(httpx.Response):
             def __init__(self, status_code, payload=None):
-                self.status_code = status_code
-                self._payload = payload or {}
-                self.text = "provider detail"
-                self.headers = {}
-
-            def json(self):
-                return self._payload
+                super().__init__(status_code, json=payload or {})
 
         responses = [
             Response(200, {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "ok"}]}}]}),
@@ -372,13 +369,9 @@ class TestGoogleRouteTerminalFidelity(unittest.TestCase):
     def _post(payload: dict):
         from codex_antigravity_auth.server import app
 
-        class Response:
-            status_code = 200
-            text = ""
-            headers = {}
-
-            def json(self):
-                return payload
+        class Response(httpx.Response):
+            def __init__(self):
+                super().__init__(200, json=payload)
 
         class Client:
             def __init__(self, *args, **kwargs):
@@ -397,7 +390,7 @@ class TestGoogleRouteTerminalFidelity(unittest.TestCase):
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account):
             with patch("codex_antigravity_auth.server.account_manager.release_account"):
                 with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
-                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", Client):
+                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", Client), patch("codex_antigravity_auth.server.write_request_record"):
                         return TestClient(app).post(
                             "/v1/responses",
                             json={"model": "gemini-3.5-flash-high", "input": "hello"},
@@ -406,7 +399,7 @@ class TestGoogleRouteTerminalFidelity(unittest.TestCase):
     def test_non_streaming_empty_200_returns_failed_response(self):
         response = self._post({"candidates": []})
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["status"], "failed")
         self.assertEqual(response.json()["error"]["code"], "empty_response")
 
@@ -415,14 +408,14 @@ class TestGoogleRouteTerminalFidelity(unittest.TestCase):
             {"candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": "partial"}]}}]}
         )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["status"], "incomplete")
         self.assertEqual(response.json()["incomplete_details"]["reason"], "max_output_tokens")
 
     def test_non_streaming_safety_block_returns_completed_refusal(self):
         response = self._post({"promptFeedback": {"blockReason": "SAFETY"}, "candidates": []})
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["status"], "completed")
         self.assertEqual(response.json()["output"][0]["content"][0]["type"], "refusal")
 
@@ -449,6 +442,9 @@ class TestGoogleRouteTerminalFidelity(unittest.TestCase):
             def aiter_text(self):
                 return AsyncChunks()
 
+            def aiter_bytes(self):
+                return byte_chunks(self.aiter_text())
+
         class StreamContext:
             async def __aenter__(self):
                 return Response()
@@ -473,7 +469,7 @@ class TestGoogleRouteTerminalFidelity(unittest.TestCase):
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account):
             with patch("codex_antigravity_auth.server.account_manager.release_account"):
                 with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
-                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", Client):
+                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", Client), patch("codex_antigravity_auth.server.write_request_record"):
                         return TestClient(app).post(
                             "/v1/responses",
                             json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},

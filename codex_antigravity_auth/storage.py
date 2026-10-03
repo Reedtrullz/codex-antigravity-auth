@@ -10,7 +10,7 @@ from .namespaces import gateway_home, gateway_file
 from typing import Any, Callable
 from cryptography.fernet import Fernet, InvalidToken
 from .constants import ANTIGRAVITY_ACCOUNTS_FILE, get_codex_home
-from .account_state import SCHEMA_VERSION, migrate_account_state
+from .account_state import SCHEMA_VERSION, UnsupportedAccountStateVersion, account_state_version, migrate_account_state
 from .secure_store import SecureStore, file_lock as _exclusive_file_lock
 from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory, protect_descriptor, protect_existing_file
 
@@ -34,6 +34,9 @@ def default_accounts_data() -> dict[str, Any]:
 
 
 def normalize_accounts_data(data: dict[str, Any]) -> dict[str, Any]:
+    # Every account load/save/update passes here, including validation of the
+    # latest persisted state while holding the cross-process store lock.
+    account_state_version(data)
     if not isinstance(data, dict):
         data = {}
     accounts = data.get("accounts")
@@ -192,11 +195,17 @@ def account_store_diagnostics() -> dict[str, Any]:
     accounts = data.get("accounts")
     state = data.get("accountState")
     version = state.get("schemaVersion") if isinstance(state, dict) else None
+    report["account_state_schema_version"] = version if type(version) is int else 0
+    try:
+        account_state_version(data)
+    except UnsupportedAccountStateVersion as exc:
+        report["error_class"] = "unsupported_account_state_version"
+        report["error"] = str(exc)
+        return report
     report.update(
         {
             "accessible": True,
             "account_count": len(accounts) if isinstance(accounts, list) else 0,
-            "account_state_schema_version": version if isinstance(version, int) and not isinstance(version, bool) else 0,
         }
     )
     report["migration"] = (

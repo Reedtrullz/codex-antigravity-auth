@@ -20,10 +20,18 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "anti.py"
 
+# Canonicalize only the parent of newly created owned test fixtures. macOS
+# exposes /var through a symlink; application-selected paths still undergo
+# the unchanged no-follow capture checks.
+tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
+
 _ACTIVE_TEST_RUNS_DIR: list[Path] = []
 
 
 def load_anti():
+    anti_lib_dir = str(SCRIPT.resolve().parent)
+    if anti_lib_dir not in sys.path:
+        sys.path.insert(0, anti_lib_dir)
     spec = importlib.util.spec_from_file_location("anti_skill_helper", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -954,6 +962,7 @@ class AntiHelperTests(unittest.TestCase):
         calls: list[str] = []
 
         def fake_request_json(method, url, *, payload=None, timeout=10.0, token_env=anti.DEFAULT_TOKEN_ENV):
+            anti.transport_entry_timeout(method, timeout)  # synthetic transport entered
             calls.append(payload["model"])
             if payload["model"] == "claude-opus-4-6-thinking":
                 raise anti.AntiError("request to http://127.0.0.1:51122/v1/responses returned HTTP 502 non-JSON response")
@@ -1275,7 +1284,7 @@ class AntiHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
             anti.RUNS_DIR = Path(tmp)
             record_path = anti.RUNS_DIR / "run-1.json"
-            record_path.write_text(json.dumps({"id": "run-1"}), encoding="utf-8")
+            record_path.write_text(json.dumps({"id": "run-1", "status": "success"}), encoding="utf-8")
             old = time.time() - 3 * 86400
             os.utime(record_path, (old, old))
             output = io.StringIO()
@@ -2649,7 +2658,10 @@ class AntiHelperTests(unittest.TestCase):
         real_urlopen = anti.open_http_request
         captured: dict[str, dict] = {}
 
-        def fake_urlopen(req, timeout=10.0):
+        def fake_urlopen(req, timeout=10.0, before_open=None, loopback_only=False):
+            self.assertFalse(loopback_only)
+            if before_open is not None:
+                timeout = before_open(req, timeout)
             captured["regular"] = dict(req.headers)
             captured["unredirected"] = dict(req.unredirected_hdrs)
 
@@ -2844,7 +2856,7 @@ class AntiHelperTests(unittest.TestCase):
         contract = json.loads(contract_output.getvalue())
         self.assertEqual(
             set(contract),
-            {"caveats", "coverage", "disagreements", "findings", "findings_dropped", "findings_total", "panelStatus", "parse_warning", "recommended_next_actions", "runStatus", "schemaVersion", "scopeStatus", "summary", "unverifiable", "verification"},
+            {"caveats", "coverage", "disagreements", "findings", "findings_dropped", "findings_total", "findings_invalid", "findings_merged", "findings_truncated", "confidence_kind", "finding_errors", "finding_errors_omitted", "panelStatus", "parse_warning", "recommended_next_actions", "runStatus", "schemaVersion", "scopeStatus", "summary", "unverifiable", "verification"},
         )
 
     def test_panel_errors_are_redacted_in_json_output(self) -> None:
@@ -4118,8 +4130,8 @@ class BugfixRegressionTests(unittest.TestCase):
         self.assertEqual(record["runStatus"], "partial")
         self.assertNotIn("output_text", record)
         self.assertIn("answer that ends mid-sentence", artifact["output_preview"])
-        self.assertIn("consult_attempts", record["metadata"])
-        self.assertEqual(len(record["metadata"]["consult_attempts"]), 2)
+        self.assertEqual(record["metadata"]["consult_attempt_count"], 2)
+        self.assertEqual(record["metadata"]["retry_disposition"], "exhausted")
 
     def test_consult_recovers_on_higher_cap_retry(self) -> None:
         anti = load_anti()
@@ -4167,7 +4179,7 @@ class BugfixRegressionTests(unittest.TestCase):
             self.assertTrue(rows[0]["interrupted"])
             self.assertEqual(rows[0]["size"], 0)
 
-    def test_runs_clean_removes_stale_tmp_files(self) -> None:
+    def test_runs_clean_preserves_stale_tmp_files(self) -> None:
         anti = load_anti()
         with tempfile.TemporaryDirectory(prefix="anti-runs-") as tmp:
             anti.RUNS_DIR = Path(tmp)
@@ -4179,8 +4191,9 @@ class BugfixRegressionTests(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 rc = anti.main(["runs", "clean", "--older-than", "1"])
             self.assertEqual(rc, 0)
-            self.assertFalse(tmp_path.exists())
-            self.assertIn("Removed 1", output.getvalue())
+            self.assertTrue(tmp_path.exists())
+            self.assertIn("Removed 0", output.getvalue())
+            self.assertIn("temporary_ownership_unknown", output.getvalue())
 
     # --- B6: provider identifier redaction ---
 
@@ -4374,7 +4387,8 @@ class BugfixRegressionTests(unittest.TestCase):
         metadata = raised.exception.run_metadata
         self.assertEqual(len(calls), 1)
         self.assertEqual(metadata["completed_chunk_count"], 1)
-        self.assertEqual(metadata["failed_chunk_count"], 1)
+        self.assertEqual(metadata["failed_chunk_count"], 0)
+        self.assertEqual(metadata["chunk_generation"][-1]["status"], "not_sent")
         self.assertGreater(metadata["not_sent_chunk_count"], 0)
 
     def test_chunk_prompts_do_not_carry_stale_single_prompt_diff_caveat(self) -> None:
@@ -4514,13 +4528,13 @@ class BugfixRegressionTests(unittest.TestCase):
             self.assertIn(model_id, anti.MODEL_CAPABILITIES, model_id)
             self.assertEqual(anti.model_cost_tier(model_id), "paid", model_id)
             self.assertGreater(anti.MODEL_QUALITY_RANK.get(model_id, 0), 0, model_id)
-            self.assertTrue(anti.model_supports(model_id, "tools"), model_id)
+            self.assertFalse(anti.model_supports(model_id, "tools"), model_id)
 
     def test_ollama_models_are_text_only(self) -> None:
         anti = load_anti()
         for model_id in ("ollama:gpt-oss:20b", "ollama:qwen3:8b"):
             self.assertFalse(anti.model_supports(model_id, "images"), model_id)
-            self.assertTrue(anti.model_supports(model_id, "tools"), model_id)
+            self.assertFalse(anti.model_supports(model_id, "tools"), model_id)
 
     def test_cheapest_models_for_task_resolves_aliases(self) -> None:
         anti = load_anti()
@@ -4971,7 +4985,9 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                         calls.append(prompt)
                         attempts["count"] += 1
                         if cap == 1000 and attempts["count"] == 2:
-                            raise anti.AntiError("provider broke at chunk 2")
+                            failure = anti.AntiError("provider broke at chunk 2")
+                            failure.submitted = True
+                            raise failure
                         return (
                             "synthesis" if "Chunked Review Manifest" in prompt else "chunk",
                             model,
@@ -4989,7 +5005,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                             "--save-output", "full", "--json", "--no-progress",
                         ])
 
-                    artifact = json.loads((anti.RUNS_DIR / run_id / "result.json").read_text(encoding="utf-8"))
+                    artifact = json.loads(Path(anti.load_run_record(anti.RUNS_DIR / f"{run_id}.json")["resultPath"]).read_text(encoding="utf-8"))
                     planned = chunk_stage["planned_calls"]
                     if cap == 1000:
                         self.assertEqual(rc, 1)
@@ -5038,7 +5054,9 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 def generate(*args, **kwargs):
                     calls["count"] += 1
                     if calls["count"] == 2:
-                        raise anti.AntiError("provider broke")
+                        failure = anti.AntiError("provider broke")
+                        failure.submitted = True
+                        raise failure
                     return "chunk result", "claude-sonnet-4-6", {
                         "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
                     }
@@ -5101,14 +5119,16 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                     "--model", "sonnet", "--model", "opus", "--judge", "opus",
                     "--max-prompt-chars", "3000", "--max-review-chunks", "0",
                     "--chunked", "always", "--run-id", "synthesis-failure",
-                    "--save-output", "summary", "--json", "--no-progress",
+                    "--save-output", "full", "--json", "--no-progress",
                 ])
             finally:
                 os.chdir(old_cwd)
 
             artifact = json.loads(
-                (anti.RUNS_DIR / "synthesis-failure" / "result.json").read_text(encoding="utf-8")
+                Path(anti.load_run_record(anti.RUNS_DIR / "synthesis-failure.json")["resultPath"]).read_text(encoding="utf-8")
             )
+            raw_lane_paths = artifact["artifacts"]["rawLanePaths"]
+            ledger = [json.loads(Path(path).read_text(encoding="utf-8")) for path in raw_lane_paths]
 
         self.assertEqual(rc, 1)
         coverage = artifact["coverage"]
@@ -5120,6 +5140,11 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertEqual(coverage["chunksFailed"], 0)
         self.assertEqual(coverage["files"][0]["contentStatus"], "complete")
         self.assertEqual(coverage["files"][0]["bytesReviewed"], len(source.encode("utf-8")))
+        self.assertEqual(len(raw_lane_paths), 3)
+        self.assertEqual([entry["stage"] for entry in ledger], [
+            "review_chunk_1", "review_chunk_2", "review_chunk_3",
+        ])
+        self.assertTrue(all(entry["output"] == "chunk" for entry in ledger))
 
     def test_incomplete_synthesis_does_not_mark_reviewed_file_omitted(self) -> None:
         anti = load_anti()
@@ -5159,7 +5184,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 os.chdir(old_cwd)
 
             artifact = json.loads(
-                (anti.RUNS_DIR / "incomplete-synthesis" / "result.json").read_text(encoding="utf-8")
+                Path(anti.load_run_record(anti.RUNS_DIR / "incomplete-synthesis.json")["resultPath"]).read_text(encoding="utf-8")
             )
 
         self.assertEqual(rc, 1)
@@ -5372,13 +5397,13 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                 },
             )
             assert record_path is not None
-            artifact_path = Path(tmp) / "scope-test" / "result.json"
+            artifact_path = Path(anti.load_run_record(record_path)["resultPath"])
             self.assertTrue(artifact_path.exists())
             record = json.loads(record_path.read_text(encoding="utf-8"))
             artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
 
         self.assertEqual(record["resultPath"], str(artifact_path))
-        self.assertEqual(artifact["schemaVersion"], 1)
+        self.assertEqual(artifact["schemaVersion"], 2)
         self.assertEqual(artifact["runId"], "scope-test")
         self.assertEqual(artifact["runStatus"], "partial")
         self.assertEqual(artifact["scopeStatus"], "partial")

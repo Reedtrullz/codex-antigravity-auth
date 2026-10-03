@@ -9,6 +9,9 @@ permissions:
   contents: read
 
 jobs:
+  quality:
+    uses: ./.github/workflows/quality.yml
+
   test:
     name: Test ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
@@ -26,13 +29,17 @@ jobs:
             python-version: "3.14"
           - os: windows-latest
             python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -43,7 +50,7 @@ jobs:
         run: python -m compileall -q codex_antigravity_auth tests
 
       - name: Run tests
-        run: python -m pytest -q
+        run: python scripts/run_tests.py -q
 
   build:
     name: Build distribution artifacts
@@ -51,10 +58,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
@@ -81,41 +90,14 @@ jobs:
       - name: Check artifact metadata
         run: python -m twine check dist/*
 
-      - name: Verify package contents and installed CLI
-        run: |
-          python - <<'PY'
-          import pathlib
-          import zipfile
+      - name: Check complete artifact contents
+        run: python scripts/check_artifacts.py
 
-          wheel = next(pathlib.Path("dist").glob("*.whl"))
-          required = {
-              "codex_antigravity_auth/skills/anti/SKILL.md",
-              "codex_antigravity_auth/skills/anti/agents/openai.yaml",
-              "codex_antigravity_auth/skills/anti/scripts/anti.py",
-              "codex_antigravity_auth/skills/anti/scripts/anti_lib/__init__.py",
-              "codex_antigravity_auth/skills/anti/scripts/anti_lib/chunking.py",
-              "codex_antigravity_auth/skills/anti/scripts/anti_lib/context.py",
-              "codex_antigravity_auth/skills/anti/scripts/anti_lib/ledger.py",
-              "codex_antigravity_auth/skills/anti/scripts/anti_lib/redaction.py",
-              "codex_antigravity_auth/skills/anti/scripts/anti_lib/runner.py",
-              "codex_antigravity_auth/skills/anti/tests/test_anti.py",
-          }
-          with zipfile.ZipFile(wheel) as archive:
-              missing = sorted(required - set(archive.namelist()))
-          if missing:
-              raise SystemExit(f"Required Anti package assets missing: {missing}")
-          PY
-          wheel_venv="${RUNNER_TEMP}/codex-antigravity-publish-wheel"
-          clean_home="${RUNNER_TEMP}/codex-antigravity-publish-home"
-          python -m venv "$wheel_venv"
-          "$wheel_venv/bin/python" -m pip install dist/*.whl
-          "$wheel_venv/bin/codex-antigravity" --help
-          "$wheel_venv/bin/codex-antigravity" doctor --help
-          "$wheel_venv/bin/codex-antigravity" provider presets
-          HOME="$clean_home" "$wheel_venv/bin/codex-antigravity" install-skill --verify
+      - name: Test installed wheel and rebuilt sdist
+        run: python scripts/check_installed.py
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: python-distributions
           path: dist/*
@@ -124,7 +106,7 @@ jobs:
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [build, test]
+    needs: [build, test, quality]
     environment: pypi
     permissions:
       contents: read
@@ -132,10 +114,10 @@ jobs:
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: python-distributions
           path: dist
 
       - name: Publish package distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1

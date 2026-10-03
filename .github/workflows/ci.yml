@@ -4,7 +4,13 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
+  quality:
+    uses: ./.github/workflows/quality.yml
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -21,13 +27,17 @@ jobs:
             python-version: "3.14"
           - os: windows-latest
             python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -38,17 +48,19 @@ jobs:
         run: python -m compileall -q codex_antigravity_auth tests
 
       - name: Run tests
-        run: python -m pytest -q
+        run: python scripts/run_tests.py -q
 
   package:
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
@@ -61,52 +73,8 @@ jobs:
       - name: Check artifact metadata
         run: python -m twine check dist/*
 
-      - name: Check artifact contents
-        run: |
-          python - <<'PY'
-          import pathlib
-          import tarfile
-          import zipfile
+      - name: Check complete artifact contents
+        run: python scripts/check_artifacts.py
 
-          dist = pathlib.Path("dist")
-          wheel = next(dist.glob("*.whl"))
-          sdist = next(dist.glob("*.tar.gz"))
-
-          with zipfile.ZipFile(wheel) as zf:
-              wheel_names = set(zf.namelist())
-          if not any(name.endswith(".dist-info/licenses/LICENSE") or name.endswith("/LICENSE") for name in wheel_names):
-              raise SystemExit(f"LICENSE missing from wheel {wheel}")
-
-          required_suffixes = {
-              "codex_antigravity_auth/skills/anti/SKILL.md",
-              "codex_antigravity_auth/skills/anti/agents/openai.yaml",
-              "codex_antigravity_auth/skills/anti/scripts/anti.py",
-              "codex_antigravity_auth/skills/anti/scripts/anti_lib/__init__.py",
-              "codex_antigravity_auth/skills/anti/scripts/anti_lib/chunking.py",
-              "codex_antigravity_auth/skills/anti/scripts/anti_lib/context.py",
-              "codex_antigravity_auth/skills/anti/scripts/anti_lib/ledger.py",
-              "codex_antigravity_auth/skills/anti/scripts/anti_lib/redaction.py",
-              "codex_antigravity_auth/skills/anti/scripts/anti_lib/runner.py",
-              "codex_antigravity_auth/skills/anti/tests/test_anti.py",
-          }
-          missing = sorted(required_suffixes - wheel_names)
-          if missing:
-              raise SystemExit(f"Required Anti package assets missing from wheel: {missing}")
-
-          with tarfile.open(sdist) as tf:
-              sdist_names = tf.getnames()
-          if not any(name.endswith("/LICENSE") for name in sdist_names):
-              raise SystemExit(f"LICENSE missing from sdist {sdist}")
-          PY
-
-      - name: Install wheel in a clean venv
-        run: |
-          python -m venv /tmp/codex-antigravity-wheel
-          /tmp/codex-antigravity-wheel/bin/python -m pip install --upgrade pip
-          /tmp/codex-antigravity-wheel/bin/python -m pip install dist/*.whl
-          /tmp/codex-antigravity-wheel/bin/python -m pip check
-          /tmp/codex-antigravity-wheel/bin/codex-antigravity --help
-          /tmp/codex-antigravity-wheel/bin/codex-antigravity doctor --help
-          /tmp/codex-antigravity-wheel/bin/codex-antigravity provider presets
-          HOME=/tmp/codex-antigravity-home /tmp/codex-antigravity-wheel/bin/codex-antigravity install-skill --verify
-          HOME=/tmp/codex-antigravity-home /tmp/codex-antigravity-wheel/bin/python /tmp/codex-antigravity-home/.codex/skills/anti/scripts/anti.py consult --help
+      - name: Test installed wheel and rebuilt sdist
+        run: python scripts/check_installed.py

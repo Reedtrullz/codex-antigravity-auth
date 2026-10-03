@@ -1,6 +1,7 @@
 """Version-check, probe, readiness, and doctor commands (split from cli.py)."""
 
 from __future__ import annotations
+from .console import console_print as print
 
 import json
 import os
@@ -337,6 +338,9 @@ def version_check_result(*, timeout: float = 2.0) -> dict:
         "latest": None,
         "detail": "version check skipped",
     }
+    if _cli.local_environment_enabled():
+        result["detail"] = "version check disabled by local-only policy"
+        return result
     if os.environ.get("CODEX_ANTIGRAVITY_NO_UPDATE_CHECK") == "1":
         result["detail"] = "version check disabled by CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1"
         return result
@@ -428,27 +432,16 @@ def readiness_storage_diagnostics() -> dict[str, dict]:
 def provider_capability_mismatches(providers: dict[str, dict]) -> list[dict[str, str]]:
     mismatches: list[dict[str, str]] = []
     for provider_id, provider in sorted(providers.items()):
-        kind = provider.get("kind")
         auth_mode = _cli.provider_auth_mode(provider)
         try:
+            _cli.validate_supported_provider_kind(provider)
             _cli.provider_capabilities(provider)
         except ValueError as exc:
-            mismatches.append({"provider": provider_id, "reason": str(exc)})
+            mismatches.append({"provider": provider_id, "reason": _cli.redact_secret_text(str(exc))})
             continue
-        if kind == "openai_chat" and auth_mode != "api_key":
+        if auth_mode != "api_key":
             mismatches.append(
                 {"provider": provider_id, "reason": "openai_chat routes require api_key auth"}
-            )
-        elif kind == "openai_responses":
-            mismatches.append(
-                {
-                    "provider": provider_id,
-                    "reason": "native Responses routing is not supported by the CLI",
-                }
-            )
-        elif kind not in {"openai_chat", "openai_responses"}:
-            mismatches.append(
-                {"provider": provider_id, "reason": f"unsupported provider kind: {kind}"}
             )
     return mismatches
 
@@ -571,9 +564,9 @@ def codex_ready_report(
             provider = providers.get(provider_prefix)
             if not provider:
                 add("model_route", "fail", f"BYOK provider '{provider_prefix}' is not configured")
-            elif _cli.provider_key_status(provider, configured_label="key OK") != "key OK":
+            elif (provider_status := _cli.provider_key_status(provider, configured_label="key OK")) != "key OK":
                 credential_name = "OAuth login" if _cli.provider_auth_mode(provider) == "oauth" else "key"
-                add("model_route", "fail", f"BYOK provider '{provider_prefix}' does not have a usable {credential_name}")
+                add("model_route", "fail", f"BYOK provider '{provider_prefix}' is not usable ({credential_name} status: {provider_status})")
             else:
                 configured_models = [
                     str(model.get("id") if isinstance(model, dict) else model)
@@ -672,10 +665,13 @@ def codex_ready_report(
             status = "warn"
         else:
             status = "pass"
+        detail = f"{store.get('format')} store; migration {store.get('migration')}"
+        if store.get("error"):
+            detail += f"; {_cli.redact_secret_text(str(store['error']))}"
         add(
             name,
             status,
-            f"{store.get('format')} store; migration {store.get('migration')}",
+            detail,
             store=store,
         )
     if not capability_mismatches:
