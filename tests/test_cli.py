@@ -3,17 +3,20 @@ import unittest
 import json
 import os
 import signal
+import socket
 import stat
 import sys
 import threading
 import time
 from argparse import Namespace
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch, MagicMock
+from fake_upstream import upstream
 from codex_antigravity_auth.oauth import authorize_antigravity, encode_state
 from codex_antigravity_auth.cli import (
     OAuthCallbackHandler,
@@ -76,6 +79,23 @@ from codex_antigravity_auth.service import install_service, render_linux_systemd
 def assert_mode_if_posix(testcase: unittest.TestCase, path: Path, expected: int) -> None:
     if os.name != "nt":
         testcase.assertEqual(stat.S_IMODE(path.stat().st_mode), expected)
+
+
+@contextmanager
+def fixture_service_http(*payloads):
+    responses = [(200, {"Content-Type": "application/json"}, json.dumps(payload).encode()) for payload in payloads]
+    with upstream(*responses) as (base, requests):
+        port = urlparse(base).port
+        original_getaddrinfo = socket.getaddrinfo
+
+        def resolve_owned_localhost(name, destination_port, *args, **kwargs):
+            # Keep the production URL; resolve only this owned listener numerically.
+            if name == "localhost" and destination_port == port:
+                name = "127.0.0.1"
+            return original_getaddrinfo(name, destination_port, *args, **kwargs)
+
+        with patch("socket.getaddrinfo", side_effect=resolve_owned_localhost):
+            yield port, f"http://localhost:{port}/v1", requests
 
 
 def write_ready_codex_config(
@@ -1961,17 +1981,22 @@ class TestV3NativeSetup(unittest.TestCase):
         self.assertFalse(info["process_matches"])
 
     def test_run_gateway_status_reports_unmanaged_reachable_gateway(self):
-        with TemporaryDirectory() as tmp:
+        catalog = {"data": [{"id": "claude-sonnet-4-6"}]}
+        runtime = {"ok": True, "service": {"serviceId": "a" * 32, "launchHash": "b" * 64, "packageVersion": "fixture", "pid": 123}}
+        with TemporaryDirectory() as tmp, fixture_service_http(catalog, runtime) as (port, base, requests):
             with patch("codex_antigravity_auth.cli.get_codex_home", return_value=Path(tmp)):
-                with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-sonnet-4-6"}):
-                    with patch("codex_antigravity_auth.cli.service_status", return_value={"installed": False, "active": False}):
-                        with patch("codex_antigravity_auth.cli.request_log_info", return_value={"path": "requests.jsonl"}):
-                            with patch("builtins.print"):
-                                info = run_gateway_status(Namespace(port=51122, json=False))
+                with patch("codex_antigravity_auth.cli.service_status", return_value={"installed": False, "active": False}):
+                    with patch("codex_antigravity_auth.cli.request_log_info", return_value={"path": "requests.jsonl"}):
+                        with patch("builtins.print"):
+                            info = run_gateway_status(Namespace(port=port, json=False))
+            self.assertEqual([request["path"] for request in requests], ["/v1/models", "/health/runtime"])
 
         self.assertEqual(info["status"], "unmanaged")
         self.assertTrue(info["reachable"])
         self.assertEqual(info["reachable_model_count"], 1)
+        self.assertEqual(info["reachable_base_url"], base)
+        self.assertFalse(info["service"]["owned_ready"])
+        self.assertEqual(info["service"]["identity_status"], "foreign_or_unverified")
 
     def test_gateway_reachability_default_allows_cold_model_catalog(self):
         info = {"port": 51122, "status": "stopped", "running": False}
@@ -1983,31 +2008,36 @@ class TestV3NativeSetup(unittest.TestCase):
         self.assertEqual(models.call_args.kwargs["timeout"], 5.0)
 
     def test_run_gateway_status_uses_waiting_reachability_probe(self):
-        with patch(
-            "codex_antigravity_auth.cli.reachable_gateway_status_info",
-            return_value={
-                "port": 51122,
-                "status": "unmanaged",
-                "running": False,
-                "pid": None,
-                "pid_file": "/tmp/pid",
-                "log_file": "/tmp/log",
-                "process_running": False,
-                "process_matches": None,
-                "reachable": True,
-                "reachable_base_url": "http://127.0.0.1:51122/v1",
-                "reachable_model_count": 7,
-            },
-        ) as status_info:
-            with patch("codex_antigravity_auth.cli.service_status", return_value={"installed": True, "active": True}):
-                with patch("codex_antigravity_auth.cli.request_log_info", return_value={"path": "requests.jsonl"}):
-                    with patch("builtins.print"):
-                        info = run_gateway_status(Namespace(port=51122, json=False))
+        runtime = {"ok": True, "service": {"serviceId": "a" * 32, "launchHash": "b" * 64, "packageVersion": "fixture", "pid": 123}}
+        with fixture_service_http(runtime) as (port, base, requests):
+            with patch(
+                "codex_antigravity_auth.cli.reachable_gateway_status_info",
+                return_value={
+                    "port": port,
+                    "status": "unmanaged",
+                    "running": False,
+                    "pid": None,
+                    "pid_file": "/tmp/pid",
+                    "log_file": "/tmp/log",
+                    "process_running": False,
+                    "process_matches": None,
+                    "reachable": True,
+                    "reachable_base_url": base,
+                    "reachable_model_count": 7,
+                },
+            ) as status_info:
+                with patch("codex_antigravity_auth.cli.service_status", return_value={"installed": True, "active": True}):
+                    with patch("codex_antigravity_auth.cli.request_log_info", return_value={"path": "requests.jsonl"}):
+                        with patch("builtins.print"):
+                            info = run_gateway_status(Namespace(port=port, json=False))
+            self.assertEqual([request["path"] for request in requests], ["/health/runtime"])
 
         self.assertTrue(info["reachable"])
-        status_info.assert_called_once_with(51122, wait=True, timeout=5.0)
+        status_info.assert_called_once_with(port, wait=True, timeout=5.0)
         self.assertTrue(info["service"]["reachable"])
         self.assertEqual(info["service"]["state"], "degraded")
+        self.assertFalse(info["service"]["owned_ready"])
+        self.assertEqual(info["service"]["identity_status"], "foreign_or_unverified")
 
     def test_run_gateway_status_marks_registered_but_unreachable_service_degraded(self):
         with patch(
@@ -2886,99 +2916,111 @@ class TestVNextPolishCli(unittest.TestCase):
         self.assertIn("service uninstall --port 51122", printed)
 
     def test_service_status_prints_reachable_gateway_when_service_has_no_pid_file(self):
-        gateway = {
-            "port": 51122,
-            "status": "stopped",
-            "running": False,
-            "pid": None,
-            "pid_file": "/tmp/antigravity-gateway-51122.pid",
-            "log_file": "/tmp/antigravity-gateway-51122.log",
-            "process_running": False,
-            "process_matches": None,
-        }
-        service = {
-            "platform": "macos",
-            "installed": True,
-            "active": True,
-            "path": "/Users/reidar/Library/LaunchAgents/com.codex-antigravity.gateway.51122.plist",
-        }
+        runtime = {"ok": True, "service": {"serviceId": "a" * 32, "launchHash": "b" * 64, "packageVersion": "fixture", "pid": 123}}
+        with fixture_service_http(runtime) as (port, base, requests):
+            gateway = {
+                "port": port,
+                "status": "stopped",
+                "running": False,
+                "pid": None,
+                "pid_file": f"/tmp/antigravity-gateway-{port}.pid",
+                "log_file": f"/tmp/antigravity-gateway-{port}.log",
+                "process_running": False,
+                "process_matches": None,
+            }
+            service = {
+                "platform": "macos",
+                "installed": True,
+                "active": True,
+                "path": f"/fixture/launch/com.codex-antigravity.gateway.{port}.plist",
+            }
 
-        def mark_reachable(info):
-            info.update(
-                {
-                    "status": "unmanaged",
-                    "reachable": True,
-                    "reachable_base_url": "http://127.0.0.1:51122/v1",
-                    "reachable_model_count": 7,
-                }
-            )
+            def mark_reachable(info):
+                info.update(
+                    {
+                        "status": "unmanaged",
+                        "reachable": True,
+                        "reachable_base_url": base,
+                        "reachable_model_count": 7,
+                    }
+                )
 
-        with patch("codex_antigravity_auth.cli.service_status", return_value=service):
-            with patch("codex_antigravity_auth.cli.gateway_status_info", return_value=gateway):
-                with patch("codex_antigravity_auth.cli.add_gateway_reachability", side_effect=mark_reachable):
-                    with patch("builtins.print") as mock_print:
-                        result = run_service_command(Namespace(service_command="status", port=51122, json=False))
+            with patch("codex_antigravity_auth.cli.service_status", return_value=service):
+                with patch("codex_antigravity_auth.cli.gateway_status_info", return_value=gateway):
+                    with patch("codex_antigravity_auth.cli.add_gateway_reachability", side_effect=mark_reachable):
+                        with patch("builtins.print") as mock_print:
+                            result = run_service_command(Namespace(service_command="status", port=port, json=False))
+            self.assertEqual([request["path"] for request in requests], ["/health/runtime"])
 
         self.assertTrue(result["gateway"]["reachable"])
         self.assertEqual(result["service"]["state"], "degraded")
+        self.assertFalse(result["service"]["owned_ready"])
+        self.assertEqual(result["service"]["identity_status"], "foreign_or_unverified")
         printed = "\n".join(call.args[0] for call in mock_print.call_args_list if call.args)
         self.assertIn("Service status: installed, active", printed)
-        self.assertIn("Gateway process: reachable (7 model(s) at http://127.0.0.1:51122/v1)", printed)
+        self.assertIn(f"Gateway process: reachable (7 model(s) at {base})", printed)
 
     def test_service_install_waits_briefly_for_reachable_gateway(self):
-        gateway = {
-            "port": 51122,
-            "status": "stopped",
-            "running": False,
-            "pid": None,
-            "pid_file": "/tmp/antigravity-gateway-51122.pid",
-            "log_file": "/tmp/antigravity-gateway-51122.log",
-            "process_running": False,
-            "process_matches": None,
-        }
-        service = {
-            "platform": "macos",
-            "installed": True,
-            "active": True,
-            "path": "/Users/reidar/Library/LaunchAgents/com.codex-antigravity.gateway.51122.plist",
-        }
-        probes = iter(
-            [
-                {"reachable": False, "reachability_error": "connection refused"},
-                {
-                    "status": "unmanaged",
-                    "reachable": True,
-                    "reachable_base_url": "http://127.0.0.1:51122/v1",
-                    "reachable_model_count": 7,
-                },
-            ]
-        )
+        identity = {"serviceId": "a" * 32, "launchHash": "b" * 64, "packageVersion": "fixture"}
+        with fixture_service_http({"ok": True, "service": {**identity, "pid": 123}}) as (port, base, requests):
+            gateway = {
+                "port": port,
+                "status": "stopped",
+                "running": False,
+                "pid": None,
+                "pid_file": f"/tmp/antigravity-gateway-{port}.pid",
+                "log_file": f"/tmp/antigravity-gateway-{port}.log",
+                "process_running": False,
+                "process_matches": None,
+            }
+            service = {
+                "platform": "macos",
+                "installed": True,
+                "active": True,
+                "path": f"/fixture/launch/com.codex-antigravity.gateway.{port}.plist",
+                "expected_identity": identity,
+            }
+            probes = iter(
+                [
+                    {"reachable": False, "reachability_error": "connection refused"},
+                    {
+                        "status": "unmanaged",
+                        "reachable": True,
+                        "reachable_base_url": base,
+                        "reachable_model_count": 7,
+                    },
+                ]
+            )
 
-        def mark_reachable(info):
-            info.update(next(probes))
+            def mark_reachable(info):
+                info.update(next(probes))
 
-        with patch("codex_antigravity_auth.cli.install_service", return_value=service):
-            with patch("codex_antigravity_auth.cli.gateway_status_info", side_effect=[dict(gateway), dict(gateway)]):
-                with patch("codex_antigravity_auth.cli.add_gateway_reachability", side_effect=mark_reachable) as probe:
-                    with patch("codex_antigravity_auth.cli.time.sleep") as sleep:
-                        with patch("builtins.print") as mock_print:
-                            result = run_service_command(
-                                Namespace(
-                                    service_command="install",
-                                    port=51122,
-                                    host="127.0.0.1",
-                                    json=False,
-                                    op_env_file=None,
-                                    op_environment=None,
+            with patch("codex_antigravity_auth.cli.install_service", return_value=service):
+                with patch("codex_antigravity_auth.cli.gateway_status_info", side_effect=[dict(gateway), dict(gateway)]):
+                    with patch("codex_antigravity_auth.cli.add_gateway_reachability", side_effect=mark_reachable) as probe:
+                        with patch("codex_antigravity_auth.cli.time.sleep") as sleep:
+                            with patch("builtins.print") as mock_print:
+                                result = run_service_command(
+                                    Namespace(
+                                        service_command="install",
+                                        port=port,
+                                        host="127.0.0.1",
+                                        json=False,
+                                        op_env_file=None,
+                                        op_environment=None,
+                                    )
                                 )
-                            )
+            self.assertEqual([request["path"] for request in requests], ["/health/runtime"])
 
         self.assertTrue(result["gateway"]["reachable"])
+        self.assertTrue(result["service"]["owned_ready"])
+        self.assertEqual(result["service"]["identity_status"], "matched")
+        self.assertEqual(result["service"]["state"], "ready")
         self.assertEqual(probe.call_count, 2)
         sleep.assert_called_once_with(0.25)
         printed = "\n".join(call.args[0] for call in mock_print.call_args_list if call.args)
-        self.assertIn("Gateway service installed for port 51122", printed)
-        self.assertIn("Gateway process: reachable (7 model(s) at http://127.0.0.1:51122/v1)", printed)
+        self.assertIn(f"[+] Gateway service installed for port {port}", printed)
+        self.assertIn(f"Gateway process: reachable (7 model(s) at {base})", printed)
 
     def test_service_install_does_not_claim_success_when_state_not_observed(self):
         service = {

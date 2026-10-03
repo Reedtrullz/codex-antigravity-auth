@@ -1675,8 +1675,12 @@ def _main():
     from .setup_profiles import add_parsers
     add_parsers(subparsers)
     args = parser.parse_args()
+    # Observation commands own their evidence/proposal JSON; the operational
+    # envelope covers model listing without replacing those command payloads.
     command_json = (
         args.command == "accounts" and getattr(args, "accounts_action", None) == "explain"
+    ) or (
+        args.command == "models" and getattr(args, "models_command", None) in {"explain", "probe", "import"}
     ) or (
         args.command == "provider" and getattr(args, "provider_command", None) in {"discover", "import-discovery"}
     )
