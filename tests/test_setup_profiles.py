@@ -464,3 +464,24 @@ def test_plan_and_stage_evidence_must_agree_before_restore(isolated, mutation):
     with pytest.raises(setup.SetupError):
         setup.restore_receipt(run_id, ["config"], write=True)
     assert (tree(client), tree(state)) == before
+
+
+@pytest.mark.parametrize("kind", ["file", "parent", "missing_below_parent"])
+def test_setup_plan_rejects_raw_symlink_components_without_reading_or_writing(isolated, tmp_path, kind):
+    client, state = isolated
+    real = tmp_path / "real-config"
+    real.mkdir()
+    target = real / "config.toml"
+    target.write_text(ORIGINAL)
+    link = tmp_path / "linked-config"
+    try:
+        link.symlink_to(target if kind == "file" else real, target_is_directory=kind != "file")
+    except OSError:
+        pytest.skip("fixture symlink creation unavailable")
+    selected = link if kind == "file" else link / ("absent/config.toml" if kind == "missing_below_parent" else "config.toml")
+    before = target.read_bytes(), target.stat().st_mode, target.stat().st_mtime_ns
+    with pytest.raises((setup.SetupError, ValueError, OSError)):
+        setup.setup_plan(options(config=str(selected)))
+    assert (target.read_bytes(), target.stat().st_mode, target.stat().st_mtime_ns) == before
+    assert not client.exists() and not state.exists()
+    assert link.is_symlink()
