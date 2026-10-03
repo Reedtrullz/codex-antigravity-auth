@@ -124,6 +124,20 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         remaining = deadline - time.monotonic() if deadline is not None else 1.0
         timeout = max(0.001, min(1.0, remaining))
         self.connection.settimeout(timeout)
+        request_deadline = time.monotonic() + timeout
+        raw = self.rfile.raw
+        readinto = raw.readinto
+
+        def read_before_deadline(buffer):
+            remaining = request_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("OAuth callback request deadline exceeded")
+            self.connection.settimeout(min(1.0, remaining))
+            return readinto(buffer)
+
+        # Buffered readline may perform many receives as headers drip in.
+        # Recompute remaining time per receive rather than resetting an idle timeout.
+        raw.readinto = read_before_deadline
         self._request_expired = False
 
         def stop_request():
