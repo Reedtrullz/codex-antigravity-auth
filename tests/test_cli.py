@@ -1540,7 +1540,7 @@ class TestV3NativeSetup(unittest.TestCase):
     def test_setup_write_prompts_for_missing_oauth_credentials_on_tty(self):
         with TemporaryDirectory() as tmp:
             credentials_path = Path(tmp) / "antigravity-credentials.json"
-            args = self.setup_args(write=True, config=str(Path(tmp) / "config.toml"))
+            args = self.setup_args(write=True, config=str(Path(tmp).resolve() / "config.toml"))
             stdin = MagicMock()
             stdin.isatty.return_value = True
             with patch("codex_antigravity_auth.constants.CREDENTIALS_FILE", str(credentials_path)):
@@ -2574,7 +2574,7 @@ class TestVNextPolishCli(unittest.TestCase):
 
     def test_setup_repair_writes_only_codex_config(self):
         with TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "config.toml"
+            config_path = Path(tmp).resolve() / "config.toml"
             args = Namespace(
                 check=False,
                 json=False,
