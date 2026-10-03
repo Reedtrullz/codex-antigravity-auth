@@ -87,7 +87,9 @@ def test_local_lifespan_and_health_do_not_start_cloud_refresh_or_inspect_cloud_a
         assert health['local_only_policy']['enabled'] is True
         assert health['accounts']['status']=='not_inspected_local_only'
         assert server._refresh_ahead_owner is None
+        assert server.ADMISSION.startup_ceiling == server.ResourceLimits.from_env().inflight
     assert server._refresh_ahead_owner is None
+    assert server.ADMISSION.startup_ceiling is None
 
 
 def test_cli_start_policy_and_update_checks_are_explicit(monkeypatch):
