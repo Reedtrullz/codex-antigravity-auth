@@ -174,7 +174,7 @@ def provider_client(lane, *, timeout, trust_env=True, follow_redirects=False):
 REFRESH_AHEAD_THROTTLE_SECONDS = 60.0
 STREAM_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 REQUEST_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-MUTATING_JSON_PATHS = {"/v1/responses", "/v1/local/responses"}
+MUTATING_JSON_PATHS = {"/v1/responses", "/v1/local/responses", "/v1/context/preflight"}
 MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS = 2.0
 GOOGLE_BACKEND_TIMEOUT_SECONDS = 60.0
 GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS = 1.0
@@ -313,6 +313,14 @@ def mutating_json_request_guard(request: Request) -> JSONResponse | None:
 
 @app.middleware("http")
 async def require_remote_gateway_token(request: Request, call_next):
+    async def guarded_response():
+        response = await call_next(request)
+        report = getattr(request.state, 'context_preflight', None)
+        if isinstance(report, dict):
+            response.headers['X-Antigravity-Context-Status'] = report['status']
+            response.headers['X-Antigravity-Context-Estimate'] = 'utf8-estimate-not-token-guarantee'
+        return response
+
     client_host = request.client.host if request.client else None
     allow_remote = os.environ.get("ANTIGRAVITY_ALLOW_REMOTE") == "1"
     proxy_marked = any(name in request.headers for name in PROXY_INDICATOR_HEADERS)
@@ -324,7 +332,7 @@ async def require_remote_gateway_token(request: Request, call_next):
         guard_response = mutating_json_request_guard(request)
         if guard_response is not None:
             return guard_response
-        return await call_next(request)
+        return await guarded_response()
 
     try:
         token = validate_gateway_token_strength(os.environ.get("ANTIGRAVITY_GATEWAY_TOKEN")) if allow_remote else ""
@@ -336,7 +344,7 @@ async def require_remote_gateway_token(request: Request, call_next):
         guard_response = mutating_json_request_guard(request)
         if guard_response is not None:
             return guard_response
-        return await call_next(request)
+        return await guarded_response()
 
     return JSONResponse(
         status_code=403,
@@ -1394,14 +1402,46 @@ class OwnedStreamingResponse(StreamingResponse):
             await self.background()
 
 
+@app.post('/v1/context/preflight')
+async def context_preflight(request: Request):
+    """No generation, auth refresh, remote token-count API or request mutation."""
+    from .context_preflight import inspect
+    budget = _new_request_budget(request)
+    try:
+        with budget.active():
+            raw = await budget.run(lambda: read_request_json(request, budget.limits))
+            budget.body_read = True
+            value = await budget.sync(validate_response_request_body, raw)
+            value['model'] = response_model_id(value)
+            providers = await budget.sync(all_provider_configs_read_only)
+            return await budget.sync(inspect, value, providers)
+    except ResourceLimitError as exc:
+        raise _resource_limit_http_exception(exc) from exc
+    except RequestDeadlineExceeded as exc:
+        raise HTTPException(status_code=504, detail='Context preflight deadline exceeded') from exc
+    except HTTPException:
+        raise
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail='Invalid context preflight request') from exc
+    finally:
+        await budget.close()
+
+
 @app.post('/v1/local/responses')
 async def create_local_response(request: Request):
     request.state.require_local_mode = True
     return await create_response(request)
 
 
-@app.post("/v1/responses")
-async def create_response(request: Request):
+def _resource_limit_http_exception(exc):
+    headers = {"Retry-After": "1"} if exc.status == 503 else None
+    return HTTPException(status_code=exc.status,
+                         detail={"code": exc.code, "message": str(exc)},
+                         headers=headers)
+
+
+def _new_request_budget(request):
+    """Apply the shared request parser, admission ceiling and permit cleanup."""
     try:
         limits = ResourceLimits.from_env()
     except ValueError as exc:
@@ -1409,12 +1449,18 @@ async def create_response(request: Request):
     try:
         permit = ADMISSION.acquire(limits)
     except ResourceLimitError as exc:
-        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)}, headers={"Retry-After": "1"}) from exc
+        raise _resource_limit_http_exception(exc) from exc
     budget = RequestBudget(request, timeout=GOOGLE_BACKEND_TIMEOUT_SECONDS,
                            release_account=release_account_for_request)
     budget.limits = limits
     budget.permit = permit
     budget.register_finalizer(permit.release)
+    return budget
+
+
+@app.post("/v1/responses")
+async def create_response(request: Request):
+    budget = _new_request_budget(request)
     transferred = False
     try:
         with budget.active():
@@ -1425,8 +1471,7 @@ async def create_response(request: Request):
         report = getattr(budget, "report_limit", None)
         if report is not None:
             await shielded_cleanup(lambda: report(exc), timeout=0.05)
-        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)},
-                            headers={"Retry-After": "1"} if exc.status == 503 else None) from exc
+        raise _resource_limit_http_exception(exc) from exc
     except (RequestDeadlineExceeded, ClientDisconnect, asyncio.CancelledError) as exc:
         if not isinstance(exc, RequestDeadlineExceeded) and not budget.terminal_observed:
             budget.cancelled = True
@@ -1522,6 +1567,21 @@ async def _create_response(request: Request, budget: RequestBudget):
     except HTTPException as exc:
         await log_request("failed", http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
         raise
+    async def check_context(providers=None, *, deployment=None):
+        from .context_preflight import enforce, ContextLimitExceeded
+        try:
+            report = await budget.sync(enforce, codex_req, providers or {}, deployment=deployment, route=unified_route)
+        except ContextLimitExceeded as exc:
+            await log_request('failed', model=model, stream=stream, http_status=400,
+                              error_class='context_limit_exceeded', attempt_count=0)
+            raise HTTPException(status_code=400, detail={'code':'context_limit_exceeded',
+                'message':str(exc), 'context_preflight':exc.report}) from exc
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail='Request cannot be assessed as finite JSON')
+        budget.context_preflight = report
+        if isinstance(request, Request):
+            request.state.context_preflight = report
+
     unified_enabled = is_unified_mode_enabled()
     unified_route = await budget.sync(classify_route, model, unified_enabled=unified_enabled)
     budget.context.update(model=model, route="openai" if unified_route.startswith("openai") else "google" if unified_route == "antigravity" else unified_route, stream=stream)
@@ -1598,6 +1658,13 @@ async def _create_response(request: Request, budget: RequestBudget):
                 error=str(exc),
             )
             raise HTTPException(status_code=exc.status_code, detail=openai_failure_detail(model, str(exc))) from exc
+        deployment = None
+        auth_kind = getattr(auth, 'kind', None)
+        if auth_kind == 'codex_oauth' or (auth_kind == 'api_key' and isinstance(getattr(auth, 'base_url', None), str)):
+            account_ref = getattr(auth, 'account_id', None)
+            if account_ref is None or isinstance(account_ref, str):
+                deployment = {'kind':auth_kind, 'endpoint':openai_responses_url(auth), 'account':account_ref}
+        await check_context(deployment=deployment)
         upstream_model = strip_reserved_openai_prefix(model).strip() or model
         if stream:
             try:
@@ -1833,6 +1900,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                 error=safe_error_detail(exc),
             )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await check_context(providers)
         if stream:
             payload, url, headers, timeout = await budget.sync(prepare_openai_compatible_request, codex_req, provider, provider_model, stream=True)
             await log_request("stream_started", model=model, route="byok", provider=provider_id, stream=True)
@@ -1961,6 +2029,7 @@ async def _create_response(request: Request, budget: RequestBudget):
             error=exc,
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await check_context()
     schedule_refresh_accounts_ahead()
 
     # 1. Select account automatically from pool
