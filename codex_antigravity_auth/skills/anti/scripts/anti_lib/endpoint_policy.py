@@ -76,7 +76,7 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     http_error_308 = http_error_302
 
 
-def open_http_request(request: urllib.request.Request | str, *, timeout: float = 10.0, before_open=None):
+def open_http_request(request: urllib.request.Request | str, *, timeout: float = 10.0, before_open=None, loopback_only: bool = False):
     if isinstance(request, str):
         request = urllib.request.Request(validate_endpoint_url(request, allow_query=True))
     if request.fragment is not None:
