@@ -299,7 +299,7 @@ def test_terminal_failures_preserve_submitted_attempt_evidence(anti,monkeypatch,
     assert settings._run_control.snapshot()['permits_released']==1
 
 
-@pytest.mark.parametrize('preparation', ['json','request','opener'])
+@pytest.mark.parametrize('preparation', ['context','json','request','opener'])
 def test_preparation_expiry_never_enters_transport_or_marks_submitted(anti,monkeypatch,preparation):
     settings=args(anti, fallback_model=None, budget=1)
     clock=[0.0]
@@ -315,7 +315,13 @@ def test_preparation_expiry_never_enters_transport_or_marks_submitted(anti,monke
             result=encode(value,*values,**kwargs)
             if isinstance(value,dict) and value.get('input')=='fixture':clock[0]=2
             return result
-        monkeypatch.setattr(anti.json,'dumps',expire)
+        request_json=anti.request_json
+        def encoding_at_transport(*values,**kwargs):
+            # Expire while encoding the submitted body, after context assessment.
+            with monkeypatch.context() as scope:
+                scope.setattr(anti.json,'dumps',expire)
+                return request_json(*values,**kwargs)
+        monkeypatch.setattr(anti,'request_json',encoding_at_transport)
     elif preparation=='request':
         request=anti.urllib.request.Request
         def expire(*values,**kwargs):

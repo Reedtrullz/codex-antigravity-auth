@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from codex_antigravity_auth import byok, cli, server, endpoint_policy
 from codex_antigravity_auth.skills.anti.scripts.anti_lib import local_policy
-from fake_upstream import upstream
+from fake_upstream import upstream, test_client_with_peer
 
 
 @pytest.fixture
@@ -87,7 +87,9 @@ def test_local_lifespan_and_health_do_not_start_cloud_refresh_or_inspect_cloud_a
         assert health['local_only_policy']['enabled'] is True
         assert health['accounts']['status']=='not_inspected_local_only'
         assert server._refresh_ahead_owner is None
+        assert server.ADMISSION.startup_ceiling == server.ResourceLimits.from_env().inflight
     assert server._refresh_ahead_owner is None
+    assert server.ADMISSION.startup_ceiling is None
 
 
 def test_cli_start_policy_and_update_checks_are_explicit(monkeypatch):
@@ -365,7 +367,7 @@ def test_local_start_refuses_secret_network_wrapper(monkeypatch, option):
 def test_local_generation_keeps_existing_browser_and_host_guards(configurations, monkeypatch, path, headers, status, message):
     monkeypatch.setattr(server, 'all_provider_configs', lambda: pytest.fail('no provider configuration after boundary refusal'))
     monkeypatch.setattr(server, '_create_response', AsyncMock(side_effect=AssertionError('no handler dispatch')))
-    client = TestClient(server.app, base_url='http://127.0.0.1:51122', client=('127.0.0.1', 50000))
+    client = test_client_with_peer(('127.0.0.1', 50000), app=server.app, base_url='http://127.0.0.1:51122')
     response = client.post(path, content=json.dumps({'model': 'local:one', 'input': 'fixture'}),
                            headers={'Content-Type': 'application/json', **headers})
     assert response.status_code == status and message in response.json()['detail']
@@ -375,7 +377,7 @@ def test_local_generation_keeps_existing_browser_and_host_guards(configurations,
 def test_valid_local_origin_reaches_local_inference(configurations, path):
     with upstream((200, {'Content-Type': 'application/json'}, chat('Complete local origin fixture answer.'))) as (base, seen):
         configurations['local'] = provider('local', base + '/v1')
-        client = TestClient(server.app, base_url='http://127.0.0.1:51122', client=('127.0.0.1', 50000))
+        client = test_client_with_peer(('127.0.0.1', 50000), app=server.app, base_url='http://127.0.0.1:51122')
         response = client.post(path, json={'model': 'local:one', 'input': 'fixture'},
                                headers={'Origin': 'http://localhost:51122', 'Sec-Fetch-Site': 'same-origin'})
     assert response.status_code == 200 and len(seen) == 1

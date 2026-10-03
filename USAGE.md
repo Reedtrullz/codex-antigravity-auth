@@ -423,30 +423,9 @@ Completed tool arguments must encode JSON objects and satisfy the available decl
 
 Google generated-media parts produce an explicit failure while retaining supported sibling output. The image-generation backend is recognized but excluded from advertised models and rejected before account selection; image input on supported text models remains available. See [Google output support](codex_antigravity_auth/design/google-output.md).
 
-Direct Anti review/plan can opt into immutable checkpoints with
-`--checkpoint-chunks --save-output full`. `--resume-from ID` creates a new run,
-requires the original source/task identity, reuses verified completed chunks and
-always resynthesizes. Failed/truncated chunks need explicit `--rerun-chunk N`.
-See [chunk resume](codex_antigravity_auth/skills/anti/CHUNK_RESUME.md) for retention,
-route receipts, coverage, combined reporting and per-invocation allowance scope.
+## Resource limits and overload
 
-### Experimental Anti image attachments
-
-Use repeatable `--image PATH` for explicit bounded PNG/JPEG files on generation
-commands. Each selected lane, judge and active fallback must declare image support
-in the gateway catalog. Exact bytes are forwarded; pixels and embedded metadata
-are not secret-scanned. Real-media evaluation is still an unmet release gate.
-See [attachments](codex_antigravity_auth/skills/anti/ATTACHMENTS.md) for examples,
-recording behavior, scope separation and the synthetic-only evidence boundary.
-
-### Local HTML run reports
-
-`python scripts/anti.py runs report RUN_ID --compare OTHER_ID --output compare.html`
-exports validated retained publications to a self-contained read-only page.
-`runs export --format html` shows retained reflection evidence and local finding
-verdicts. See [HTML reports](codex_antigravity_auth/skills/anti/HTML_REPORTS.md) for
-comparison, keyboard navigation, retention and display limits. No server or
-network publication is started.
+Generation admission defaults to 32 in-flight requests per process and 16 per backend route. Excess requests receive HTTP503 with Retry-After. Incoming bodies default to32MiB, inline attachments have separate decoded limits, and JSON/schema/SSE/provider accumulation are bounded without accepting clipped requests as complete. Set operator environment overrides for larger contexts or images; increasing the in-flight ceiling above its startup value requires a gateway restart. See [resource limits and admission](codex_antigravity_auth/RESOURCE_LIMITS.md) for units, ranges, failure codes and ownership.
 
 ## Anti whole-run deadlines
 
@@ -465,3 +444,61 @@ apply to retries, fallback and judge calls. Optional `--currency-budget` require
 an explicit dated `--pricing-file` with complete-attempt charge bounds; unknown
 or stale prices refuse admission. Local usage is not billing. See the packaged
 [spend-control contract](codex_antigravity_auth/skills/anti/SPEND_CONTROL.md).
+
+## HTTP client pooling
+
+The running gateway reuses bounded HTTP connections for generation across Google, native OpenAI and BYOK, with separate pools for each environment-proxy policy. Credentials and timeouts remain per request; shared cookie storage is disabled. See [HTTP client ownership and synthetic measurements](codex_antigravity_auth/HTTP_CLIENTS.md).
+
+## Model discovery and recent readiness
+
+`provider discover NAME` reads cached evidence; `--network` explicitly fetches a
+bounded optional catalog. `models explain ID --json` stays offline, while
+`models probe ID --network` records one expiring text-generation check. Imports
+are preview-first and require `--write --accept-digest` to save. See the
+[discovery and readiness contract](codex_antigravity_auth/design/model-discovery.md)
+for supported pagination, limits, cache semantics and configuration diagnostics.
+
+## Context preflight
+
+`POST /v1/context/preflight` accepts the intended Responses request body and
+returns a count-only `fit`/`unknown`/`reject` assessment without generation. The
+current catalog limits are declarations, so ordinary routes return `unknown`
+with labeled whole-request estimates. See [context preflight](codex_antigravity_auth/skills/anti/CONTEXT_PREFLIGHT.md)
+for component accounting, evidence requirements, generation behavior and Anti
+usage calibration. Character limits are not tokenizer or context guarantees.
+
+## Chunk checkpoints
+
+Direct Anti review/plan can opt into immutable checkpoints with
+`--checkpoint-chunks --save-output full`. `--resume-from ID` creates a new run,
+requires the original source/task identity, reuses verified completed chunks and
+always resynthesizes. Failed/truncated chunks need explicit `--rerun-chunk N`.
+See [chunk resume](codex_antigravity_auth/skills/anti/CHUNK_RESUME.md) for retention,
+route receipts, coverage, combined reporting and per-invocation allowance scope.
+
+### Offline review-quality replay
+
+`python scripts/anti.py benchmark corpus`, `benchmark template`, and
+`benchmark replay --replay replay.json --adjudications adjudications.json` provide
+a versioned synthetic corpus and matched-case evaluation. Independent local
+evidence is separate from model claims; unavailable, invalid and inconclusive
+results remain explicit. See [offline benchmark](codex_antigravity_auth/skills/anti/BENCHMARK.md).
+No live tournament, model quality ranking or routing-default change is performed.
+
+### Experimental Anti image attachments
+
+Use repeatable `--image PATH` for explicit bounded PNG/JPEG files on generation
+commands. Each selected lane, judge and active fallback must declare image support
+in the gateway catalog. Exact bytes are forwarded; pixels and embedded metadata
+are not secret-scanned. Real-media evaluation is still an unmet release gate.
+See [attachments](codex_antigravity_auth/skills/anti/ATTACHMENTS.md) for examples,
+recording behavior, scope separation and the synthetic-only evidence boundary.
+
+### Local HTML run reports
+
+`python scripts/anti.py runs report RUN_ID --compare OTHER_ID --output compare.html`
+exports validated retained publications to a self-contained read-only page.
+`runs export --format html` shows retained reflection evidence and local finding
+verdicts. See [HTML reports](codex_antigravity_auth/skills/anti/HTML_REPORTS.md) for
+comparison, keyboard navigation, retention and display limits. No server or
+network publication is started.

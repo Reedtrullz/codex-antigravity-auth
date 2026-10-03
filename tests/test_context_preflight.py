@@ -1,5 +1,6 @@
 """Context evidence is synthetic; no real tokenizer/limit/provider is certified."""
 from copy import deepcopy
+import asyncio
 import argparse
 import io
 from urllib.parse import urlsplit
@@ -10,12 +11,14 @@ from unittest.mock import AsyncMock
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from codex_antigravity_auth import byok, context_preflight, server
 from codex_antigravity_auth.skills.anti.scripts.anti_lib.context_budget import (
     assess, calibration, VerifiedContext,
 )
+from codex_antigravity_auth.resource_limits import Admission, ResourceLimits
 from fake_upstream import upstream
 
 
@@ -133,6 +136,24 @@ def provider(base):
     return byok.merged_provider_config('fixture', value)
 
 
+class RawRequest:
+    def __init__(self, body, *, started=None):
+        self.body = body
+        self.headers = {'content-length': str(len(body)), 'content-type': 'application/json'}
+        self.state = SimpleNamespace()
+        self.read_chunks = 0
+        self.started = started
+
+    async def stream(self):
+        self.read_chunks += 1
+        if self.started is not None:
+            self.started.set()
+        yield self.body
+
+    async def is_disconnected(self):
+        return False
+
+
 def test_nongenerating_preflight_reads_declarations_without_provider_or_auth_activity(gateway,monkeypatch):
     gateway['fixture'] = provider('http://127.0.0.1:12345/v1')
     monkeypatch.setattr(server, 'resolve_openai_auth', lambda:pytest.fail('no auth'))
@@ -144,6 +165,117 @@ def test_nongenerating_preflight_reads_declarations_without_provider_or_auth_act
     assert report['status'] == 'unknown' and report['limit']['declared_tokens'] == 50
     assert report['declared_comparison'] == 'estimate_exceeds_declaration'
     assert 'long fixture' not in response.text
+
+
+@pytest.mark.parametrize('kind', ['body', 'depth'])
+def test_preflight_applies_current_json_limits_before_reading_provider_configuration(gateway,monkeypatch,kind):
+    gateway['fixture'] = provider('http://127.0.0.1:12345/v1')
+    provider_reads = []
+    monkeypatch.setattr(server, 'all_provider_configs_read_only', lambda: provider_reads.append(True) or gateway)
+    if kind == 'body':
+        monkeypatch.setenv('ANTIGRAVITY_MAX_BODY_BYTES', '1024')
+        body = b'{"model":"fixture:arbitrary-unknown","input":"' + b'x' * 1024 + b'"}'
+        code = 'request_body_limit'
+    else:
+        monkeypatch.setenv('ANTIGRAVITY_MAX_JSON_DEPTH', '8')
+        body = b'{"model":"fixture:arbitrary-unknown","input":' + b'[' * 9 + b'"x"' + b']' * 9 + b'}'
+        code = 'json_depth_limit'
+    raw = RawRequest(body)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(server.context_preflight(raw))
+    assert caught.value.status_code == 413
+    assert caught.value.detail['code'] == code
+    assert raw.read_chunks == (0 if kind == 'body' else 1)
+    assert provider_reads == []
+
+
+def test_preflight_malformed_json_stays_400_and_invalid_limit_policy_stays_500(gateway,monkeypatch):
+    admission = Admission()
+    monkeypatch.setattr(server, 'ADMISSION', admission)
+    malformed = RawRequest(b'{"input":')
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(server.context_preflight(malformed))
+    assert caught.value.status_code == 400
+    assert admission.total == 0
+
+    monkeypatch.setenv('ANTIGRAVITY_MAX_BODY_BYTES', '0')
+    invalid_policy = RawRequest(b'{"model":"fixture:arbitrary-unknown","input":"x"}')
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(server.context_preflight(invalid_policy))
+    assert caught.value.status_code == 500
+    assert invalid_policy.read_chunks == 0
+    assert admission.total == 0
+
+
+def test_preflight_shares_global_startup_admission_and_releases_on_completion_and_cancel(gateway,monkeypatch):
+    gateway['fixture'] = provider('http://127.0.0.1:12345/v1')
+    configured = ResourceLimits(inflight=2, route_inflight=1)
+    monkeypatch.setattr(ResourceLimits, 'from_env', classmethod(lambda cls: configured))
+    admission = Admission()
+    admission.set_startup_ceiling(1)
+    monkeypatch.setattr(server, 'ADMISSION', admission)
+    entered = asyncio.Event()
+
+    async def block_generation(_request, _budget):
+        entered.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(server, '_create_response', block_generation)
+
+    async def scenario():
+        generation = RawRequest(b'{"model":"fixture:arbitrary-unknown","input":"x"}')
+        pending = asyncio.create_task(server.create_response(generation))
+        await entered.wait()
+        assert admission.total == 1 and admission.startup_ceiling == 1
+
+        rejected = RawRequest(b'{"model":"fixture:arbitrary-unknown","input":"x"}')
+        with pytest.raises(HTTPException) as caught:
+            await server.context_preflight(rejected)
+        assert caught.value.status_code == 503
+        assert caught.value.detail['code'] == 'gateway_overloaded'
+        assert caught.value.headers['Retry-After'] == '1'
+        assert rejected.read_chunks == 0 and admission.total == 1
+
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert admission.total == 0 and admission.startup_ceiling == 1
+
+        accepted = RawRequest(b'{"model":"fixture:arbitrary-unknown","input":"x"}')
+        report = await server.context_preflight(accepted)
+        assert report['status'] == 'unknown'
+        assert accepted.read_chunks == 1 and admission.total == 0
+        assert admission.startup_ceiling == 1
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        admission.set_startup_ceiling(None)
+
+
+def test_preflight_body_read_cancellation_releases_global_admission(gateway,monkeypatch):
+    admission = Admission()
+    monkeypatch.setattr(server, 'ADMISSION', admission)
+    entered = asyncio.Event()
+
+    class StalledRawRequest(RawRequest):
+        async def stream(self):
+            self.read_chunks += 1
+            entered.set()
+            await asyncio.Future()
+            yield b''
+
+    async def scenario():
+        request = StalledRawRequest(b'')
+        pending = asyncio.create_task(server.context_preflight(request))
+        await entered.wait()
+        assert admission.total == 1
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert admission.total == 0
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize('model',['gpt-5.6','gemini-3.8-flash','fixture:arbitrary-unknown'])
@@ -216,6 +348,7 @@ def test_preflight_slow_configuration_read_obeys_owned_deadline(gateway,monkeypa
     monkeypatch.setattr(server, 'all_provider_configs_read_only', slow)
     response = TestClient(server.app).post('/v1/context/preflight', json={'input':'fixture'})
     assert response.status_code == 504
+    assert server.ADMISSION.total == 0
 
 
 def test_native_openai_evidence_needs_the_actual_endpoint_and_auth_kind(gateway):

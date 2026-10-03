@@ -1130,7 +1130,7 @@ class TestRegressionFixes(unittest.TestCase):
                     headers={"Content-Type": "application/json"},
                 )
                 self.assertEqual(response.status_code, 400)
-                self.assertIn(expected_detail, response.json()["detail"])
+                self.assertEqual(response.json()["detail"]["code"], "invalid_json_number")
 
     def test_responses_endpoint_logs_run_id_and_strips_metadata_before_byok_routing(self):
         provider = {

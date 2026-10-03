@@ -90,10 +90,10 @@ def test_pathological_trailing_json_produces_a_protocol_failure():
     depth = 2000
     deeply_nested = b'data: {"type":"fixture","value":' + b'[' * depth + b'0' + b']' * depth + b'}\n\n'
     _, final = terminal_result([wire(created()), wire(completed()), deeply_nested])
-    # JSON implementations have different nesting limits. Parsed or rejected,
-    # this trailing payload must never leave the earlier success authoritative.
+    # Framing/parser budgets may reject this before ordinary event handling;
+    # the trailing payload must never leave the earlier success authoritative.
     assert final["type"] == "response.failed"
-    assert final["response"]["error"]["code"] in {"invalid_stream_chunk", "output_after_terminal"}
+    assert final["response"]["error"]["code"] in {"invalid_stream_chunk", "output_after_terminal", "provider_output_limit"}
 
 
 @pytest.mark.parametrize("status", ["completed", "incomplete", "failed"])

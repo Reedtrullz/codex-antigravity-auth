@@ -14,6 +14,10 @@ gateway-declared image support at every stage. Read [attachments](ATTACHMENTS.md
 for limits, unscanned pixels/metadata, retention, and the unmet real-media release
 gate. Do not infer image support from a model name or replace images with text.
 
+Use [offline benchmark replay](BENCHMARK.md) for controlled synthetic quality
+evaluation. Ordinary compare output, model agreement and latency do not establish
+quality. Benchmark replay makes no model calls and never changes routing defaults.
+
 Use this skill to ask the local `codex-antigravity-auth` gateway for an external Antigravity review, consult, deep work plan, named workflow preset, or bounded multi-model panel while native Codex remains the primary agent.
 
 V3's primary product is native Claude in Codex through `codex-antigravity setup`; `$anti` is an optional helper for review and planning after the gateway and Codex model picker are already working.

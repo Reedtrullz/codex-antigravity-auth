@@ -20,6 +20,11 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "anti.py"
 
+# Canonicalize only the parent of newly created owned test fixtures. macOS
+# exposes /var through a symlink; application-selected paths still undergo
+# the unchanged no-follow capture checks.
+tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
+
 _ACTIVE_TEST_RUNS_DIR: list[Path] = []
 
 
@@ -2653,7 +2658,8 @@ class AntiHelperTests(unittest.TestCase):
         real_urlopen = anti.open_http_request
         captured: dict[str, dict] = {}
 
-        def fake_urlopen(req, timeout=10.0, before_open=None):
+        def fake_urlopen(req, timeout=10.0, before_open=None, loopback_only=False):
+            self.assertFalse(loopback_only)
             if before_open is not None:
                 timeout = before_open(req, timeout)
             captured["regular"] = dict(req.headers)

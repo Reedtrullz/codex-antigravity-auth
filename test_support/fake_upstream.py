@@ -68,3 +68,16 @@ def upstream(*responses):
         remove_listener(endpoint)
     assert not errors, errors
     assert not script, "scripted upstream responses were not consumed"
+
+
+def test_client_with_peer(peer, *, app, base_url="http://testserver"):
+    """Set the ASGI peer without depending on newer TestClient constructor APIs."""
+    from fastapi.testclient import TestClient
+    async def peer_app(scope, receive, send):
+        if scope["type"] == "http":
+            scope = {**scope, "client": peer}
+        await app(scope, receive, send)
+    return TestClient(peer_app, base_url=base_url)
+
+
+test_client_with_peer.__test__ = False
