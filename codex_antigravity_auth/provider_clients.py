@@ -56,7 +56,7 @@ class ProviderClientLease:
 
 
 class ProviderClientPool:
-    """Three bounded HTTPX connection pools, created lazily on one event loop."""
+    """Six bounded lane/policy clients, created lazily on one event loop."""
     LANES = frozenset({'google', 'native', 'byok'})
 
     def __init__(self, *, max_connections, client_factory=None):
