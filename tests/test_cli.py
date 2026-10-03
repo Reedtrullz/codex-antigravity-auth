@@ -1994,7 +1994,7 @@ class TestV3NativeSetup(unittest.TestCase):
         self.assertEqual(info["status"], "unmanaged")
         self.assertTrue(info["reachable"])
         self.assertEqual(info["reachable_model_count"], 1)
-        self.assertEqual(info["reachable_base_url"], base)
+        self.assertEqual(info["reachable_base_url"], f"http://127.0.0.1:{port}/v1")
         self.assertFalse(info["service"]["owned_ready"])
         self.assertEqual(info["service"]["identity_status"], "foreign_or_unverified")
 
