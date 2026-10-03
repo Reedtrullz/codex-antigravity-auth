@@ -66,6 +66,10 @@
           "tools": true
         },
         "family": "gemini",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
         "route": "antigravity",
         "transport": {
           "image_forms": [
@@ -155,6 +159,10 @@
           "tools": true
         },
         "family": "gemini",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
         "route": "antigravity",
         "transport": {
           "image_forms": [
@@ -238,6 +246,10 @@
           "tools": true
         },
         "family": "gemini",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
         "route": "antigravity",
         "transport": {
           "image_forms": [
@@ -261,84 +273,6 @@
         "version": 1
       },
       "id": "gemini-3.1-pro"
-    },
-    {
-      "capabilities": {
-        "aliases": [],
-        "availability": "unknown",
-        "backend_id": "gemini-3.1-flash-image",
-        "canonical_id": "gemini-3.1-flash-image",
-        "context_limit": {
-          "basis": "declared",
-          "known": true,
-          "tokens": 1048576
-        },
-        "declaration_source": "builtin",
-        "declared_backend": {
-          "availability": "unknown",
-          "context_limit": {
-            "basis": "declared",
-            "known": true,
-            "tokens": 1048576
-          },
-          "input_modalities": [
-            "image",
-            "text"
-          ],
-          "output_types": [
-            "text",
-            "refusal",
-            "function_call"
-          ],
-          "structured_output": true,
-          "tools": true
-        },
-        "effective": {
-          "image_forms": [
-            "data_url",
-            "url"
-          ],
-          "input_modalities": [
-            "image",
-            "text"
-          ],
-          "output_types": [
-            "text",
-            "refusal",
-            "function_call"
-          ],
-          "parallel_tool_calls": true,
-          "reasoning_efforts": [],
-          "reasoning_mapping": null,
-          "reasoning_replay": false,
-          "streaming": true,
-          "structured_output": true,
-          "tools": true
-        },
-        "family": "gemini",
-        "route": "antigravity",
-        "transport": {
-          "image_forms": [
-            "data_url",
-            "url"
-          ],
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "opaque_reasoning_replay": false,
-          "output_types": [
-            "text",
-            "reasoning",
-            "function_call",
-            "refusal"
-          ],
-          "structured_output": true,
-          "tools": true
-        },
-        "version": 1
-      },
-      "id": "gemini-3.1-flash-image"
     },
     {
       "capabilities": {
@@ -406,6 +340,10 @@
           "tools": true
         },
         "family": "claude",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
         "route": "antigravity",
         "transport": {
           "image_forms": [
@@ -495,6 +433,10 @@
           "tools": true
         },
         "family": "claude",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
         "route": "antigravity",
         "transport": {
           "image_forms": [
@@ -568,6 +510,10 @@
           "tools": true
         },
         "family": "gemini",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
         "route": "antigravity",
         "transport": {
           "image_forms": [
@@ -656,6 +602,10 @@
           "tools": true
         },
         "family": "gemini",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
         "route": "antigravity",
         "transport": {
           "image_forms": [
@@ -740,6 +690,10 @@
           "tools": true
         },
         "family": "gemini",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
         "route": "antigravity",
         "transport": {
           "image_forms": [

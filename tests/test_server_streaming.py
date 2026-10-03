@@ -21,6 +21,13 @@ from codex_antigravity_auth.server import (
 from fastapi.testclient import TestClient
 from starlette.requests import ClientDisconnect, Request
 
+def operation_client(factory):
+    # These protocol fixtures model operation-owned contexts. The separate
+    # provider-client suite exercises real lifespan pools and response leases.
+    return patch('codex_antigravity_auth.server.provider_client',
+                 side_effect=lambda _lane, **kwargs: factory(**kwargs))
+
+
 class TestServerStreaming(unittest.TestCase):
     def test_native_openai_route_normalizes_terminal_and_closes_upstream(self):
         closed = []
@@ -153,15 +160,15 @@ class TestServerStreaming(unittest.TestCase):
             with patch("codex_antigravity_auth.server.account_manager.release_account"):
                     with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
                         with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
-                            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
-                                with patch("codex_antigravity_auth.server.sys.stderr") as mock_stderr:
+                            with operation_client(MockClient):
+                                with self.assertLogs("codex_antigravity_auth.server", level="ERROR") as captured_logs:
                                     response = TestClient(app, raise_server_exceptions=False).post(
                                         "/v1/responses",
                                         json={"model": "gemini-3.5-flash-high", "input": "hello"},
                                     )
 
         self.assertEqual(response.status_code, 500)
-        stderr_text = "".join(call.args[0] for call in mock_stderr.write.call_args_list)
+        stderr_text = "\n".join(captured_logs.output)
         self.assertIn("request_backend unexpected error", stderr_text)
         self.assertIn("KeyError", stderr_text)
 
@@ -201,7 +208,7 @@ class TestServerStreaming(unittest.TestCase):
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", side_effect=[account, account]) as acquire:
             with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
                 with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
-                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                    with operation_client(MockClient):
                         response = TestClient(app).post(
                             "/v1/responses",
                             json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
@@ -388,7 +395,7 @@ class TestServerStreaming(unittest.TestCase):
                     pass
             
             with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
-                with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                with operation_client(CleanAsyncClientMock):
                     response = test_client.post("/v1/responses", json=codex_payload)
                 self.assertEqual(response.status_code, 200)
                 
@@ -438,7 +445,7 @@ class TestServerStreaming(unittest.TestCase):
 
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
             with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
-                with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                with operation_client(MockClient):
                     response = TestClient(app).post(
                         "/v1/responses",
                         json={"model": "gemini-3.5-flash-high", "input": "hello"},
@@ -474,7 +481,7 @@ class TestServerStreaming(unittest.TestCase):
 
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
             with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
-                with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                with operation_client(MockClient):
                     response = TestClient(app).post(
                         "/v1/responses",
                         json={"model": "gemini-3.5-flash-high", "input": "hello"},
@@ -509,7 +516,7 @@ class TestServerStreaming(unittest.TestCase):
             with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
                     with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
-                        with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                        with operation_client(MockClient):
                             response = TestClient(app).post(
                                 "/v1/responses",
                                 json={"model": "gemini-3.5-flash-high", "input": "hello"},
@@ -552,7 +559,7 @@ class TestServerStreaming(unittest.TestCase):
             with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
                     with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
-                        with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                        with operation_client(MockClient):
                             response = TestClient(app).post(
                                 "/v1/responses",
                                 json={"model": "gemini-3.5-flash-high", "input": "hello"},
@@ -613,7 +620,7 @@ class TestServerStreaming(unittest.TestCase):
             with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
                     with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
-                        with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                        with operation_client(MockClient):
                             with TestClient(app) as client:
                                 response = client.post(
                                     "/v1/responses",
@@ -638,7 +645,7 @@ class TestServerStreaming(unittest.TestCase):
             async def receive():
                 nonlocal sent
                 if sent:
-                    return {"type": "http.disconnect"}
+                    await asyncio.Future()  # Still connected during preparation.
                 sent = True
                 return {
                     "type": "http.request",
@@ -663,17 +670,16 @@ class TestServerStreaming(unittest.TestCase):
             )
             response = await create_response(request)
             sent = []
-            received = 0
+            first_body = asyncio.Event()
 
             async def asgi_receive():
-                nonlocal received
-                received += 1
-                if received == 1:
-                    return {"type": "http.request", "body": b"", "more_body": False}
+                await first_body.wait()
                 return {"type": "http.disconnect"}
 
             async def asgi_send(message):
                 sent.append(message)
+                if message["type"] == "http.response.body" and message.get("body"):
+                    first_body.set()
 
             await response(request.scope, asgi_receive, asgi_send)
             return sent
@@ -1333,7 +1339,7 @@ class TestServerStreaming(unittest.TestCase):
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
                     with patch("codex_antigravity_auth.server.account_manager.record_attempt"):
                         with patch("codex_antigravity_auth.server.write_request_record", side_effect=records.append):
-                            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                            with operation_client(MockClient):
                                 response = TestClient(app).post(
                                     "/v1/responses",
                                     json={
@@ -1395,7 +1401,7 @@ class TestServerStreaming(unittest.TestCase):
                 with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account) as acquire:
                     with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
                         with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
-                            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                            with operation_client(MockClient):
                                 response = TestClient(app).post(
                                     "/v1/responses",
                                     json={"model": "gemini-3.5-flash-high", "input": "hello"},
@@ -1455,7 +1461,7 @@ class TestServerStreaming(unittest.TestCase):
                         return httpx.Response(200, json=payload)
 
                 with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"matrix": provider}):
-                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                    with operation_client(MockClient):
                         response = TestClient(app).post(
                             "/v1/responses",
                             json={"model": "matrix:model", "input": "hello"},
@@ -1492,7 +1498,7 @@ class TestServerStreaming(unittest.TestCase):
                 )
 
         with patch("codex_antigravity_auth.server.all_provider_configs", return_value={"openrouter": provider}):
-            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+            with operation_client(MockClient):
                 legacy = TestClient(app).post(
                     "/v1/responses",
                     json={"model": "openrouter:openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "input": "hello"},
@@ -1571,7 +1577,7 @@ class TestServerStreaming(unittest.TestCase):
                 with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=account) as acquire:
                     with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
                         with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
-                            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+                            with operation_client(MockClient):
                                 response = TestClient(app).post(
                                     "/v1/responses",
                                     json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
@@ -1656,7 +1662,7 @@ class TestServerStreaming(unittest.TestCase):
                 return StreamContext()
 
         with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
-            with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
+            with operation_client(MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
                     json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
@@ -1742,7 +1748,7 @@ class TestServerStreaming(unittest.TestCase):
                     pass
             
             with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
-                with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                with operation_client(CleanAsyncClientMock):
                     response = test_client.post("/v1/responses", json=codex_payload)
                 self.assertEqual(response.status_code, 200)
                 
@@ -1807,7 +1813,7 @@ class TestServerStreaming(unittest.TestCase):
 
             with patch("codex_antigravity_auth.server.account_manager.acquire_account", return_value=fake_account):
                 with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
-                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                    with operation_client(CleanAsyncClientMock):
                         response = test_client.post(
                             "/v1/responses",
                             json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
@@ -1905,7 +1911,7 @@ class TestServerStreaming(unittest.TestCase):
             ):
                 with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
                     with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
-                        with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                        with operation_client(CleanAsyncClientMock):
                             response = test_client.post(
                                 "/v1/responses",
                                 json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
@@ -2000,7 +2006,7 @@ class TestServerStreaming(unittest.TestCase):
             ):
                 with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
                         with patch("codex_antigravity_auth.server.account_manager.release_account") as release:
-                            with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                            with operation_client(CleanAsyncClientMock):
                                 response = test_client.post(
                                     "/v1/responses",
                                     json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
@@ -2094,7 +2100,7 @@ class TestServerStreaming(unittest.TestCase):
                 side_effect=[first_account, second_account],
             ):
                 with patch("codex_antigravity_auth.server.account_manager.mark_failure"):
-                    with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                    with operation_client(CleanAsyncClientMock):
                         response = test_client.post(
                             "/v1/responses",
                             json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},
@@ -2180,7 +2186,7 @@ class TestServerStreaming(unittest.TestCase):
                 return_value=first_account,
             ) as mock_select:
                 with patch("codex_antigravity_auth.server.account_manager.record_attempt") as record:
-                        with patch("codex_antigravity_auth.server.httpx.AsyncClient", CleanAsyncClientMock):
+                        with operation_client(CleanAsyncClientMock):
                             response = test_client.post(
                                 "/v1/responses",
                                 json={"model": "gemini-3.5-flash-high", "input": "hello", "stream": True},

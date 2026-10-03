@@ -5,6 +5,7 @@ from __future__ import annotations
 from tests.conftest import byte_chunks
 
 import json
+import httpx
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -212,13 +213,9 @@ class TestUnifiedResponsesRouting(unittest.TestCase):
             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
         }
 
-        class FakeResp:
-            status_code = 200
-
-            def json(self):
-                return fake_payload
-
-            text = "{}"
+        class FakeResp(httpx.Response):
+            def __init__(self):
+                super().__init__(200, json=fake_payload)
 
         class FakeClient:
             def __init__(self, *a, **k):
@@ -263,8 +260,7 @@ class TestUnifiedResponsesRouting(unittest.TestCase):
                 self.read = False
 
             async def aread(self):
-                self.read = True
-                return self._body
+                raise AssertionError("error-body reads must be bounded and incremental")
 
             def aiter_text(self):
                 async def iterator():
@@ -274,7 +270,14 @@ class TestUnifiedResponsesRouting(unittest.TestCase):
                 return iterator()
 
             def aiter_bytes(self):
-                return byte_chunks(self.aiter_text())
+                async def iterator():
+                    self.read = True
+                    if self._body:
+                        yield self._body
+                    else:
+                        async for chunk in byte_chunks(self.aiter_text()):
+                            yield chunk
+                return iterator()
 
         class FakeStreamContext:
             def __init__(self, response):
@@ -362,22 +365,13 @@ class TestUnifiedResponsesRouting(unittest.TestCase):
                         import asyncio
 
                         async def fake_post(req, lease):
-                            class R:
-                                status_code = 200
-                                text = "{}"
+                            return httpx.Response(200, json={"response": {
+                                "candidates": [{"content": {"parts": [{"text": "hi"}]}, "finishReason": "STOP"}],
+                                "usageMetadata": {},
+                            }})
 
-                                def json(self):
-                                    return {
-                                        "response": {
-                                            "candidates": [
-                                                {"content": {"parts": [{"text": "hi"}]}, "finishReason": "STOP"}
-                                            ],
-                                            "usageMetadata": {},
-                                        }
-                                    }
-
-                            return R()
-
+                        from codex_antigravity_auth.google_transport import GoogleTransport as RealGoogleTransport
+                        instance.parse_response.side_effect = RealGoogleTransport(timeout=1).parse_response
                         instance.post.side_effect = fake_post
                         with patch(
                             "codex_antigravity_auth.unified.resolve_openai_auth"

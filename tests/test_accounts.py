@@ -3,7 +3,7 @@ import time
 import tempfile
 import threading
 from pathlib import Path
-from codex_antigravity_auth.accounts import AccountManager
+from codex_antigravity_auth.accounts import AccountManager, AccountRefreshInProgress
 from codex_antigravity_auth.response_protocol import AttemptOutcome
 from unittest.mock import patch
 
@@ -124,7 +124,10 @@ class TestAccounts(unittest.TestCase):
         selected = AccountManager().select_active_account("gemini-3.8-flash")
 
         self.assertEqual(selected["email"], "secondary@gmail.com")
-        self.assertEqual(results, [True])
+        # Snapshot/recheck/merge use separate store transactions; the failed
+        # refresh must still persist exactly one authoritative cooldown.
+        self.assertTrue(any(results))
+        self.assertEqual(data["accountState"]["failures"]["primary@gmail.com"]["account"], 1)
         self.assertIn("primary@gmail.com", data["accountState"]["cooldowns"])
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
@@ -227,7 +230,8 @@ class TestAccounts(unittest.TestCase):
             self.assertTrue(started.wait(1))
 
             started_at = time.monotonic()
-            self.assertIsNone(manager.select_active_account("gemini-3.8-flash"))
+            with self.assertRaises(AccountRefreshInProgress):
+                manager.select_active_account("gemini-3.8-flash")
             self.assertLess(time.monotonic() - started_at, 0.5)
             self.assertNotIn("primary@gmail.com", data["accountState"]["cooldowns"])
         finally:
