@@ -618,14 +618,15 @@ def test_config_writer_refuses_same_hash_parent_swap_during_temp_fsync(isolated,
 def test_planned_config_refuses_ordinary_leaf_replacement_after_publication(isolated, tmp_path, monkeypatch):
     client, _state = isolated
     target = existing_config(client)
+    original_bytes = target.read_bytes()
     args = options()
     plan = setup.setup_plan(args)
     merge_options = dict(model=args.model, provider_id=args.provider, provider_name=args.provider_name,
                          base_url=args.base_url, activate=args.activate)
-    intended = cli.merge_codex_config(ORIGINAL, **merge_options).encode()
-    assert intended != ORIGINAL.encode()
+    intended = cli.merge_codex_config(original_bytes.decode('utf-8'), **merge_options).encode()
+    assert intended != original_bytes
     replacement = tmp_path / "replacement-config.toml"
-    setup.SecureStore().atomic_write_bytes(replacement, ORIGINAL.encode())
+    setup.SecureStore().atomic_write_bytes(replacement, original_bytes)
     native_replace = os.replace
     swapped = False
     published = None
@@ -651,6 +652,6 @@ def test_planned_config_refuses_ordinary_leaf_replacement_after_publication(isol
         failure = exc
 
     assert swapped and published == intended
-    assert target.read_bytes() == ORIGINAL.encode()
+    assert target.read_bytes() == original_bytes
     assert isinstance(failure, setup.SetupError), f"Changed success was returned for different visible bytes: {result}"
     assert result is None
