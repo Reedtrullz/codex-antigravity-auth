@@ -47,8 +47,7 @@ except ImportError:  # copied skill without the gateway package
                 if fcntl is not None:
                     fcntl.flock(descriptor, fcntl.LOCK_EX)
                 else:
-                    if os.fstat(descriptor).st_size == 0:
-                        os.write(descriptor, b"\0")
+                    # Windows locks may extend beyond EOF; a pre-lock write races with holders.
                     os.lseek(descriptor, 0, os.SEEK_SET)
                     msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
                 acquired = True
