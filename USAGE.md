@@ -411,6 +411,47 @@ service to stop its old append-only output routing. Account references in runtim
 messages are opaque and change on restart; explicit account-management commands
 still show local account identity. See [the process-log contract](codex_antigravity_auth/PROCESS_LOGS.md).
 
+## Private storage and lock files
+
+Gateway secure stores and packaged/standalone Anti persistence share one checked
+process-lock implementation. Lock files must be regular, singly linked files
+owned by the current user. The opened descriptor is compared with the directory
+entry (native volume plus 128-bit file identity on Windows) before permissions change or the Windows lock byte is written. Symlinks,
+reparse points, hardlinks, FIFOs and unexpected path types are refused. If neither
+POSIX flock nor Windows byte-range locking is available, the operation fails;
+there is no thread-only success path.
+
+Managed leaf directories and newly created parents are protected before files
+are opened; unrelated pre-existing ancestors are not chmodded. POSIX directories
+use 0700 and files 0600, with descriptor-based permission updates. Managed leaf
+directory symlinks are refused; use the canonical directory when configuring a
+protected store. These checks do not claim protection against the same user or
+an administrator replacing every ancestor directory.
+
+Windows uses handle-based ownership and DACL checks rather than treating chmod
+as an ACL guarantee. Objects must initially belong to the current user or its
+process-default owner (for example an elevated token's default owner group).
+Protection sets the current user as owner, applies a protected current-user-only
+full-control DACL, then verifies owner, ACE type/count/access mask and inheritance
+on the opened object. Files are protected before secret bytes are written;
+private directories pin the target handle and use `SetFileSecurityW` to preserve
+existing child descriptors. Read/write sharing permits in-use directories while
+delete sharing remains denied. Their owner-only ACE inherits to newly created files and
+directories; managed files then receive a protected, non-inheriting ACE before
+content is written. If required ACL,
+handle or filesystem facilities are unavailable, access fails explicitly.
+Administrators' backup/ownership privileges remain outside this boundary.
+
+The Windows implementation follows Microsoft's
+[ReOpenFile](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile),
+[GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo),
+[FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info)
+[SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo),
+and [SetFileSecurityW](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-setfilesecurityw)
+contracts. Native Windows tests inspect temporary-file security descriptors through
+read-only Win32 APIs; non-Windows runs skip that check and exercise synthetic refusal paths.
+No Windows ACL success is inferred from POSIX mode bits or mocked tests.
+
 ## Model discovery and recent readiness
 
 `provider discover NAME` reads cached evidence; `--network` explicitly fetches a

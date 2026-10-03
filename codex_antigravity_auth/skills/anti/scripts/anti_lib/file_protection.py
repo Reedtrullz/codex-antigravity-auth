@@ -161,11 +161,15 @@ def file_lock(path: Path, *, posix_backend=fcntl, windows_backend=msvcrt):
             if posix_backend is not None:
                 posix_backend.flock(descriptor, posix_backend.LOCK_EX)
             else:
-                if os.fstat(descriptor).st_size == 0:
-                    os.write(descriptor, b"\0")
                 os.lseek(descriptor, 0, os.SEEK_SET)
                 windows_backend.locking(descriptor, windows_backend.LK_LOCK, 1)
             acquired = True
+            if posix_backend is None and os.fstat(descriptor).st_size == 0:
+                # CRT byte-range locks may extend beyond EOF. Initialize only
+                # after owning byte 0 so concurrent creators cannot race writes.
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                if os.write(descriptor, b"\0") != 1:
+                    raise OSError("Could not initialize the Windows storage lock")
             verify_regular_descriptor(descriptor, lock_path)
             held[key] = descriptor
             yield
