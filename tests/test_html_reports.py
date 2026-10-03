@@ -131,7 +131,10 @@ def test_credentials_redacted_before_html_and_absolute_paths_omitted(ui,location
     _,artifacts,renderer,_,_,_=ui
     view=renderer.from_publication(artifacts.read_publication(publication(ui)))
     view['output']='api_key=fixture-very-private-token-value'
-    view['findings'][0]['advisory'].update(file=location,sourceFile='src/allowed-relative.py',evidence='password="fixture secret words"')
+    view['findings'][0]['advisory'].update(file=location,evidence='password="fixture secret words"')
+    control=view['findings'][0]
+    view['findings'].append({**control,'findingKey':'relative-control',
+        'advisory':{**control['advisory'],'file':'src/allowed-relative.py'}})
     text=renderer.render([view]);assert 'fixture-very-private-token-value' not in text and 'fixture secret words' not in text
     assert 'location.py' not in text and '&lt;absolute path omitted&gt;' in text
     assert 'src/allowed-relative.py' in text
