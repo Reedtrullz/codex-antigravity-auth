@@ -15,9 +15,10 @@ MiB = 1024 * 1024
 
 
 class ResourceLimitError(ValueError):
-    def __init__(self, code, *, status=413):
+    def __init__(self, code, *, status=413, path=None):
         self.code, self.status = code, status
-        super().__init__(f"Gateway resource policy rejected the payload ({code}).")
+        prefix = f"{path}: " if path else ""
+        super().__init__(f"{prefix}Gateway resource policy rejected the payload ({code}).")
 
 
 @dataclass(frozen=True)
@@ -180,13 +181,15 @@ def check_request_structure(payload, limits):
     for schema in schemas:
         check_tree(schema, limits, depth_limit=limits.schema_depth)
     attachment_total = 0
-    stack = [payload]
+    stack = [(payload, "")]
     while stack:
-        item = stack.pop()
+        item, path = stack.pop()
         if type(item) is list:
-            stack.extend(item)
+            stack.extend((child, f"{path}[{index}]") for index, child in enumerate(item))
         elif type(item) is dict:
-            stack.extend(item.values())
+            # Only protocol field names enter diagnostics, never arbitrary user keys.
+            stack.extend((child, f"{path}." + (key if key in {"input", "content", "output", "image_url", "url", "file_data"} else "?"))
+                         for key, child in item.items())
             kind = item.get("type")
             if type(kind) is not str or kind not in {"input_image", "image", "image_url", "input_file", "file"}:
                 continue
@@ -205,17 +208,17 @@ def check_request_structure(payload, limits):
                 continue  # No new attachment representation or capability here.
             padding = len(encoded) - len(encoded.rstrip("="))
             if len(encoded) % 4 or padding > 2:
-                raise ResourceLimitError("invalid_attachment_encoding", status=400)
+                raise ResourceLimitError("invalid_attachment_encoding", status=400, path=path.lstrip("."))
             estimated = (len(encoded) // 4) * 3 - padding
             if estimated > limits.attachment_bytes or attachment_total + estimated > limits.attachments_bytes:
-                raise ResourceLimitError("attachment_size_limit")
+                raise ResourceLimitError("attachment_size_limit", path=path.lstrip("."))
             try:
                 decoded = base64.b64decode(encoded, validate=True)
             except (ValueError, UnicodeError):
-                raise ResourceLimitError("invalid_attachment_encoding", status=400) from None
+                raise ResourceLimitError("invalid_attachment_encoding", status=400, path=path.lstrip(".")) from None
             size = len(decoded)
             if size > limits.attachment_bytes or attachment_total + size > limits.attachments_bytes:
-                raise ResourceLimitError("attachment_size_limit")
+                raise ResourceLimitError("attachment_size_limit", path=path.lstrip("."))
             attachment_total += size
 
 
