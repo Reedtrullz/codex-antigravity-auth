@@ -1,3 +1,5 @@
+from .console import console_print as print
+import logging
 import json
 import asyncio
 import math
@@ -21,7 +23,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
-from .accounts import AccountManager, classify_backend_status, is_validation_required_error
+from .accounts import AccountManager, AccountRefreshInProgress, classify_backend_status, is_validation_required_error
 from .account_state import scoped_cooldown_expiry
 from .byok import (
     PROVIDER_AUTH_MODE_API_KEY,
@@ -158,7 +160,10 @@ GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS = 600.0
 STREAM_IDLE_TIMEOUT_SECONDS = 60.0
 STREAM_TOTAL_TIMEOUT_SECONDS = 1800.0
 CLIENT_DISCONNECT_POLL_SECONDS = 0.1
-TEST_CLIENT_HOSTS = {"testserver"}
+TEST_CLIENT_HOSTS = {"testserver", "testclient"}
+PROXY_INDICATOR_HEADERS = frozenset({
+    "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "x-real-ip",
+})
 REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
     native_responses=True,
     parallel_tool_calls=True,
@@ -215,7 +220,9 @@ def request_origin_matches(request: Request, origin: str) -> bool:
     if request_port is None:
         request_port = 443 if request_url.scheme == "https" else 80
     host_matches = parsed_origin.hostname.lower() == (request_url.hostname or "").lower()
-    if not host_matches and is_loopback_host(parsed_origin.hostname) and is_loopback_host(request_url.hostname):
+    if (not host_matches and parsed_origin.hostname.lower() not in TEST_CLIENT_HOSTS
+            and (request_url.hostname or "").lower() not in TEST_CLIENT_HOSTS
+            and is_loopback_host(parsed_origin.hostname) and is_loopback_host(request_url.hostname)):
         host_matches = True
     return (
         parsed_origin.scheme == request_url.scheme
@@ -225,10 +232,33 @@ def request_origin_matches(request: Request, origin: str) -> bool:
 
 
 def request_uses_loopback_host(request: Request, client_host: str | None = None) -> bool:
-    hostname = request.url.hostname
-    if is_loopback_host(hostname):
-        return True
-    return (hostname or "").lower() in TEST_CLIENT_HOSTS and client_host == "testclient"
+    # Some ASGI URL implementations fall back to scope.server for a malformed
+    # Host. Access control must inspect the supplied authority before that
+    # fallback can turn invalid input into an apparently local request.
+    hosts = request.headers.getlist("host")
+    if len(hosts) != 1:
+        return False
+    authority = hosts[0]
+    if (not authority or any(ch.isspace() or ord(ch) < 0x20 or 0x7f <= ord(ch) < 0xa0 for ch in authority)
+            or any(ch in authority for ch in "/?#@\\") or authority.endswith(":")):
+        return False
+    try:
+        parsed = urlparse("//" + authority)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    if authority.startswith("["):
+        suffix = authority[authority.find("]") + 1:]
+        if suffix and not re.fullmatch(r":\d+", suffix):
+            return False
+    elif authority.count(":") > 1:
+        return False
+    if port is not None and not 1 <= port <= 65535:
+        return False
+    if (hostname or "").lower() in TEST_CLIENT_HOSTS:
+        return client_host == "testclient"
+    return is_loopback_host(hostname)
 
 
 def mutating_json_request_guard(request: Request) -> JSONResponse | None:
@@ -245,10 +275,6 @@ def mutating_json_request_guard(request: Request) -> JSONResponse | None:
             content={"detail": "Mutating gateway requests must use Content-Type: application/json."},
         )
 
-    client_host = request.client.host if request.client else None
-    if is_loopback_host(client_host) and not request_uses_loopback_host(request, client_host):
-        return JSONResponse(status_code=403, content={"detail": "Loopback gateway requests must use a loopback Host."})
-
     if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
         return JSONResponse(status_code=403, content={"detail": "Cross-site browser requests are not allowed."})
 
@@ -262,20 +288,25 @@ def mutating_json_request_guard(request: Request) -> JSONResponse | None:
 @app.middleware("http")
 async def require_remote_gateway_token(request: Request, call_next):
     client_host = request.client.host if request.client else None
-    if is_loopback_host(client_host):
+    allow_remote = os.environ.get("ANTIGRAVITY_ALLOW_REMOTE") == "1"
+    proxy_marked = any(name in request.headers for name in PROXY_INDICATOR_HEADERS)
+    # Header values can never grant the local exemption. In authenticated mode
+    # even a loopback peer may be a reverse proxy acting for a remote client.
+    if is_loopback_host(client_host) and not allow_remote and not proxy_marked:
+        if not request_uses_loopback_host(request, client_host):
+            return JSONResponse(status_code=403, content={"detail": "Loopback gateway requests must use a loopback Host."})
         guard_response = mutating_json_request_guard(request)
         if guard_response is not None:
             return guard_response
         return await call_next(request)
 
-    allow_remote = os.environ.get("ANTIGRAVITY_ALLOW_REMOTE") == "1"
     try:
         token = validate_gateway_token_strength(os.environ.get("ANTIGRAVITY_GATEWAY_TOKEN")) if allow_remote else ""
     except ValueError as e:
         return JSONResponse(status_code=403, content={"detail": str(e)})
     expected_auth = f"Bearer {token}" if token else ""
     supplied_auth = request.headers.get("authorization", "")
-    if allow_remote and token and secrets.compare_digest(supplied_auth, expected_auth):
+    if allow_remote and token and secrets.compare_digest(supplied_auth.encode("utf-8"), expected_auth.encode("ascii")):
         guard_response = mutating_json_request_guard(request)
         if guard_response is not None:
             return guard_response
@@ -929,9 +960,7 @@ async def list_models():
 
 @app.get("/health")
 async def health(request: Request):
-    client_host = request.client.host if request.client else None
-    if not request_uses_loopback_host(request, client_host):
-        raise HTTPException(status_code=403, detail="Health checks are loopback-only.")
+    # The middleware applies the same local/authenticated boundary to every route.
     providers, provider_catalog_status = await provider_health_catalog_fail_soft()
     local_mode = gateway_local_only()
     catalog = [] if local_mode else native_model_catalog()
@@ -1664,18 +1693,19 @@ async def _create_response(request: Request, budget: RequestBudget):
     provider_id, provider_model = await budget.sync(split_provider_model, model)
     if provider_id is not None:
         budget.context.update(route="byok", provider=provider_id)
-    try:
-        validate_provider_model_id(provider_id, provider_model)
-    except HTTPException as exc:
-        await log_request("failed", model=model, route="byok", provider=provider_id, stream=stream, http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
-        raise
     from .request_shapes import validate_request_shapes
     try:
+        await budget.sync(validate_provider_model_id, provider_id, provider_model)
         await budget.sync(validate_request_shapes, codex_req, route="byok" if provider_id is not None else "google")
+    except HTTPException as exc:
+        await log_request("failed", model=model, route="byok" if provider_id is not None else "google", provider=provider_id, stream=stream, http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
+        raise
     except ValueError as exc:
-        await log_request("failed", model=model, route="byok" if provider_id is not None else "google",
-                          provider=provider_id, stream=stream, http_status=400, error_class="invalid_request",
-                          error="Request shape is unsupported for this route.", attempt_count=0)
+        await log_request(
+            "failed", model=model, route="byok" if provider_id is not None else "google",
+            provider=provider_id, stream=stream, http_status=400, error_class="invalid_request",
+            error="Request shape is unsupported for this route.", attempt_count=0,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if provider_id is not None:
         # Normalize self-referential prefixes (openrouter:openrouter/x ->
@@ -1894,6 +1924,22 @@ async def _create_response(request: Request, budget: RequestBudget):
             terminal_cleanup=True,
         ))
         raise HTTPException(status_code=504, detail="Antigravity request deadline exceeded")
+    except AccountRefreshInProgress as exc:
+        await log_request(
+            "failed",
+            model=model,
+            route="google",
+            family=family,
+            stream=stream,
+            http_status=503,
+            error_class="account_refresh_in_progress",
+            error="Google account refresh is in progress; retry the request shortly.",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Google account refresh is in progress; retry the request shortly.",
+            headers={"Retry-After": "1"},
+        ) from exc
     if not account:
         await log_request(
             "failed",
@@ -1946,11 +1992,7 @@ async def _create_response(request: Request, budget: RequestBudget):
             # Transport failures are expected; anything else is a bug that must
             # surface as a 500 (not be silently masked as an account-rotation
             # trigger and turned into a misleading 502).
-            print(
-                f"[gateway] request_backend unexpected error: "
-                f"{type(exc).__name__}: {redact_secret_text(str(exc))[:300]}",
-                file=sys.stderr,
-            )
+            logging.getLogger(__name__).error("request_backend unexpected error: %s", type(exc).__name__)
             raise
 
     async def request_backend_with_boundary(selected_account: dict) -> httpx.Response | None:
@@ -2272,7 +2314,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     cooldown_category=cooldown_category,
                 )
                 return codex_resp
-            except HTTPException:
+            except (HTTPException, RequestDeadlineExceeded, ClientDisconnect):
                 raise
             except Exception as e:
                 await run_nonstream_diagnostic(
@@ -2295,6 +2337,31 @@ async def _create_response(request: Request, budget: RequestBudget):
                     error=safe_error_detail(e),
                 )
                 raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
+        except AccountRefreshInProgress as exc:
+            if cooldown_category is None:
+                await best_effort_diagnostic(record_attempt_outcome(
+                    response_account.get("email", ""),
+                    model,
+                    AttemptOutcome(scope="none", category="transport"),
+                    status_code=502,
+                    error_class="connection_error",
+                ))
+            await log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=503,
+                rotation_attempted=True,
+                error_class="account_refresh_in_progress",
+                error="Google account refresh is in progress; retry the request shortly.",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Google account refresh is in progress; retry the request shortly.",
+                headers={"Retry-After": "1"},
+            ) from exc
         except RequestDeadlineExceeded:
             await best_effort_diagnostic(log_request(
                 "failed",
@@ -2547,7 +2614,15 @@ async def _create_response(request: Request, budget: RequestBudget):
                     return
 
             if attempt_num == 0 and not adapter.visible_output_started:
-                rotated = await run_bounded_operation(lambda: acquire_active_account_for_request(model), release_late_result=True)
+                try:
+                    rotated = await run_bounded_operation(
+                        lambda: acquire_active_account_for_request(model),
+                        release_late_result=True,
+                    )
+                except AccountRefreshInProgress:
+                    rotated = None
+                    error_code = "account_refresh_in_progress"
+                    error_message = "Google account refresh is in progress; retry the request shortly."
                 if rotated and rotated.get("email") != stream_account.get("email"):
                     adapter.reset_attempt()
                     stream_attempts.append(rotated)
@@ -2581,14 +2656,15 @@ async def _create_response(request: Request, budget: RequestBudget):
     async def managed_sse_generator() -> AsyncGenerator[str, None]:
         nonlocal observed_stream_terminal, observed_stream_account
         try:
-            async for chunk in stream_with_budget(sse_generator(), budget):
-                for line in chunk.splitlines():
-                    if line.startswith("data: ") and line != "data: [DONE]":
-                        event = json.loads(line[6:])
-                        if event.get("type") in {"response.completed", "response.incomplete", "response.failed"}:
-                            observed_stream_terminal = event
-                            observed_stream_account = stream_attempts[-1]
-                yield chunk
+            async with aclosing(stream_with_budget(sse_generator(), budget)) as source:
+                async for chunk in source:
+                    for line in chunk.splitlines():
+                        if line.startswith("data: ") and line != "data: [DONE]":
+                            event = json.loads(line[6:])
+                            if event.get("type") in {"response.completed", "response.incomplete", "response.failed"}:
+                                observed_stream_terminal = event
+                                observed_stream_account = stream_attempts[-1]
+                    yield chunk
         finally:
             async def cleanup_stream_accounts() -> None:
                 cancelled = any(
@@ -2722,6 +2798,8 @@ async def create_openai_upstream_response(
             )
         try:
             terminal = await call_sync(_collect_openai_sse_terminal, res.content, display_model, request=codex_req)
+        except (RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception as exc:
             raise HTTPException(
                 status_code=502,
@@ -2760,13 +2838,20 @@ async def create_openai_upstream_response(
         )
     try:
         data = await call_sync(res.json)
+    except (RequestDeadlineExceeded, ClientDisconnect):
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=502,
             detail=openai_failure_detail(display_model, f"OpenAI returned non-JSON data: {exc}"),
         ) from exc
     try:
-        return await call_sync(OpenAICompatibleTransport(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS).validate_native_response, data, display_model=display_model, request=codex_req)
+        return await call_sync(
+            OpenAICompatibleTransport(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS).validate_native_response,
+            data,
+            display_model=display_model,
+            request=codex_req,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=openai_failure_detail(display_model, "OpenAI returned an invalid native response.")) from exc
 

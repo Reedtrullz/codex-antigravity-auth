@@ -23,7 +23,7 @@ def review(monkeypatch, tmp_path):
     monkeypatch.setattr(anti, "RUNS_DIR", tmp_path / "runs")
     repo = tmp_path / "project"
     repo.mkdir()
-    (repo / "before.py").write_text("fixture = 1\n")
+    (repo / "before.py").write_bytes(b"fixture = 1\n")
     return anti, reflections, reports, finding_verdicts, repo
 
 

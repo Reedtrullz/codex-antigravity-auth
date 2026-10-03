@@ -1,17 +1,23 @@
-from standalone import without_installed_packages
 """Saved publication fixtures use synthetic bytes and temporary roots only."""
 import importlib.util
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
+from standalone import without_installed_packages
+
+from standalone import without_installed_packages
 
 SCRIPT = Path(__file__).resolve().parents[1] / "codex_antigravity_auth/skills/anti/scripts/anti.py"
 
 
 @pytest.fixture
 def publications(monkeypatch, tmp_path):
+    script_dir = str(SCRIPT.resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
     spec = importlib.util.spec_from_file_location("anti_artifact_fixture", SCRIPT)
     anti = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(anti)
@@ -59,7 +65,7 @@ def test_current_publications_validate_with_truthful_retention_and_scope(publica
         result = stored(Path(record["resultPath"]))
         assert result["schemaVersion"] == 2
         assert result["scopeStatus"] == record["scopeStatus"] == scope
-        assert "/revisions/" in record["resultPath"]
+        assert Path(record["resultPath"]).parent.parent == anti.RUNS_DIR / record["id"] / "revisions"
         assert bool(record["publication"]["lanes"]) is (mode == "full")
 
 

@@ -1,0 +1,53 @@
+name: Quality gates
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.10"
+      - run: python -m pip install -c requirements/ci-py310-linux.txt -e ".[dev]"
+      - name: Focused correctness lint
+        run: python -m ruff check .
+      - name: Test gate failure behavior
+        run: python scripts/run_tests.py tests/test_quality_gates.py -q
+
+  compatibility:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        constraints: [minimum-runtime.txt, ci-py310-linux.txt]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.10"
+      - run: python -m pip install -c requirements/${{ matrix.constraints }} -e ".[dev]"
+      - run: python -m pip check
+      - run: python scripts/run_tests.py -q
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.10"
+      - run: python -m pip install -c requirements/ci-py310-linux.txt -e ".[dev,quality]"
+      - name: Audit complete compatible snapshot
+        run: python scripts/audit_dependencies.py

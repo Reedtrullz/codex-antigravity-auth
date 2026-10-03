@@ -25,14 +25,14 @@ def repo(tmp_path, monkeypatch):
                           'old.py':'rename fixture\n'}.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
+        path.write_bytes(content.encode('utf-8'))
     git('add', '.')
     git('commit', '-qm', 'fixture')
-    (root / 'tracked.py').write_text('after\n')
+    (root / 'tracked.py').write_bytes(b'after\n')
     (root / 'deleted.py').unlink()
     git('mv', 'old.py', 'renamed.py')
-    (root / 'untracked.py').write_text('new source\n')
-    (root / 'pkg/new.py').write_text('new package source\n')
+    (root / 'untracked.py').write_bytes(b'new source\n')
+    (root / 'pkg/new.py').write_bytes(b'new package source\n')
     (root / '.env').write_text('synthetic private fixture')
     (root / 'ignored').mkdir()
     (root / 'ignored/private.py').write_text('ignored fixture')
@@ -292,3 +292,39 @@ def test_chunk_packing_preserves_captured_empty_files(repo, required):
     assert empty['contentStatus'] == 'complete' and empty['bytesSent'] == empty['bytesDeclared'] == 0
     assert empty['chunksExpected'] == empty['chunksSent'] == 1
     assert any('### pkg/empty.py\n```text\n\n```' in chunk['prompt'] for chunk in chunks)
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_windows_creation_and_change_times_are_compared_with_their_own_api(repo, monkeypatch, changed):
+    from types import SimpleNamespace
+    anti, root, _ = repo
+    inventory = anti.review_inventory
+    target = root / 'pkg/source.py'
+    real_lstat, real_fstat = Path.lstat, inventory.os.fstat
+    fields = ('st_mode', 'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+
+    def snapshot(info, ctime):
+        values = {key: getattr(info, key) for key in fields}
+        values.update(st_ctime_ns=ctime, st_birthtime_ns=100)
+        return SimpleNamespace(**values)
+
+    def lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        return snapshot(info, 100) if path == target else info
+
+    calls = []
+    def fstat(fd):
+        calls.append(fd)
+        return snapshot(real_fstat(fd), 200 + int(changed and len(calls) > 1))
+
+    # Keep the platform override local to the inventory; pathlib and the real
+    # fixture filesystem retain their native platform behavior.
+    fake_os = SimpleNamespace(**vars(inventory.os))
+    fake_os.name, fake_os.fstat = 'nt', fstat
+    monkeypatch.setattr(inventory, 'os', fake_os)
+    monkeypatch.setattr(Path, 'lstat', lstat)
+    raw, size, reason = inventory.read_file(root, 'pkg/source.py', 100)
+    if changed:
+        assert raw is None and reason == 'changed_during_read'
+    else:
+        assert raw == b'source\n' and size == 7 and reason is None
