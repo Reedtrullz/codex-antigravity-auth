@@ -147,7 +147,7 @@ with file_lock(Path(sys.argv[2])):
     child = None
     try:
         with secure_store.file_lock(target):
-            child = subprocess.Popen([sys.executable, "-S", "-c", code, str(scripts), str(target), str(started), str(entered)],
+            child = subprocess.Popen([sys.executable, "-c", code, str(scripts), str(target), str(started), str(entered)],
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             deadline = time.monotonic() + 3
             while not started.exists() and child.poll() is None and time.monotonic() < deadline:
