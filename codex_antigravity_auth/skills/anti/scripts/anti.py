@@ -674,15 +674,17 @@ def settle_spend(*, submitted, usage=None):
 
 def scheduling_metadata(metadata=None, control=None):
     metadata = dict(metadata or {})
-    for source, target in (('panel_results', 'panel_lane_count'), ('judge_attempts', 'judge_attempt_count')):
+    for source, target in (
+        ('panel_results', 'panel_lane_count'),
+        ('judge_attempts', 'judge_attempt_count'),
+        ('consult_attempts', 'consult_attempt_count'),
+    ):
         if isinstance(metadata.get(source), list):
             metadata[target] = len(metadata[source])
     control = control or CURRENT_RUN.get()
     if control is not None:
         snapshot = control.snapshot()
         metadata['run_control'] = snapshot
-        for source, target in (('panel_results','panel_lane_count'),('judge_attempts','judge_attempt_count'),('consult_attempts','consult_attempt_count')):
-            if isinstance(metadata.get(source), list): metadata[target] = len(metadata[source])
         policy = getattr(control, 'spend_control', None)
         if policy is not None:
             metadata['admission_controls'] = policy.snapshot()
