@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator
 import uuid
 
 import httpx
+from starlette.requests import ClientDisconnect
 
 from .endpoint_policy import httpx_client_options
 from .byok import (
@@ -21,7 +22,8 @@ from .byok import (
     validate_provider_headers,
 )
 
-from .request_budget import owned_context
+from .request_budget import RequestDeadlineExceeded, owned_context
+from .resource_limits import ResourceLimitError, json_loads_limited, read_response_bytes
 from .redaction import redact_secret_text
 from .native_output import (
     MAX_ITEMS, NativeOutputError, check_json, reconcile_output,
@@ -46,13 +48,15 @@ from .tool_calls import (FunctionCallValidator, ToolCallError, tool_terminal, pa
 from .transform import transform_request_to_chat
 
 
-from .sse import SSEDecoder, SSELineError, iter_sse_data
+from .sse import SSEDecoder, SSELineError, SSELimitError, iter_sse_data
 
 
 def parse_sse_payload(data: str, *, label: str = "provider") -> dict[str, Any]:
     try:
-        payload = json.loads(data)
-    except json.JSONDecodeError as exc:
+        payload = json_loads_limited(data)
+    except ResourceLimitError as exc:
+        raise (SSELimitError if exc.status == 413 else SSELineError)(str(exc)) from exc
+    except (ValueError, RecursionError) as exc:
         raise SSELineError(f"The {label} stream returned malformed JSON: {exc}") from exc
     if isinstance(payload, list):
         payload = payload[0] if payload else {}
@@ -162,17 +166,17 @@ class ChatResponseAccumulator:
         self._tool_order = []
         self._tool_ids = {}
         self._invalid_tool_indices = set()
-        self._text = ""
-        self._reasoning = ""
+        self._text: list[str] = []
+        self._reasoning: list[str] = []
         self._finish_reason: str | None = None
         self._usage = normalize_usage()
         self._done = False
         self._malformed = False
         self._primary = PrimaryAlternativeSelector()
-        self._refusal = ""
+        self._refusal: list[str] = []
         self._blocked = False
-        self._tool_names: dict[int, str] = {}
-        self._tool_arguments: dict[int, str] = {}
+        self._tool_names: dict[int, list[str]] = {}
+        self._tool_arguments: dict[int, list[str]] = {}
 
     @property
     def usage(self) -> dict[str, int]:
@@ -209,11 +213,15 @@ class ChatResponseAccumulator:
             delta = choice.get("delta")
             if not isinstance(delta, dict):
                 continue
-            self._text += _message_text(delta)
+            content = _message_text(delta)
+            if content:
+                self._text.append(content)
             reasoning = delta.get("reasoning_content")
-            if isinstance(reasoning, str):
-                self._reasoning += reasoning
-            self._refusal += _message_refusal(delta)
+            if isinstance(reasoning, str) and reasoning:
+                self._reasoning.append(reasoning)
+            refusal = _message_refusal(delta)
+            if refusal:
+                self._refusal.append(refusal)
             tool_calls = delta.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
                 self.tool_error = self.tool_error or "invalid_function_call"
@@ -245,13 +253,13 @@ class ChatResponseAccumulator:
                         self.tool_error = self.tool_error or "invalid_function_name"
                         self._invalid_tool_indices.add(index)
                     if isinstance(name, str):
-                        self._tool_names[index] = self._tool_names.get(index, "") + name
+                        self._tool_names.setdefault(index, []).append(name)
                     arguments = function.get("arguments")
                     if arguments is not None and not isinstance(arguments, str):
                         self.tool_error = self.tool_error or "invalid_function_arguments"
                         self._invalid_tool_indices.add(index)
                     if isinstance(arguments, str):
-                        self._tool_arguments[index] = self._tool_arguments.get(index, "") + arguments
+                        self._tool_arguments.setdefault(index, []).append(arguments)
 
     def finalize(self) -> ProviderResult:
         output: list[dict[str, Any]] = []
@@ -260,7 +268,7 @@ class ChatResponseAccumulator:
                 {
                     "type": "reasoning",
                     "id": f"rs_{uuid.uuid4().hex[:8]}",
-                    "step_by_step_summary": self._reasoning,
+                    "step_by_step_summary": "".join(self._reasoning),
                 }
             )
         if self._text:
@@ -270,18 +278,18 @@ class ChatResponseAccumulator:
                     "id": f"msg_{uuid.uuid4().hex[:8]}",
                     "status": "completed",
                     "role": "assistant",
-                    "content": [{"type": "output_text", "text": self._text, "annotations": []}],
+                    "content": [{"type": "output_text", "text": "".join(self._text), "annotations": []}],
                 }
             )
         if self._refusal or self._blocked:
-            output.append(refusal_item({"blockReason": "CONTENT_FILTER"}, refusal_text=self._refusal))
+            output.append(refusal_item({"blockReason": "CONTENT_FILTER"}, refusal_text="".join(self._refusal)))
         counts = Counter(self._tool_ids.values())
         for index in self._tool_order:
             if index in self._invalid_tool_indices:
                 continue
-            name = self._tool_names.get(index, "")
+            name = "".join(self._tool_names.get(index, []))
             try:
-                arguments = self.tool_validator.arguments(name, self._tool_arguments.get(index, ""))
+                arguments = self.tool_validator.arguments(name, "".join(self._tool_arguments.get(index, [])))
                 call_id = self._tool_ids.setdefault(index, f"call_{uuid.uuid4().hex[:8]}")
                 if counts[call_id] > 1:
                     raise ToolCallError("conflicting_function_call")
@@ -520,7 +528,9 @@ class OpenAICompatibleTransport:
                     if response.status_code != 200:
                         detail = f"Provider returned HTTP {response.status_code}."
                         try:
-                            body = (await response.aread()).decode("utf-8", errors="replace")
+                            body = (await read_response_bytes(response, limit=65536)).decode("utf-8", errors="replace")
+                        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+                            raise
                         except Exception:
                             body = ""
                         if body:
@@ -547,6 +557,10 @@ class OpenAICompatibleTransport:
                                 return
                             try:
                                 payload = parse_sse_payload(data, label="OpenAI")
+                            except SSELimitError as exc:
+                                async for event in fail("provider_output_limit", str(exc)):
+                                    yield event
+                                return
                             except SSELineError:
                                 async for event in fail("invalid_stream_chunk", "The provider returned malformed stream JSON."):
                                     yield event
@@ -581,10 +595,16 @@ class OpenAICompatibleTransport:
                                     text_active = True
                                     for event in builder.add_text_delta(content_str):
                                         yield event
+                    except SSELimitError as exc:
+                        async for event in fail("provider_output_limit", str(exc)):
+                            yield event
+                        return
                     except SSELineError as exc:
                         async for event in fail("invalid_stream_chunk", str(exc)):
                             yield event
                         return
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception:
             if not terminal_emitted:
                 async for event in fail("connection_error", "The provider connection failed."):
@@ -680,6 +700,22 @@ class NativeResponsesStreamAdapter:
         return self._protocol_error
 
     def _failure(self, code: str, message: str) -> dict[str, Any]:
+        output = []
+        if code == "provider_output_limit":
+            if self._terminal_event is not None:
+                output = self._terminal_event["response"].get("output", [])
+            else:
+                for index, item in sorted(self._completed_items.items()):
+                    if index != len(output):
+                        break
+                    output.append(item)
+            try:
+                output = validate_output(output)
+            except NativeOutputError:
+                # Individually valid done items can still contradict one
+                # another (for example duplicate call IDs). Error rendering
+                # must neither publish that aggregate nor fail recursively.
+                output = []
         return {
             "type": "response.failed",
             "response": {
@@ -687,7 +723,7 @@ class NativeResponsesStreamAdapter:
                 "object": "response",
                 "status": "failed",
                 "model": self.display_model,
-                "output": [],
+                "output": output,
                 "error": {"code": code, "message": message},
             },
         }
@@ -794,7 +830,10 @@ class NativeResponsesStreamAdapter:
             self._set_failure("output_after_done", "The provider emitted output after [DONE].")
             return []
         try:
-            event = json.loads(data)
+            event = json_loads_limited(data)
+        except ResourceLimitError as exc:
+            self._set_failure("provider_output_limit" if exc.status == 413 else "invalid_stream_chunk", str(exc))
+            return []
         except (ValueError, RecursionError):
             self._set_failure("invalid_stream_chunk", "The provider returned malformed stream JSON.")
             return []
@@ -941,6 +980,8 @@ class NativeResponsesStreamAdapter:
         try:
             for data in self._decoder.feed(chunk):
                 events.extend(self._consume_payload(data))
+        except SSELimitError as exc:
+            self._set_failure("provider_output_limit", str(exc))
         except SSELineError as exc:
             self._set_failure("invalid_stream_chunk", str(exc))
         return self._emit_or_defer(events)
@@ -952,6 +993,8 @@ class NativeResponsesStreamAdapter:
         try:
             for data in self._decoder.finish():
                 events.extend(self._consume_payload(data))
+        except SSELimitError as exc:
+            self._set_failure("provider_output_limit", str(exc))
         except SSELineError as exc:
             self._set_failure("invalid_stream_chunk", str(exc))
         if self._terminal_event is None:
