@@ -3,21 +3,21 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path, PurePosixPath
 import re
-import stat
 from typing import Any
 
 from .cleanup import RUN_ID_RE
 from .persistence import PersistenceError
 from .retention import lifecycle_metadata
 from .data_policy import audit_projection
+from .inventory import read_path
 
 RECORD_SCHEMA_VERSION = 1
 SAVED_RESULT_SCHEMA_VERSION = 2
 LANE_SCHEMA_VERSION = 1
 MAX_LANES = 10000
+MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 STATES = {"running", "success", "partial", "error", "failed", "interrupted"}
 SCOPES = {"complete", "partial"}
 VERIFICATION_STATES = {"not_run", "completed_no_evidence", "tool_checks", "unknown"}
@@ -44,13 +44,16 @@ def _object(raw: bytes) -> dict[str, Any]:
 
 
 def _bytes(path: Path) -> bytes:
-    try:
-        _require(not path.is_symlink() and stat.S_ISREG(path.stat().st_mode), "Artifact must be a regular file", "invalid_reference")
-        return path.read_bytes()
-    except FileNotFoundError as exc:
-        raise ArtifactError("incomplete_publication", "A referenced artifact is missing") from exc
-    except OSError as exc:
-        raise ArtifactError("unreadable_artifact", "A referenced artifact cannot be read") from exc
+    raw, _size, reason = read_path(path, max_file_bytes=MAX_ARTIFACT_BYTES)
+    if reason == "missing":
+        raise ArtifactError("incomplete_publication", "A referenced artifact is missing")
+    if reason in {"symlink", "special_file"}:
+        raise ArtifactError("invalid_reference", "Artifact must be a regular file without symlinks")
+    if reason == "file_byte_limit":
+        raise ArtifactError("artifact_too_large", "Artifact exceeds its bounded read limit")
+    if reason is not None:
+        raise ArtifactError("unreadable_artifact", "A referenced artifact cannot be read safely")
+    return raw
 
 
 def _owned_path(root: Path, value: Any, run_id: str, *, relative: bool) -> Path:
@@ -282,7 +285,7 @@ def read_record(path: Path) -> dict[str, Any]:
 
 def read_publication(path: Path) -> dict[str, Any]:
     """Read a bounded consistent publication for local export; never repair it."""
-    from .inventory import _open_file, path_kind
+    from .inventory import path_kind, read_file
     path = Path(path).absolute()
     captured = {}
     total = 0
@@ -305,18 +308,13 @@ def read_publication(path: Path) -> dict[str, Any]:
             anchor = Path(selected.anchor)
             relative = selected.relative_to(anchor).as_posix()
             _require(path_kind(anchor, relative) == "file", "HTML input must be a regular file without symlink parents", "invalid_reference")
-            before = selected.lstat()
-            _require(before.st_size <= remaining, "HTML publication exceeds8MiB/file or16MiB total", "export_limit")
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-            with os.fdopen(_open_file(anchor, relative, flags), "rb") as handle:
-                opened = os.fstat(handle.fileno())
-                _require(stat.S_ISREG(opened.st_mode), "Artifact is not a regular file", "invalid_reference")
-                raw = handle.read(remaining + 1)
-                after = os.fstat(handle.fileno())
-            final = selected.lstat()
-            identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-            _require(identity(before) == identity(opened) == identity(after) == identity(final), "Artifact changed during read", "changed_during_read")
-            _require(len(raw) <= remaining, "HTML publication byte limit exceeded", "export_limit")
+            raw, _size, reason = read_file(anchor, relative, remaining, max_file_bytes=8 * 1024 * 1024)
+            if reason in {"file_byte_limit", "total_byte_limit", "source_byte_limit"}:
+                raise ArtifactError("export_limit", "HTML publication exceeds8MiB/file or16MiB total")
+            if reason == "changed_during_read":
+                raise ArtifactError("changed_during_read", "Artifact changed during read")
+            if reason is not None:
+                raise ArtifactError("invalid_reference", "HTML input must be a regular file without symlink parents")
             value = json.loads(raw, object_pairs_hook=unique_object,
                                parse_constant=lambda _: _require(False, "Non-finite artifact number"))
             _require(isinstance(value, dict), "Saved artifact must be an object")

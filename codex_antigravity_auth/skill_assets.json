@@ -7,6 +7,7 @@
     "CONTEXT_PREFLIGHT.md",
     "DATA_POLICY.md",
     "HTML_REPORTS.md",
+    "DIFF_PROVENANCE.md",
     "LOCAL_ONLY.md",
     "OWNERSHIP.md",
     "RUN_CONTROL.md",
@@ -27,9 +28,11 @@
     "scripts/anti_lib/checkpoints.py",
     "scripts/anti_lib/chunking.py",
     "scripts/anti_lib/cleanup.py",
+    "scripts/anti_lib/console.py",
     "scripts/anti_lib/context.py",
     "scripts/anti_lib/context_budget.py",
     "scripts/anti_lib/data_policy.py",
+    "scripts/anti_lib/diff_snapshot.py",
     "scripts/anti_lib/endpoint_policy.py",
     "scripts/anti_lib/errors.py",
     "scripts/anti_lib/finding_verdicts.py",
@@ -38,6 +41,7 @@
     "scripts/anti_lib/ledger.py",
     "scripts/anti_lib/local_policy.py",
     "scripts/anti_lib/media.py",
+    "scripts/anti_lib/namespaces.py",
     "scripts/anti_lib/persistence.py",
     "scripts/anti_lib/redaction.py",
     "scripts/anti_lib/reflections.py",
@@ -53,10 +57,6 @@
     "scripts/anti_lib/windows_job.py",
     "tests/fixtures/v5-lane-opus.json",
     "tests/fixtures/v5-lane-sonnet.json",
-    "tests/test_anti.py",
-    "DIFF_PROVENANCE.md",
-    "scripts/anti_lib/console.py",
-    "scripts/anti_lib/diff_snapshot.py",
-    "scripts/anti_lib/namespaces.py"
+    "tests/test_anti.py"
   ]
 }

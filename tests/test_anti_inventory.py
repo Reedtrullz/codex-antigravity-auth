@@ -328,3 +328,55 @@ def test_windows_creation_and_change_times_are_compared_with_their_own_api(repo,
         assert raw is None and reason == 'changed_during_read'
     else:
         assert raw == b'source\n' and size == 7 and reason is None
+
+
+def test_stable_capture_allows_explicit_larger_limit(repo, monkeypatch):
+    anti, root, _ = repo
+    inventory = anti.review_inventory
+    monkeypatch.setattr(inventory, 'MAX_FILE_BYTES', 3)
+    limited, _size, reason = inventory.read_path(root / 'pkg/source.py')
+    assert limited is None and reason == 'file_byte_limit'
+    raw, size, reason = inventory.read_path(root / 'pkg/source.py', max_file_bytes=7)
+    assert raw == b'source\n' and size == 7 and reason is None
+
+
+def test_stable_capture_detects_same_size_change_with_restored_mtime(repo, monkeypatch):
+    import os
+    anti, root, _ = repo
+    inventory = anti.review_inventory
+    target = root / 'pkg/source.py'
+    original_fstat = os.fstat
+    calls = 0
+
+    def mutate_after_capture(fd):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            before = target.stat()
+            target.write_bytes(b'changed')
+            os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return original_fstat(fd)
+
+    monkeypatch.setattr(inventory.os, 'fstat', mutate_after_capture)
+    raw, _size, reason = inventory.read_path(target)
+    assert raw is None and reason == 'changed_during_read'
+
+
+def test_stable_capture_detects_same_size_path_swap(repo, monkeypatch):
+    import os
+    anti, root, _ = repo
+    inventory = anti.review_inventory
+    target = root / 'pkg/source.py'
+    replacement = root / 'replacement.py'
+    replacement.write_bytes(b'changed')
+    before = target.stat()
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    open_file = inventory._open_file
+
+    def swap_before_open(capture_root, rel, flags):
+        os.replace(replacement, target)
+        return open_file(capture_root, rel, flags)
+
+    monkeypatch.setattr(inventory, '_open_file', swap_before_open)
+    raw, _size, reason = inventory.read_path(target)
+    assert raw is None and reason == 'changed_during_read'
