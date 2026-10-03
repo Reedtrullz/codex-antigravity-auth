@@ -1,12 +1,14 @@
 """Synthetic client-pool isolation and ownership; no providers or user state."""
 import asyncio
 import json
+import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
-from codex_antigravity_auth import provider_clients as clients, server
+from codex_antigravity_auth import provider_clients as clients, request_budget as budgets, server
 from codex_antigravity_auth.request_budget import owned_context
 from test_request_deadlines import NATIVE, Request, setup_route, success_response  # noqa: F401
 
@@ -307,6 +309,8 @@ def test_local_only_https_dispatch_uses_real_endpoint_policy(monkeypatch, setup_
 @pytest.mark.parametrize('stop', ['cancel', 'deadline'])
 @pytest.mark.parametrize('prep_delay', [0, 0.12])
 def test_gateway_stop_keeps_shared_client_usable_and_returns_admission(monkeypatch, setup_route, route, stream, stop, prep_delay):
+    # This tests transport-stop ownership; slow preparation is bounded separately
+    # in test_request_deadlines. Start this fixture's clock at body entry.
     state = setup_route(route, timeout=0.08)
     from fastapi import HTTPException
     from codex_antigravity_auth.resource_limits import Admission
@@ -316,9 +320,31 @@ def test_gateway_stop_keeps_shared_client_usable_and_returns_admission(monkeypat
     made = []
     async def scenario():
         entered = asyncio.Event()
+        epoch = time.monotonic()
+        transport_started = None
+
+        def transport_clock():
+            return epoch if transport_started is None else epoch + time.monotonic() - transport_started
+
+        class TransportTimers:
+            def __getattr__(self, name):
+                return getattr(asyncio, name)
+
+            async def sleep(self, delay):
+                # Clock and timers must both exclude setup; freezing just the
+                # clock would still let a preparation timer fire on wall time.
+                await entered.wait()
+                await asyncio.sleep(delay)
+
+        phase_time = SimpleNamespace(monotonic=transport_clock, time=time.time)
+        monkeypatch.setattr(server, 'time', phase_time)
+        monkeypatch.setattr(budgets, 'time', phase_time)
+        monkeypatch.setattr(budgets, 'asyncio', TransportTimers())
         closed = []
         class StalledBody(httpx.AsyncByteStream):
             async def __aiter__(self):
+                nonlocal transport_started
+                transport_started = time.monotonic()
                 entered.set()
                 await asyncio.Future()
                 yield b''
