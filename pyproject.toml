@@ -67,6 +67,7 @@ codex_antigravity_auth = [
   "REQUEST_DEADLINES.md",
 
   "design/model-discovery.md",
+  "RESOURCE_LIMITS.md",
   "skills/anti/SKILL.md",
   "skills/anti/RUN_CONTROL.md",
   "skills/anti/SPEND_CONTROL.md",
