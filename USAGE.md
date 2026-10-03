@@ -381,3 +381,12 @@ Omit probe intent and use `--dry-run --json` for local capture/format validation
 This is a private gateway extension with unverified backend listening, not generic
 Responses audio support. Read [WAV_AUDIO.md](codex_antigravity_auth/skills/anti/WAV_AUDIO.md)
 for limits, privacy, retry/fallback rules and required live acceptance controls.
+
+### Local HTML run reports
+
+`python scripts/anti.py runs report RUN_ID --compare OTHER_ID --output compare.html`
+exports validated retained publications to a self-contained read-only page.
+`runs export --format html` shows retained reflection evidence and local finding
+verdicts. See [HTML reports](codex_antigravity_auth/skills/anti/HTML_REPORTS.md) for
+comparison, keyboard navigation, retention and display limits. No server or
+network publication is started.
