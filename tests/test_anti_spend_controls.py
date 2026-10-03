@@ -304,23 +304,33 @@ def test_consult_preserves_partial_when_token_cap_retry_is_not_admitted(
     assert record.get(retained_field) == partial_text
     assert record['output_chars'] == 365
     assert record['status'] == record['runStatus'] == record['scopeStatus'] == 'partial'
-    assert record['metadata']['upstream_status'] == 'incomplete'
-    assert record['metadata']['incomplete_details'] == {'reason': 'max_output_tokens'}
-    assert record['metadata']['result_quality'] == 'incomplete'
-    assert record['metadata']['usage_totals']['output_tokens'] == 512
+    if save_output == 'full':
+        assert record['metadata']['upstream_status'] == 'incomplete'
+        assert record['metadata']['incomplete_details'] == {'reason': 'max_output_tokens'}
+        assert record['metadata']['result_quality'] == 'incomplete'
+        assert record['metadata']['usage_totals']['output_tokens'] == 512
     assert record['metadata']['consult_attempt_count'] == 1
+    assert record['metadata']['retry_disposition'] == 'exhausted'
     assert record['prompt_chars'] == len('Synthetic bounded consult.')
     assert any('admission' in caveat and 'not submitted' in caveat for caveat in record['caveats'])
     artifact = json.loads(Path(record['resultPath']).read_text())
     assert artifact[retained_field] == partial_text
     assert artifact['runStatus'] == artifact['scopeStatus'] == 'partial'
     assert artifact['verification']['status'] == 'not_run'
+    if save_output == 'summary':
+        assert record['retention']['contentComplete'] is False
+        assert artifact['retention']['contentComplete'] is False
+        assert artifact['output_chars'] == 365
+        assert 'output_text' not in artifact
 
     result = json.loads(capsys.readouterr().out)
     assert result['output_text'] == partial_text
     assert result['runStatus'] == result['scopeStatus'] == 'partial'
     assert result['metadata']['status'] == 'truncated'
     assert result['metadata']['result_quality'] == 'incomplete'
+    assert result['metadata']['upstream_status'] == 'incomplete'
+    assert result['metadata']['incomplete_details'] == {'reason': 'max_output_tokens'}
+    assert result['metadata']['usage_totals']['output_tokens'] == 512
     assert result['verification']['status'] == 'not_run'
 
 
