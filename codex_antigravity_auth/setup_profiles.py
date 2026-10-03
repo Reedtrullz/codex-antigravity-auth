@@ -48,6 +48,17 @@ def _json(path: Path, value):
 
 
 def _read_file(path: Path, limit=MAX_BYTES):
+    # Check the original components before resolving or opening. A missing leaf
+    # is valid for planning, but must not hide an existing linked parent.
+    for component in (path, *path.parents):
+        try:
+            entry = component.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(entry.st_mode) or getattr(entry, "st_file_attributes", 0) & 0x400:
+            raise SetupError("Setup refuses symlinked or reparse file paths")
+        if component != path and not stat.S_ISDIR(entry.st_mode):
+            raise SetupError("Setup file parents must be directories")
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -228,8 +239,8 @@ def setup_plan(args, *, profile=None):
     else:
         settings = profile["settings"]
     config_entry = client_config_path(args.config).absolute()
-    config = config_entry.resolve()
-    raw = _read_file(config)
+    raw = _read_file(config_entry)
+    config = Path(os.path.abspath(config_entry))
     try:
         text = raw.decode("utf-8") if raw is not None else ""
     except UnicodeError as exc:

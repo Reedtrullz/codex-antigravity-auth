@@ -56,7 +56,7 @@ def test_account_refresh_and_cooldown_runtime_messages_never_include_identity_or
         monkeypatch.setattr("codex_antigravity_auth.oauth.discover_project_id", Mock(side_effect=ValueError("fixture-unlabelled-secret")))
         assert manager._refresh_snapshot(dict(account)) == "refreshed"
     output = path.read_text()
-    assert "acct_" in output and "Project discovery failed during token refresh" in output
+    assert "acct_" in output and "ValueError" in output and "Discovered project" in output
     for sentinel in ("person@example.invalid", "private-project-sentinel", "fixture-access", "fixture-refresh", "fixture-unlabelled-secret"):
         assert sentinel not in output
     assert account["email"] == "person@example.invalid" and account["accessToken"] == "fixture-access"
