@@ -230,7 +230,6 @@ def test_native_non200_body_read_preserves_typed_control_errors(monkeypatch, fai
     client = Client()
     monkeypatch.setattr(server, "openai_responses_url", lambda _auth: "https://example.invalid/v1/responses")
     monkeypatch.setattr(server, "openai_request_headers", lambda _auth: {})
-    monkeypatch.setattr(server, "httpx_client_options", lambda *args, **kwargs: {})
     monkeypatch.setattr(server.httpx, "AsyncClient", lambda **kwargs: client)
     async def rejected(*args, **kwargs): raise failure
     monkeypatch.setattr(server, "read_response_bytes", rejected)
@@ -253,7 +252,6 @@ def test_native_non200_body_read_io_failure_keeps_upstream_http_status(monkeypat
     client = Client()
     monkeypatch.setattr(server, "openai_responses_url", lambda _auth: "https://example.invalid/v1/responses")
     monkeypatch.setattr(server, "openai_request_headers", lambda _auth: {})
-    monkeypatch.setattr(server, "httpx_client_options", lambda *args, **kwargs: {})
     monkeypatch.setattr(server.httpx, "AsyncClient", lambda **kwargs: client)
     async def unreadable(*args, **kwargs): raise OSError("synthetic body-read failure")
     monkeypatch.setattr(server, "read_response_bytes", unreadable)
