@@ -1,7 +1,6 @@
 from tests.conftest import byte_chunks
 import json
 import os
-import io
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -514,7 +513,7 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertNotIn("apiKeyOptional", deepseek)
 
         custom = normalized["providers"]["custom-one"]
-        self.assertNotIn("kind", custom)
+        self.assertIsNone(custom["kind"])
         self.assertNotIn("displayName", custom)
         self.assertEqual(custom["baseUrl"], "http://localhost:9999/v1")
         self.assertEqual(
@@ -530,7 +529,7 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertNotIn("timeout", custom)
 
         custom_two = normalized["providers"]["custom-two"]
-        self.assertNotIn("kind", custom_two)
+        self.assertEqual(custom_two["kind"], "unknown")
         self.assertNotIn("displayName", custom_two)
         self.assertEqual(custom_two["models"], [{"id": "ok"}])
         self.assertNotIn("apiKeyEnv", custom_two)
@@ -538,21 +537,20 @@ class TestBYOKProviders(unittest.TestCase):
 
         for index, api_key in enumerate(("secret\nbad", "secret\u00e9bad")):
             with self.subTest(api_key=repr(api_key)):
-                captured_stderr = io.StringIO()
-                with patch("sys.stderr", captured_stderr):
+                with self.assertLogs("codex_antigravity_auth.byok", level="WARNING") as logs:
                     malformed_key = normalize_provider_entry(
                         {"apiKey": api_key, "displayName": f"Broken Provider {index}"}
                     )
                 self.assertNotIn("apiKey", malformed_key)
-                self.assertIn(f"Broken Provider {index}", captured_stderr.getvalue())
-                self.assertIn("failed validation", captured_stderr.getvalue())
-                self.assertNotIn(api_key, captured_stderr.getvalue())
+                output = "\n".join(logs.output)
+                self.assertNotIn(f"Broken Provider {index}", output)
+                self.assertIn("failed validation", output)
+                self.assertNotIn(api_key, output)
         # The warning is emitted once per provider label, not on every load.
-        captured_stderr = io.StringIO()
-        with patch("sys.stderr", captured_stderr):
+        with self.assertLogs("codex_antigravity_auth.byok", level="WARNING") as logs:
             normalize_provider_entry({"apiKey": "bad\x01key", "displayName": "Repeat Warning Provider"})
             normalize_provider_entry({"apiKey": "bad\x01key", "displayName": "Repeat Warning Provider"})
-        self.assertEqual(captured_stderr.getvalue().count("failed validation"), 1)
+        self.assertEqual("\n".join(logs.output).count("failed validation"), 1)
 
         reserved = normalize_provider_entry(
             {
@@ -572,7 +570,7 @@ class TestBYOKProviders(unittest.TestCase):
             providers = all_provider_configs(include_env_enabled=False)
             self.assertIsNone(providers["deepseek"]["baseUrl"])
             self.assertEqual(providers["deepseek"]["models"], ["deepseek-chat"])
-            self.assertEqual(providers["custom-one"]["kind"], "openai_chat")
+            self.assertIsNone(providers["custom-one"]["kind"])
 
     def test_single_string_legacy_models_are_not_split_into_characters(self):
         normalized = normalize_provider_entry({"models": "abc"})
@@ -1627,7 +1625,7 @@ class TestBYOKProviders(unittest.TestCase):
         }
 
         chunks = [
-            'data: {"choices":"bad"}\n',
+            'data: {"choices":[]}\n',
             'data: {"choices":[{"delta":"bad"}]}\n',
             'data: {"choices":[{"delta":{"reasoning_content":["bad"],"content":["bad"]}}]}\n',
             'data: {"choices":[{"delta":{"tool_calls":[{"index":"bad","id":"bad","function":{"name":"ignored","arguments":"{}"}}]}}]}\n',

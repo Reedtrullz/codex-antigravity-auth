@@ -13,10 +13,23 @@ SCRIPT = Path(__file__).resolve().parents[1] / "codex_antigravity_auth/skills/an
 
 @pytest.fixture
 def checks(monkeypatch, tmp_path):
+    script_dir = str(SCRIPT.resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
     spec = importlib.util.spec_from_file_location("anti_check_fixture", SCRIPT)
     anti = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(anti)
     import anti_lib.verifier as verifier
+    if sys.platform == "win32":
+        guarded_popen = verifier.subprocess.Popen
+        def fixture_popen(argv, **kwargs):
+            # Keep the real gated wrapper and Job Object, with test isolation
+            # inherited by its synthetic checker and descendants.
+            if argv[:5] == [sys.executable, "-I", "-S", "-c", verifier._WINDOWS_WRAPPER]:
+                assert len(argv) == 7 and argv[-1] == str(verifier.MAX_FILE_BYTES)
+                argv = [argv[0], *argv[3:]]
+            return guarded_popen(argv, **kwargs)
+        monkeypatch.setattr(verifier.subprocess, "Popen", fixture_popen)
     monkeypatch.setattr(verifier, "_fixture_find_eslint", verifier._find_eslint, raising=False)
     monkeypatch.setattr(verifier, "_find_eslint", lambda _: None)
     monkeypatch.setattr(anti, "RUNS_DIR", tmp_path / "runs")
@@ -302,7 +315,6 @@ def test_windows_job_creation_failure_never_starts_a_process(checks, monkeypatch
 def test_windows_job_assignment_failure_keeps_gate_closed(checks, monkeypatch):
     _, verifier, root = checks
     monkeypatch.setattr(verifier, "WINDOWS", True)
-    guarded_windows_fixture(monkeypatch, verifier)
     marker = root / "must-not-run"
     state = {"closed": False}
     class Job:
@@ -321,7 +333,6 @@ def test_windows_job_assignment_failure_keeps_gate_closed(checks, monkeypatch):
 def test_windows_gated_wrapper_starts_only_after_assignment(checks, monkeypatch):
     _, verifier, root = checks
     monkeypatch.setattr(verifier, "WINDOWS", True)
-    guarded_windows_fixture(monkeypatch, verifier)
     state = {"assigned": False, "closed": False}
     marker = root / "checker-started"
     class Job:
@@ -345,7 +356,6 @@ def test_windows_job_adapter_terminates_synthetic_descendants_on_timeout(checks,
     import signal
     _, verifier, root = checks
     monkeypatch.setattr(verifier, "WINDOWS", True)
-    guarded_windows_fixture(monkeypatch, verifier)
     monkeypatch.setattr(verifier, "CHECK_TIMEOUT_SECONDS", 0.8)
     state = {"assigned": False, "closed": False}
     class Job:
@@ -367,16 +377,6 @@ def test_windows_job_adapter_terminates_synthetic_descendants_on_timeout(checks,
     assert outcome["reason"] == "tool_timeout"
     assert "synthetic-child-started" in outcome["output"]
     assert state == {"assigned": True, "closed": True}
-
-
-def guarded_windows_fixture(monkeypatch, verifier):
-    # Exercise the actual gated wrapper with synthetic children while retaining
-    # startup isolation. Production still requests -I/-S for its own wrapper.
-    original = verifier.subprocess.Popen
-    def start(argv, **kwargs):
-        assert argv[:4] == [sys.executable, '-I', '-S', '-c']
-        return original([argv[0], *argv[3:]], **kwargs)
-    monkeypatch.setattr(verifier.subprocess, 'Popen', start)
 
 
 def test_windows_job_uses_kill_on_close_and_required_assignment_rights(monkeypatch):
@@ -411,3 +411,48 @@ def test_windows_job_uses_kill_on_close_and_required_assignment_rights(monkeypat
     assert ("open", (0x0101, False, 777)) in calls
     assert ("assign", (101, 202)) in calls
     assert [args for name, args in calls if name == "close"] == [(202,), (101,)]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows process-tree ownership")
+def test_native_windows_job_terminates_live_descendant_on_timeout(checks, monkeypatch):
+    import ctypes
+    from ctypes import wintypes as w
+    import threading
+    import time
+    _, verifier, root = checks
+    monkeypatch.setattr(verifier, "CHECK_TIMEOUT_SECONDS", 4)
+    marker = root / "child-pid"
+    code = (
+        "import subprocess,sys,time; from pathlib import Path; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(20)']); "
+        "Path('child-pid.tmp').write_text(str(child.pid)); "
+        "Path('child-pid.tmp').replace('child-pid'); time.sleep(20)"
+    )
+    outcomes = []
+    runner = threading.Thread(target=lambda: outcomes.append(
+        verifier._run_check([sys.executable, "-c", code], b"", root)))
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes, kernel.OpenProcess.restype = [w.DWORD, w.BOOL, w.DWORD], w.HANDLE
+    kernel.WaitForSingleObject.argtypes, kernel.WaitForSingleObject.restype = [w.HANDLE, w.DWORD], w.DWORD
+    kernel.TerminateProcess.argtypes, kernel.TerminateProcess.restype = [w.HANDLE, w.UINT], w.BOOL
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [w.HANDLE], w.BOOL
+    handle = None
+    runner.start()
+    try:
+        deadline = time.monotonic() + 3
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert marker.exists(), "synthetic descendant did not start before timeout"
+        handle = kernel.OpenProcess(0x100001, False, int(marker.read_text()))  # SYNCHRONIZE | TERMINATE
+        assert handle, ctypes.get_last_error()
+        assert kernel.WaitForSingleObject(handle, 0) == 258  # Still alive before job closure.
+        runner.join(timeout=6)
+        assert not runner.is_alive()
+        assert len(outcomes) == 1 and outcomes[0]["reason"] == "tool_timeout"
+        assert kernel.WaitForSingleObject(handle, 2000) == 0  # Real descendant was terminated.
+    finally:
+        runner.join(timeout=6)
+        if handle:
+            if kernel.WaitForSingleObject(handle, 0) == 258:
+                kernel.TerminateProcess(handle, 1)  # Owned fixture only, if the assertion failed.
+            kernel.CloseHandle(handle)

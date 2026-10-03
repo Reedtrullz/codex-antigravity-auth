@@ -288,7 +288,7 @@ class TestOpenAIStreamingRoute(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual([event["type"] for event in terminal], ["response.completed"])
         self.assertEqual(len(refusals), 1)
-        self.assertNotIn("provider detail", str(refusals))
+        self.assertIn("provider detail", str(refusals))
 
 
 class TestNativeResponsesRoute(unittest.IsolatedAsyncioTestCase):

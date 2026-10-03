@@ -19,6 +19,47 @@ class TerminalKind(str, Enum):
     FAILED = "failed"
 
 
+POLICY_FINISH_REASONS = frozenset({
+    "content_filter", "safety", "recitation", "blocklist", "prohibited_content", "spii",
+    "image_safety", "image_prohibited_content", "image_recitation", "escalation",
+})
+_ERROR_FINISH_REASONS = frozenset({
+    "language", "malformed_function_call", "unexpected_tool_call", "too_many_tool_calls",
+    "missing_thought_signature", "malformed_response", "no_image", "image_other", "pup_limited_disabled",
+})
+
+
+class PrimaryAlternativeSelector:
+    """Select index zero without merging provider alternatives across frames.
+
+    A sole unindexed item is the legacy single-answer format. Once a stream
+    contains nonprimary indices, unindexed chunks are ambiguous and rejected.
+    """
+
+    def __init__(self) -> None:
+        self._unindexed_seen = False
+        self._nonprimary_seen = False
+
+    def select(self, alternatives: object) -> list[dict[str, Any]]:
+        if not isinstance(alternatives, list) or any(not isinstance(item, dict) for item in alternatives):
+            raise ValueError("Provider alternatives must be a list of objects")
+        if not alternatives:
+            return []
+        if any("index" not in item for item in alternatives):
+            if len(alternatives) != 1 or self._nonprimary_seen:
+                raise ValueError("Unindexed provider alternatives are ambiguous")
+            self._unindexed_seen = True
+            return alternatives
+        indices = [item["index"] for item in alternatives]
+        if any(type(index) is not int or index < 0 for index in indices) or indices.count(0) > 1:
+            raise ValueError("Provider alternative indices must be nonnegative integers with one primary index")
+        nonprimary = any(index != 0 for index in indices)
+        if nonprimary and self._unindexed_seen:
+            raise ValueError("Mixed indexed and unindexed provider alternatives are ambiguous")
+        self._nonprimary_seen = self._nonprimary_seen or nonprimary
+        return [item for item in alternatives if item["index"] == 0]
+
+
 @dataclass(frozen=True)
 class ProviderTerminal:
     kind: TerminalKind
@@ -123,8 +164,8 @@ def normalize_usage(
     }
 
 
-def refusal_item(safety_block: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Build a refusal without exposing provider policy internals."""
+def refusal_item(safety_block: dict[str, Any] | None = None, *, refusal_text: str | None = None) -> dict[str, Any]:
+    """Preserve user-facing refusal text; do not expose policy metadata as text."""
 
     reason = "The provider declined to produce this response."
     if isinstance(safety_block, dict):
@@ -135,6 +176,8 @@ def refusal_item(safety_block: dict[str, Any] | None = None) -> dict[str, Any]:
             and all(character.isupper() or character.isdigit() or character == "_" for character in block_reason)
         ):
             reason = f"The provider declined this response ({block_reason})."
+    if isinstance(refusal_text, str) and refusal_text:
+        reason = refusal_text
     return {
         "type": "message",
         "id": f"msg_{uuid.uuid4().hex[:12]}",
@@ -202,6 +245,12 @@ def classify_terminal(
         )
 
     normalized_reason = finish_reason.strip().lower() if isinstance(finish_reason, str) else ""
+    if isinstance(finish_reason, str) and not normalized_reason:
+        return ProviderTerminal(
+            TerminalKind.FAILED, "missing_terminal_signal",
+            error_code="missing_terminal_signal",
+            error_message="The provider ended without a nonblank finish reason.",
+        )
     if normalized_reason in {"max_tokens", "max_output_tokens", "length"}:
         return ProviderTerminal(
             TerminalKind.INCOMPLETE,
@@ -209,16 +258,51 @@ def classify_terminal(
             incomplete_reason="max_output_tokens",
         )
 
-    if bool(meaningful_output_items(output)):
-        return ProviderTerminal(TerminalKind.COMPLETED, normalized_reason or "completed")
+    if normalized_reason in _ERROR_FINISH_REASONS:
+        return ProviderTerminal(
+            TerminalKind.FAILED, normalized_reason,
+            error_code=f"provider_finish_{normalized_reason}",
+            error_message=f"The provider stopped with {normalized_reason}.",
+        )
+    if normalized_reason not in {"", "stop", "tool_calls", "function_call"} | POLICY_FINISH_REASONS:
+        return ProviderTerminal(
+            TerminalKind.FAILED, "unknown_finish_reason",
+            error_code="unknown_finish_reason",
+            error_message="The provider returned an unsupported finish reason.",
+        )
 
-    if safety_block:
+    meaningful = meaningful_output_items(output)
+    if safety_block or normalized_reason in POLICY_FINISH_REASONS:
+        ordinary_output = any(
+            item.get("type") == "function_call" or (
+                item.get("type") == "message" and any(
+                    isinstance(part, dict) and part.get("type") == "output_text"
+                    and isinstance(part.get("text"), str) and bool(part["text"])
+                    for part in item.get("content", [])
+                )
+            ) for item in meaningful
+        )
+        if ordinary_output:
+            return ProviderTerminal(
+                TerminalKind.INCOMPLETE, normalized_reason or "content_filter", incomplete_reason="content_filter",
+            )
+        if any(
+            item.get("type") == "message" and any(
+                isinstance(part, dict) and part.get("type") == "refusal"
+                and isinstance(part.get("refusal"), str) and bool(part["refusal"])
+                for part in item.get("content", [])
+            ) for item in meaningful
+        ):
+            return ProviderTerminal(TerminalKind.COMPLETED, normalized_reason or "refusal")
         return ProviderTerminal(
             TerminalKind.FAILED,
             "blocked_without_refusal",
             error_code="blocked_without_refusal",
             error_message="The provider blocked the response without a refusal item.",
         )
+
+    if meaningful:
+        return ProviderTerminal(TerminalKind.COMPLETED, normalized_reason or "completed")
 
     return ProviderTerminal(
         TerminalKind.FAILED,

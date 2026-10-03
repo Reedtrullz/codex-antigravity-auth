@@ -18,7 +18,9 @@ including executable code and function responses, produce
 `unsupported_output_part`; malformed supported fields produce
 `malformed_output_part`, including a supplied non-list `parts` container. Media
 errors take precedence over malformed parts, then other unsupported parts,
-independent of part/candidate/chunk ordering. Error messages are fixed and contain no provider values.
+independent of part/chunk ordering within the selected alternative. Other
+alternatives remain excluded by the gateway's primary-answer contract.
+Error messages are fixed and contain no provider values.
 
 Usable sibling text, reasoning, valid calls and aggregate usage are retained. A
 nominally completed response becomes failed. A provider's incomplete result keeps

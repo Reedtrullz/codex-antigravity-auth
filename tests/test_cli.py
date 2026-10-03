@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 import json
 import os
@@ -55,7 +56,7 @@ from codex_antigravity_auth.cli import (
     validate_codex_provider_name,
     version_check_result,
     write_codex_config,
-    _toml_section_name,
+    parse_codex_config,
 )
 from codex_antigravity_auth.cli_doctor import (
     openrouter_reachability_check,
@@ -1227,7 +1228,7 @@ class TestInstallSkill(unittest.TestCase):
             )
             with patch("codex_antigravity_auth.cli.gateway_model_ids", return_value={"claude-opus-4-6-thinking", "claude-sonnet-4-6"}):
                 with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={"deepseek": provider}):
-                    with patch("codex_antigravity_auth.cli.load_provider_config", return_value={"providers": {"deepseek": provider}}):
+                    with patch("codex_antigravity_auth.cli.load_provider_config_read_only", return_value={"providers": {"deepseek": provider}}):
                         with patch("builtins.print") as mock_print:
                             run_setup_v2(args)
 
@@ -2157,12 +2158,13 @@ class TestV3NativeSetup(unittest.TestCase):
                                             )
 
             pid_file = Path(tmp) / "antigravity-gateway-51122.pid"
-            log_file = Path(tmp) / "antigravity-gateway-51122.log"
+            log_file = Path(tmp) / "antigravity-process-logs/gateway-51122.log"
             self.assertEqual(pid_file.read_text(encoding="utf-8"), "12345\n")
             assert_mode_if_posix(self, log_file, 0o600)
             self.assertEqual(info["pid_file"], str(pid_file))
             self.assertEqual(info["log_file"], str(log_file))
             popen.assert_called_once()
+            self.assertIn("--process-log", popen.call_args.args[0])
 
     def test_start_background_removes_pid_and_terminates_when_readiness_fails(self):
         proc = MagicMock()
@@ -2211,8 +2213,11 @@ class TestV3NativeSetup(unittest.TestCase):
             cmd = popen.call_args.args[0]
             self.assertEqual(cmd[:4], ["/usr/local/bin/op", "run", "--env-file", str(env_file)])
             self.assertIn("--", cmd)
-            self.assertIn("uvicorn", cmd)
-            self.assertIn("codex_antigravity_auth.server:app", cmd)
+            self.assertIn("codex_antigravity_auth.cli", cmd)
+            self.assertIn("start", cmd)
+            self.assertIn("--process-log", cmd)
+            self.assertEqual(popen.call_args.kwargs["stdout"], subprocess.DEVNULL)
+            self.assertEqual(popen.call_args.kwargs["stderr"], subprocess.DEVNULL)
 
     def test_start_background_rejects_onepassword_when_op_missing_before_popen(self):
         proc = MagicMock()
@@ -3401,12 +3406,10 @@ class TestVNextPolishCli(unittest.TestCase):
 
 
 class VisionSidecarDoctorTests(unittest.TestCase):
-    def test_toml_section_name_normalizes_quoted_subtables(self):
-        # [model_providers."antigravity"] and [model_providers.antigravity]
-        # name the same TOML table; upserts must not emit a duplicate header.
-        self.assertEqual(_toml_section_name('[model_providers."antigravity"]'), "model_providers.antigravity")
-        self.assertEqual(_toml_section_name("[model_providers.antigravity]"), "model_providers.antigravity")
-        self.assertIsNone(_toml_section_name("model = 'x'"))
+    def test_codex_config_recognizes_quoted_provider_tables(self):
+        for header in ('[model_providers."antigravity"]', "[model_providers.antigravity]"):
+            parsed = parse_codex_config(header + '\nbase_url = "http://localhost:51122/v1"\n')
+            self.assertEqual(parsed["provider_tables"]["antigravity"]["base_url"], "http://localhost:51122/v1")
 
     def test_codex_model_metadata_default_input_modalities(self):
         m = codex_model_metadata('test-model', 'Test', 100000, 'test', 1234)

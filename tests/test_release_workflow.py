@@ -35,7 +35,7 @@ class TestReleaseWorkflow(unittest.TestCase):
                 ("macos-latest", "3.12"),
             },
         )
-        self.assertEqual(set(jobs["publish"]["needs"]), {"build", "test"})
+        self.assertEqual(set(jobs["publish"]["needs"]), {"build", "test", "quality"})
 
     def test_release_version_and_tag_guard_are_current(self):
         project = tomllib.loads(
@@ -119,4 +119,4 @@ class TestArtifactCompleteness(unittest.TestCase):
             self.assertIn("os: macos-latest", text)
             self.assertIn("python scripts/run_tests.py", text)
         project = tomllib.loads((ROOT / "pyproject.toml").read_text())
-        self.assertIn("tomli>=2.0; python_version < '3.11'", project["project"]["optional-dependencies"]["dev"])
+        self.assertIn("tomli>=2.0.1; python_version < '3.11'", project["project"]["optional-dependencies"]["dev"])

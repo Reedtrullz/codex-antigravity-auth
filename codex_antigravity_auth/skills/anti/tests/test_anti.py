@@ -24,6 +24,9 @@ _ACTIVE_TEST_RUNS_DIR: list[Path] = []
 
 
 def load_anti():
+    anti_lib_dir = str(SCRIPT.resolve().parent)
+    if anti_lib_dir not in sys.path:
+        sys.path.insert(0, anti_lib_dir)
     spec = importlib.util.spec_from_file_location("anti_skill_helper", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -2847,7 +2850,7 @@ class AntiHelperTests(unittest.TestCase):
         contract = json.loads(contract_output.getvalue())
         self.assertEqual(
             set(contract),
-            {"caveats", "coverage", "disagreements", "findings", "findings_dropped", "findings_total", "panelStatus", "parse_warning", "recommended_next_actions", "runStatus", "schemaVersion", "scopeStatus", "summary", "unverifiable", "verification"},
+            {"caveats", "coverage", "disagreements", "findings", "findings_dropped", "findings_total", "findings_invalid", "findings_merged", "findings_truncated", "confidence_kind", "finding_errors", "finding_errors_omitted", "panelStatus", "parse_warning", "recommended_next_actions", "runStatus", "schemaVersion", "scopeStatus", "summary", "unverifiable", "verification"},
         )
 
     def test_panel_errors_are_redacted_in_json_output(self) -> None:
@@ -5110,7 +5113,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                     "--model", "sonnet", "--model", "opus", "--judge", "opus",
                     "--max-prompt-chars", "3000", "--max-review-chunks", "0",
                     "--chunked", "always", "--run-id", "synthesis-failure",
-                    "--save-output", "summary", "--json", "--no-progress",
+                    "--save-output", "full", "--json", "--no-progress",
                 ])
             finally:
                 os.chdir(old_cwd)
@@ -5118,6 +5121,8 @@ class ScopeIntegrityContractTests(unittest.TestCase):
             artifact = json.loads(
                 Path(anti.load_run_record(anti.RUNS_DIR / "synthesis-failure.json")["resultPath"]).read_text(encoding="utf-8")
             )
+            raw_lane_paths = artifact["artifacts"]["rawLanePaths"]
+            ledger = [json.loads(Path(path).read_text(encoding="utf-8")) for path in raw_lane_paths]
 
         self.assertEqual(rc, 1)
         coverage = artifact["coverage"]
@@ -5129,6 +5134,11 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         self.assertEqual(coverage["chunksFailed"], 0)
         self.assertEqual(coverage["files"][0]["contentStatus"], "complete")
         self.assertEqual(coverage["files"][0]["bytesReviewed"], len(source.encode("utf-8")))
+        self.assertEqual(len(raw_lane_paths), 3)
+        self.assertEqual([entry["stage"] for entry in ledger], [
+            "review_chunk_1", "review_chunk_2", "review_chunk_3",
+        ])
+        self.assertTrue(all(entry["output"] == "chunk" for entry in ledger))
 
     def test_incomplete_synthesis_does_not_mark_reviewed_file_omitted(self) -> None:
         anti = load_anti()
