@@ -275,6 +275,97 @@ def test_automatic_token_cap_retry_respects_output_allowance(anti,monkeypatch,tm
     assert 'fixture:model' not in json.dumps(record)
 
 
+@pytest.mark.parametrize('save_output', ['summary', 'full'])
+def test_consult_preserves_partial_when_token_cap_retry_is_not_admitted(
+    anti, monkeypatch, tmp_path, capsys, save_output,
+):
+    monkeypatch.setattr(anti, 'fetch_model_ids', lambda *a, **k: {'fixture:model'})
+    monkeypatch.setattr(anti, '_install_run_signal_handlers', lambda args: None)
+    partial_text = 'Synthetic unfinished consult output: ' + 'x' * 328
+    partial = response(partial_text, {'input_tokens': 10, 'output_tokens': 512, 'total_tokens': 522})
+    partial.update(status='incomplete', incomplete_details={'reason': 'max_output_tokens'})
+    calls = open_sequence(monkeypatch, anti, [(200, partial)])
+    run_id = 'budgeted-partial-' + save_output
+
+    code = anti.main([
+        'consult', '--model', 'fixture:model', '--prompt', 'Synthetic bounded consult.',
+        '--max-output-tokens', '512', '--max-calls', '1', '--retry', '0',
+        '--run-id', run_id, '--save-output', save_output,
+        '--no-progress', '--no-pre-read', '--json',
+    ])
+
+    assert code == 1
+    assert len(calls) == 1 and calls[0]['max_output_tokens'] == 512
+    record = json.loads((tmp_path / 'runs' / (run_id + '.json')).read_text())
+    admission = record['metadata']['admission_controls']
+    assert admission['committed']['calls'] == 1 and admission['reserved']['calls'] == 0
+    assert admission['refused_attempts'] == 1
+    retained_field = 'output_preview' if save_output == 'summary' else 'output_text'
+    assert record.get(retained_field) == partial_text
+    assert record['output_chars'] == 365
+    assert record['status'] == record['runStatus'] == record['scopeStatus'] == 'partial'
+    if save_output == 'full':
+        assert record['metadata']['upstream_status'] == 'incomplete'
+        assert record['metadata']['incomplete_details'] == {'reason': 'max_output_tokens'}
+        assert record['metadata']['result_quality'] == 'incomplete'
+        assert record['metadata']['usage_totals']['output_tokens'] == 512
+    assert record['metadata']['consult_attempt_count'] == 1
+    assert record['metadata']['retry_disposition'] == 'exhausted'
+    assert record['prompt_chars'] == len('Synthetic bounded consult.')
+    assert any('admission' in caveat and 'not submitted' in caveat for caveat in record['caveats'])
+    artifact = json.loads(Path(record['resultPath']).read_text())
+    assert artifact[retained_field] == partial_text
+    assert artifact['runStatus'] == artifact['scopeStatus'] == 'partial'
+    assert artifact['verification']['status'] == 'not_run'
+    if save_output == 'summary':
+        assert record['retention']['contentComplete'] is False
+        assert artifact['retention']['contentComplete'] is False
+        assert artifact['output_chars'] == 365
+        assert 'output_text' not in artifact
+
+    result = json.loads(capsys.readouterr().out)
+    assert result['output_text'] == partial_text
+    assert result['runStatus'] == result['scopeStatus'] == 'partial'
+    assert result['metadata']['status'] == 'truncated'
+    assert result['metadata']['result_quality'] == 'incomplete'
+    assert result['metadata']['upstream_status'] == 'incomplete'
+    assert result['metadata']['incomplete_details'] == {'reason': 'max_output_tokens'}
+    assert result['metadata']['usage_totals']['output_tokens'] == 512
+    assert result['verification']['status'] == 'not_run'
+
+
+@pytest.mark.parametrize('retry,refused_attempts,error_detail', [
+    (0, 0, 'HTTP 503'),
+    (1, 1, 'calls admission limit'),
+])
+def test_consult_submitted_retry_errors_remain_errors(
+    anti, monkeypatch, tmp_path, capsys, retry, refused_attempts, error_detail,
+):
+    monkeypatch.setattr(anti, 'fetch_model_ids', lambda *a, **k: {'fixture:model'})
+    monkeypatch.setattr(anti, '_install_run_signal_handlers', lambda args: None)
+    monkeypatch.setattr(anti.time, 'sleep', lambda seconds: None)
+    partial = response('Synthetic incomplete output.', {'input_tokens': 10, 'output_tokens': 512, 'total_tokens': 522})
+    partial.update(status='incomplete', incomplete_details={'reason': 'max_output_tokens'})
+    calls = open_sequence(monkeypatch, anti, [(200, partial), (503, {'error': 'synthetic busy'})])
+
+    code = anti.main([
+        'consult', '--model', 'fixture:model', '--prompt', 'Synthetic bounded consult.',
+        '--max-output-tokens', '512', '--max-calls', '2', '--retry', str(retry),
+        '--run-id', 'submitted-retry-error', '--save-output', 'full',
+        '--no-progress', '--no-pre-read', '--json',
+    ])
+
+    assert code == 1
+    assert [call['max_output_tokens'] for call in calls] == [512, 1024]
+    record = json.loads((tmp_path / 'runs/submitted-retry-error.json').read_text())
+    assert record['status'] == 'error' and record['runStatus'] == 'failed'
+    assert error_detail in record['error']
+    admission = record['metadata']['admission_controls']
+    assert admission['committed']['calls'] == 2 and admission['reserved']['calls'] == 0
+    assert admission['refused_attempts'] == refused_attempts
+    assert capsys.readouterr().out == ''
+
+
 def test_currency_quote_must_cover_gateway_internal_attempts(anti,tmp_path):
     path=profile(tmp_path)
     data=json.loads(path.read_text());data['models']['fixture:model'].pop('covers_all_gateway_attempts')
