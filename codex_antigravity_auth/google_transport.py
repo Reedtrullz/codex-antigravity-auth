@@ -12,12 +12,16 @@ import uuid
 
 import httpx
 
-from .sse import SSELineError, iter_sse_data
+from .endpoint_policy import httpx_client_options, validate_endpoint_url
+from .request_budget import call_sync, owned_context
+from .resource_limits import ResourceLimitError, json_loads_limited, limited_post, response_json
+from .sse import SSELineError, SSELimitError, iter_sse_data
 
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
 from .response_protocol import (
     AttemptOutcome,
     ProviderResult,
+    POLICY_FINISH_REASONS,
     PrimaryAlternativeSelector,
     ProviderTerminal,
     ResponseEventBuilder,
@@ -26,12 +30,12 @@ from .response_protocol import (
     normalize_usage,
     refusal_item,
 )
+from .tool_calls import FunctionCallValidator, tool_terminal
+from .google_parts import GooglePart, normalize_google_part, output_failure, merge_output_error
 from .transform import (
-    function_call_arguments_json,
     safe_project_id,
     transform_gemini_candidate,
     transform_request,
-    valid_function_name,
 )
 ANTIGRAVITY_IDE_VERSION = "2.5.5"
 _IDE_USER_AGENT_CACHE: str | None = None
@@ -145,9 +149,14 @@ def _safe_client_metadata(value: object) -> dict[str, Any]:
 
 
 class GoogleResponseAccumulator:
-    def __init__(self) -> None:
-        self._text = ""
-        self._reasoning = ""
+    def __init__(self, *, tool_validator=None) -> None:
+        self.tool_validator = tool_validator or FunctionCallValidator()
+        self.tool_error = None
+        self.output_error = None
+        self._partial_names = set()
+        self._bad_call_ids = set()
+        self._text: list[str] = []
+        self._reasoning: list[str] = []
         self._function_calls: list[dict[str, Any]] = []
         self._finish_reason: str | None = None
         self._safety_block: dict[str, Any] | None = None
@@ -166,15 +175,16 @@ class GoogleResponseAccumulator:
     def mark_done(self) -> None:
         self._done = True
 
-    def consume(self, payload: object) -> None:
+    def consume(self, payload: object) -> list[GooglePart]:
+        normalized_parts = []
         if not isinstance(payload, dict):
             self._malformed = True
-            return
+            return []
         if "response" in payload:
             nested = payload.get("response")
             if not isinstance(nested, dict):
                 self._malformed = True
-                return
+                return []
             payload = nested
 
         prompt_feedback = payload.get("promptFeedback")
@@ -193,13 +203,17 @@ class GoogleResponseAccumulator:
             candidates = self._primary.select(payload.get("candidates", []))
         except ValueError:
             self._malformed = True
-            return
+            return []
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
             finish_reason = candidate.get("finishReason")
-            if isinstance(finish_reason, str) and finish_reason:
+            if finish_reason is not None and not isinstance(finish_reason, str):
+                self._malformed = True
+            if isinstance(finish_reason, str):
                 self._finish_reason = finish_reason
+                if finish_reason.strip().lower() in POLICY_FINISH_REASONS:
+                    self._safety_block = self._safety_block or {"blockReason": finish_reason.strip().upper()}
             content = candidate.get("content")
             if content is None:
                 continue
@@ -207,39 +221,22 @@ class GoogleResponseAccumulator:
                 continue
             parts = content.get("parts", [])
             if not isinstance(parts, list):
+                self.output_error = merge_output_error(self.output_error, 'malformed_output_part')
+                normalized_parts.append(GooglePart(output_error='malformed_output_part'))
                 continue
             for part in parts:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("thought") is True or part.get("type") == "thinking":
-                    thought = part.get("text") or part.get("thinking")
-                    if isinstance(thought, str):
-                        self._reasoning += thought
-                    continue
-                if "text" in part:
-                    text = part.get("text")
-                    if isinstance(text, str):
-                        self._text += text
-                    continue
-                if "functionCall" in part:
-                    function_call = part.get("functionCall")
-                    if not isinstance(function_call, dict):
-                        continue
-                    name = function_call.get("name")
-                    if not valid_function_name(name):
-                        continue
-                    call_id = function_call.get("id")
-                    if not isinstance(call_id, str) or not call_id:
-                        call_id = f"call_{uuid.uuid4().hex[:8]}"
-                    self._function_calls.append(
-                        {
-                            "type": "function_call",
-                            "id": f"fc_{uuid.uuid4().hex[:8]}",
-                            "call_id": call_id,
-                            "name": name,
-                            "arguments": function_call_arguments_json(function_call.get("args", {})),
-                        }
-                    )
+                normalized = normalize_google_part(part, self.tool_validator)
+                normalized_parts.append(normalized)
+                if normalized.text:
+                    self._text.append(normalized.text)
+                if normalized.reasoning:
+                    self._reasoning.append(normalized.reasoning)
+                self.output_error = merge_output_error(self.output_error, normalized.output_error)
+                self.tool_error = self.tool_error or normalized.tool_error
+                if normalized.partial_id: self._bad_call_ids.add(normalized.partial_id)
+                if normalized.partial_name: self._partial_names.add(normalized.partial_name)
+                if normalized.function is not None: self._function_calls.append(normalized.function)
+        return normalized_parts
 
     def finalize(self) -> ProviderResult:
         output: list[dict[str, Any]] = []
@@ -248,7 +245,7 @@ class GoogleResponseAccumulator:
                 {
                     "type": "reasoning",
                     "id": f"rs_{uuid.uuid4().hex[:8]}",
-                    "step_by_step_summary": self._reasoning,
+                    "step_by_step_summary": "".join(self._reasoning),
                 }
             )
         if self._text:
@@ -258,11 +255,16 @@ class GoogleResponseAccumulator:
                     "id": f"msg_{uuid.uuid4().hex[:8]}",
                     "status": "completed",
                     "role": "assistant",
-                    "content": [{"type": "output_text", "text": self._text, "annotations": []}],
+                    "content": [{"type": "output_text", "text": "".join(self._text), "annotations": []}],
                 }
             )
-        output.extend(self._function_calls)
-        if self._safety_block and not output:
+        from collections import Counter
+        counts = Counter(item["call_id"] for item in self._function_calls)
+        if any(count > 1 for count in counts.values()):
+            self.tool_error = self.tool_error or "conflicting_function_call"
+        output.extend(item for item in self._function_calls if counts[item["call_id"]] == 1
+                      and item["call_id"] not in self._bad_call_ids and item["name"] not in self._partial_names)
+        if self._safety_block:
             output.append(refusal_item(self._safety_block))
         terminal = classify_terminal(
             output=output,
@@ -281,6 +283,10 @@ class GoogleResponseAccumulator:
                 error_code="missing_terminal_signal",
                 error_message="The provider stream ended without a terminal signal.",
             )
+        if self.tool_error:
+            terminal = tool_terminal(terminal, self.tool_error)
+        if self.output_error:
+            terminal = output_failure(terminal, self.output_error)
         return ProviderResult(output=tuple(output), usage=self._usage, terminal=terminal)
 
 
@@ -296,13 +302,14 @@ def _stream_payload_error(payload: object) -> tuple[str, str] | None:
 
 
 class GoogleStreamEventAdapter:
-    def __init__(self, *, response_id: str, display_model: str) -> None:
+    def __init__(self, *, response_id: str, display_model: str, request=None) -> None:
+        self.tool_validator = FunctionCallValidator(request, route="google")
         self.builder = ResponseEventBuilder(
             response_id=response_id,
             model=display_model,
             created_at=int(time.time()),
         )
-        self.accumulator = GoogleResponseAccumulator()
+        self.accumulator = GoogleResponseAccumulator(tool_validator=self.tool_validator)
         self._primary = PrimaryAlternativeSelector()
         self.created_emitted = False
         self.visible_output_started = False
@@ -326,7 +333,7 @@ class GoogleStreamEventAdapter:
     def reset_attempt(self) -> None:
         if self.visible_output_started:
             raise RuntimeError("cannot reset a Google stream after visible output")
-        self.accumulator = GoogleResponseAccumulator()
+        self.accumulator = GoogleResponseAccumulator(tool_validator=self.tool_validator)
         self._primary = PrimaryAlternativeSelector()
 
     def consume(self, payload: object) -> list[dict[str, Any]]:
@@ -347,48 +354,20 @@ class GoogleStreamEventAdapter:
         except ValueError as exc:
             self.accumulator.consume({**payload, "candidates": []})
             raise GoogleStreamPayloadError("invalid_alternatives", str(exc)) from exc
-        self.accumulator.consume({**payload, "candidates": candidates})
+        parts = self.accumulator.consume({**payload, "candidates": candidates})
         events: list[dict[str, Any]] = []
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
-                continue
-            content = candidate.get("content")
-            if not isinstance(content, dict):
-                continue
-            parts = content.get("parts", [])
-            if not isinstance(parts, list):
-                continue
-            for part in parts:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("thought") is True or part.get("type") == "thinking":
-                    text = part.get("text") or part.get("thinking")
-                    if isinstance(text, str) and text:
-                        self.reasoning_active = True
-                        self.visible_output_started = True
-                        events.extend(self.builder.add_reasoning_delta(text))
-                    continue
-                text = part.get("text")
-                if isinstance(text, str) and text:
-                    self.text_active = True
-                    self.visible_output_started = True
-                    events.extend(self.builder.add_text_delta(text))
-                    continue
-                function_call = part.get("functionCall")
-                if not isinstance(function_call, dict):
-                    continue
-                name = function_call.get("name")
-                if not valid_function_name(name):
-                    continue
+        for part in parts:
+            if part.has_function or part.output_error:
+                # Pending or unrepresentable output still prevents replay/rotation.
                 self.visible_output_started = True
-                call_id = function_call.get("id")
-                events.extend(
-                    self.builder.add_function_call(
-                        name,
-                        function_call_arguments_json(function_call.get("args", {})),
-                        call_id=call_id if isinstance(call_id, str) else None,
-                    )
-                )
+            if part.reasoning:
+                self.reasoning_active = True
+                self.visible_output_started = True
+                events.extend(self.builder.add_reasoning_delta(part.reasoning))
+            if part.text:
+                self.text_active = True
+                self.visible_output_started = True
+                events.extend(self.builder.add_text_delta(part.text))
         return events
 
     def finish(self) -> list[dict[str, Any] | str]:
@@ -412,6 +391,9 @@ class GoogleStreamEventAdapter:
         )
         if refusal is not None:
             events.extend(self.builder.add_output_item(refusal))
+        for item in result.output:
+            if item.get("type") == "function_call":
+                events.extend(self.builder.add_function_call(item["name"], item["arguments"], call_id=item["call_id"]))
         if result.terminal.kind is TerminalKind.FAILED:
             events.append(
                 self.builder.error(
@@ -460,11 +442,17 @@ class GoogleTransport:
     ) -> None:
         self.timeout = timeout
         self.platform_name = platform_name or get_platform()
-        self.endpoint = endpoint.rstrip("/")
+        self.endpoint = validate_endpoint_url(endpoint, label="Google endpoint").rstrip("/")
         self.client_factory = client_factory
 
     def build_request(self, request: dict[str, Any], lease: AccountLease) -> dict[str, Any]:
-        return transform_request(request, project_id=safe_project_id(lease.project_id))
+        from .models import native_model_definition, required_output_bridge
+        if required_output_bridge(native_model_definition(request.get("model", ""))):
+            raise ValueError("unsupported_output_modality: generated image output is not supported by the Google adapter")
+        payload = transform_request(request, project_id=safe_project_id(lease.project_id))
+        from .route_identity import identity, observe
+        observe(identity('antigravity', request.get('model',''), backend=payload.get('model'), endpoint=self.endpoint))
+        return payload
 
     def build_headers(self, lease: AccountLease) -> dict[str, str]:
         # Match the real Antigravity IDE header set exactly.  OpenCodex sends
@@ -484,11 +472,13 @@ class GoogleTransport:
 
     async def post(self, request: dict[str, Any], lease: AccountLease) -> httpx.Response:
         url = f"{self.endpoint}/v1internal:generateContent"
-        async with self.client_factory(timeout=self.timeout) as client:
-            return await client.post(
-                url,
-                json=self.build_request(request, lease),
-                headers=self.build_headers(lease),
+        payload = await call_sync(self.build_request, request, lease)
+        headers = await call_sync(self.build_headers, lease)
+        async with owned_context(self.client_factory(**httpx_client_options(url, timeout=self.timeout))) as client:
+            return await limited_post(
+                client, url,
+                payload=payload,
+                headers=headers,
             )
 
     async def execute(
@@ -504,23 +494,22 @@ class GoogleTransport:
         if response.status_code != 200:
             raise GoogleHTTPError(response.status_code, outcome_for_http_status(response.status_code))
         try:
-            payload = response.json()
+            payload = response_json(response)
+        except ResourceLimitError:
+            raise
         except Exception:
             accumulator = GoogleResponseAccumulator()
             accumulator.mark_malformed()
             return accumulator.finalize()
-        return self.parse_response(payload)
+        return self.parse_response(payload, request=request)
 
     @asynccontextmanager
     async def stream(self, request: dict[str, Any], lease: AccountLease):
         url = f"{self.endpoint}/v1internal:streamGenerateContent?alt=sse"
-        async with self.client_factory(timeout=self.timeout) as client:
-            async with client.stream(
-                "POST",
-                url,
-                json=self.build_request(request, lease),
-                headers=self.build_headers(lease),
-            ) as response:
+        payload = await call_sync(self.build_request, request, lease)
+        headers = await call_sync(self.build_headers, lease)
+        async with owned_context(self.client_factory(**httpx_client_options(url, timeout=self.timeout))) as client:
+            async with owned_context(client.stream("POST", url, json=payload, headers=headers)) as response:
                 yield response
 
     async def stream_events(
@@ -536,6 +525,7 @@ class GoogleTransport:
         adapter = adapter or GoogleStreamEventAdapter(
             response_id=response_id,
             display_model=display_model,
+            request=request,
         )
         async with self.stream(request, lease) as response:
             if telemetry is not None:
@@ -556,8 +546,10 @@ class GoogleTransport:
                         adapter.mark_done()
                         continue
                     try:
-                        payload = json.loads(data)
-                    except json.JSONDecodeError as exc:
+                        payload = json_loads_limited(data)
+                    except ResourceLimitError as exc:
+                        raise GoogleStreamPayloadError("provider_output_limit" if exc.status == 413 else "invalid_stream_chunk", str(exc)) from exc
+                    except (ValueError, RecursionError) as exc:
                         raise GoogleStreamPayloadError(
                             "invalid_stream_chunk", "The Google provider returned malformed stream JSON.",
                         ) from exc
@@ -565,12 +557,15 @@ class GoogleTransport:
                         payload = payload[0] if payload else {}
                     for event in adapter.consume(payload):
                         yield event
+            except SSELimitError as exc:
+                raise GoogleStreamPayloadError("provider_output_limit", str(exc)) from exc
             except SSELineError as exc:
                 raise GoogleStreamPayloadError("invalid_stream_chunk", str(exc)) from exc
         for event in adapter.finish():
             yield event
 
-    def parse_response(self, payload: object) -> ProviderResult:
+    def parse_response(self, payload: object, *, request=None) -> ProviderResult:
+        tool_validator = FunctionCallValidator(request, route="google")
         if isinstance(payload, list):
             payload = payload[0] if payload else {}
         if not isinstance(payload, dict):
@@ -595,13 +590,21 @@ class GoogleTransport:
         output: list[dict[str, Any]] = []
         finish_reason: str | None = None
         malformed = False
+        tool_error = output_error = None
+        partial_ids, partial_names = set(), set()
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
             candidate_reason = candidate.get("finishReason")
-            if isinstance(candidate_reason, str) and candidate_reason:
+            if candidate_reason is not None and not isinstance(candidate_reason, str):
+                malformed = True
+            if isinstance(candidate_reason, str):
                 finish_reason = candidate_reason
-            transformed = transform_gemini_candidate(candidate)
+            transformed = transform_gemini_candidate(candidate, tool_validator=tool_validator)
+            tool_error = tool_error or transformed.get("tool_error")
+            output_error = merge_output_error(output_error, transformed.get("output_error"))
+            partial_ids.update(transformed.get("partial_call_ids", ()))
+            partial_names.update(transformed.get("partial_call_names", ()))
             reasoning = transformed.get("reasoning")
             if isinstance(reasoning, dict):
                 output.append(reasoning)
@@ -612,10 +615,18 @@ class GoogleTransport:
             if isinstance(function_calls, list):
                 output.extend(item for item in function_calls if isinstance(item, dict))
 
+        from collections import Counter
+        ids = Counter(item["call_id"] for item in output if item.get("type") == "function_call")
+        if any(count > 1 for count in ids.values()):
+            tool_error = tool_error or "conflicting_function_call"
+        output = [item for item in output if item.get("type") != "function_call" or (
+            ids[item["call_id"]] == 1 and item["call_id"] not in partial_ids and item["name"] not in partial_names)]
         safety_block = unwrapped.get("promptFeedback")
-        if not isinstance(safety_block, dict):
+        if not isinstance(safety_block, dict) or not safety_block.get("blockReason"):
             safety_block = None
-        if safety_block and not output:
+        if isinstance(finish_reason, str) and finish_reason.strip().lower() in POLICY_FINISH_REASONS:
+            safety_block = safety_block or {"blockReason": finish_reason.strip().upper()}
+        if safety_block:
             output.append(refusal_item(safety_block))
 
         usage = unwrapped.get("usageMetadata")
@@ -631,4 +642,8 @@ class GoogleTransport:
             safety_block=safety_block,
             malformed=malformed,
         )
+        if tool_error:
+            terminal = tool_terminal(terminal, tool_error)
+        if output_error:
+            terminal = output_failure(terminal, output_error)
         return ProviderResult(output=tuple(output), usage=normalized_usage, terminal=terminal)

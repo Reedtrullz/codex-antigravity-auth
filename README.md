@@ -8,6 +8,8 @@ Released local gateway for using Google Antigravity Claude Opus/Sonnet from Open
 
 The default setup is intentionally conservative: it can install the Codex provider block and start the gateway, but it will not replace your active Codex model unless you explicitly pass `--activate`.
 
+Current contracts and evidence boundaries: [STATUS.md](STATUS.md). Package metadata describes this source; historical live or release results do not certify this checkout.
+
 ## Quick Start
 
 ```bash
@@ -159,7 +161,7 @@ python3 ~/.codex/skills/anti/scripts/anti.py fusion --mode plan --model opus --m
 
 Panel consensus is not proof and should not patch code directly. Structured findings include `id`, `claim`, `severity`, `lanes`, and `verify`; run the `verify` hint locally before acting. Findings remain `unverified` until native/local checks confirm or reject them. Text and JSON outputs include per-lane/judge usage and latency when the gateway/provider returns it. Broad review panels summarize oversized scopes once before fan-out instead of silently truncating raw context for every lane.
 
-Panel JSON keeps requested and actual execution identities separate (`requestedModel`, `actualModel`, `provider`, `fallbackChain`, `primaryError`, and `fallbackReason`). The panel status is `complete_multi_model`, `partial_multi_model`, `same_provider_multi_model`, `degraded_single_model`, or `failed`; distinct actual provider/model identities, rather than repeated logical fallback lanes, satisfy `--min-successes`, and `--min-providers` can require provider diversity. `/v1/models` is only a catalog/readiness hint—the bounded generation call is the live model health check. Every saved run exposes top-level `runStatus`, `scopeStatus`, `panelStatus`, `coverage`, and `resultPath`.
+Panel JSON keeps requested and actual execution identities separate (`requestedModel`, `actualModel`, `provider`, `fallbackChain`, `primaryError`, and `fallbackReason`). The panel status is `complete_multi_model`, `partial_multi_model`, `same_provider_multi_model`, `degraded_single_model`, or `failed`; distinct actual provider/model identities, rather than repeated logical fallback lanes, satisfy `--min-successes`, and `--min-providers` can require provider diversity. `/v1/models` is only a catalog/readiness hint—the bounded generation call is the live model health check. Summary/full runs expose `runStatus`, `scopeStatus`, `panelStatus`, `coverage`, and `resultPath`; summary content is a bounded preview, independently of scope coverage. Never mode writes only a content-free lifecycle record.
 When the diversity minimum is not met, the panel fails closed before judge synthesis; `--json` and `--output findings` still return the lane evidence and status with a non-zero exit code.
 
 Panel lanes are selected explicitly from the native Sonnet/Opus defaults or from models advertised by the running gateway. BYOK examples include `openrouter:...`, `deepseek:...`, `xai:...`, `kimi:...`, `ollama:...`, and `opencode:...`; they require the corresponding API key or a key-optional local provider. When a BYOK lane receives repository, diff, or file context, the helper prints and records a disclosure naming the provider lane. Virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` remain helper aliases rather than gateway-side fan-out.
@@ -181,7 +183,7 @@ python3 ~/.codex/skills/anti/scripts/anti.py workflow debug-consensus --prompt "
 python3 ~/.codex/skills/anti/scripts/anti.py runs list
 ```
 
-Workflow runs save sanitized summaries under `~/.codex/anti-runs` by default; primitive `consult`, `plan`, `review`, and `panel` commands default to not writing a ledger unless `--save-output summary` or `--save-output full` is passed. Saved runs include the Anti run id, which is also sent as `metadata.run_id` to the gateway and appears in sanitized request logs for correlation. Run records never retain raw prompts: full mode keeps sanitized per-call output plus prompt hashes/counts, while summary mode keeps a short index and the complete sanitized answer in `result.json`. `plan` and `review` use a conservative Claude safety budget with `--chunked auto`, so broad Opus/Sonnet work is split into bounded chunk calls before synthesis instead of being sent as one giant request; `--chunked off` preserves exact scope and refuses when the request cannot fit, including when `--max-prompt-chars 0` is set. Partial results retain explicit non-zero exits and coverage; `--allow-partial` only permits the call, it does not make the result complete. Use `--required-file` to fail closed if priority files must be fully covered. `--fallback-model sonnet --fallback-policy on-retryable` and `--progress` are available for long-running model calls that may otherwise fail silently or hit transient backend rotation errors.
+Workflow runs save sanitized summaries under `~/.codex/anti-runs` by default; primitive `consult`, `plan`, `review`, and `panel` commands default to `--save-output never`, which retains only a content-free lifecycle/correlation record. Saved runs include the Anti run id, which is also sent as `metadata.run_id` to the gateway and appears in sanitized request logs for correlation. Run records never retain raw prompts: full mode keeps sanitized per-call output plus prompt hashes/counts, while summary mode bounds content in the index, `result.json`, nested metadata and reflections. It never saves complete lane files or a forced full answer; `retention.contentComplete=false` marks saved previews. See the [recording policy](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks) for the limits. `plan` and `review` use a conservative Claude safety budget with `--chunked auto`, so broad Opus/Sonnet work is split into bounded chunk calls before synthesis instead of being sent as one giant request; `--chunked off` preserves exact scope and refuses when the request cannot fit, including when `--max-prompt-chars 0` is set. Partial results retain explicit non-zero exits and coverage; `--allow-partial` only permits the call, it does not make the result complete. Use `--required-file` to fail closed if priority files must be fully covered. `--fallback-model sonnet --fallback-policy on-retryable` and `--progress` are available for long-running model calls that may otherwise fail silently or hit transient backend rotation errors.
 
 Before running `codex-antigravity login`, create a Google OAuth desktop client. The local callback listener uses:
 
@@ -236,7 +238,7 @@ codex-antigravity start
 codex-antigravity start --background
 ```
 
-Background mode writes pid/log files under `~/.codex/`. The log file is append-only and created with private permissions; remove or rotate it manually if it grows too large.
+Gateway process logs are sanitized and bounded: `~/.codex/antigravity-process-logs/gateway-<port>.log` retains at most 2 MiB plus two 2 MiB backups per port. Foreground, background and newly installed services use this same writer. Existing append-only logs are preserved; reinstall services to adopt the new policy. `status --json` distinguishes process logs from structured request logs. See [process-log privacy and retention](codex_antigravity_auth/PROCESS_LOGS.md).
 
 Request diagnostics are written to a sanitized capped JSONL file under `~/.codex/antigravity-requests.jsonl`. The log records request ids, model/route metadata, latency, status, retry/rotation hints, HTTP status, usage totals when available, and redacted error classes/messages. It never stores prompts, request bodies, OAuth material, provider keys, or account emails.
 
@@ -458,6 +460,27 @@ wheel and rebuilt sdist, assert import origins, exercise real HTTP fixture flows
 and run the installed standalone Anti suite. They use synthetic state; platform
 fixtures do not establish real Keychain, OAuth, or service-manager acceptance.
 
+## Client and gateway directories
+
+`CODEX_HOME` selects the client `config.toml`, `auth.json`, and default skill
+installation directory. `ANTIGRAVITY_STATE_HOME` separately selects gateway
+accounts, providers, Google OAuth client settings, model overlays, runtime logs,
+and Anti run/reflection state. Both default to `~/.codex`; selecting only a
+client root intentionally leaves the gateway on its shared default state.
+Set both to isolate both. Paths must be absolute (a leading `~` is expanded).
+An explicitly selected client never falls back to another root's `auth.json`.
+
+`codex-antigravity namespace show` reports the relationship without reading
+credentials or creating files. Installed services freeze both effective roots
+in their command arguments, so later shell environment changes do not silently
+switch service identities. Reinstall the service to change its roots. Separate
+state roots using the same port still address the same gateway/service; choose
+different ports for simultaneously running instances.
+
+Switching roots never moves files automatically. See [namespace copy and
+migration limits](USAGE.md#namespace-copy) for an explicit dry-run-first copy.
+Local finding verdicts and JSON/SARIF/Markdown reports are available through `anti.py runs finding` and `runs export`. They preserve advisory findings and scope gaps without automatic suppression or publication; see the [usage examples](USAGE.md#local-finding-verdicts-and-report-export).
+
 ## Troubleshooting
 
 ### HTTP 403 VALIDATION_REQUIRED
@@ -514,3 +537,7 @@ the `antigravity-unified` provider block for unified pickers.
 Tagged releases are prepared for PyPI Trusted Publishing. The `.github/workflows/publish.yml` workflow runs on `v*` tags, requires the [test matrix and installed-artifact gates](#verification) plus a checked sdist/wheel build, then publishes with `pypa/gh-action-pypi-publish@release/v1` using OIDC (`id-token: write`) in the `pypi` environment. The tag must exactly match the package version. External actions are pinned to reviewed commits, and publishing also requires the focused lint, minimum/snapshot compatibility and dependency-audit gates. See [CI dependency and action policy](requirements/README.md) for reproducible commands, scope and expiring audit exceptions.
 
 Before the first PyPI publish, configure the PyPI project `codex-antigravity-auth` with a trusted publisher for this GitHub repository, workflow file `.github/workflows/publish.yml`, and environment `pypi`. No local PyPI API token is required or expected.
+
+
+Developer ownership of route telemetry, request resources, Anti scope rendering
+and immutable run publication is mapped in [the orchestration guide](codex_antigravity_auth/design/orchestration.md).

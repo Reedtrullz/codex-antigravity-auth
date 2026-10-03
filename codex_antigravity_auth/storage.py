@@ -7,6 +7,7 @@ import base64
 import hashlib
 import time
 from pathlib import Path
+from .namespaces import gateway_home, gateway_file
 from typing import Any, Callable
 from cryptography.fernet import Fernet, InvalidToken
 from .constants import ANTIGRAVITY_ACCOUNTS_FILE, get_codex_home
@@ -20,7 +21,7 @@ _DEFAULT_GET_CODEX_HOME = get_codex_home
 def _codex_home_read_only() -> Path:
     if get_codex_home is not _DEFAULT_GET_CODEX_HOME:
         return get_codex_home()
-    return Path(os.path.expanduser("~/.codex"))
+    return gateway_home()
 
 # Stable service name for OS Keyring integration
 KEYRING_SERVICE_NAME = "codex-antigravity-auth"
@@ -146,7 +147,7 @@ def _peek_encryption_key() -> str | None:
 
 def account_store_diagnostics() -> dict[str, Any]:
     """Inspect account-store format and schema without migrating or writing it."""
-    path = Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    path = gateway_file(ANTIGRAVITY_ACCOUNTS_FILE, "antigravity-accounts.json")
     report: dict[str, Any] = {
         "path": str(path),
         "exists": path.is_file(),
@@ -274,7 +275,7 @@ def get_accounts_json_path() -> Path:
 
 
 def accounts_json_path_read_only() -> Path:
-    return Path(os.path.expanduser(ANTIGRAVITY_ACCOUNTS_FILE))
+    return gateway_file(ANTIGRAVITY_ACCOUNTS_FILE, "antigravity-accounts.json")
 
 
 def _load_secure_json_unlocked(

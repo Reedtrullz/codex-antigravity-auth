@@ -39,7 +39,8 @@ def test_bad_attachments_fail_before_dispatch(monkeypatch, part, mixed):
     monkeypatch.setattr(server, "resolve_openai_auth", credentials)
     result = TestClient(server.app).post("/v1/responses", json=request_with(part, mixed=mixed))
     assert result.status_code == 400
-    assert "input[0].content[" in result.json()["detail"]
+    detail = result.json()["detail"]
+    assert "input[0].content[" in (detail["message"] if isinstance(detail, dict) else detail)
     acquire.assert_not_called()
     credentials.assert_not_called()
 
