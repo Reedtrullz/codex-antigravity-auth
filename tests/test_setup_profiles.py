@@ -485,3 +485,87 @@ def test_setup_plan_rejects_raw_symlink_components_without_reading_or_writing(is
     assert (target.read_bytes(), target.stat().st_mode, target.stat().st_mtime_ns) == before
     assert not client.exists() and not state.exists()
     assert link.is_symlink()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX directory rename fixture")
+def test_config_read_rejects_parent_replacement_before_open(isolated, tmp_path, monkeypatch):
+    import os
+    client, _state = isolated
+    target = existing_config(client)
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    external = foreign / "config.toml"
+    external.write_text('model = "external-secret"\n')
+    moved = tmp_path / "moved-client"
+    native_open = os.open
+    swapped = False
+    def replace_parent(path, flags, *args, **kwargs):
+        nonlocal swapped
+        selected = Path(path)
+        if not swapped and (selected == target or (selected == Path(target.name) and "dir_fd" in kwargs)):
+            client.rename(moved)
+            client.symlink_to(foreign, target_is_directory=True)
+            swapped = True
+        return native_open(path, flags, *args, **kwargs)
+    monkeypatch.setattr(setup.os, "open", replace_parent)
+    monkeypatch.setattr(setup.os, "supports_dir_fd", {*os.supports_dir_fd, replace_parent})
+    with pytest.raises((setup.SetupError, ValueError, OSError)):
+        setup._read_file(target)
+    assert swapped and external.read_text() == 'model = "external-secret"\n'
+    assert (moved / "config.toml").read_text() == ORIGINAL
+
+
+def test_config_read_rejects_content_change_during_capture(isolated, monkeypatch):
+    client, _state = isolated
+    target = existing_config(client)
+    native_fdopen = setup.os.fdopen
+    class ChangingRead:
+        def __init__(self, stream): self.stream = stream
+        def __enter__(self): return self
+        def __exit__(self, *args): self.stream.close()
+        def fileno(self): return self.stream.fileno()
+        def read(self, count):
+            value = self.stream.read(count)
+            target.write_bytes(ORIGINAL.encode() + b"# concurrent edit\n")
+            return value
+    monkeypatch.setattr(setup.os, "fdopen", lambda *a, **kw: ChangingRead(native_fdopen(*a, **kw)))
+    with pytest.raises((setup.SetupError, ValueError, OSError)):
+        setup._read_file(target)
+
+
+def test_journal_config_writer_never_follows_a_late_leaf_link(isolated, tmp_path, monkeypatch):
+    client, _state = isolated
+    target = existing_config(client)
+    external = tmp_path / "external.toml"
+    external.write_text(ORIGINAL)
+    native_configure = cli.run_configure_codex
+    def replace_then_configure(args):
+        target.unlink()
+        try:
+            target.symlink_to(external)
+        except OSError:
+            pytest.skip("fixture symlink creation unavailable")
+        return native_configure(args)
+    monkeypatch.setattr(cli, "run_configure_codex", replace_then_configure)
+    with pytest.raises((setup.SetupError, SystemExit)):
+        cli_setup.run_setup(options(write=True, json=True))
+    assert external.read_text() == ORIGINAL
+    assert target.is_symlink()
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_setup_plan_rejects_linked_ancestors_of_empty_or_missing_skill(isolated, tmp_path, existing):
+    client, state = isolated
+    actual = tmp_path / "actual-skills"
+    actual.mkdir()
+    if existing:
+        (actual / "skills" / "anti").mkdir(parents=True)
+    alias = tmp_path / "alias-skills"
+    try:
+        alias.symlink_to(actual, target_is_directory=True)
+    except OSError:
+        pytest.skip("fixture symlink creation unavailable")
+    with pytest.raises((setup.SetupError, ValueError, OSError)):
+        setup.setup_plan(options(install_skill=True, skill_dir=str(alias / "skills")))
+    assert not client.exists() and not state.exists()
+    assert not (actual / "skills" / "anti" / "SKILL.md").exists()
