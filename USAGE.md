@@ -1,6 +1,17 @@
 # Google Antigravity Auth for OpenAI Codex Usage Guide
 
+Start with [current source contracts](STATUS.md) and [verification boundaries](VERIFICATION.md).
+
 This guide describes real-world examples, advanced configurations, and diagnostics routines to run Google Antigravity models inside OpenAI Codex efficiently.
+
+## Local-only gateway and Anti workflows
+
+Use an explicitly configured loopback inference server and start the gateway with
+`codex-antigravity start --local-only`. Anti's `--local-only` / `--local-profile`
+requires that gateway mode and checks every selected stage, including fallback
+and judge. It never downloads models or substitutes hosted defaults. See the
+[local-only guide](codex_antigravity_auth/skills/anti/LOCAL_ONLY.md) for setup,
+settings export, diversity semantics and the third-party networking boundary.
 
 ## 0. Quick Codex Setup
 
@@ -62,8 +73,10 @@ Request JSONL append and rotation share a cross-process lock. By default, the lo
 OAuth inspection in `setup --check`, `setup --json`, `setup-v2 --check-google`, and `doctor` does not repair credential files, migrate account/provider stores, or create encryption keys. Unsafe POSIX credential permissions produce a warning and prevent use of the file's credentials until repaired; symlinked credential paths are refused. Set the credential file mode to `0600`, or use explicit `setup --write` or `login` to repair permissions. Environment credentials retain precedence. On Windows these checks do not change permissions or assess ACLs.
 
 The package-version check is a separate side effect: setup/readiness and doctor may query PyPI and create or refresh `~/.codex/antigravity-version-check.json` once daily. Set `CODEX_ANTIGRAVITY_NO_UPDATE_CHECK=1` to disable both this lookup and its cache writes when requiring a filesystem read-only check. `setup-v2` does not perform the version check.
-Request-log rows distinguish lifecycle phase (`started` or `terminal`) from semantic terminal outcome. `logs summary` groups by `request_id`, counts the last terminal contribution once, and reports completed, incomplete, failed, cancelled, and requests with no retained terminal record separately. Start rows do not enter latency or failure samples; success rate uses closed requests only and is unknown when none have closed. Duplicate terminals do not double usage or attempts. `upstream_http_status` and `provider_accepted` record observed upstream HTTP acceptance separately from the gateway status and generation outcome. Local validation does not infer provider acceptance; unknown remains unknown. Metrics come only from the selected last terminal, without borrowing from discarded terminals. Disconnect after an observed terminal retains that outcome. Legacy rows remain readable; rows lacking a request ID are counted independently because they cannot safely be correlated.
 
+OAuth refresh timeouts, connection/DNS failures, server errors, throttling, and malformed responses cool the account down without adding credential strikes. Only a structured `invalid_grant` token rejection adds strikes; session-policy reauthentication and OAuth client configuration errors remain recoverable. Refresh attempts respect persisted account cooldowns and disabled state, including concurrent/background callers. Existing disabled accounts still require explicit recovery. See [Google’s refresh-token and session-policy guidance](https://developers.google.com/identity/protocols/oauth2) for `invalid_grant` versus `invalid_rapt`.
+
+Request-log rows distinguish lifecycle phase (`started` or `terminal`) from semantic terminal outcome. `logs summary` groups by `request_id`, counts the last terminal contribution once, and reports completed, incomplete, failed, cancelled, and requests with no retained terminal record separately. Start rows do not enter latency or failure samples; success rate uses closed requests only and is unknown when none have closed. Duplicate terminals do not double usage or attempts. `upstream_http_status` and `provider_accepted` record observed upstream HTTP acceptance separately from the gateway status and generation outcome. Local validation does not infer provider acceptance; unknown remains unknown. Metrics come only from the selected last terminal, without borrowing from discarded terminals. Disconnect after an observed terminal retains that outcome. Legacy rows remain readable; rows lacking a request ID are counted independently because they cannot safely be correlated.
 Google account selection is sticky for sequential requests but load-aware for concurrent ones. `AccountState` owns family/account cooldowns, process-local leases, attempt counters, and persisted schema-version `2` state; request handlers release every lease when non-streaming responses finish or streaming responses end/disconnect.
 
 To expose a local model definition in Codex's model picker, add an overlay entry:
@@ -111,6 +124,11 @@ Panel mode validates requested judge/fallback models against `/v1/models` before
 
 The panel judge returns a structured findings contract with `id`, `claim`, `severity`, `lanes`, and `verify`. Default prose output renders disagreements first, then findings, unverifiable observations, and caveats. `--output findings` emits just the sanitized findings JSON, while `--json` includes panel results, usage/latency metadata, caveats, findings, and the rendered output. Broad `panel --mode review` scopes reuse the review chunking path to create one bounded summary before fan-out rather than silently truncating full context for every lane.
 
+Default Anti diff inspection disables Git external-diff drivers and textconv converters. Review and planning context use raw diffs and binary-file descriptors; Git inspection failures stop collection instead of becoming empty successful scope. Repository-configured preprocessing is not run implicitly.
+
+Finding confidence is model-reported, not a calibrated probability. Duplicate findings merge deterministically, retain corroborating evidence/checks, and report `findings_merged` separately from `findings_invalid` and `findings_truncated`. `findings_dropped` counts invalid discarded entries only; ordinary merging does not mark judge input partial. Nonfinite numbers, invalid scalar types, and invalid line numbers are rejected with up to 20 bounded `finding_errors` plus an omitted-error count. Generated finding IDs derive from content rather than input order.
+Human console output escapes terminal control characters, including ESC, BEL, carriage return, and C1 controls. Ordinary Unicode, Markdown, newlines, and tabs remain readable. JSON output retains original string values through JSON escaping; stored source excerpts are not rewritten by the display layer.
+
 Panel lanes are selected explicitly from the native Sonnet/Opus defaults or from models advertised by the running gateway. BYOK examples include `openrouter:...`, `deepseek:...`, `xai:...`, `kimi:...`, `ollama:...`, and `opencode:...`; they require the corresponding API key or a key-optional local provider. When a BYOK lane receives repository, diff, or file context, the helper prints and records a disclosure naming the provider lane. Virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` remain helper aliases rather than gateway-side fan-out. The current xAI preset is API-key based and uses `XAI_API_KEY`; a catalog entry is not proof that a live generation will succeed.
 
 Repository context leaves the Google Antigravity lane only after explicit selection and the existing BYOK disclosure. Opus remains the default judge; native Codex remains the acting agent and must verify advisory output locally.
@@ -130,7 +148,13 @@ python3 ~/.codex/skills/anti/scripts/anti.py runs list
 
 Workflow presets save sanitized summaries under `~/.codex/anti-runs` by default. Primitive commands default to `--save-output never`: only a content-free lifecycle/correlation record is retained, with no findings or reflection history. Opt into `summary` for bounded previews across all saved payloads, or redacted `full` for detailed results and lane files. Summary artifacts are explicitly marked `retention.contentComplete=false`; they are not complete saved answers. See the bundled [recording policy](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks) for bounds. Saved runs include a run id; Anti sends it to the gateway as `metadata.run_id`, and the sanitized request JSONL log records it for correlation without forwarding it to Google or BYOK providers. With `--chunked auto`, Opus/Sonnet plan and review calls use a conservative Claude safety budget and split broad context into bounded chunk calls before synthesis; use `--chunked off` only when you intentionally want one large request, including when `--max-prompt-chars 0` would otherwise mean unlimited. Use `--fallback-model sonnet --fallback-policy on-retryable` for long Opus calls that should degrade after retryable backend failures, and `--progress` to print model/chunk progress to stderr.
 
+Finding checks default to in-memory Python syntax and credential-pattern checks, with structured outcomes and no project writes. Opt into trusted project ESLint with `panel --check-profile eslint` (also forwarded by workflow commands), or skip all checks with `--no-verify`. These checks never execute model-supplied `verify` text or establish a finding's semantic truth. Detailed check records appear in live JSON/full retention; summaries keep counts. See the bundled [check policy](codex_antigravity_auth/skills/anti/SKILL.md#new-flags).
+
+Saved results use immutable revisions referenced by the run index; `anti.py runs show <id>` validates checksums and status consistency before returning `resultPath`. Legacy records are explicitly unverified. See the [artifact contract](codex_antigravity_auth/skills/anti/ARTIFACTS.md).
+
 Each run ID has one writer; use a new ID for a new invocation or when a previous record's ownership is unknown. Corrupt or unreadable reflection files are preserved, with backup/recovery guidance instead of silently replacing history. See the bundled [persistence contract](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks).
+
+Preview retention cleanup with `anti.py runs clean --older-than 30 --dry-run --json`. Only old terminal records are eligible; running, uncertain and temporary state is kept regardless of age. Cleanup retains reflection history and a small permanent ID reservation. Incomplete deletion exits nonzero and lists retained paths; inspect them before retrying with `--resume-cleanup`. See the bundled [cleanup policy](codex_antigravity_auth/skills/anti/SKILL.md#operational-fallbacks).
 
 For the older Google-only OAuth setup, use:
 
@@ -180,6 +204,8 @@ The current presets are API-key based. xAI uses `XAI_API_KEY` and exposes `xai:g
 BYOK provider ids may contain only letters, numbers, underscores, and hyphens. Provider model ids may contain `/` or `:`, but not whitespace or control characters. Unknown `provider:model` prefixes are rejected as BYOK routing errors before any Google account selection. Non-preset custom BYOK providers must provide a base URL, and the generic `custom` preset is not auto-enabled until `provider set custom ...` is run. `--api-key-env` is preferred because it avoids persisting keys; `--api-key` stores a key in encrypted provider config. Stored/env BYOK keys and extra provider header values must be printable ASCII without control characters. Model-picker display names must not contain control characters. Provider API-key env var names must contain only letters, numbers, and underscores and must not start with a number. Custom provider and Codex gateway base URLs must be absolute `http` or `https` URLs without embedded credentials, whitespace/control characters, query strings, fragments, invalid ports, or malformed bracketed hosts. Plain `http` base URLs are accepted only for loopback/local hosts; remote providers and remote gateway URLs must use `https`. Extra BYOK provider headers may not override gateway-managed auth, content, host, or transport headers; malformed provider config is rejected before it is written and before streaming begins. Key-optional providers are only keyless on loopback/local hosts; remote custom or cloud URLs need a stored/env API key before they appear in Codex's picker or route requests. BYOK streams surface provider error frames as failed Responses API streams, ignore never-named tool-call deltas, and wait for complete streamed function names before emitting function-call items.
 Models configured with `--api-key-env` remain hidden from `/v1/models` until the env var exists in the gateway process environment. `doctor --byok-only` fails when configured BYOK providers have missing or malformed keys, and `doctor --config /path/to/config.toml` can verify non-default Codex config files.
 
+BYOK dispatch supports `kind: openai_chat` only. Providers configured with `openai_responses` or another unsupported kind remain visible in configuration diagnostics, but their models are excluded from `/v1/models`. Doctor and setup preflight report the unsupported kind; direct requests fail with HTTP 400 before contacting a provider. Use an endpoint supporting Chat Completions with `kind: openai_chat`, or remove the unsupported provider. This restriction does not affect the separate unified OpenAI upstream route.
+
 For 1Password-backed BYOK keys, store secret references in a local env file and let the gateway process run under `op run`:
 
 ```dotenv
@@ -195,7 +221,23 @@ codex-antigravity service install --port 51122 --host 127.0.0.1 --op-env-file ~/
 Set the env file to private permissions (`chmod 600 ~/.codex/antigravity.env`). The 1Password CLI must be installed on `PATH`; gateway start and service install resolve it to an absolute path and fail before starting the process or writing a manifest if `op` is missing. Durable services still depend on your local 1Password unlock/session behavior after reboot.
 
 If your 1Password CLI includes the Environments beta commands, use `--op-environment <environment-id>` instead of `--op-env-file`.
-The gateway binds to loopback by default. Non-loopback binds require `--allow-remote` plus `ANTIGRAVITY_GATEWAY_TOKEN` set to at least 32 visible ASCII characters; remote clients must send it as a bearer token. The built-in server is still plain HTTP, so remote use should go through a trusted tunnel, local network boundary, or TLS-terminating proxy.
+
+### Gateway access and reverse proxies
+
+The gateway binds to loopback by default. Local-only mode grants unauthenticated access only to an observed loopback peer with a valid loopback `Host` and no proxy-indicator headers. This applies to `/health` and `/v1/models` as well as generation requests. A request carrying `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-Port`, or `X-Real-IP` cannot use that exemption, regardless of the header value.
+
+For a reverse proxy, enable authenticated mode **even if the gateway binds to loopback**:
+
+```bash
+# Supply a private, randomly generated token in this environment first.
+codex-antigravity start --host 127.0.0.1 --allow-remote
+```
+
+`--allow-remote` requires `ANTIGRAVITY_GATEWAY_TOKEN` to contain at least 32 visible ASCII characters and enables bearer authentication for **every request**, including direct loopback requests and health checks. Setting `ANTIGRAVITY_ALLOW_REMOTE=1` in the gateway's runtime environment enables the same authentication policy. A non-loopback bind additionally requires the explicit `--allow-remote` flag. Each client must send `Authorization: Bearer <token>`. Readiness/status commands need the token in their own environment too; when using a secret runtime, wrap the invoking command so both the launcher and its child receive the token.
+
+Foreground, background, and managed-service launches disable Uvicorn's forwarded-header interpretation. Forwarded addresses never grant access, and the gateway does not reconstruct browser origins from forwarded scheme or host values. Custom Uvicorn launches must also use `--no-proxy-headers`. Keep the backend private; the built-in server speaks plain HTTP, so remote access needs a protected tunnel or a TLS-terminating proxy with a protected backend connection. The proxy must relay each client's bearer header, rather than inject the gateway token for unauthenticated callers.
+
+A local proxy that strips all proxy indicators and rewrites `Host` looks like any other local process. The gateway cannot detect that proxy automatically; authenticated mode is required before exposing it. JSON content-type, cross-site fetch, and Origin checks remain active after authentication. For browser requests, Origin must match the scheme and Host visible to the backend; forwarding `X-Forwarded-Proto: https` alone does not make an HTTP backend origin match an HTTPS browser origin.
 
 Use live diagnostics sparingly when proving a final install:
 
@@ -211,6 +253,14 @@ Token refresh and project discovery run outside account-selection and storage lo
 
 The gateway lifespan starts a refresh-ahead check and repeats checks every 60 seconds while idle, refreshing tokens within five minutes of expiry. At most one refresh-ahead worker runs at a time. Shutdown stops the timer, signals the worker to stop before further discovery/merges/accounts, and waits for the current synchronous call to finish using its existing network timeouts. It does not abandon a live worker thread. This is process-local refresh ownership; multiple gateway processes are not coordinated by a distributed refresh lease.
 
+Google and Chat Completions responses select provider alternative index `0`, consistently across streaming and non-streaming output. Other alternatives cannot contribute text, tools, or terminal reasons. A single unindexed alternative remains supported; ambiguous multi-answer or mixed unindexed/alternative streams fail explicitly. Usage stays the provider-reported aggregate, since per-alternative token usage cannot be inferred.
+
+Token refresh and project discovery run outside account-selection and storage locks. A concurrent selection can use another eligible account; a busy refresh never makes an expired token eligible. Each account has one refresh owner per gateway process. The credential snapshot is checked before refresh and before writing back, so removal, changed credentials, and newer token state take precedence. Family cooldowns remain independent of token refresh.
+
+The gateway lifespan starts a refresh-ahead check and repeats checks every 60 seconds while idle, refreshing tokens within five minutes of expiry. At most one refresh-ahead worker runs at a time. Shutdown stops the timer, signals the worker to stop before further discovery/merges/accounts, and waits for the current synchronous call to finish using its existing network timeouts. It does not abandon a live worker thread. This is process-local refresh ownership; multiple gateway processes are not coordinated by a distributed refresh lease.
+
+Live readiness requires a completed response with usable text in a completed assistant message. HTTP success alone, failed or incomplete responses (including token-cap exhaustion), refusals, empty output, and malformed responses do not pass. The live probe in `doctor --codex-ready --json` separates `transport_ok` from `generation_ok` and reports `terminal_kind`, `terminal_reason`, and a redacted `error`; `ok` reflects generation success. The check sends one request with the existing token budget and does not retry automatically.
+
 ## 1. Supported Models & Aliases
 You can use standard, developer-friendly names in your `~/.codex/config.toml` that the gateway automatically translates to the official Google Antigravity backend model definitions:
 
@@ -219,7 +269,7 @@ You can use standard, developer-friendly names in your `~/.codex/config.toml` th
 | `gemini-3.8-flash` | `gemini-3.8-flash-tiered` (current Flash; low/medium/high via `thinkingLevel`) |
 | `gemini-3.7-flash` | `gemini-3.7-flash-tiered` (supported Flash) |
 | `gemini-3.1-pro` | `gemini-3.1-pro-low` (Advanced Reasoning Pro) |
-| `gemini-3.1-flash-image` | `gemini-3.1-flash-image` (image generation) |
+| `gemini-3.1-flash-image` | Recognized but not advertised; generation rejects unsupported image output before dispatch |
 | `claude-sonnet-4-6` | `claude-sonnet-4-6` (High-Fidelity Anthropic Sonnet) |
 | `claude-opus-4-6-thinking` | `claude-opus-4-6-thinking` (Deep Anthropic Opus Reasoning) |
 
@@ -248,6 +298,12 @@ When multiple Google accounts are registered, the gateway automatically rotates 
 - **Sticky Active Selection**: The `AccountManager` keeps independent active-account slots for Gemini and Claude families to preserve conversational continuity before rotating on connection timeouts/failures.
 - **Claude Diagnostics**: Google request failures include sanitized family-level diagnostics such as selected family, cooldown count, retry-after source, rotation attempt status, and whether all Claude accounts are cooling down. Non-streaming Google failure responses use a structured `detail` object with `message` and `diagnostics`; clients should handle both this shape and older string details. Account identifiers are reserved for authenticated account-list commands.
 
+Use `codex-antigravity accounts explain --model claude-sonnet-4-6` (or add `--json`) for a read-only eligibility explanation. The view uses positional identifiers such as `account-1`, fixed exclusion categories, cooldown seconds, token lifetime categories, and next actions. It includes the account-store, OAuth client configuration, and keyring namespaces without displaying emails, tokens, project IDs, fingerprints, or stored free-text error reasons. Identifiers follow store order and may change when accounts are removed.
+
+Routing eligibility is separate from token readiness: an expired token may require refresh, whose success is unknown until attempted. The command never refreshes, probes providers, takes leases, writes migrations, or repairs files. Unsupported store versions fail with recovery guidance. Runtime selection prefers the lowest lease count, with ties ordered cyclically from the family's preferred account; this is sticky preference, not round-robin. The CLI cannot observe another gateway process's leases, so it reports them as unknown and does not predict the next selected account. Cooldown expiry alone does not reveal whether its cause was throttling, transport failure, or authentication.
+
+The view reports route classification for both classic and unified gateway modes because a separate gateway may run with different settings. Google eligibility applies only to modes classified as `antigravity`; OpenAI and BYOK routes are rejected. Standard namespace paths use `~/.codex/...`; customized paths are represented by stable hashes so private directory names stay out of shared reports.
+
 ---
 
 ## 3. High-Fidelity Streaming & Reasoning
@@ -256,6 +312,8 @@ Native Responses content deltas remain streaming, but the final completed/incomp
 Native output preservation and supported item/field limits are documented in [the native Responses contract](codex_antigravity_auth/NATIVE_RESPONSES.md). Reasoning continuation, web-search calls, citations, custom calls and assistant phase survive native routing without using translated-output heuristics. Unsupported item types fail explicitly.
 
 Streaming readers decode UTF-8 incrementally, ignore one leading BOM, and recognize LF, CRLF, and CR line endings. Native Responses events are dispatched at a blank line, with multiple `data:` fields joined by a newline. Malformed UTF-8 is replaced consistently; unfinished data at EOF fails instead of becoming a complete event. Chat Completions and Google retain an explicit legacy JSON-line mode for endpoints that omit blank separators, including multiline JSON continuations; a physical data line must still terminate. Readers retain at most 8 Mi decoded characters and 10,000 data lines per pending frame. These bounds do not impose whole-response or gateway admission limits.
+
+Explicit provider refusal text is retained as refusal content even alongside an answer prefix or tool call. A refusal-only response can be `completed`, while readiness still reports it as refused. Filtered responses with ordinary text or tools are `incomplete` with reason `content_filter`; token-limit responses use `max_output_tokens`. Known technical or unknown finish reasons fail explicitly while retaining supported partial output. Policy metadata without user-facing refusal text produces a generic refusal notice, and safety ratings without an explicit block do not imply refusal. Streaming and non-streaming normalization use the same outcome rules.
 
 The local server natively isolates explicit thinking blocks and stream envelopes, ensuring standard formatting:
 - **Thinking/Reasoning block**: Emits `response.reasoning_text.delta` for explicit backend thinking parts while preserving regular `thoughtSignature` text as visible output.
@@ -347,6 +405,10 @@ Use `setup --plan` for JSON stages/prerequisites without credential resolution o
 ## Versioned command JSON and support bundles
 
 Operational `--json` commands now return a version-1 envelope with command data under `data`, warnings separate from blocking failures, and explicit exit codes. Migrate consumers of the previous root-level JSON fields. `support-bundle` previews bounded allowlisted offline evidence; only `--output PATH --write` creates a private local export, and existing files are preserved. See [the JSON and support contract](codex_antigravity_auth/CLI_JSON.md) for supported commands, schemas, limits and privacy details.
+
+## Request shape and schema diagnostics
+
+Malformed message/content/tool shapes and orphan outputs return field-specific HTTP400 errors before account work. Translated routes reject unsupported built-in tools and explicit schema weakening; Google cannot honor `strict: true`. Native Responses keeps provider-specific items/tools and continuation intact. See [request validation and translation-loss behavior](codex_antigravity_auth/design/request-shapes.md) for compatibility changes and limits.
 ### Gateway process-log privacy and retention
 
 `start`, `start --background` and newly installed services write bounded,
@@ -358,6 +420,49 @@ service to stop its old append-only output routing. Account references in runtim
 messages are opaque and change on restart; explicit account-management commands
 still show local account identity. See [the process-log contract](codex_antigravity_auth/PROCESS_LOGS.md).
 
+## Model discovery and recent readiness
+
+`provider discover NAME` reads cached evidence; `--network` explicitly fetches a
+bounded optional catalog. `models explain ID --json` stays offline, while
+`models probe ID --network` records one expiring text-generation check. Imports
+are preview-first and require `--write --accept-digest` to save. See the
+[discovery and readiness contract](codex_antigravity_auth/design/model-discovery.md)
+for supported pagination, limits, cache semantics and configuration diagnostics.
+
+## Local finding verdicts and report export
+
+```sh
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --run-id RUN_ID --format json
+python3 ~/.codex/skills/anti/scripts/anti.py runs finding --repo . --run-id RUN_ID --finding FINDING_KEY --verdict rejected --author reviewer --source-file src/example.py --evidence-file local-evidence.txt
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --run-id RUN_ID --format sarif --output review.sarif
+python3 ~/.codex/skills/anti/scripts/anti.py runs export --repo . --format markdown --output reviews.md
+```
+
+Use `findingKey` from the first export. Local verdicts require explicit evidence
+and record the inspected file hash; model claims and passing file checks remain
+unverified. Rejected and unresolved findings remain visible. Existing output
+files are never overwritten, and these commands never publish to GitHub. Retained
+content and provenance limits follow the
+[review export contract](codex_antigravity_auth/skills/anti/ARTIFACTS.md#finding-adjudication-and-review-exports).
+
+### Anti repository submission policies
+
+For explicit repository audits, use `review --scope repository` with optional
+literal `--review-root` / `--exclude-path` selections. Working-tree reviews report
+excluded untracked files; `--include-untracked` opts in to their content. Staged
+scope stays unchanged. See [review inventory and coverage limits](codex_antigravity_auth/skills/anti/SCOPES.md).
+
+Diff findings retain captured old/new line and blob provenance. Locations outside
+submitted hunks stay unknown; mapping never verifies the finding. See
+[immutable diff locations](codex_antigravity_auth/skills/anti/DIFF_PROVENANCE.md).
+
+`consult`, `review`, `plan`, `compare`, `panel` and `workflow` accept opt-in
+`--data-policy PATH`. Exact gateway/model/stage allowlists and forbidden source
+paths restrict the chosen run. Bounded secret-pattern checks stop a submission
+until resolved or explicitly acknowledged for its exact prompt hash. Policy
+dry runs write nothing and report hashes instead of source. See the bundled
+[policy contract](codex_antigravity_auth/skills/anti/DATA_POLICY.md).
+
 ## Request time budgets
 
 Google, BYOK and native OpenAI requests now share a monotonic 60-second preparation/nonstream deadline. Streaming has separate 60-second event-idle and 30-minute total defaults, including preparation, with validated metadata overrides. Downstream backpressure and resource cleanup are bounded; timeouts never trigger replay after visible output. See [request deadlines and cleanup](codex_antigravity_auth/REQUEST_DEADLINES.md) for overrides, failure outcomes, cleanup grace and cancellation limits.
@@ -365,3 +470,71 @@ Google, BYOK and native OpenAI requests now share a monotonic 60-second preparat
 ## Service configuration drift
 
 `service status` distinguishes catalog reachability from owned service readiness. New installs record nonsecret launch intent; `service repair` and `service restart` preview changes until `--write` is supplied. Repairs retain protected backups and report incomplete registration explicitly. See [service identity, migration and recovery](codex_antigravity_auth/SERVICES.md).
+
+## Completed function-call validation
+
+Completed tool arguments must encode JSON objects and satisfy the available declared identity and supported schema checks. Invalid calls cannot become executable completion events; usable sibling output is retained with an explicit failed/incomplete result. Google’s internal `_placeholder` is removed only with per-tool injection provenance. See [final-call validation and limits](codex_antigravity_auth/design/tool-calls.md).
+
+Google generated-media parts produce an explicit failure while retaining supported sibling output. The image-generation backend is recognized but excluded from advertised models and rejected before account selection; image input on supported text models remains available. See [Google output support](codex_antigravity_auth/design/google-output.md).
+
+## Resource limits and overload
+
+Generation admission defaults to 32 in-flight requests per process and 16 per backend route. Excess requests receive HTTP503 with Retry-After. Incoming bodies default to32MiB, inline attachments have separate decoded limits, and JSON/schema/SSE/provider accumulation are bounded without accepting clipped requests as complete. Set operator environment overrides for larger contexts or images; increasing the in-flight ceiling above its startup value requires a gateway restart. See [resource limits and admission](codex_antigravity_auth/RESOURCE_LIMITS.md) for units, ranges, failure codes and ownership.
+
+## Anti whole-run deadlines
+
+Anti generation commands accept `--run-timeout` (default 1800 seconds). This budget
+is shared by chunks, retries, fallback and judge calls; each actual destination
+acquires a process-local permit for each attempt. Deadline-deferred work is saved
+as partial coverage under the selected retention mode. See [run controls and
+cooperative timeout limits](codex_antigravity_auth/skills/anti/RUN_CONTROL.md).
+
+
+## Anti admission and cost units
+
+`--budget` remains a heuristic-unit limit. Independent `--max-calls`,
+`--max-total-input-tokens` (estimated) and `--max-total-output-tokens` allowances
+apply to retries, fallback and judge calls. Optional `--currency-budget` requires
+an explicit dated `--pricing-file` with complete-attempt charge bounds; unknown
+or stale prices refuse admission. Local usage is not billing. See the packaged
+[spend-control contract](codex_antigravity_auth/skills/anti/SPEND_CONTROL.md).
+
+## HTTP client pooling
+
+The running gateway reuses bounded HTTP connections for generation across Google, native OpenAI and BYOK, with separate pools for each environment-proxy policy. Credentials and timeouts remain per request; shared cookie storage is disabled. See [HTTP client ownership and synthetic measurements](codex_antigravity_auth/HTTP_CLIENTS.md).
+
+## Model discovery and recent readiness
+
+`provider discover NAME` reads cached evidence; `--network` explicitly fetches a
+bounded optional catalog. `models explain ID --json` stays offline, while
+`models probe ID --network` records one expiring text-generation check. Imports
+are preview-first and require `--write --accept-digest` to save. See the
+[discovery and readiness contract](codex_antigravity_auth/design/model-discovery.md)
+for supported pagination, limits, cache semantics and configuration diagnostics.
+
+## Context preflight
+
+`POST /v1/context/preflight` accepts the intended Responses request body and
+returns a count-only `fit`/`unknown`/`reject` assessment without generation. The
+current catalog limits are declarations, so ordinary routes return `unknown`
+with labeled whole-request estimates. See [context preflight](codex_antigravity_auth/skills/anti/CONTEXT_PREFLIGHT.md)
+for component accounting, evidence requirements, generation behavior and Anti
+usage calibration. Character limits are not tokenizer or context guarantees.
+
+## Chunk checkpoints
+
+Direct Anti review/plan can opt into immutable checkpoints with
+`--checkpoint-chunks --save-output full`. `--resume-from ID` creates a new run,
+requires the original source/task identity, reuses verified completed chunks and
+always resynthesizes. Failed/truncated chunks need explicit `--rerun-chunk N`.
+See [chunk resume](codex_antigravity_auth/skills/anti/CHUNK_RESUME.md) for retention,
+route receipts, coverage, combined reporting and per-invocation allowance scope.
+
+### Offline review-quality replay
+
+`python scripts/anti.py benchmark corpus`, `benchmark template`, and
+`benchmark replay --replay replay.json --adjudications adjudications.json` provide
+a versioned synthetic corpus and matched-case evaluation. Independent local
+evidence is separate from model claims; unavailable, invalid and inconclusive
+results remain explicit. See [offline benchmark](codex_antigravity_auth/skills/anti/BENCHMARK.md).
+No live tournament, model quality ranking or routing-default change is performed.

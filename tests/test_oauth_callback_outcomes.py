@@ -11,13 +11,17 @@ from urllib.request import urlopen
 from unittest.mock import MagicMock
 
 import pytest
+from fake_upstream import allow_listener, remove_listener
 
 from codex_antigravity_auth import cli, cli_setup, oauth
 
 
 @pytest.fixture
 def callback():
-    server = cli.OAuthServer(("127.0.0.1", 0), cli.OAuthCallbackHandler)
+    server = cli.OAuthServer(("127.0.0.1", 0), cli.OAuthCallbackHandler, bind_and_activate=False)
+    endpoint = allow_listener(server.socket)
+    server.server_address = endpoint
+    server.server_activate()
     server.expected_state_id = "synthetic-state"
     thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01))
     thread.start()
@@ -35,10 +39,13 @@ def callback():
     try:
         yield server, request
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
-        assert not thread.is_alive()
+        try:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            assert not thread.is_alive()
+        finally:
+            remove_listener(endpoint)
 
 
 @pytest.mark.parametrize("outcome", [{"code": "synthetic-code"}, {"error": "access_denied"}])
@@ -189,7 +196,10 @@ def test_code_callback_still_validates_pkce_and_closes_on_exchange_failure(flow,
 @pytest.mark.parametrize("drip", [False, True])
 def test_partial_connected_request_cannot_outlive_callback_deadline(drip):
     import socket
-    server = cli.OAuthServer(("127.0.0.1", 0), cli.OAuthCallbackHandler)
+    server = cli.OAuthServer(("127.0.0.1", 0), cli.OAuthCallbackHandler, bind_and_activate=False)
+    endpoint = allow_listener(server.socket)
+    server.server_address = endpoint
+    server.server_activate()
     server.expected_state_id = "synthetic-state"
     server.timeout = 0.2
     server.callback_deadline = time.monotonic() + 0.15
@@ -218,6 +228,37 @@ def test_partial_connected_request_cannot_outlive_callback_deadline(drip):
             assert finished.wait(1), "accepted partial request bypassed the deadline"
             assert server.auth_code is server.auth_error is None
     finally:
-        server.server_close()
-        worker.join(timeout=2)
-        assert not worker.is_alive()
+        try:
+            server.server_close()
+            worker.join(timeout=2)
+            assert not worker.is_alive()
+        finally:
+            remove_listener(endpoint)
+
+
+def test_callback_drip_reads_check_absolute_deadline_without_timer(monkeypatch):
+    # A timer/socket shutdown is best effort on some hosts. Drip progress must
+    # not refresh the accepted request's absolute read deadline.
+    now = [10.0]
+    reads = []
+    connection = SimpleNamespace(settimeout=MagicMock(), shutdown=MagicMock())
+    def readinto(buffer):
+        now[0] += 0.06
+        reads.append(True)
+        buffer[0] = ord("x")
+        return 1
+    handler = cli.OAuthCallbackHandler.__new__(cli.OAuthCallbackHandler)
+    handler.server = SimpleNamespace(callback_deadline=10.15)
+    handler.connection = connection
+    handler.rfile = SimpleNamespace(raw=SimpleNamespace(readinto=readinto))
+    monkeypatch.setattr(cli.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(cli.threading, "Timer", MagicMock())
+    def receive(self):
+        for _ in range(10):
+            self.rfile.raw.readinto(bytearray(1))
+        pytest.fail("drip progress refreshed the absolute request deadline")
+    monkeypatch.setattr(cli.http.server.BaseHTTPRequestHandler, "handle", receive)
+    with pytest.raises(TimeoutError):
+        handler.handle()
+    assert len(reads) == 3
+    assert connection.settimeout.call_args.args[0] <= 0.15

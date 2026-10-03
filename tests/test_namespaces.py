@@ -3,11 +3,13 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shlex
 import subprocess
 import sys
 from types import SimpleNamespace
 
 import pytest
+from standalone import without_installed_packages
 
 from codex_antigravity_auth import byok, cli, constants, models, observability, service, storage, unified
 from codex_antigravity_auth import namespace_migration as migration
@@ -133,8 +135,11 @@ def test_service_definitions_freeze_both_selected_roots(roots, monkeypatch):
     assert agent["StandardOutPath"] == "/dev/null"
     from codex_antigravity_auth.process_logs import log_path
     assert command[command.index("--process-log") + 1] == str(log_path(state, 51122))
+
+    assert Path(command[command.index("--process-log") + 1]).parent.parent == state
     unit = service.render_linux_systemd_unit(51122, "127.0.0.1")
-    assert f"--client-home {client}" in unit and f"--state-home {state}" in unit
+    exec_start = unit.split("ExecStart=", 1)[1].splitlines()[0].replace("%%", "%")
+    assert shlex.split(exec_start) == command
     assert not client.exists() and not state.exists()
 
 
@@ -151,13 +156,15 @@ def test_standalone_anti_namespace_paths_without_site_packages(roots, monkeypatc
     monkeypatch.setenv("CODEX_HOME", str(client))
     monkeypatch.setenv("ANTIGRAVITY_STATE_HOME", str(state))
     script_dir = Path(cli.__file__).parent / "skills/anti/scripts"
-    code = '''import json, runpy, sys
+    code = '''import json, os, runpy, sys
+os.environ['CODEX_HOME'] = sys.argv[2]
+os.environ['ANTIGRAVITY_STATE_HOME'] = sys.argv[3]
 sys.path.insert(0, sys.argv[1])
 anti = runpy.run_path(sys.argv[1] + '/anti.py', run_name='synthetic_namespace_import')
 from anti_lib import reflections
 print(json.dumps([str(anti['PID_FILE']), str(anti['LOG_FILE']), str(anti['RUNS_DIR']), str(reflections.REFLECTIONS_DIR)]))
 '''
-    result = subprocess.run([sys.executable, "-S", "-c", code, str(script_dir)], text=True, capture_output=True, timeout=10, check=True)
+    result = subprocess.run([sys.executable, "-c", without_installed_packages(code), str(script_dir), str(client), str(state)], cwd=client.parent, text=True, capture_output=True, timeout=10, check=True)
     assert json.loads(result.stdout) == [str(state / name) for name in ("anti-gateway.pid", "anti-gateway.log", "anti-runs", "anti-runs/reflections")]
     assert not any(path.exists() for path in roots)
 

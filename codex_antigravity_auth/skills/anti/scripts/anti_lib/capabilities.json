@@ -1,0 +1,723 @@
+{
+  "capability_catalog_version": 1,
+  "data": [
+    {
+      "capabilities": {
+        "aliases": [
+          "gemini-3.8-flash-high",
+          "gemini-3.8-flash-low",
+          "gemini-3.8-flash-medium",
+          "gemini-3.8-flash-tiered"
+        ],
+        "availability": "unknown",
+        "backend_id": "gemini-3.8-flash-tiered",
+        "canonical_id": "gemini-3.8-flash",
+        "context_limit": {
+          "basis": "declared",
+          "known": true,
+          "tokens": 1048576
+        },
+        "declaration_source": "builtin",
+        "declared_backend": {
+          "availability": "unknown",
+          "context_limit": {
+            "basis": "declared",
+            "known": true,
+            "tokens": 1048576
+          },
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "effective": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "parallel_tool_calls": true,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoning_mapping": "thinking_level",
+          "reasoning_replay": false,
+          "streaming": true,
+          "structured_output": true,
+          "tools": true
+        },
+        "family": "gemini",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
+        "route": "antigravity",
+        "transport": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "opaque_reasoning_replay": false,
+          "output_types": [
+            "text",
+            "reasoning",
+            "function_call",
+            "refusal"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "version": 1
+      },
+      "id": "gemini-3.8-flash"
+    },
+    {
+      "capabilities": {
+        "aliases": [
+          "gemini-3.7-flash-high",
+          "gemini-3.7-flash-low",
+          "gemini-3.7-flash-medium",
+          "gemini-3.7-flash-tiered"
+        ],
+        "availability": "unknown",
+        "backend_id": "gemini-3.7-flash-tiered",
+        "canonical_id": "gemini-3.7-flash",
+        "context_limit": {
+          "basis": "declared",
+          "known": true,
+          "tokens": 1048576
+        },
+        "declaration_source": "builtin",
+        "declared_backend": {
+          "availability": "unknown",
+          "context_limit": {
+            "basis": "declared",
+            "known": true,
+            "tokens": 1048576
+          },
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "effective": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "parallel_tool_calls": true,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoning_mapping": "thinking_level",
+          "reasoning_replay": false,
+          "streaming": true,
+          "structured_output": true,
+          "tools": true
+        },
+        "family": "gemini",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
+        "route": "antigravity",
+        "transport": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "opaque_reasoning_replay": false,
+          "output_types": [
+            "text",
+            "reasoning",
+            "function_call",
+            "refusal"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "version": 1
+      },
+      "id": "gemini-3.7-flash"
+    },
+    {
+      "capabilities": {
+        "aliases": [
+          "gemini-3.1-pro-high",
+          "gemini-3.1-pro-low",
+          "gemini-3.1-pro-preview",
+          "gemini-pro-agent"
+        ],
+        "availability": "unknown",
+        "backend_id": "gemini-3.1-pro-low",
+        "canonical_id": "gemini-3.1-pro",
+        "context_limit": {
+          "basis": "declared",
+          "known": true,
+          "tokens": 1048576
+        },
+        "declaration_source": "builtin",
+        "declared_backend": {
+          "availability": "unknown",
+          "context_limit": {
+            "basis": "declared",
+            "known": true,
+            "tokens": 1048576
+          },
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "effective": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call"
+          ],
+          "parallel_tool_calls": true,
+          "reasoning_efforts": [],
+          "reasoning_mapping": null,
+          "reasoning_replay": false,
+          "streaming": true,
+          "structured_output": true,
+          "tools": true
+        },
+        "family": "gemini",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
+        "route": "antigravity",
+        "transport": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "opaque_reasoning_replay": false,
+          "output_types": [
+            "text",
+            "reasoning",
+            "function_call",
+            "refusal"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "version": 1
+      },
+      "id": "gemini-3.1-pro"
+    },
+    {
+      "capabilities": {
+        "aliases": [
+          "claude-3-5-sonnet",
+          "claude-3.5-sonnet",
+          "claude-sonnet",
+          "sonnet"
+        ],
+        "availability": "unknown",
+        "backend_id": "claude-sonnet-4-6",
+        "canonical_id": "claude-sonnet-4-6",
+        "context_limit": {
+          "basis": "declared",
+          "known": true,
+          "tokens": 250000
+        },
+        "declaration_source": "builtin",
+        "declared_backend": {
+          "availability": "unknown",
+          "context_limit": {
+            "basis": "declared",
+            "known": true,
+            "tokens": 250000
+          },
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "effective": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "parallel_tool_calls": true,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "reasoning_mapping": "thinking_budget",
+          "reasoning_replay": false,
+          "streaming": true,
+          "structured_output": true,
+          "tools": true
+        },
+        "family": "claude",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
+        "route": "antigravity",
+        "transport": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "opaque_reasoning_replay": false,
+          "output_types": [
+            "text",
+            "reasoning",
+            "function_call",
+            "refusal"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "version": 1
+      },
+      "id": "claude-sonnet-4-6"
+    },
+    {
+      "capabilities": {
+        "aliases": [
+          "claude-opus",
+          "claude-opus-4-6",
+          "opus"
+        ],
+        "availability": "unknown",
+        "backend_id": "claude-opus-4-6-thinking",
+        "canonical_id": "claude-opus-4-6-thinking",
+        "context_limit": {
+          "basis": "declared",
+          "known": true,
+          "tokens": 250000
+        },
+        "declaration_source": "builtin",
+        "declared_backend": {
+          "availability": "unknown",
+          "context_limit": {
+            "basis": "declared",
+            "known": true,
+            "tokens": 250000
+          },
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "effective": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "parallel_tool_calls": true,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "reasoning_mapping": "thinking_budget",
+          "reasoning_replay": false,
+          "streaming": true,
+          "structured_output": true,
+          "tools": true
+        },
+        "family": "claude",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
+        "route": "antigravity",
+        "transport": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "opaque_reasoning_replay": false,
+          "output_types": [
+            "text",
+            "reasoning",
+            "function_call",
+            "refusal"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "version": 1
+      },
+      "id": "claude-opus-4-6-thinking"
+    },
+    {
+      "capabilities": {
+        "aliases": [],
+        "availability": "unknown",
+        "backend_id": "gpt-oss-120b-medium",
+        "canonical_id": "gpt-oss-120b-medium",
+        "context_limit": {
+          "basis": "declared",
+          "known": true,
+          "tokens": 131072
+        },
+        "declaration_source": "builtin",
+        "declared_backend": {
+          "availability": "unknown",
+          "context_limit": {
+            "basis": "declared",
+            "known": true,
+            "tokens": 131072
+          },
+          "input_modalities": [
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "effective": {
+          "image_forms": [],
+          "input_modalities": [
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call"
+          ],
+          "parallel_tool_calls": true,
+          "reasoning_efforts": [],
+          "reasoning_mapping": null,
+          "reasoning_replay": false,
+          "streaming": true,
+          "structured_output": true,
+          "tools": true
+        },
+        "family": "gemini",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
+        "route": "antigravity",
+        "transport": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "opaque_reasoning_replay": false,
+          "output_types": [
+            "text",
+            "reasoning",
+            "function_call",
+            "refusal"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "version": 1
+      },
+      "id": "gpt-oss-120b-medium"
+    },
+    {
+      "capabilities": {
+        "aliases": [
+          "gemini-3.6-flash",
+          "gemini-3.6-flash-low",
+          "gemini-3.6-flash-medium"
+        ],
+        "availability": "unknown",
+        "backend_id": "gemini-3.7-flash-tiered",
+        "canonical_id": "gemini-3.6-flash-high",
+        "context_limit": {
+          "basis": "declared",
+          "known": true,
+          "tokens": 1048576
+        },
+        "declaration_source": "builtin",
+        "declared_backend": {
+          "availability": "unknown",
+          "context_limit": {
+            "basis": "declared",
+            "known": true,
+            "tokens": 1048576
+          },
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "effective": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "parallel_tool_calls": true,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoning_mapping": "thinking_level",
+          "reasoning_replay": false,
+          "streaming": true,
+          "structured_output": true,
+          "tools": true
+        },
+        "family": "gemini",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
+        "route": "antigravity",
+        "transport": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "opaque_reasoning_replay": false,
+          "output_types": [
+            "text",
+            "reasoning",
+            "function_call",
+            "refusal"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "version": 1
+      },
+      "id": "gemini-3.6-flash-high"
+    },
+    {
+      "capabilities": {
+        "aliases": [
+          "gemini-3-flash-agent",
+          "gemini-3.5-flash",
+          "gemini-3.5-flash-extra-low",
+          "gemini-3.5-flash-low",
+          "gemini-3.5-flash-medium"
+        ],
+        "availability": "unknown",
+        "backend_id": "gemini-3-flash-agent",
+        "canonical_id": "gemini-3.5-flash-high",
+        "context_limit": {
+          "basis": "declared",
+          "known": true,
+          "tokens": 1048576
+        },
+        "declaration_source": "builtin",
+        "declared_backend": {
+          "availability": "unknown",
+          "context_limit": {
+            "basis": "declared",
+            "known": true,
+            "tokens": 1048576
+          },
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "effective": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call"
+          ],
+          "parallel_tool_calls": true,
+          "reasoning_efforts": [],
+          "reasoning_mapping": null,
+          "reasoning_replay": false,
+          "streaming": true,
+          "structured_output": true,
+          "tools": true
+        },
+        "family": "gemini",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
+        "route": "antigravity",
+        "transport": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "opaque_reasoning_replay": false,
+          "output_types": [
+            "text",
+            "reasoning",
+            "function_call",
+            "refusal"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "version": 1
+      },
+      "id": "gemini-3.5-flash-high"
+    }
+  ],
+  "generated_from": "codex_antigravity_auth.models.NATIVE_MODELS; run scripts/generate_capability_snapshot.py"
+}

@@ -188,6 +188,14 @@ class TestChatResponseAccumulator(unittest.TestCase):
         accumulator.consume({"choices": [{"delta": {"content": "partial"}, "finish_reason": "length"}]})
         self.assertEqual(accumulator.finalize().terminal.kind, TerminalKind.INCOMPLETE)
 
+    def test_visible_reasoning_does_not_claim_opaque_replay_data(self):
+        accumulator = ChatResponseAccumulator()
+        accumulator.consume({"choices": [{"delta": {"reasoning_content": "visible fixture"}}]})
+        accumulator.mark_done()
+        reasoning = next(item for item in accumulator.finalize().output if item["type"] == "reasoning")
+        self.assertEqual(reasoning["step_by_step_summary"], "visible fixture")
+        self.assertNotIn("encrypted_content", reasoning)
+
 
 class TestOpenAIStreamingRoute(unittest.IsolatedAsyncioTestCase):
     async def _events(self, chunks):
@@ -288,7 +296,7 @@ class TestOpenAIStreamingRoute(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual([event["type"] for event in terminal], ["response.completed"])
         self.assertEqual(len(refusals), 1)
-        self.assertNotIn("provider detail", str(refusals))
+        self.assertIn("provider detail", str(refusals))
 
 
 class TestNativeResponsesRoute(unittest.IsolatedAsyncioTestCase):

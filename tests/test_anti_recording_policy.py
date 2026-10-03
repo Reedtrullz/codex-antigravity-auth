@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from standalone import without_installed_packages
+
 SCRIPT = Path(__file__).resolve().parents[1] / "codex_antigravity_auth/skills/anti/scripts/anti.py"
 SENTINEL = "synthetic-private-content-"
 LONG = SENTINEL + "x" * 4000 + "-private-tail"
@@ -16,6 +18,9 @@ SECRET = "sk-syntheticfixture01234567890123456789"
 
 @pytest.fixture
 def isolated_anti(monkeypatch, tmp_path):
+    script_dir = str(SCRIPT.resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
     spec = importlib.util.spec_from_file_location("anti_recording_fixture", SCRIPT)
     anti = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(anti)
@@ -57,7 +62,8 @@ def test_never_records_only_allowlisted_lifecycle(isolated_anti, status):
     assert SENTINEL not in files[path]
     record = json.loads(files[path])
     assert record["status"] == status
-    assert record["metadata"] == {"request_log_correlation_id": "fixture-run", "output_chars": 4000, "scope_status": "partial"}
+    assert record["metadata"] == {"request_log_correlation_id": "fixture-run", "output_chars": 4000,
+                                  "scope_status": "partial", "panel_lane_count": 1}
     assert "resultPath" not in record
     if sys.platform != "win32":
         assert path.stat().st_mode & 0o777 == 0o600
@@ -191,7 +197,7 @@ def test_standalone_copy_uses_same_retention_without_installed_package(isolated_
     copied = root / "copy"
     shutil.copytree(SCRIPT.parent, copied, ignore=shutil.ignore_patterns("__pycache__"))
     probe = "from anti_lib.retention import summary_projection; assert len(summary_projection('x'*4000)) == 1600"
-    subprocess.run([sys.executable, "-S", "-c", probe], cwd=copied, check=True)
+    subprocess.run([sys.executable, "-c", without_installed_packages(probe)], cwd=copied, check=True)
 
 
 @pytest.mark.parametrize("retention", ["never", "summary", "full"])
@@ -206,7 +212,7 @@ def test_interrupted_full_publication_preserves_orphan_artifacts(isolated_anti, 
         patch.setattr(anti.os, "replace", interrupt_record)
         with pytest.raises(OSError, match="interrupted publication"):
             write(anti, "full", execution_ledger=None)
-    assert (anti.RUNS_DIR / "fixture-run/result.json").exists()
+    assert list((anti.RUNS_DIR / "fixture-run/revisions").glob("*/result.json"))
     assert not (anti.RUNS_DIR / "fixture-run.json").exists()
     before = all_files(root)
     with pytest.raises(anti.AntiError, match="unknown retention policy"):
@@ -278,3 +284,36 @@ def test_validated_artifact_identity_survives_shared_privacy_redaction(isolated_
     assert artifact["runId"] == record["id"] == "user_12345678"
     assert artifact["resultPath"] == artifact["artifacts"]["resultPath"] == record["resultPath"]
     assert Path(artifact["artifacts"]["runRecordPath"]) == path
+
+
+def test_control_receipts_preserve_only_bounded_numbers_and_fixed_labels(isolated_anti):
+    from anti_lib.retention import lifecycle_metadata
+    source={'judge_attempt_count':1, 'panel_lane_count':2, 'synthesis_status':'not_sent',
+        'run_control':{'scope':'process_local','attempts_started':3,'permits_released':3,
+                       'elapsed_seconds':10**1000,'remaining_seconds':float('nan'),
+                       'events':[{'prompt':LONG}]},
+        'admission_controls':{'enabled':True,'refused_attempts':1,'committed':{'calls':3,'output_tokens':6},
+            'attempts':[{'model':LONG,'prompt':LONG}], 'currency_reserved':'1E-9',
+            'currency':{'currency':'USD','sha256':'a'*64,'gateway':LONG,'source':LONG,
+                        'basis':'user_declared_complete_attempt_ceiling','provider_price_verified':False}}}
+    result=lifecycle_metadata(source)
+    assert result==lifecycle_metadata(result)
+    assert result['judge_attempt_count']==1 and result['panel_lane_count']==2
+    assert result['run_control']['attempts_started']==3
+    assert 'elapsed_seconds' not in result['run_control'] and 'remaining_seconds' not in result['run_control']
+    assert result['admission_controls']['committed']['output_tokens']==6
+    assert result['admission_controls']['currency_reserved']=='1E-9'
+    assert 'source' not in result['admission_controls']['currency']
+    assert SENTINEL not in json.dumps(result) and LONG not in json.dumps(result)
+    assert len(json.dumps(result))<3000
+    anti, _reflections, _root = isolated_anti
+    token = anti.CURRENT_RUN.set(None)
+    try:
+        derived = anti.scheduling_metadata({'consult_attempts': [{'model': LONG}, {'prompt': LONG}],
+                                            'retry_disposition': 'exhausted'})
+        path = write(anti, 'never', metadata=derived)
+    finally:
+        anti.CURRENT_RUN.reset(token)
+    saved = json.loads(path.read_text())['metadata']
+    assert saved['consult_attempt_count'] == 2 and saved['retry_disposition'] == 'exhausted'
+    assert 'consult_attempts' not in saved and SENTINEL not in path.read_text()

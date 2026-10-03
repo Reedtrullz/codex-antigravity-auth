@@ -97,6 +97,16 @@ def write_ready_codex_config(
         encoding="utf-8",
     )
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cli_service_probe(monkeypatch):
+    # CLI report tests must never inspect launchd/systemd/schtasks on the host.
+    # Service rendering/lifecycle tests exercise service.py with explicit fakes.
+    monkeypatch.setattr("codex_antigravity_auth.cli.service_status", lambda *a, **kw: {"installed": False, "active": False, "reachable": False})
+
+
 class TestCliDoctor(unittest.TestCase):
     def setUp(self):
         self._version_check_env = patch.dict(os.environ, {"CODEX_ANTIGRAVITY_NO_UPDATE_CHECK": "1"})
@@ -271,7 +281,8 @@ wire_api = "responses"
         self.assertFalse(ready)
         self.assertIn("active model_provider", reason)
 
-    def test_run_doctor_byok_only_fails_for_missing_provider_key(self):
+    @patch("codex_antigravity_auth.cli.open_http_request", side_effect=urllib.error.URLError("fixture offline"))
+    def test_run_doctor_byok_only_fails_for_missing_provider_key(self, _urlopen):
         provider = {
             "displayName": "DeepSeek",
             "baseUrl": "https://api.deepseek.com",
@@ -672,7 +683,10 @@ class TestGoogleAccountSetup(unittest.TestCase):
                         run_local_oauth_flow()
 
     def test_oauth_callback_rejects_state_mismatch_before_storing_code(self):
-        server = OAuthServer(("127.0.0.1", 0), OAuthCallbackHandler)
+        from _test_isolation import allow_listener, remove_listener
+        server = OAuthServer(("127.0.0.1", 0), OAuthCallbackHandler, bind_and_activate=False)
+        server.server_address = allow_listener(server.socket)
+        server.server_activate()
         server.timeout = 2
         server.expected_state_id = "good-state"
         host, port = server.server_address
@@ -700,6 +714,7 @@ class TestGoogleAccountSetup(unittest.TestCase):
             self.assertEqual(server.auth_state, good_state)
         finally:
             server.server_close()
+            remove_listener(server.server_address)
 
 
 class TestConfigureCodex(unittest.TestCase):
@@ -2149,6 +2164,7 @@ class TestV3NativeSetup(unittest.TestCase):
             self.assertEqual(info["pid_file"], str(pid_file))
             self.assertEqual(info["log_file"], str(log_file))
             popen.assert_called_once()
+            self.assertIn("--process-log", popen.call_args.args[0])
 
     def test_start_background_removes_pid_and_terminates_when_readiness_fails(self):
         proc = MagicMock()
@@ -2702,6 +2718,7 @@ class TestVNextPolishCli(unittest.TestCase):
 
             self.assertFalse(manifest.exists())
 
+    @patch.dict(os.environ, {"CODEX_ANTIGRAVITY_NO_UPDATE_CHECK": "0"})
     def test_version_check_reports_update_available_and_writes_cache(self):
         response = MagicMock()
         response.read.return_value = b'{"info":{"version":"9.9.9"}}'
@@ -2722,6 +2739,7 @@ class TestVNextPolishCli(unittest.TestCase):
         self.assertEqual(result["installed"], "1.4.0")
         self.assertEqual(result["latest"], "9.9.9")
 
+    @patch.dict(os.environ, {"CODEX_ANTIGRAVITY_NO_UPDATE_CHECK": "0"})
     def test_version_check_uses_fresh_cache_without_network(self):
         with TemporaryDirectory() as tmp:
             cache_path = Path(tmp) / "antigravity-version-check.json"
@@ -2746,6 +2764,7 @@ class TestVNextPolishCli(unittest.TestCase):
         self.assertEqual(result["status"], "skip")
         urlopen.assert_not_called()
 
+    @patch.dict(os.environ, {"CODEX_ANTIGRAVITY_NO_UPDATE_CHECK": "0"})
     def test_version_check_skips_non_numeric_latest_version(self):
         response = MagicMock()
         response.read.return_value = b'{"info":{"version":"not-a-version"}}'
@@ -2762,6 +2781,7 @@ class TestVNextPolishCli(unittest.TestCase):
         self.assertEqual(result["status"], "skip")
         self.assertEqual(result["detail"], "version check unavailable")
 
+    @patch.dict(os.environ, {"CODEX_ANTIGRAVITY_NO_UPDATE_CHECK": "0"})
     def test_version_check_prefers_source_checkout_version_over_stale_installed_dist(self):
         with TemporaryDirectory() as tmp:
             cache_path = Path(tmp) / "antigravity-version-check.json"

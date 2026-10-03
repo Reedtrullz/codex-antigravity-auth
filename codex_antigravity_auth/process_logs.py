@@ -298,7 +298,7 @@ def run_gateway(host: str, port: int, *, path: Path, console: bool = True):
             try:
                 import uvicorn
                 uvicorn.run("codex_antigravity_auth.server:app", host=host, port=port,
-                            log_level="info", log_config=None, access_log=False)
+                            log_level="info", log_config=None, access_log=False, proxy_headers=False)
             except Exception:
                 logging.getLogger(__name__).exception("Gateway runtime failed")
                 raise SystemExit(1) from None

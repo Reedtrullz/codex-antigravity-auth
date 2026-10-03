@@ -48,7 +48,7 @@ def test_account_refresh_and_cooldown_runtime_messages_never_include_identity_or
     monkeypatch.setattr("codex_antigravity_auth.oauth.discover_project_id", lambda _: "private-project-sentinel")
     manager = accounts.AccountManager()
     monkeypatch.setattr(manager, "_mutate_state", lambda f: f(manager._state_owner))
-    monkeypatch.setattr(accounts, "update_accounts", lambda callback: callback({"accounts": [account], "accountState": {}}))
+    monkeypatch.setattr(accounts, "update_accounts", lambda mutator: mutator({"accounts": [account]}))
     with logs.runtime_logging(path, console=False):
         assert manager._refresh_snapshot(dict(account)) == "refreshed"
         manager.mark_failure(account["email"], "fixture-unlabelled-secret person@example.invalid", status_code=429)
@@ -167,6 +167,7 @@ def test_gateway_entrypoint_installs_policy_before_uvicorn_and_suppresses_raw_fa
     import uvicorn
     def fail(*args, **kwargs):
         assert kwargs["log_config"] is None and kwargs["access_log"] is False
+        assert kwargs["proxy_headers"] is False
         logging.getLogger("uvicorn.error").warning("email person@example.invalid api_key=fixture-key")
         raise RuntimeError("raw-fixture-secret")
     monkeypatch.setattr(uvicorn, "run", fail)

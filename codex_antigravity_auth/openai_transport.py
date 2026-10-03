@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import json
 import math
@@ -10,17 +11,19 @@ from typing import Any, AsyncIterator
 import uuid
 
 import httpx
+from starlette.requests import ClientDisconnect
 
 from .endpoint_policy import httpx_client_options
-
 from .byok import (
+    provider_capabilities,
     resolve_api_key,
     validate_http_base_url,
     validate_provider_api_key,
     validate_provider_headers,
 )
 
-from .request_budget import owned_context
+from .request_budget import RequestDeadlineExceeded, owned_context
+from .resource_limits import ResourceLimitError, json_loads_limited, read_response_bytes
 from .redaction import redact_secret_text
 from .native_output import (
     MAX_ITEMS, NativeOutputError, check_json, reconcile_output,
@@ -29,6 +32,9 @@ from .native_output import (
 
 from .response_protocol import (
     ProviderCapabilities,
+    validate_capabilities,
+    POLICY_FINISH_REASONS,
+    PrimaryAlternativeSelector,
     ProviderResult,
     ProviderTerminal,
     ResponseEventBuilder,
@@ -37,17 +43,20 @@ from .response_protocol import (
     normalize_usage,
     refusal_item,
 )
-from .transform import function_call_arguments_string, valid_function_name
+from .tool_calls import (FunctionCallValidator, ToolCallError, tool_terminal, parse_arguments,
+                         checked_native_call, native_response)
 from .transform import transform_request_to_chat
 
 
-from .sse import SSEDecoder, SSELineError, iter_sse_data
+from .sse import SSEDecoder, SSELineError, SSELimitError, iter_sse_data
 
 
 def parse_sse_payload(data: str, *, label: str = "provider") -> dict[str, Any]:
     try:
-        payload = json.loads(data)
-    except json.JSONDecodeError as exc:
+        payload = json_loads_limited(data)
+    except ResourceLimitError as exc:
+        raise (SSELimitError if exc.status == 413 else SSELineError)(str(exc)) from exc
+    except (ValueError, RecursionError) as exc:
         raise SSELineError(f"The {label} stream returned malformed JSON: {exc}") from exc
     if isinstance(payload, list):
         payload = payload[0] if payload else {}
@@ -69,7 +78,29 @@ class PreparedOpenAIRequest:
     timeout: float
 
 
-def _message_output(message: object) -> list[dict[str, Any]]:
+def _message_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(part["text"] for part in content if isinstance(part, dict) and isinstance(part.get("text"), str))
+    return ""
+
+
+def _message_refusal(message: dict[str, Any]) -> str:
+    refusal = message.get("refusal")
+    if isinstance(refusal, str) and refusal:
+        return refusal
+    content = message.get("content")
+    if isinstance(content, list):
+        return "".join(part["refusal"] for part in content if isinstance(part, dict)
+                       and part.get("type") == "refusal" and isinstance(part.get("refusal"), str))
+    return ""
+
+
+def _message_output(message: object, *, tool_validator=None, tool_errors=None, duplicate_ids=()) -> list[dict[str, Any]]:
+    tool_validator = tool_validator or FunctionCallValidator()
+    tool_errors = tool_errors if tool_errors is not None else []
     if not isinstance(message, dict):
         return []
     output: list[dict[str, Any]] = []
@@ -79,21 +110,10 @@ def _message_output(message: object) -> list[dict[str, Any]]:
             {
                 "type": "reasoning",
                 "id": f"rs_{uuid.uuid4().hex[:8]}",
-                "encrypted_content": "",
                 "step_by_step_summary": reasoning,
             }
         )
-    content = message.get("content")
-    if isinstance(content, str):
-        text = content
-    elif isinstance(content, list):
-        text = "".join(
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and isinstance(part.get("text"), str)
-        )
-    else:
-        text = ""
+    text = _message_text(message)
     if text:
         output.append(
             {
@@ -104,13 +124,26 @@ def _message_output(message: object) -> list[dict[str, Any]]:
                 "content": [{"type": "output_text", "text": text, "annotations": []}],
             }
         )
+    refusal = _message_refusal(message)
+    if refusal:
+        output.append(refusal_item(refusal_text=refusal))
     tool_calls = message.get("tool_calls")
+    if tool_calls is not None and not isinstance(tool_calls, list):
+        tool_errors.append("invalid_function_call")
     if isinstance(tool_calls, list):
         for tool_call in tool_calls:
-            if not isinstance(tool_call, dict):
-                continue
-            function = tool_call.get("function")
-            if not isinstance(function, dict) or not valid_function_name(function.get("name")):
+            try:
+                if not isinstance(tool_call, dict) or tool_call.get("type", "function") != "function":
+                    raise ToolCallError("invalid_function_call")
+                provider_id = tool_call.get("id")
+                if isinstance(provider_id, str) and provider_id in duplicate_ids:
+                    raise ToolCallError("conflicting_function_call")
+                function = tool_call.get("function")
+                if not isinstance(function, dict):
+                    raise ToolCallError("invalid_function_call")
+                arguments = tool_validator.arguments(function.get("name"), function.get("arguments"))
+            except ToolCallError as exc:
+                tool_errors.append(exc.code)
                 continue
             provider_id = tool_call.get("id")
             call_id = provider_id if isinstance(provider_id, str) and provider_id else f"call_{uuid.uuid4().hex[:8]}"
@@ -120,22 +153,34 @@ def _message_output(message: object) -> list[dict[str, Any]]:
                     "id": call_id if call_id.startswith("fc_") else f"fc_{uuid.uuid4().hex[:8]}",
                     "call_id": call_id,
                     "name": function["name"],
-                    "arguments": function_call_arguments_string(function.get("arguments", "{}")),
+                    "arguments": arguments,
                 }
             )
     return output
 
 
 class ChatResponseAccumulator:
-    def __init__(self) -> None:
-        self._text = ""
-        self._reasoning = ""
+    def __init__(self, *, tool_validator=None) -> None:
+        self.tool_validator = tool_validator or FunctionCallValidator()
+        self.tool_error = None
+        self._tool_order = []
+        self._tool_ids = {}
+        self._invalid_tool_indices = set()
+        self._text: list[str] = []
+        self._reasoning: list[str] = []
         self._finish_reason: str | None = None
         self._usage = normalize_usage()
         self._done = False
-        self._refusal = False
-        self._tool_names: dict[int, str] = {}
-        self._tool_arguments: dict[int, str] = {}
+        self._malformed = False
+        self._primary = PrimaryAlternativeSelector()
+        self._refusal: list[str] = []
+        self._blocked = False
+        self._tool_names: dict[int, list[str]] = {}
+        self._tool_arguments: dict[int, list[str]] = {}
+
+    @property
+    def usage(self) -> dict[str, int]:
+        return dict(self._usage)
 
     def mark_done(self) -> None:
         self._done = True
@@ -150,45 +195,71 @@ class ChatResponseAccumulator:
                 usage.get("completion_tokens", usage.get("output_tokens")),
                 usage.get("total_tokens"),
             )
-        choices = payload.get("choices", [])
-        if not isinstance(choices, list):
+        try:
+            choices = self._primary.select(payload.get("choices", []))
+        except ValueError:
+            self._malformed = True
             return
         for choice in choices:
             if not isinstance(choice, dict):
                 continue
             finish_reason = choice.get("finish_reason")
-            if isinstance(finish_reason, str) and finish_reason:
+            if finish_reason is not None and not isinstance(finish_reason, str):
+                self._malformed = True
+            if isinstance(finish_reason, str):
                 self._finish_reason = finish_reason
-                if finish_reason == "content_filter":
-                    self._refusal = True
+                if finish_reason.strip().lower() in POLICY_FINISH_REASONS:
+                    self._blocked = True
             delta = choice.get("delta")
             if not isinstance(delta, dict):
                 continue
-            content = delta.get("content")
-            if isinstance(content, str):
-                self._text += content
+            content = _message_text(delta)
+            if content:
+                self._text.append(content)
             reasoning = delta.get("reasoning_content")
-            if isinstance(reasoning, str):
-                self._reasoning += reasoning
-            if isinstance(delta.get("refusal"), str) and delta["refusal"]:
-                self._refusal = True
+            if isinstance(reasoning, str) and reasoning:
+                self._reasoning.append(reasoning)
+            refusal = _message_refusal(delta)
+            if refusal:
+                self._refusal.append(refusal)
             tool_calls = delta.get("tool_calls")
+            if tool_calls is not None and not isinstance(tool_calls, list):
+                self.tool_error = self.tool_error or "invalid_function_call"
             if isinstance(tool_calls, list):
                 for position, tool_call in enumerate(tool_calls):
-                    if not isinstance(tool_call, dict):
+                    if not isinstance(tool_call, dict) or tool_call.get("type", "function") not in {None, "function"}:
+                        self.tool_error = self.tool_error or "invalid_function_call"
                         continue
                     index = tool_call.get("index", position)
-                    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                    if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < 10000:
+                        self.tool_error = self.tool_error or "invalid_function_call"
                         continue
+                    if index not in self._tool_order:
+                        self._tool_order.append(index)
+                    call_id = tool_call.get("id")
+                    if isinstance(call_id, str) and call_id:
+                        if index in self._tool_ids and self._tool_ids[index] != call_id:
+                            self.tool_error = self.tool_error or "conflicting_function_call"
+                            self._invalid_tool_indices.add(index)
+                        self._tool_ids[index] = call_id
                     function = tool_call.get("function")
+                    if function is None:
+                        continue
                     if not isinstance(function, dict):
+                        self.tool_error = self.tool_error or "invalid_function_call"
                         continue
                     name = function.get("name")
+                    if name is not None and not isinstance(name, str):
+                        self.tool_error = self.tool_error or "invalid_function_name"
+                        self._invalid_tool_indices.add(index)
                     if isinstance(name, str):
-                        self._tool_names[index] = self._tool_names.get(index, "") + name
+                        self._tool_names.setdefault(index, []).append(name)
                     arguments = function.get("arguments")
+                    if arguments is not None and not isinstance(arguments, str):
+                        self.tool_error = self.tool_error or "invalid_function_arguments"
+                        self._invalid_tool_indices.add(index)
                     if isinstance(arguments, str):
-                        self._tool_arguments[index] = self._tool_arguments.get(index, "") + arguments
+                        self._tool_arguments.setdefault(index, []).append(arguments)
 
     def finalize(self) -> ProviderResult:
         output: list[dict[str, Any]] = []
@@ -197,8 +268,7 @@ class ChatResponseAccumulator:
                 {
                     "type": "reasoning",
                     "id": f"rs_{uuid.uuid4().hex[:8]}",
-                    "encrypted_content": "",
-                    "step_by_step_summary": self._reasoning,
+                    "step_by_step_summary": "".join(self._reasoning),
                 }
             )
         if self._text:
@@ -208,28 +278,31 @@ class ChatResponseAccumulator:
                     "id": f"msg_{uuid.uuid4().hex[:8]}",
                     "status": "completed",
                     "role": "assistant",
-                    "content": [{"type": "output_text", "text": self._text, "annotations": []}],
+                    "content": [{"type": "output_text", "text": "".join(self._text), "annotations": []}],
                 }
             )
-        if self._refusal and not output:
-            output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
-        for index in sorted(self._tool_names):
-            name = self._tool_names[index]
-            if valid_function_name(name):
-                arguments = self._tool_arguments.get(index, "")
-                output.append(
-                    {
-                        "type": "function_call",
-                        "id": f"fc_{uuid.uuid4().hex[:8]}",
-                        "call_id": f"call_{uuid.uuid4().hex[:8]}",
-                        "name": name,
-                        "arguments": arguments if arguments else "{}",
-                    }
-                )
+        if self._refusal or self._blocked:
+            output.append(refusal_item({"blockReason": "CONTENT_FILTER"}, refusal_text="".join(self._refusal)))
+        counts = Counter(self._tool_ids.values())
+        for index in self._tool_order:
+            if index in self._invalid_tool_indices:
+                continue
+            name = "".join(self._tool_names.get(index, []))
+            try:
+                arguments = self.tool_validator.arguments(name, "".join(self._tool_arguments.get(index, [])))
+                call_id = self._tool_ids.setdefault(index, f"call_{uuid.uuid4().hex[:8]}")
+                if counts[call_id] > 1:
+                    raise ToolCallError("conflicting_function_call")
+            except ToolCallError as exc:
+                self.tool_error = self.tool_error or exc.code
+                continue
+            output.append({"type": "function_call", "id": f"fc_{uuid.uuid4().hex[:8]}",
+                           "call_id": call_id, "name": name, "arguments": arguments})
         terminal = classify_terminal(
             output=output,
             finish_reason=self._finish_reason,
-            safety_block={"blockReason": "CONTENT_FILTER"} if self._refusal else None,
+            safety_block={"blockReason": "CONTENT_FILTER"} if self._blocked else None,
+            malformed=self._malformed,
         )
         if terminal.kind is TerminalKind.COMPLETED and self._finish_reason is None and not self._done:
             terminal = ProviderTerminal(
@@ -238,6 +311,8 @@ class ChatResponseAccumulator:
                 error_code="missing_terminal_signal",
                 error_message="The provider stream ended without a terminal signal.",
             )
+        if self.tool_error:
+            terminal = tool_terminal(terminal, self.tool_error)
         return ProviderResult(output=tuple(output), usage=self._usage, terminal=terminal)
 
 
@@ -320,10 +395,14 @@ class OpenAICompatibleTransport:
         stream: bool,
     ) -> PreparedOpenAIRequest:
         try:
-            payload = transform_request_to_chat({**request, "stream": stream}, provider_model)
+            capabilities = provider_capabilities(provider, provider_model)
+            validate_capabilities(request, capabilities)
+            payload = transform_request_to_chat({**request, "stream": stream}, provider_model, capabilities=capabilities)
         except ValueError as exc:
             raise TransportConfigError(400, str(exc)) from exc
         payload["stream"] = stream
+        from .route_identity import identity, observe
+        observe(identity('byok', provider_model, provider=provider, backend=payload.get('model')))
         return PreparedOpenAIRequest(
             payload=payload,
             url=self.chat_completions_url(provider),
@@ -331,28 +410,11 @@ class OpenAICompatibleTransport:
             timeout=self.provider_timeout(provider),
         )
 
-    def parse_chat_response(self, payload: object) -> ProviderResult:
+    def parse_chat_response(self, payload: object, *, request=None) -> ProviderResult:
+        tool_validator = FunctionCallValidator(request, route="byok")
+        tool_errors = []
         if not isinstance(payload, dict):
             payload = {}
-        choices = payload.get("choices", [])
-        if not isinstance(choices, list):
-            choices = []
-        output: list[dict[str, Any]] = []
-        finish_reason: str | None = None
-        refusal = False
-        for choice in choices:
-            if not isinstance(choice, dict):
-                continue
-            reason = choice.get("finish_reason")
-            if isinstance(reason, str) and reason:
-                finish_reason = reason
-                refusal = refusal or reason == "content_filter"
-            message = choice.get("message")
-            if isinstance(message, dict):
-                refusal = refusal or bool(message.get("refusal"))
-            output.extend(_message_output(message))
-        if refusal and not output:
-            output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
         usage = payload.get("usage")
         usage = usage if isinstance(usage, dict) else {}
         normalized_usage = normalize_usage(
@@ -360,18 +422,55 @@ class OpenAICompatibleTransport:
             usage.get("completion_tokens", usage.get("output_tokens")),
             usage.get("total_tokens"),
         )
+        try:
+            choices = PrimaryAlternativeSelector().select(payload.get("choices", []))
+        except ValueError as exc:
+            return self._failed_result("invalid_alternatives", str(exc), usage=normalized_usage)
+        output: list[dict[str, Any]] = []
+        finish_reason: str | None = None
+        malformed = False
+        blocked = False
+        explicit_refusal = False
+        # Only the selected alternative is eligible to supply executable calls.
+        call_ids = Counter()
+        for choice in choices:
+            message = choice.get("message") if isinstance(choice, dict) else None
+            calls = message.get("tool_calls") if isinstance(message, dict) else None
+            if isinstance(calls, list):
+                call_ids.update(call["id"] for call in calls if isinstance(call, dict)
+                                and isinstance(call.get("id"), str) and call["id"])
+        duplicate_ids = {call_id for call_id, count in call_ids.items() if count > 1}
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            reason = choice.get("finish_reason")
+            if reason is not None and not isinstance(reason, str):
+                malformed = True
+            if isinstance(reason, str):
+                finish_reason = reason
+                blocked = blocked or reason.strip().lower() in POLICY_FINISH_REASONS
+            message = choice.get("message")
+            if isinstance(message, dict):
+                explicit_refusal = explicit_refusal or bool(_message_refusal(message))
+            output.extend(_message_output(message, tool_validator=tool_validator, tool_errors=tool_errors,
+                                          duplicate_ids=duplicate_ids))
+        if blocked and not explicit_refusal:
+            output.append(refusal_item({"blockReason": "CONTENT_FILTER"}))
         terminal = classify_terminal(
             output=output,
             finish_reason=finish_reason,
-            safety_block={"blockReason": "CONTENT_FILTER"} if refusal else None,
+            safety_block={"blockReason": "CONTENT_FILTER"} if blocked else None,
+            malformed=malformed,
         )
+        if tool_errors:
+            terminal = tool_terminal(terminal, tool_errors[0])
         return ProviderResult(output=tuple(output), usage=normalized_usage, terminal=terminal)
 
     @staticmethod
-    def _failed_result(code: str, message: str) -> ProviderResult:
+    def _failed_result(code: str, message: str, *, usage: dict[str, int] | None = None) -> ProviderResult:
         return ProviderResult(
             output=(),
-            usage=normalize_usage(),
+            usage=usage if usage is not None else normalize_usage(),
             terminal=ProviderTerminal(
                 TerminalKind.FAILED,
                 code,
@@ -395,9 +494,8 @@ class OpenAICompatibleTransport:
             model=display_model,
             created_at=int(time.time()),
         )
-        accumulator = ChatResponseAccumulator()
-        tool_calls: dict[int, dict[str, str]] = {}
-        tool_seen_order: list[int] = []
+        accumulator = ChatResponseAccumulator(tool_validator=FunctionCallValidator(prepared.payload, route="byok"))
+        primary = PrimaryAlternativeSelector()
         text_active = False
         reasoning_active = False
         terminal_emitted = False
@@ -413,7 +511,7 @@ class OpenAICompatibleTransport:
                 for event in builder.finish_text():
                     yield event
             yield builder.error(code, message)
-            yield builder.terminal(self._failed_result(code, message))
+            yield builder.terminal(self._failed_result(code, message, usage=accumulator.usage))
             terminal_emitted = True
             yield builder.done_marker()
 
@@ -430,7 +528,9 @@ class OpenAICompatibleTransport:
                     if response.status_code != 200:
                         detail = f"Provider returned HTTP {response.status_code}."
                         try:
-                            body = (await response.aread()).decode("utf-8", errors="replace")
+                            body = (await read_response_bytes(response, limit=65536)).decode("utf-8", errors="replace")
+                        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+                            raise
                         except Exception:
                             body = ""
                         if body:
@@ -457,6 +557,10 @@ class OpenAICompatibleTransport:
                                 return
                             try:
                                 payload = parse_sse_payload(data, label="OpenAI")
+                            except SSELimitError as exc:
+                                async for event in fail("provider_output_limit", str(exc)):
+                                    yield event
+                                return
                             except SSELineError:
                                 async for event in fail("invalid_stream_chunk", "The provider returned malformed stream JSON."):
                                     yield event
@@ -467,10 +571,14 @@ class OpenAICompatibleTransport:
                                 async for event in fail(code if isinstance(code, str) and code else "provider_error", "The provider stream failed."):
                                     yield event
                                 return
-                            accumulator.consume(payload)
-                            choices = payload.get("choices", [])
-                            if not isinstance(choices, list):
-                                continue
+                            try:
+                                choices = primary.select(payload.get("choices", []))
+                            except ValueError as exc:
+                                accumulator.consume({**payload, "choices": []})
+                                async for event in fail("invalid_alternatives", str(exc)):
+                                    yield event
+                                return
+                            accumulator.consume({**payload, "choices": choices})
                             for choice in choices:
                                 if not isinstance(choice, dict):
                                     continue
@@ -482,43 +590,21 @@ class OpenAICompatibleTransport:
                                     reasoning_active = True
                                     for event in builder.add_reasoning_delta(reasoning):
                                         yield event
-                                content_str = delta.get("content")
+                                content_str = _message_text(delta)
                                 if isinstance(content_str, str) and content_str:
                                     text_active = True
                                     for event in builder.add_text_delta(content_str):
                                         yield event
-                                raw_calls = delta.get("tool_calls")
-                                if not isinstance(raw_calls, list):
-                                    continue
-                                for position, raw_call in enumerate(raw_calls):
-                                    if not isinstance(raw_call, dict):
-                                        continue
-                                    raw_index = raw_call.get("index", position)
-                                    if isinstance(raw_index, bool):
-                                        continue
-                                    try:
-                                        index = int(raw_index)
-                                    except (TypeError, ValueError):
-                                        continue
-                                    if index < 0:
-                                        continue
-                                    if index not in tool_calls:
-                                        tool_seen_order.append(index)
-                                    state = tool_calls.setdefault(index, {"call_id": "", "name": "", "arguments": ""})
-                                    call_id = raw_call.get("id")
-                                    if isinstance(call_id, str) and call_id:
-                                        state["call_id"] = call_id
-                                    function = raw_call.get("function")
-                                    if not isinstance(function, dict):
-                                        continue
-                                    for field in ("name", "arguments"):
-                                        fragment = function.get(field)
-                                        if isinstance(fragment, str):
-                                            state[field] += fragment
+                    except SSELimitError as exc:
+                        async for event in fail("provider_output_limit", str(exc)):
+                            yield event
+                        return
                     except SSELineError as exc:
                         async for event in fail("invalid_stream_chunk", str(exc)):
                             yield event
                         return
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception:
             if not terminal_emitted:
                 async for event in fail("connection_error", "The provider connection failed."):
@@ -547,14 +633,9 @@ class OpenAICompatibleTransport:
         if refusal is not None:
             for event in builder.add_output_item(refusal):
                 yield event
-        for index in tool_seen_order:
-            state = tool_calls[index]
-            if valid_function_name(state["name"]):
-                for event in builder.add_function_call(
-                    state["name"],
-                    function_call_arguments_string(state["arguments"]),
-                    call_id=state["call_id"] or None,
-                ):
+        for item in result.output:
+            if item.get("type") == "function_call":
+                for event in builder.add_function_call(item["name"], item["arguments"], call_id=item["call_id"]):
                     yield event
         if result.terminal.kind is TerminalKind.FAILED:
             yield builder.error(
@@ -569,8 +650,9 @@ class OpenAICompatibleTransport:
         payload: object,
         *,
         display_model: str,
+        request=None,
     ) -> dict[str, Any]:
-        return validate_response(payload, display_model=display_model)
+        return native_response(payload, display_model=display_model, validator=FunctionCallValidator(request))
 
 
 
@@ -579,7 +661,15 @@ class NativeResponsesStreamAdapter:
 
     _TERMINAL_TYPES = {"response.completed", "response.incomplete", "response.failed"}
 
-    def __init__(self, *, display_model: str) -> None:
+    def __init__(self, *, display_model: str, request=None) -> None:
+        self._tool_validator = FunctionCallValidator(request)
+        self._tool_error = None
+        self._bad_tool_indices = set()
+        self._invalid_tool_snapshots = {}
+        self._finalized_arguments = {}
+        self._deferred_events = []
+        self._deferred_budget = [0, 0]
+        self._deferring_tools = False
         self.display_model = display_model
         self._decoder = SSEDecoder()
         self._terminal_event: dict[str, Any] | None = None
@@ -610,6 +700,22 @@ class NativeResponsesStreamAdapter:
         return self._protocol_error
 
     def _failure(self, code: str, message: str) -> dict[str, Any]:
+        output = []
+        if code == "provider_output_limit":
+            if self._terminal_event is not None:
+                output = self._terminal_event["response"].get("output", [])
+            else:
+                for index, item in sorted(self._completed_items.items()):
+                    if index != len(output):
+                        break
+                    output.append(item)
+            try:
+                output = validate_output(output)
+            except NativeOutputError:
+                # Individually valid done items can still contradict one
+                # another (for example duplicate call IDs). Error rendering
+                # must neither publish that aggregate nor fail recursively.
+                output = []
         return {
             "type": "response.failed",
             "response": {
@@ -617,7 +723,7 @@ class NativeResponsesStreamAdapter:
                 "object": "response",
                 "status": "failed",
                 "model": self.display_model,
-                "output": [],
+                "output": output,
                 "error": {"code": code, "message": message},
             },
         }
@@ -724,7 +830,10 @@ class NativeResponsesStreamAdapter:
             self._set_failure("output_after_done", "The provider emitted output after [DONE].")
             return []
         try:
-            event = json.loads(data)
+            event = json_loads_limited(data)
+        except ResourceLimitError as exc:
+            self._set_failure("provider_output_limit" if exc.status == 413 else "invalid_stream_chunk", str(exc))
+            return []
         except (ValueError, RecursionError):
             self._set_failure("invalid_stream_chunk", "The provider returned malformed stream JSON.")
             return []
@@ -743,8 +852,40 @@ class NativeResponsesStreamAdapter:
             else:
                 self._set_failure("output_after_terminal", "The provider emitted output after its terminal event.")
             return []
+        index = event.get("output_index")
+        bad_tool_event = False
+        item = event.get("item")
+        function_done = event_type == "response.output_item.done" and isinstance(item, dict) and item.get("type") == "function_call"
+        arguments_done = event_type == "response.function_call_arguments.done"
+        if function_done or arguments_done:
+            try:
+                if type(index) is not int or not 0 <= index < MAX_ITEMS:
+                    raise NativeOutputError("invalid_output_index")
+                if function_done:
+                    checked_native_call(item, self._tool_validator, finalized_arguments=self._finalized_arguments.get(index))
+                else:
+                    parse_arguments(event.get("arguments"))
+                    if index in self._finalized_arguments:
+                        raise ToolCallError("conflicting_function_arguments")
+                    self._finalized_arguments[index] = event["arguments"]
+            except (ToolCallError, NativeOutputError) as exc:
+                self._tool_error = self._tool_error or exc.code
+                self._bad_tool_indices.add(index)
+                bad_tool_event = True
         try:
-            expected_item = validate_event(event)
+            if bad_tool_event:
+                # Invalid finalized call data is withheld, while usable sibling
+                # events are still read. Structural identity was checked above.
+                check_json(event)
+                if type(index) is not int or not 0 <= index < MAX_ITEMS:
+                    raise NativeOutputError("invalid_output_index")
+                expected_item = "function_call"
+                if function_done:
+                    from copy import deepcopy
+                    check_json(item, budget=self._completed_budget)
+                    self._invalid_tool_snapshots[index] = deepcopy(item)
+            else:
+                expected_item = validate_event(event)
             index = event.get("output_index")
             supplied = []
             if expected_item is not None and index is not None:
@@ -759,7 +900,7 @@ class NativeResponsesStreamAdapter:
                 if len(self._native_types) >= MAX_ITEMS and offset not in self._native_types:
                     raise NativeOutputError("native_output_limit")
                 self._native_types[offset] = item_type
-            if event_type == "response.output_item.done":
+            if event_type == "response.output_item.done" and not bad_tool_event:
                 if index in self._completed_items:
                     raise NativeOutputError("duplicate_native_item")
                 check_json(event["item"], budget=self._completed_budget)
@@ -778,10 +919,17 @@ class NativeResponsesStreamAdapter:
                 self._set_failure("invalid_terminal_event", "The provider terminal status did not match its event type.")
                 return []
             try:
-                output = reconcile_output(response.get("output"), self._completed_items)
+                output = reconcile_output(response.get("output"), {**self._completed_items, **self._invalid_tool_snapshots}, validate=False)
                 if any(index >= len(output) for index in self._native_types):
                     raise NativeOutputError("incomplete_native_output")
-                normalized = validate_response({**response, "status": expected_status, "output": output}, display_model=self.display_model)
+                tool_errors = []
+                normalized = native_response(
+                    {**response, "status": expected_status, "output": output}, display_model=self.display_model,
+                    validator=self._tool_validator, bad_indices=self._bad_tool_indices, error_code=self._tool_error,
+                    finalized_arguments=self._finalized_arguments, errors=tool_errors,
+                )
+                if tool_errors:
+                    self._tool_error = self._tool_error or tool_errors[0]
             except (NativeOutputError, ValueError) as exc:
                 self._set_failure(getattr(exc, "code", "invalid_native_output"), "The provider returned an invalid native terminal snapshot.")
                 return []
@@ -796,6 +944,35 @@ class NativeResponsesStreamAdapter:
             event["response"] = {**event["response"], "model": self.display_model}
         return [event]
 
+    def _emit_or_defer(self, events):
+        visible = []
+        for event in events:
+            item = event.get("item")
+            snapshot = event.get("response")
+            functions = (isinstance(item, dict) and item.get("type") == "function_call") or event.get("type", "").startswith("response.function_call_arguments")
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("output"), list):
+                functions = functions or any(isinstance(child, dict) and child.get("type") == "function_call" for child in snapshot["output"])
+            index = event.get("output_index")
+            # Do not expose indices beyond an unknown earlier slot: that slot
+            # may later prove to be a rejected function. This keeps retained
+            # sibling output indices coherent when withheld calls are removed.
+            prefix = 0
+            while self._native_types.get(prefix) not in {None, "function_call"}:
+                prefix += 1
+            if functions or (type(index) is int and index >= prefix):
+                self._deferring_tools = True
+            if self._deferring_tools:
+                try:
+                    check_json(event, budget=self._deferred_budget)
+                except NativeOutputError:
+                    self._deferred_events.clear()
+                    self._set_failure("tool_output_limit", "The pending tool stream exceeded its validation limit.")
+                    return visible
+                self._deferred_events.append(event)
+            else:
+                visible.append(event)
+        return visible
+
     def consume_bytes(self, chunk: bytes) -> list[dict[str, Any]]:
         if self._terminal_emitted or self._protocol_error:
             return []
@@ -803,9 +980,11 @@ class NativeResponsesStreamAdapter:
         try:
             for data in self._decoder.feed(chunk):
                 events.extend(self._consume_payload(data))
+        except SSELimitError as exc:
+            self._set_failure("provider_output_limit", str(exc))
         except SSELineError as exc:
             self._set_failure("invalid_stream_chunk", str(exc))
-        return events
+        return self._emit_or_defer(events)
 
     def finish(self) -> list[dict[str, Any]]:
         if self._terminal_emitted:
@@ -814,6 +993,8 @@ class NativeResponsesStreamAdapter:
         try:
             for data in self._decoder.finish():
                 events.extend(self._consume_payload(data))
+        except SSELimitError as exc:
+            self._set_failure("provider_output_limit", str(exc))
         except SSELineError as exc:
             self._set_failure("invalid_stream_chunk", str(exc))
         if self._terminal_event is None:
@@ -821,8 +1002,15 @@ class NativeResponsesStreamAdapter:
                 "missing_terminal_signal",
                 "The provider stream ended without a terminal response event.",
             )
-        events.extend(self._release_terminal())
-        return events
+        visible = self._emit_or_defer(events)
+        terminal_events = self._release_terminal()
+        if terminal_events:
+            if not self._protocol_error and not self._tool_error:
+                visible.extend(self._deferred_events)
+            # On failure/incompleteness, the terminal snapshot carries retained
+            # usable siblings. Never emit completion events for discarded calls.
+            self._deferred_events.clear()
+        return visible + terminal_events
 
     def abort(self, code: str, message: str) -> list[dict[str, Any]]:
         self._set_failure(code, message)

@@ -65,10 +65,11 @@ OPENAI_UPSTREAM_TIMEOUT_SECONDS = 120.0
 class OpenAIModel:
     id: str
     display_name: str
-    context_window: int
+    context_window: int | None
+    input_modalities: tuple[str, ...] = ("text", "image")
 
 
-# Curated Codex/OpenAI ids actually reachable through the OpenAI upstream.
+# Curated routing identities; registry membership is not upstream health evidence.
 # Extend without code changes via ANTIGRAVITY_OPENAI_MODELS="gpt-5.6,my-model".
 # (No single reliable dynamic source covers both the API-key path and the
 # ChatGPT-subscription path, hence an explicit registry + env override.)
@@ -134,7 +135,7 @@ def list_openai_models() -> list[OpenAIModel]:
         if known is not None:
             models.append(known)
         else:
-            models.append(OpenAIModel(id=model_id, display_name=model_id, context_window=400_000))
+            models.append(OpenAIModel(id=model_id, display_name=model_id, context_window=None, input_modalities=("text",)))
     return models or list(DEFAULT_OPENAI_MODELS)
 
 
@@ -171,18 +172,33 @@ def is_antigravity_model(model: object) -> bool:
         return False
 
 
-def is_byok_model(model: object) -> bool:
+def is_byok_model(
+    model: object,
+    *,
+    read_only: bool = False,
+    provider_configs: dict | None = None,
+) -> bool:
     """True when the id carries an explicit BYOK provider prefix."""
     from .byok import split_provider_model
 
     try:
-        provider_id, _ = split_provider_model(str(model))
+        provider_id, _ = split_provider_model(
+            str(model), read_only=read_only, provider_configs=provider_configs
+        )
     except Exception:
+        if read_only:
+            raise
         return False
     return provider_id is not None
 
 
-def classify_route(model: object, *, unified_enabled: bool | None = None) -> str:
+def classify_route(
+    model: object,
+    *,
+    unified_enabled: bool | None = None,
+    read_only: bool = False,
+    provider_configs: dict | None = None,
+) -> str:
     """Central router: ``byok`` | ``openai`` | ``antigravity`` | ``unknown``.
 
     ``openai-disabled`` is returned when an OpenAI id is requested while
@@ -203,7 +219,7 @@ def classify_route(model: object, *, unified_enabled: bool | None = None) -> str
         if antigravity_stripped:
             return "antigravity"
         return "unknown" if unified_enabled else "antigravity"
-    if is_byok_model(text):
+    if is_byok_model(text, read_only=read_only, provider_configs=provider_configs):
         return "byok"
     # Registry-based, no startswith cascade. Antigravity wins on overlap
     # (e.g. an overlay shadowing an OpenAI id) and is documented as such.
@@ -230,11 +246,27 @@ def openai_catalog() -> list[dict[str, Any]]:
                 "display_name": model.display_name,
                 "context_window": model.context_window,
                 "family": "openai",
+                "input_modalities": list(model.input_modalities),
                 "default_reasoning_level": "high",
-                "supports_parallel_tool_calls": True,
+                "supports_parallel_tool_calls": openai_model_capabilities(model.id).parallel_tool_calls,
             }
         )
     return entries
+
+
+def openai_model_capabilities(model: str):
+    from .response_protocol import ProviderCapabilities
+    identifier = _normalize_id(strip_reserved_openai_prefix(model))
+    definition = next((item for item in list_openai_models() if item.id.lower() == identifier), None)
+    known = definition is not None and any(item.id == definition.id for item in DEFAULT_OPENAI_MODELS)
+    return ProviderCapabilities(
+        native_responses=True, parallel_tool_calls=known, structured_output=known,
+        stop_sequences=known, reasoning=known, streaming_usage=known,
+        tool_choice_modes=frozenset({"auto", "none", "required", "function"} if known else {"auto", "none"}),
+        reasoning_effort_levels=("low", "medium", "high", "xhigh") if known else (),
+        input_modalities=frozenset(definition.input_modalities if definition else {"text"}),
+        opaque_reasoning_replay=True,
+    )
 
 
 def _codex_home() -> Path:

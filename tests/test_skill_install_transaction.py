@@ -22,7 +22,7 @@ def trees(monkeypatch, tmp_path):
     for name, text in manifest.items():
         path = bundle / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
+        path.write_text(text, newline="\n")
     skills = tmp_path / "skills"
     destination = skills / "anti"
     destination.mkdir(parents=True)

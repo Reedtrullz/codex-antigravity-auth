@@ -76,7 +76,7 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     http_error_308 = http_error_302
 
 
-def open_http_request(request: urllib.request.Request | str, *, timeout: float = 10.0):
+def open_http_request(request: urllib.request.Request | str, *, timeout: float = 10.0, before_open=None, loopback_only: bool = False):
     if isinstance(request, str):
         request = urllib.request.Request(validate_endpoint_url(request, allow_query=True))
     if request.fragment is not None:
@@ -88,19 +88,26 @@ def open_http_request(request: urllib.request.Request | str, *, timeout: float =
             request.add_unredirected_header(key, value)
     handlers = [NoRedirectHandler()]
     parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme == "http" and is_loopback_endpoint(parsed.hostname):
+    if loopback_only and not is_loopback_endpoint(parsed.hostname):
+        raise ValueError("local-only policy requires a loopback endpoint")
+    if is_loopback_endpoint(parsed.hostname) and (loopback_only or parsed.scheme == "http"):
         handlers.append(urllib.request.ProxyHandler({}))
-    return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
+    opener = urllib.request.build_opener(*handlers)
+    if before_open is not None:
+        timeout = before_open(request, timeout)
+    return opener.open(request, timeout=timeout)
 
 
-def httpx_client_options(url: str, *, timeout: float) -> dict:
+def httpx_client_options(url: str, *, timeout: float, loopback_only: bool = False) -> dict:
     """Apply the same redirect and loopback-proxy policy to HTTPX clients."""
     value = validate_endpoint_url(url, allow_query=True)
     parsed = urllib.parse.urlsplit(value)
+    if loopback_only and not is_loopback_endpoint(parsed.hostname):
+        raise ValueError("local-only policy requires a loopback endpoint")
     return {
         "timeout": timeout,
         "follow_redirects": False,
-        # Bypass proxies for plaintext loopback. HTTPS keeps its configured CA
-        # environment, including local TLS endpoints with a private CA.
-        "trust_env": not (parsed.scheme == "http" and is_loopback_endpoint(parsed.hostname)),
+        # Local-only bypasses all proxy environment settings. Outside that mode,
+        # HTTPS retains its configured certificate environment.
+        "trust_env": not (loopback_only or parsed.scheme == "http" and is_loopback_endpoint(parsed.hostname)),
     }

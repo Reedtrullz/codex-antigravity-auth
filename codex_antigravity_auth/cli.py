@@ -1,4 +1,7 @@
-from .endpoint_policy import open_http_request
+from .endpoint_policy import open_http_request, is_loopback_endpoint
+from .skills.anti.scripts.anti_lib.local_policy import environment_enabled as local_environment_enabled
+from .console import console_print as print
+from .console import ConsoleArgumentParser, safe_terminal_text
 import sys
 import os
 import argparse
@@ -43,6 +46,7 @@ from .byok import (
     validate_http_base_url,
     validate_provider_api_key,
     validate_provider_id,
+    validate_supported_provider_kind,
 )
 from .models import (
     DEFAULT_CODEX_MODEL_ID,
@@ -120,6 +124,20 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         remaining = deadline - time.monotonic() if deadline is not None else 1.0
         timeout = max(0.001, min(1.0, remaining))
         self.connection.settimeout(timeout)
+        request_deadline = time.monotonic() + timeout
+        raw = self.rfile.raw
+        readinto = raw.readinto
+
+        def read_before_deadline(buffer):
+            remaining = request_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("OAuth callback request deadline exceeded")
+            self.connection.settimeout(min(1.0, remaining))
+            return readinto(buffer)
+
+        # Buffered readline may perform many receives as headers drip in.
+        # Recompute remaining time per receive rather than resetting an idle timeout.
+        raw.readinto = read_before_deadline
         self._request_expired = False
 
         def stop_request():
@@ -227,7 +245,17 @@ def bundled_skill_root():
     root = files("codex_antigravity_auth").joinpath("skills", BUNDLED_CODEX_SKILL_NAME)
     if not root.is_dir():
         raise RuntimeError(f"Bundled Codex skill '{BUNDLED_CODEX_SKILL_NAME}' is missing from this install.")
+    missing = [name for name in bundled_skill_asset_names() if not root.joinpath(name).is_file()]
+    if missing:
+        raise RuntimeError(f"Bundled Anti assets missing: {missing}")
     return root
+
+
+def bundled_skill_asset_names() -> tuple[str, ...]:
+    manifest = json.loads(files("codex_antigravity_auth").joinpath("skill_assets.json").read_text(encoding="utf-8"))
+    if manifest.get("version") != 1:
+        raise RuntimeError("Unsupported bundled skill asset manifest version")
+    return tuple(manifest["files"])
 
 
 def _resource_tree_manifest(root, prefix: str = "") -> dict[str, bytes]:
@@ -401,12 +429,7 @@ def _skill_manifest_hash(manifest: dict[str, bytes]) -> str:
 
 
 def verify_codex_skill(skill_path: Path) -> bool:
-    required = [
-        skill_path / "SKILL.md",
-        skill_path / "agents" / "openai.yaml",
-        skill_path / "scripts" / "anti.py",
-        skill_path / "tests" / "test_anti.py",
-    ]
+    required = [skill_path / name for name in bundled_skill_asset_names()]
     missing = [path for path in required if not path.is_file()]
     if missing:
         for path in missing:
@@ -469,12 +492,23 @@ def _confirm_account_mutation(prompt: str, *, yes: bool, non_interactive_error: 
         return True
     if not sys.stdin.isatty():
         raise SystemExit(non_interactive_error)
-    answer = input(f"{prompt} [y/N] ").strip().lower()
+    answer = input(safe_terminal_text(f"{prompt} [y/N] ")).strip().lower()
     return answer in {"y", "yes"}
 
 
 def run_accounts_command(args) -> None:
     action = getattr(args, "accounts_action", None) or "list"
+    if action == "explain":
+        from .account_diagnostics import account_eligibility_lines, account_eligibility_report
+        report = account_eligibility_report(args.model)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            for line in account_eligibility_lines(report):
+                print(line)
+        if not report["ok"]:
+            raise SystemExit(1)
+        return
     if action == "list":
         data = load_accounts()
         accounts = data.get("accounts", [])
@@ -526,7 +560,38 @@ def run_accounts_command(args) -> None:
     raise SystemExit(f"Unsupported accounts action: {action}")
 
 
+def run_model_observation_command(args) -> None:
+    from . import model_observations as observations
+    operation = args.models_command if args.command == "models" else args.provider_command
+    failed = False
+    try:
+        if operation == "explain":
+            result = observations.describe_model(args.id, base_url=args.base_url)
+        elif operation == "probe":
+            result = observations.probe(args.id, network=args.network, base_url=args.base_url,
+                token_env=args.gateway_token_env, timeout=args.timeout)
+            failed = not result["generationOk"]
+        elif operation == "discover":
+            result = observations.discover(args.provider, network=args.network, timeout=args.timeout)
+            failed = result["state"] == "invalid" or bool(args.network and result["record"]["status"] != "complete")
+        elif operation == "import-discovery":
+            result = observations.import_discovered(args.provider, args.model, write=args.write, accept_digest=args.accept_digest)
+        else:
+            result = observations.import_overlay(args.path, write=args.write, accept_digest=args.accept_digest)
+    except (ValueError, OSError, RuntimeError) as exc:
+        message = str(exc) if isinstance(exc, observations.ObservationError) else "Model operation failed: configuration or input is invalid."
+        result = {"status":"error", "message":message}
+        failed = True
+    output = {"schemaVersion":1, "operation":operation, **result}
+    # JSON is also the concise text preview: it shows the entire proposal and
+    # digest without hiding fields behind an implicit save or a live probe.
+    print(json.dumps(output, indent=2, sort_keys=True))
+    if failed: raise SystemExit(1)
+
+
 def run_models_command(args) -> None:
+    if args.models_command in {"explain", "probe", "import"}:
+        return run_model_observation_command(args)
     if args.models_command == "list":
         try:
             overlays = load_model_overlays(strict=True)
@@ -813,13 +878,13 @@ def reset_google_account_state(email: str | None = None, *, all_accounts: bool =
 
 
 def require_safe_gateway_host(host: str, allow_remote: bool) -> None:
-    if is_loopback_host(host):
-        return
-    if not allow_remote:
+    if not is_loopback_host(host) and not allow_remote:
         raise SystemExit(
             "Refusing to bind the unauthenticated gateway to a non-loopback host. "
             "Use --allow-remote with ANTIGRAVITY_GATEWAY_TOKEN set to opt in."
         )
+    if not allow_remote and os.environ.get("ANTIGRAVITY_ALLOW_REMOTE") != "1":
+        return
     try:
         token = validate_gateway_token_strength(os.environ.get("ANTIGRAVITY_GATEWAY_TOKEN"))
     except ValueError as e:
@@ -829,6 +894,10 @@ def require_safe_gateway_host(host: str, allow_remote: bool) -> None:
 
 
 def provider_key_status(provider: dict, *, configured_label: str) -> str:
+    try:
+        validate_supported_provider_kind(provider)
+    except ValueError as exc:
+        return redact_secret_text(str(exc))
     if provider_auth_mode(provider) == "oauth":
         return "unsupported oauth"
     try:
@@ -1234,7 +1303,16 @@ def run_configure_codex(args) -> None:
     print("[*] Optional sidecar skill: codex-antigravity install-skill")
 
 
-def main():
+def configure_local_gateway_environment(args):
+    if getattr(args, 'local_only', False) is True or local_environment_enabled():
+        if not is_loopback_endpoint(args.host) or getattr(args, 'allow_remote', False):
+            raise SystemExit('Local-only gateway mode requires a loopback host and no --allow-remote')
+        if getattr(args, 'op_env_file', None) or getattr(args, 'op_environment', None):
+            raise SystemExit('Local-only gateway mode does not launch the 1Password network wrapper; supply local configuration instead')
+        os.environ['ANTIGRAVITY_LOCAL_ONLY'] = '1'
+        os.environ['CODEX_ANTIGRAVITY_NO_UPDATE_CHECK'] = '1'
+
+def _main():
     _ensure_split_modules()
     from .cli_json import JSONArgumentParser
     parser = JSONArgumentParser(description="Codex Antigravity Auth CLI Utility")
@@ -1286,7 +1364,7 @@ def main():
     setup_parser.add_argument(
         "--allow-remote",
         action="store_true",
-        help="Allow non-loopback gateway clients when starting with a strong ANTIGRAVITY_GATEWAY_TOKEN",
+        help="Require bearer authentication (including loopback) and allow non-loopback clients with a strong ANTIGRAVITY_GATEWAY_TOKEN",
     )
     setup_parser.add_argument("--gateway-timeout", type=float, default=2.0, help="Gateway model-catalog timeout")
     setup_parser.add_argument("--live", action="store_true", help="Run an explicit Google /v1/responses live generation smoke")
@@ -1368,6 +1446,10 @@ def main():
     accounts_parser = subparsers.add_parser("accounts", help="List or manage configured Google accounts")
     accounts_sub = accounts_parser.add_subparsers(dest="accounts_action")
     accounts_sub.add_parser("list", help="List configured Google accounts").add_argument("--json", action="store_true", help="Print versioned account metadata")
+
+    accounts_explain = accounts_sub.add_parser("explain", help="Explain local Google eligibility without refreshing or changing state")
+    accounts_explain.add_argument("--model", required=True, help="Google model whose family to inspect")
+    accounts_explain.add_argument("--json", action="store_true", help="Print sanitized eligibility as JSON")
     accounts_remove = accounts_sub.add_parser("remove", help="Remove a Google account from the encrypted rotation store")
     accounts_remove.add_argument("email", help="Google account email to remove")
     accounts_remove.add_argument("--yes", action="store_true", help="Confirm removal without prompting")
@@ -1478,11 +1560,39 @@ def main():
     models_remove = models_sub.add_parser("remove", help="Remove a local model catalog overlay")
     models_remove.add_argument("id")
     models_sub.add_parser("doctor", help="Validate model overlay and runtime definitions")
+    explain = models_sub.add_parser("explain", help="Explain declared capabilities, cached discovery and recent probe evidence without network access")
+    explain.add_argument("id")
+    explain.add_argument("--base-url", default="http://127.0.0.1:51122/v1", help="Gateway identity used to match prior probe evidence")
+    explain.add_argument("--json", action="store_true")
+    probe = models_sub.add_parser("probe", help="Explicitly test one model's text generation and record a short-lived observation")
+    probe.add_argument("id")
+    probe.add_argument("--network", action="store_true", help="Allow this one bounded generation request")
+    probe.add_argument("--base-url", default="http://127.0.0.1:51122/v1")
+    probe.add_argument("--gateway-token-env", default="ANTIGRAVITY_GATEWAY_TOKEN")
+    probe.add_argument("--timeout", type=float, default=10)
+    probe.add_argument("--json", action="store_true")
+    overlay_import = models_sub.add_parser("import", help="Preview a local TOML overlay import before explicitly saving it")
+    overlay_import.add_argument("path")
+    overlay_import.add_argument("--write", action="store_true")
+    overlay_import.add_argument("--accept-digest", help="Exact digest printed by the reviewed preview")
+    overlay_import.add_argument("--json", action="store_true")
 
     provider_parser = subparsers.add_parser("provider", help="Manage BYOK OpenAI-compatible providers")
     provider_sub = provider_parser.add_subparsers(dest="provider_command", required=True)
     provider_sub.add_parser("list", help="List BYOK providers").add_argument("--json", action="store_true", help="Print versioned provider metadata")
     provider_sub.add_parser("presets", help="List built-in BYOK provider presets").add_argument("--json", action="store_true", help="Print versioned presets")
+
+    discover = provider_sub.add_parser("discover", help="Read cached discovery, or explicitly fetch the provider's optional model catalog")
+    discover.add_argument("provider")
+    discover.add_argument("--network", action="store_true", help="Fetch a bounded catalog; never probe generation or save declarations")
+    discover.add_argument("--timeout", type=float, default=10)
+    discover.add_argument("--json", action="store_true")
+    discovered_import = provider_sub.add_parser("import-discovery", help="Preview selected discovered IDs before explicitly saving declarations")
+    discovered_import.add_argument("provider")
+    discovered_import.add_argument("--model", action="append", required=True)
+    discovered_import.add_argument("--write", action="store_true")
+    discovered_import.add_argument("--accept-digest", help="Exact digest printed by the reviewed preview")
+    discovered_import.add_argument("--json", action="store_true")
     provider_set = provider_sub.add_parser("set", help="Configure a BYOK provider")
     provider_set.add_argument("provider", help="Provider id, e.g. openrouter, deepseek, xai, kimi, ollama, opencode, custom")
     provider_set.add_argument("--api-key", help="API key to store encrypted")
@@ -1518,9 +1628,11 @@ def main():
     start_parser.add_argument(
         "--allow-remote",
         action="store_true",
-        help="Allow non-loopback clients when ANTIGRAVITY_GATEWAY_TOKEN is set to at least 32 visible ASCII characters",
+        help="Require bearer authentication for all clients, including loopback; allow non-loopback binds with a strong ANTIGRAVITY_GATEWAY_TOKEN",
     )
     start_parser.add_argument("--service-id", help=argparse.SUPPRESS)
+
+    start_parser.add_argument("--local-only", action="store_true", help="Allow only configured loopback provider endpoints; disable cloud refresh/update work")
     start_parser.add_argument("--process-log", help=argparse.SUPPRESS)
     start_parser.add_argument("--quiet-runtime-console", action="store_true", help=argparse.SUPPRESS)
     start_parser.add_argument("--background", action="store_true", help="Start the gateway as a background process with pid/log files")
@@ -1555,7 +1667,12 @@ def main():
     from .setup_profiles import add_parsers
     add_parsers(subparsers)
     args = parser.parse_args()
-    if getattr(args, "json", False) or args.command == "support-bundle":
+    command_json = (
+        args.command == "accounts" and getattr(args, "accounts_action", None) == "explain"
+    ) or (
+        args.command == "provider" and getattr(args, "provider_command", None) in {"discover", "import-discovery"}
+    )
+    if (getattr(args, "json", False) and not command_json) or args.command == "support-bundle":
         from .cli_json import run as run_json
         raise SystemExit(run_json(args))
     if args.command == "start":
@@ -1620,6 +1737,8 @@ def main():
     elif args.command == "models":
         run_models_command(args)
     elif args.command == "provider":
+        if args.provider_command in {"discover", "import-discovery"}:
+            return run_model_observation_command(args)
         if args.provider_command == "presets":
             print("[*] Built-in BYOK provider presets:")
             for provider_id, preset in PROVIDER_PRESETS.items():
@@ -1708,6 +1827,7 @@ def main():
             else:
                 print(f"[*] No stored BYOK provider named {args.provider}")
     elif args.command == "start":
+        configure_local_gateway_environment(args)
         from .service_manifest import configure_runtime
         try:
             configure_runtime(args)
@@ -1727,6 +1847,15 @@ def main():
         stop_gateway(args)
     elif args.command == "status":
         run_gateway_status(args)
+
+
+def main():
+    try:
+        return _main()
+    except SystemExit as exc:
+        if isinstance(exc.code, str):
+            raise SystemExit(safe_terminal_text(exc.code)) from None
+        raise
 
 
 # The cli_* modules below import `cli` themselves (`from . import cli as _cli`),

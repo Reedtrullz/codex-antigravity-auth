@@ -173,6 +173,90 @@ def test_late_account_acquisition_is_released_without_dispatch(monkeypatch, setu
     asyncio.run(scenario())
 
 
+def test_refresh_in_progress_is_retryable_and_logged_without_a_lease(monkeypatch, setup_route):
+    state = setup_route("google")
+
+    async def acquire(*_args):
+        raise server.AccountRefreshInProgress()
+
+    monkeypatch.setattr(server, "acquire_active_account_for_request", acquire)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(server.create_response(Request("google")))
+
+    assert caught.value.status_code == 503
+    assert caught.value.headers["Retry-After"] == "1"
+    assert state.release.await_count == 0
+    assert state.records[-1]["http_status"] == 503
+    assert state.records[-1]["error_class"] == "account_refresh_in_progress"
+
+
+@pytest.mark.parametrize("seam,route", [
+    ("google_json", "google"),
+    ("google_parse", "google"),
+    ("openai_oauth_sse", "openai_oauth"),
+    ("openai_json", "openai"),
+])
+@pytest.mark.parametrize(
+    "failure_type,reason",
+    [(budgets.RequestDeadlineExceeded, "deadline"), (ClientDisconnect, "disconnect")],
+    ids=["deadline", "disconnect"],
+)
+def test_sync_decode_and_translation_failures_keep_outer_deadline_or_disconnect(
+    monkeypatch, setup_route, seam, route, failure_type, reason,
+):
+    state = setup_route(route, timeout=0.2)
+    response = success_response(route)
+    clients = []
+
+    class Client:
+        def __init__(self, **_kwargs):
+            self.closed = 0
+            clients.append(self)
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            self.closed += 1
+        async def post(self, *_args, **_kwargs):
+            return response
+
+    def fail(*_args, **_kwargs):
+        reached.append(True)
+        raise failure_type()
+
+    reached = []
+    monkeypatch.setattr(server.httpx, "AsyncClient", Client)
+    if seam in {"google_json", "openai_json"}:
+        # Both routes use the bounded shared decoder, not HTTPX Response.json().
+        monkeypatch.setattr(server, "response_json", fail)
+    elif seam == "google_parse":
+        monkeypatch.setattr(server.GoogleTransport, "parse_response", fail)
+    else:
+        # OAuth responses are decoded incrementally by the terminal-authority adapter.
+        monkeypatch.setattr(server.NativeResponsesStreamAdapter, "consume_bytes", fail)
+
+    if reason == "deadline":
+        with pytest.raises(HTTPException) as caught:
+            asyncio.run(server.create_response(Request(route)))
+        assert caught.value.status_code == 504
+        expected_error = "request_deadline_exceeded"
+    else:
+        with pytest.raises(ClientDisconnect):
+            asyncio.run(server.create_response(Request(route)))
+        expected_error = "cancelled"
+
+    assert reached == [True]
+    assert clients and all(client.closed == 1 for client in clients)
+    assert state.release.await_count == (1 if route == "google" else 0)
+    terminal = [row for row in state.records if row["lifecycle_phase"] == "terminal"]
+    assert len(terminal) == 1
+    assert terminal[0]["error_class"] == expected_error
+    assert terminal[0]["status"] == ("failed" if reason == "deadline" else "cancelled")
+    if reason == "deadline":
+        assert terminal[0]["http_status"] == 504
+    else:
+        assert terminal[0]["cancelled"] is True
+
+
 @pytest.mark.parametrize("phase", ["idle", "total"])
 def test_stream_event_idle_and_total_policies_fail_once_without_replay(monkeypatch, phase):
     monkeypatch.setattr(budgets, "DRAIN_SECONDS", 0.01)
@@ -333,13 +417,20 @@ def test_slow_close_is_bounded_and_other_owned_resources_are_attempted(monkeypat
 def test_timeout_failure_uses_observed_native_response_id_without_created(monkeypatch):
     monkeypatch.setattr(budgets, "DRAIN_SECONDS", 0.01)
     async def scenario():
-        budget = budgets.RequestBudget(Request("openai"), timeout=1, release_account=AsyncMock())
-        budget.stream_idle = 0.02
+        budget = budgets.RequestBudget(Request("openai"), timeout=5, release_account=AsyncMock())
+        budget.stream_idle = 5
         async def source():
             yield 'data: {"type":"response.output_text.delta","response_id":"resp_observed","delta":"fixture"}\n\n'
             await asyncio.Future()
-        chunks = [chunk async for chunk in budgets.stream_with_budget(source(), budget)]
+        stream = budgets.stream_with_budget(source(), budget)
+        first = await anext(stream)
+        assert json.loads(first[6:])["response_id"] == "resp_observed"
+        # Test identity preservation after an observed event. A 20ms wall-clock
+        # deadline could instead expire before observation under suite load.
+        budget.deadline = time.monotonic() - 1
+        chunks = [chunk async for chunk in stream]
         assert json.loads(chunks[-2][6:])["response"]["id"] == "resp_observed"
+        assert chunks[-1] == "data: [DONE]\n\n"
     asyncio.run(scenario())
 
 

@@ -157,6 +157,7 @@ class TestResponseEventBuilder(unittest.TestCase):
             event["item"] for event in events if event["type"] == "response.output_item.done"
         ]
         self.assertEqual(events[-1]["response"]["output"], done_items)
+        self.assertNotIn("encrypted_content", done_items[1])
         self.assertEqual(self.builder.done_marker(), "[DONE]")
 
     def test_incremental_events_reject_duplicate_finish_and_output_after_terminal(self):

@@ -1,6 +1,7 @@
 """Gateway process, service, status, and log commands (split from cli.py)."""
 
 from __future__ import annotations
+from .console import console_print as print
 
 import json
 import os
@@ -254,7 +255,16 @@ def gateway_status_info(port: int) -> dict:
 def run_gateway_status(args) -> dict:
     info = _cli.reachable_gateway_status_info(args.port, wait=True, timeout=5.0)
     raw_service = _cli.service_status(args.port)
-    info["service"] = observe_service(raw_service, info)
+    observed = _cli.observed_service_result(
+        action="status",
+        installed=bool(raw_service.get("installed")),
+        active=bool(raw_service.get("active")),
+        reachable=bool(info.get("reachable")),
+        changed=False,
+        commands=tuple(raw_service.get("commands", ())) if isinstance(raw_service.get("commands", ()), (list, tuple)) else (),
+        error=raw_service.get("error"),
+    ).to_dict()
+    info["service"] = observe_service({**raw_service, **observed}, info)
     info["request_log"] = _cli.request_log_info()
     info["namespaces"] = _cli.namespace_diagnostics()
     info["process_log"] = process_log_info(_codex_home_read_only(), args.port)
@@ -324,10 +334,31 @@ def run_service_command(args) -> dict:
             raise SystemExit("service requires install, uninstall, status, repair, or restart")
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(_cli.redact_secret_text(str(exc))) from exc
+    if action == "installed" and (
+        info.get("state") == "failed"
+        or not bool(info.get("installed"))
+        or not bool(info.get("active"))
+    ):
+        detail = info.get("error") or "service installation was not observed as installed and active"
+        raise SystemExit(_cli.redact_secret_text(str(detail)))
+    if action == "uninstalled" and bool(info.get("installed")):
+        detail = info.get("error") or "service uninstall was not observed"
+        raise SystemExit(_cli.redact_secret_text(str(detail)))
     gateway = _cli.reachable_gateway_status_info(
         args.port,
         wait=(action == "installed" or (action in {"repair", "restart"} and info.get("changed"))) and bool(info.get("active")),
     )
+    result_action = {"installed": "install", "uninstalled": "uninstall"}.get(action, action)
+    observed = _cli.observed_service_result(
+        action=result_action,
+        installed=bool(info.get("installed")),
+        active=bool(info.get("active")),
+        reachable=bool(gateway.get("reachable")),
+        changed=bool(info.get("changed", action != "status")),
+        commands=tuple(info.get("commands", ())) if isinstance(info.get("commands", ()), (list, tuple)) else (),
+        error=info.get("error"),
+    ).to_dict()
+    info = {**info, **observed}
     info = observe_service(info, gateway)
     if action in {'installed', 'repair', 'restart'} and info.get('changed', action == 'installed') and not info.get('owned_ready'):
         info.update(state='failed', error=info.get('error') or 'Service did not reach verified owned readiness')
@@ -448,6 +479,7 @@ def run_logs_command(args) -> None:
 
 
 def start_gateway_background(args) -> dict:
+    _cli.configure_local_gateway_environment(args)
     _cli.require_safe_gateway_host(args.host, args.allow_remote)
     _cli.ensure_unified_env_for_gateway(args)
     pid_path, log_path = _cli.gateway_runtime_paths(args.port)

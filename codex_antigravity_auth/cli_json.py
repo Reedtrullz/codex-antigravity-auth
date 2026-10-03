@@ -1,13 +1,13 @@
 """Version 1 operational result envelope and single-document stdout boundary."""
 from __future__ import annotations
 
-import argparse
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 import sys
 
 from . import cli
+from .console import ConsoleArgumentParser
 from .redaction import redact_secrets
 from .support_bundle import collect_bundle, export_bundle, number
 
@@ -25,7 +25,7 @@ class _Capture(io.StringIO):
         return super().write(value)
 
 
-class JSONArgumentParser(argparse.ArgumentParser):
+class JSONArgumentParser(ConsoleArgumentParser):
     def error(self, message):
         if "--json" in sys.argv or "support-bundle" in sys.argv:
             print(json.dumps(envelope("arguments", None, errors=["invalid_arguments"], exit_code=2)))
