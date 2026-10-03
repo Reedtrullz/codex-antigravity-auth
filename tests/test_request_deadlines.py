@@ -220,15 +220,19 @@ def test_sync_decode_and_translation_failures_keep_outer_deadline_or_disconnect(
             return response
 
     def fail(*_args, **_kwargs):
+        reached.append(True)
         raise failure_type()
 
+    reached = []
     monkeypatch.setattr(server.httpx, "AsyncClient", Client)
     if seam in {"google_json", "openai_json"}:
-        monkeypatch.setattr(response, "json", fail)
+        # Both routes use the bounded shared decoder, not HTTPX Response.json().
+        monkeypatch.setattr(server, "response_json", fail)
     elif seam == "google_parse":
         monkeypatch.setattr(server.GoogleTransport, "parse_response", fail)
     else:
-        monkeypatch.setattr(server, "_collect_openai_sse_terminal", fail)
+        # OAuth responses are decoded incrementally by the terminal-authority adapter.
+        monkeypatch.setattr(server.NativeResponsesStreamAdapter, "consume_bytes", fail)
 
     if reason == "deadline":
         with pytest.raises(HTTPException) as caught:
@@ -240,6 +244,7 @@ def test_sync_decode_and_translation_failures_keep_outer_deadline_or_disconnect(
             asyncio.run(server.create_response(Request(route)))
         expected_error = "cancelled"
 
+    assert reached == [True]
     assert clients and all(client.closed == 1 for client in clients)
     assert state.release.await_count == (1 if route == "google" else 0)
     terminal = [row for row in state.records if row["lifecycle_phase"] == "terminal"]

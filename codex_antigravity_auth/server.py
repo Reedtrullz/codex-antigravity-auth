@@ -52,6 +52,10 @@ from .models import (
 )
 from .observability import request_log_info, write_request_record
 from .route_lifecycle import write_route_lifecycle
+from .resource_limits import (
+    ADMISSION, ResourceLimits, ResourceLimitError, read_request_json,
+    limited_post, read_response_bytes, response_context, response_json,
+)
 from .request_budget import (
     RequestBudget, RequestDeadlineExceeded, owned_context, shielded_cleanup, stream_with_budget,
     CURRENT_BUDGET, NativeStreamState, call_sync,
@@ -113,11 +117,13 @@ class _ClosingStreamingResponse(StreamingResponse):
 
 @asynccontextmanager
 async def gateway_lifespan(_app: FastAPI):
+    startup_limits = ResourceLimits.from_env()  # Refuse invalid operator policy before serving.
     global _refresh_ahead_owner
     if _refresh_ahead_owner is not None:
         raise RuntimeError("Gateway refresh lifecycle is already running")
     owner = _RefreshAheadOwner()
     _refresh_ahead_owner = owner
+    ADMISSION.set_startup_ceiling(startup_limits.inflight)
     try:
         owner.start()
         yield
@@ -125,6 +131,7 @@ async def gateway_lifespan(_app: FastAPI):
         try:
             await owner.close()
         finally:
+            ADMISSION.set_startup_ceiling(None)
             _refresh_ahead_owner = None
 
 
@@ -1258,6 +1265,20 @@ class OwnedStreamingResponse(StreamingResponse):
     def __init__(self, *args, budget, **kwargs):
         super().__init__(*args, **kwargs)
         self.budget = budget
+        source = self.body_iterator
+        async def owned_body():
+            try:
+                async for chunk in source:
+                    yield chunk
+            finally:
+                callbacks = [budget.close]
+                if hasattr(source, "aclose"):
+                    callbacks.append(source.aclose)
+                try:
+                    await shielded_cleanup(*callbacks)
+                finally:
+                    budget.run_finalizers()
+        self.body_iterator = owned_body()
 
     async def __call__(self, scope, receive, send):
         disconnected = False
@@ -1309,7 +1330,10 @@ class OwnedStreamingResponse(StreamingResponse):
         finally:
             if disconnected and not self.budget.terminal_observed:
                 self.budget.cancelled = True
-            await shielded_cleanup(self.body_iterator.aclose, self.budget.close)
+            try:
+                await shielded_cleanup(self.body_iterator.aclose, self.budget.close)
+            finally:
+                self.budget.run_finalizers()
             if (disconnected or expired) and not self.budget.terminal_observed and not self.budget.abort_reported and self.budget.abort:
                 await shielded_cleanup(lambda: self.budget.abort(expired), timeout=0.05)
         if self.background is not None:
@@ -1318,14 +1342,31 @@ class OwnedStreamingResponse(StreamingResponse):
 
 @app.post("/v1/responses")
 async def create_response(request: Request):
+    try:
+        limits = ResourceLimits.from_env()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    try:
+        permit = ADMISSION.acquire(limits)
+    except ResourceLimitError as exc:
+        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)}, headers={"Retry-After": "1"}) from exc
     budget = RequestBudget(request, timeout=GOOGLE_BACKEND_TIMEOUT_SECONDS,
                            release_account=release_account_for_request)
+    budget.limits = limits
+    budget.permit = permit
+    budget.register_finalizer(permit.release)
     transferred = False
     try:
         with budget.active():
             response = await _create_response(request, budget)
         transferred = isinstance(response, OwnedStreamingResponse)
         return response
+    except ResourceLimitError as exc:
+        report = getattr(budget, "report_limit", None)
+        if report is not None:
+            await shielded_cleanup(lambda: report(exc), timeout=0.05)
+        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)},
+                            headers={"Retry-After": "1"} if exc.status == 503 else None) from exc
     except (RequestDeadlineExceeded, ClientDisconnect, asyncio.CancelledError) as exc:
         if not isinstance(exc, RequestDeadlineExceeded) and not budget.terminal_observed:
             budget.cancelled = True
@@ -1380,10 +1421,19 @@ async def _create_response(request: Request, budget: RequestBudget):
                           cancelled=not expired, terminal_cleanup=True)
     budget.abort = abort_request
 
+    async def report_limit(exc):
+        if getattr(exc, "upstream_status", None) is not None:
+            upstream_observation["http_status"] = exc.upstream_status
+        await log_request("failed", **budget.context, http_status=exc.status,
+                          error_class=exc.code, error=str(exc), terminal_cleanup=True)
+    budget.report_limit = report_limit
+
     try:
-        codex_req = await budget.run(request.json)
+        codex_req = await budget.run(lambda: read_request_json(request, budget.limits))
         budget.body_read = True
     except (RequestDeadlineExceeded, ClientDisconnect):
+        raise
+    except ResourceLimitError:
         raise
     except Exception:
         await log_request("failed", http_status=400, error_class="invalid_json", error="Invalid JSON body")
@@ -1416,6 +1466,8 @@ async def _create_response(request: Request, budget: RequestBudget):
         await log_request("failed", model=model, route="google", stream=stream, http_status=400,
                           error_class=detail["code"], error=detail["message"])
         raise HTTPException(status_code=400, detail=detail)
+    if unified_route in {"openai", "google", "antigravity", "byok"}:
+        budget.permit.bind_route("google" if unified_route == "antigravity" else unified_route)
     if unified_route == "unknown":
         from .unified import unknown_model_error as _unknown_model_error
 
@@ -1518,7 +1570,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     detail=openai_failure_detail(model, message),
                     headers=response_headers,
                 ) from exc
-            except (RequestDeadlineExceeded, ClientDisconnect):
+            except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
                 raise
             except Exception as exc:
                 message = f"OpenAI upstream is unreachable: {safe_error_detail(exc)}"
@@ -1933,6 +1985,8 @@ async def _create_response(request: Request, budget: RequestBudget):
             response = await google_transport.post(codex_req, account_lease(selected_account))
             upstream_observation["http_status"] = response.status_code
             return response
+        except ResourceLimitError:
+            raise
         except (httpx.HTTPError, OSError, GoogleHTTPError, GoogleStreamPayloadError):
             return None
         except Exception as exc:
@@ -2187,7 +2241,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                 )
 
             try:
-                gemini_resp = await call_sync(res.json)
+                gemini_resp = await call_sync(response_json, res)
                 if isinstance(gemini_resp, list) and gemini_resp:
                     gemini_resp = gemini_resp[0]
                 backend_error = backend_error_from_payload(gemini_resp)
@@ -2261,7 +2315,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     cooldown_category=cooldown_category,
                 )
                 return codex_resp
-            except (HTTPException, RequestDeadlineExceeded, ClientDisconnect):
+            except (HTTPException, ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
                 raise
             except Exception as e:
                 await run_nonstream_diagnostic(
@@ -2471,7 +2525,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                 )
                 error_code = exc.code
                 error_message = safe_error_detail(exc.message)
-                if adapter.visible_output_started:
+                if adapter.visible_output_started or exc.code == "provider_output_limit":
                     if not adapter.created_emitted:
                         yield serialize_transport_event(adapter.created())
                     for event in adapter.fail(error_code, error_message):
@@ -2489,6 +2543,32 @@ async def _create_response(request: Request, budget: RequestBudget):
                         rotation_attempted=attempt_num > 0,
                     )
                     return
+            except ResourceLimitError as exc:
+                error_code = exc.code
+                error_message = safe_error_detail(exc)
+                await record_stream_attempt(
+                    stream_account,
+                    AttemptOutcome(scope="none", category="invalid_request"),
+                    error_class=error_code,
+                )
+                if not adapter.created_emitted:
+                    yield serialize_transport_event(adapter.created())
+                for event in adapter.fail(error_code, error_message):
+                    yield serialize_transport_event(event)
+                await log_request(
+                    "failed",
+                    model=model,
+                    route="google",
+                    family=family,
+                    stream=True,
+                    http_status=upstream_observation.get("http_status"),
+                    usage=adapter.accumulator.usage,
+                    error_class=error_code,
+                    error=error_message,
+                    rotation_attempted=attempt_num > 0,
+                )
+                stream_terminal_logged = True
+                return
             except Exception as exc:
                 outcome = AttemptOutcome(scope="none", category="transport")
                 await record_stream_attempt(
@@ -2685,15 +2765,17 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
     payload, url, headers, timeout = await call_sync(prepare_openai_compatible_request, codex_req, provider, provider_model, stream=False)
     async with owned_context(httpx.AsyncClient(**httpx_client_options(url, timeout=timeout))) as client:
         try:
-            res = await client.post(url, json=payload, headers=headers)
+            res = await limited_post(client, url, payload=payload, headers=headers)
             if telemetry is not None:
                 telemetry["http_status"] = res.status_code
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"{provider['id']} connection error: {safe_error_detail(e)}") from e
     if res.status_code != 200:
         raise HTTPException(status_code=res.status_code, detail=f"{provider['id']} API error: {safe_error_detail(res.text)}")
     try:
-        chat_resp = await call_sync(res.json)
+        chat_resp = await call_sync(response_json, res)
         backend_error = backend_error_from_payload(chat_resp)
         if backend_error:
             code, message = backend_error
@@ -2702,7 +2784,7 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
                 detail=f"{provider['id']} API error: {safe_error_detail(message)}",
             )
         return await call_sync(transform_chat_response, chat_resp, display_model, request=codex_req)
-    except (HTTPException, RequestDeadlineExceeded, ClientDisconnect):
+    except (HTTPException, ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{provider['id']} response translation failed: {safe_error_detail(e)}") from e
@@ -2716,54 +2798,39 @@ async def create_openai_upstream_response(
     url = openai_responses_url(auth)
     headers = openai_request_headers(auth)
     if auth.kind == "codex_oauth":
-        # ChatGPT backend is stream-only: collect SSE into one Response object.
+        # Collect validated terminal state incrementally; never buffer the whole
+        # OAuth SSE body before the decoder's limits can apply.
         payload = await call_sync(_build_payload, codex_req, upstream_model, stream=True)
         payload["store"] = bool(codex_req.get("store", False))
         try:
             async with owned_context(httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))) as client:
-                res = await client.post(url, json=payload, headers=headers)
-                if telemetry is not None:
-                    telemetry["http_status"] = res.status_code
-        except Exception as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=openai_failure_detail(display_model, f"OpenAI upstream is unreachable: {exc}"),
-            ) from exc
-        if res.status_code != 200:
-            if res.status_code in (401, 403):
-                raise HTTPException(
-                    status_code=res.status_code,
-                    detail=openai_failure_detail(
-                        display_model,
-                        "OpenAI ChatGPT authentication failed or expired. "
-                        f"Run `codex login` again. {safe_error_detail(res.text)}",
-                    ),
-                )
-            raise HTTPException(
-                status_code=res.status_code,
-                detail=openai_failure_detail(display_model, f"OpenAI upstream error: {safe_error_detail(res.text)}"),
-            )
-        try:
-            terminal = await call_sync(_collect_openai_sse_terminal, res.content, display_model, request=codex_req)
-        except (RequestDeadlineExceeded, ClientDisconnect):
+                async with response_context(client, url, payload=payload, headers=headers) as res:
+                    if telemetry is not None:
+                        telemetry["http_status"] = res.status_code
+                    if res.status_code != 200:
+                        raw = await read_response_bytes(res, limit=65536)
+                        message = "OpenAI upstream error: " + safe_error_detail(raw.decode("utf-8", errors="replace"))
+                        if res.status_code in (401, 403):
+                            message = "OpenAI ChatGPT authentication failed or expired. Run `codex login` again."
+                        raise HTTPException(status_code=res.status_code, detail=openai_failure_detail(display_model, message))
+                    adapter = NativeResponsesStreamAdapter(display_model=display_model, request=codex_req)
+                    async for chunk in res.aiter_bytes():
+                        adapter.consume_bytes(chunk)
+                        if adapter.protocol_failed:
+                            break
+                    return adapter.finish()[-1]["response"]
+        except (HTTPException, ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
             raise
         except Exception as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=openai_failure_detail(display_model, f"OpenAI stream did not terminate cleanly: {exc}"),
-            ) from exc
-        if terminal is None:
-            raise HTTPException(
-                status_code=502,
-                detail=openai_failure_detail(display_model, "OpenAI stream ended without a terminal response event."),
-            )
-        return terminal
+            raise HTTPException(status_code=502, detail=openai_failure_detail(display_model, "OpenAI stream could not be collected.")) from exc
     payload = await call_sync(_build_payload, codex_req, upstream_model, stream=False)
     try:
         async with owned_context(httpx.AsyncClient(**httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))) as client:
-            res = await client.post(url, json=payload, headers=headers)
+            res = await limited_post(client, url, payload=payload, headers=headers)
             if telemetry is not None:
                 telemetry["http_status"] = res.status_code
+    except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -2784,8 +2851,8 @@ async def create_openai_upstream_response(
             detail=openai_failure_detail(display_model, f"OpenAI upstream error: {safe_error_detail(res.text)}"),
         )
     try:
-        data = await call_sync(res.json)
-    except (RequestDeadlineExceeded, ClientDisconnect):
+        data = await call_sync(response_json, res)
+    except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
         raise
     except Exception as exc:
         raise HTTPException(
@@ -2847,7 +2914,9 @@ async def _open_openai_upstream_stream(
             telemetry["http_status"] = response.status_code
         if response.status_code != 200:
             try:
-                body = (await response.aread()).decode("utf-8", errors="replace")
+                body = (await read_response_bytes(response, limit=65536)).decode("utf-8", errors="replace")
+            except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+                raise
             except Exception:
                 body = ""
             raise OpenAIUpstreamHTTPError(response.status_code, body, response.headers.get("retry-after"))
@@ -2895,6 +2964,8 @@ async def openai_upstream_sse_generator(
             yield f"data: {json.dumps(error_event)}\n\n"
             yield "data: [DONE]\n\n"
             return
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception as exc:
             error_event = {
                 "type": "response.failed",
@@ -2942,6 +3013,8 @@ async def openai_upstream_sse_generator(
                     tail_deadline = time.monotonic() + OPENAI_UPSTREAM_TIMEOUT_SECONDS
         except (TimeoutError, httpx.TimeoutException):
             terminal_events = adapter.abort("stream_timeout", "The provider stream timed out before EOF.")
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception:
             terminal_events = adapter.abort("stream_interrupted", "The provider stream was interrupted before EOF.")
         else:
@@ -2992,6 +3065,8 @@ async def openai_compatible_sse_generator(
                 done_sent = True
             else:
                 yield f"data: {json.dumps(event)}\n\n"
+    except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+        raise
     except Exception as exc:
         # Parity with the xAI OAuth SSE generator: surface a client-visible
         # error event plus [DONE] instead of dropping the stream mid-flight.

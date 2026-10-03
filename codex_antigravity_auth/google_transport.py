@@ -14,7 +14,8 @@ import httpx
 
 from .endpoint_policy import httpx_client_options, validate_endpoint_url
 from .request_budget import call_sync, owned_context
-from .sse import SSELineError, iter_sse_data
+from .resource_limits import ResourceLimitError, json_loads_limited, limited_post, response_json
+from .sse import SSELineError, SSELimitError, iter_sse_data
 
 from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
 from .response_protocol import (
@@ -154,8 +155,8 @@ class GoogleResponseAccumulator:
         self.output_error = None
         self._partial_names = set()
         self._bad_call_ids = set()
-        self._text = ""
-        self._reasoning = ""
+        self._text: list[str] = []
+        self._reasoning: list[str] = []
         self._function_calls: list[dict[str, Any]] = []
         self._finish_reason: str | None = None
         self._safety_block: dict[str, Any] | None = None
@@ -226,8 +227,10 @@ class GoogleResponseAccumulator:
             for part in parts:
                 normalized = normalize_google_part(part, self.tool_validator)
                 normalized_parts.append(normalized)
-                self._text += normalized.text
-                self._reasoning += normalized.reasoning
+                if normalized.text:
+                    self._text.append(normalized.text)
+                if normalized.reasoning:
+                    self._reasoning.append(normalized.reasoning)
                 self.output_error = merge_output_error(self.output_error, normalized.output_error)
                 self.tool_error = self.tool_error or normalized.tool_error
                 if normalized.partial_id: self._bad_call_ids.add(normalized.partial_id)
@@ -242,7 +245,7 @@ class GoogleResponseAccumulator:
                 {
                     "type": "reasoning",
                     "id": f"rs_{uuid.uuid4().hex[:8]}",
-                    "step_by_step_summary": self._reasoning,
+                    "step_by_step_summary": "".join(self._reasoning),
                 }
             )
         if self._text:
@@ -252,7 +255,7 @@ class GoogleResponseAccumulator:
                     "id": f"msg_{uuid.uuid4().hex[:8]}",
                     "status": "completed",
                     "role": "assistant",
-                    "content": [{"type": "output_text", "text": self._text, "annotations": []}],
+                    "content": [{"type": "output_text", "text": "".join(self._text), "annotations": []}],
                 }
             )
         from collections import Counter
@@ -469,7 +472,11 @@ class GoogleTransport:
         payload = await call_sync(self.build_request, request, lease)
         headers = await call_sync(self.build_headers, lease)
         async with owned_context(self.client_factory(**httpx_client_options(url, timeout=self.timeout))) as client:
-            return await client.post(url, json=payload, headers=headers)
+            return await limited_post(
+                client, url,
+                payload=payload,
+                headers=headers,
+            )
 
     async def execute(
         self,
@@ -484,7 +491,9 @@ class GoogleTransport:
         if response.status_code != 200:
             raise GoogleHTTPError(response.status_code, outcome_for_http_status(response.status_code))
         try:
-            payload = response.json()
+            payload = response_json(response)
+        except ResourceLimitError:
+            raise
         except Exception:
             accumulator = GoogleResponseAccumulator()
             accumulator.mark_malformed()
@@ -534,8 +543,10 @@ class GoogleTransport:
                         adapter.mark_done()
                         continue
                     try:
-                        payload = json.loads(data)
-                    except json.JSONDecodeError as exc:
+                        payload = json_loads_limited(data)
+                    except ResourceLimitError as exc:
+                        raise GoogleStreamPayloadError("provider_output_limit" if exc.status == 413 else "invalid_stream_chunk", str(exc)) from exc
+                    except (ValueError, RecursionError) as exc:
                         raise GoogleStreamPayloadError(
                             "invalid_stream_chunk", "The Google provider returned malformed stream JSON.",
                         ) from exc
@@ -543,6 +554,8 @@ class GoogleTransport:
                         payload = payload[0] if payload else {}
                     for event in adapter.consume(payload):
                         yield event
+            except SSELimitError as exc:
+                raise GoogleStreamPayloadError("provider_output_limit", str(exc)) from exc
             except SSELineError as exc:
                 raise GoogleStreamPayloadError("invalid_stream_chunk", str(exc)) from exc
         for event in adapter.finish():
