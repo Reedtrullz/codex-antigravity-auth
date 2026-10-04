@@ -80,6 +80,20 @@ is rejected instead of being erased.
 
 ## Versioned route catalog and standalone Anti
 
+Native structured text output is encoded only for eligible Gemini text routes.
+Responses `text.format` accepts `text`, `json_object`, or `json_schema`; JSON uses
+`responseMimeType` and schemas use `responseJsonSchema` intact. The output bridge
+supports types, properties, required names, additionalProperties, items, string
+or numeric enums, numeric/item-count bounds, anyOf, and text annotations. It
+rejects other constraints (including references, oneOf exclusivity and patterns)
+instead of weakening them through the function-parameter sanitizer. `strict:true`
+is rejected because OpenAI strict guarantees have not been established here.
+Malformed or unsupported requests fail before account acquisition. Claude,
+GPT-OSS, unknown native definitions and image-output routes do not advertise
+effective structured output. Public Gemini schema fields establish an encoding
+contract; private OAuth acceptance and semantic correctness require separate
+verification. Explicit plain-text format keeps the ordinary request unchanged.
+
 `/v1/models` retains the `data` and `models` picker lists and adds
 `capability_catalog_version: 1`. Each entry carries `canonical_id`, `alias_of`
 and a versioned `capabilities` object: route, backend identity, family, aliases,

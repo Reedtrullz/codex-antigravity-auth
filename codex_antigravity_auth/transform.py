@@ -495,6 +495,13 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
         request_payload["toolConfig"] = tool_config
         
     generation_config = {}
+    text_format = (codex_req.get('text') or {}).get('format') or {}
+    if text_format.get('type') in ('json_object', 'json_schema'):
+        generation_config['responseMimeType'] = 'application/json'
+        if text_format['type'] == 'json_schema':
+            # Output schemas have their own lossless validation. The function
+            # parameter sanitizer would silently weaken these constraints.
+            generation_config['responseJsonSchema'] = text_format['schema']
     if "temperature" in codex_req:
         generation_config["temperature"] = codex_req["temperature"]
     if "top_p" in codex_req:

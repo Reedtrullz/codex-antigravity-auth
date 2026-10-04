@@ -1711,7 +1711,7 @@ def int_usage(value: Any) -> int | None:
     return None
 
 
-def normalize_usage(value: Any) -> dict[str, int] | None:
+def normalize_usage(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     input_tokens = int_usage(value.get("input_tokens"))
@@ -1721,7 +1721,7 @@ def normalize_usage(value: Any) -> dict[str, int] | None:
     if output_tokens is None:
         output_tokens = int_usage(value.get("completion_tokens"))
     total_tokens = int_usage(value.get("total_tokens"))
-    result: dict[str, int] = {}
+    result: dict[str, Any] = {}
     if input_tokens is not None:
         result["input_tokens"] = input_tokens
     if output_tokens is not None:
@@ -1730,6 +1730,11 @@ def normalize_usage(value: Any) -> dict[str, int] | None:
         result["total_tokens"] = total_tokens
     elif input_tokens is not None and output_tokens is not None:
         result["total_tokens"] = input_tokens + output_tokens
+    details = value.get('output_tokens_details')
+    if isinstance(details, dict):
+        thought = details.get('reasoning_tokens')
+        if type(thought) is int and thought >= 0:
+            result['output_tokens_details'] = {'reasoning_tokens': thought}
     return result or None
 
 
@@ -1852,6 +1857,9 @@ def post_response(
         "max_output_tokens": max_output_tokens,
         "stream": False,
     }
+    response_format = getattr(budget_args, '_response_format', None)
+    if response_format is not None:
+        payload['text'] = {'format': response_format}
     effort = effort_for_model(requested_model) or effort_for_model(matched_model or model)
     if effort:
         payload["reasoning"] = {"effort": effort}
@@ -1959,6 +1967,10 @@ def post_response(
                        f"(status={decoded.get('status', 'unknown')}); "
                        f"the response may be malformed or empty")
             response_metadata: dict[str, Any] = {"attempts": attempt, "submitted": True}
+            if response_format is not None:
+                response_metadata['response_schema_sha256'] = hashlib.sha256(
+                    json.dumps(response_format['schema'], sort_keys=True, separators=(',', ':')).encode('utf-8')
+                ).hexdigest()
             if isinstance(decoded, dict):
                 upstream_status = decoded.get("status")
                 if isinstance(upstream_status, str):
@@ -7253,6 +7265,40 @@ def command_panel(args: argparse.Namespace) -> int:
     return 0 if run_status == "success" else 1
 
 
+def capture_response_schema(args):
+    raw = getattr(args, 'response_schema', None)
+    if raw is None:
+        return None
+    if len(raw.encode('utf-8')) > 65536:
+        raise AntiError('--response-schema exceeds 64 KiB')
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate schema key')
+            result[key] = value
+        return result
+    try:
+        schema = json.loads(raw, object_pairs_hook=unique,
+                            parse_constant=lambda value: (_ for _ in ()).throw(ValueError('nonfinite schema value')))
+        if not isinstance(schema, dict):
+            raise ValueError('schema must be an object')
+        # Bound nesting before the JSON is used by policy or payload builders.
+        pending = [(schema, 0)]
+        while pending:
+            value, depth = pending.pop()
+            if depth > 48:
+                raise ValueError('schema exceeds nesting limit')
+            if isinstance(value, dict):
+                pending.extend((child, depth + 1) for child in value.values())
+            elif isinstance(value, list):
+                pending.extend((child, depth + 1) for child in value)
+    except (ValueError, RecursionError) as exc:
+        raise AntiError('--response-schema requires a bounded JSON schema object') from exc
+    args._response_format = {'type': 'json_schema', 'name': 'anti_observation', 'strict': False, 'schema': schema}
+    return json.dumps(schema, sort_keys=True, separators=(',', ':'))
+
+
 @controlled_command
 def command_consult(args: argparse.Namespace) -> int:
     mode = "listen" if getattr(args, "command", None) == "listen" else "consult"
@@ -7280,6 +7326,13 @@ def command_consult(args: argparse.Namespace) -> int:
         progress(args, f"consult: pre-read {len(read_files)} file(s) for context")
     
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
+    schema_text = capture_response_schema(args)
+    if schema_text is not None:
+        # Include the same bytes in the assembled text identity and policy scan:
+        # schemas can contain private descriptions, enums or property names.
+        prompt += '\n\nRequested output schema: ' + schema_text
+        if args.max_prompt_chars and len(prompt) > args.max_prompt_chars:
+            raise AntiError('prompt plus --response-schema exceeds --max-prompt-chars')
     estimated_cost = estimate_call_cost(model, len(prompt), args.max_output_tokens)
     if policy_preflight(args, prompt, [(model, "primary")]):
         return 0
@@ -9032,6 +9085,7 @@ def build_parser() -> argparse.ArgumentParser:
         consult.add_argument("--model", default=None, help="opus, sonnet, or full model id")
         consult.add_argument("--prompt", help="Prompt text")
         consult.add_argument("--prompt-file", help="Read prompt text from file")
+        consult.add_argument('--response-schema', help='Explicit JSON schema object (64 KiB max); forwarded natively with strict=false, also included in prompt policy identity; caller must validate the result')
         consult.add_argument("--no-pre-read", action="store_true", dest="no_pre_read", help="Disable automatic file pre-reading for consult prompts")
         consult.add_argument("--max-output-tokens", type=positive_int, default=2048 if listening else 4096)
         consult.add_argument("--max-prompt-chars", type=non_negative_int, default=DEFAULT_MAX_PROMPT_CHARS, help="Maximum prompt chars before truncation; use 0 for unlimited")

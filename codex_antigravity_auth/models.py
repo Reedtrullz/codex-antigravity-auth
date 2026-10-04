@@ -519,7 +519,9 @@ def capabilities_for_native_definition(definition: NativeModel | None) -> Provid
         parallel_tool_calls=(
             definition.supports_parallel_tool_calls if definition is not None else True
         ),
-        structured_output=True,
+        structured_output=bool(definition and definition.family == 'gemini'
+                               and definition.backend_id.startswith('gemini-')
+                               and not required_output_bridge(definition)),
         stop_sequences=True,
         reasoning=bool(definition and definition.reasoning_mapping),
         streaming_usage=True,

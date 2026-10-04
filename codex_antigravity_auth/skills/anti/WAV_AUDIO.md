@@ -84,6 +84,32 @@ adapter. Anti's receipt records media identity and submission evidence; it does
 not manufacture native AUDIO token counts or turn an empty finding list into
 musical approval. Existing `consult` / `ask` retry behavior is unchanged.
 
+### Explicit output schema and thinking budget
+
+`listen` and `consult` accept `--response-schema` with an explicit JSON schema
+object (at most64KiB). The helper includes canonical schema text in the assembled
+prompt for policy scanning and content identity, and forwards Responses
+`text.format` with `type: json_schema`, `strict: false`. Per-generation metadata
+records `response_schema_sha256`; defaults without this option are unchanged.
+Duplicate keys, nonfinite JSON, non-object roots and excessive nesting refuse
+before gateway lookup. The gateway separately validates the supported native
+schema subset before account acquisition. Unsupported constraints refuse rather
+than being silently removed. The caller must still validate complete output and
+its meaning. A native formatting request does not establish audio perception.
+
+The native Gemini bridge uses `responseMimeType: application/json` and
+`responseJsonSchema`. Private OAuth acceptance remains unverified; an error never
+triggers a text-only fallback for `listen`. Other native families and generated
+image routes refuse structured output until their transport is established.
+
+The2,048-token listen ceiling includes thinking and answer generation. Simple
+sound-recognition probes should use low reasoning and short answers. When Google
+reports `thoughtsTokenCount`, usage preserves it as
+`output_tokens_details.reasoning_tokens`, including an explicit zero; Responses
+`output_tokens` includes these thoughts plus candidate tokens. Missing counts
+remain unknown and are never inferred from total tokens. Truncation retains the
+partial output and makes no second POST. This option does not raise the ceiling.
+
 ## Gateway extension and capability evidence
 
 The gateway's private content type is **not a standard OpenAI Responses audio

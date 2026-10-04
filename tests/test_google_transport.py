@@ -15,11 +15,35 @@ from codex_antigravity_auth.google_transport import (
     GoogleTransport,
     outcome_for_backend_error,
 )
-from codex_antigravity_auth.response_protocol import TerminalKind
+from codex_antigravity_auth.response_protocol import TerminalKind, response_from_result
 from tests.conftest import _legacy_transform_response as transform_response
 
 
 class TestGoogleResponseTranslation(unittest.TestCase):
+    def test_preserves_reported_thought_tokens_through_response_envelope(self):
+        for thought in (0, 1964):
+            with self.subTest(thought=thought):
+                payload = {"response": {"candidates": [{"finishReason": "MAX_TOKENS",
+                    "content": {"parts": [{"text": "partial"}]}}],
+                    "usageMetadata": {"promptTokenCount": 435, "candidatesTokenCount": 80,
+                                      "thoughtsTokenCount": thought, "totalTokenCount": 2479}}}
+                parsed = self.transport.parse_response(payload)
+                accumulator = GoogleResponseAccumulator()
+                accumulator.consume(payload)
+                for result in (parsed, accumulator.finalize()):
+                    wire = response_from_result(result, response_id="fixture", model="fixture", created_at=0)
+                    self.assertEqual(wire["usage"]["output_tokens_details"], {"reasoning_tokens": thought})
+                    self.assertEqual(wire["usage"]["output_tokens"], 80 + thought)
+                    self.assertEqual(wire["usage"]["total_tokens"], 2479)
+                    self.assertEqual(wire["status"], "incomplete")
+
+    def test_missing_thought_count_is_unknown_not_inferred_from_total(self):
+        result = self.transport.parse_response({"candidates": [{"finishReason": "STOP",
+            "content": {"parts": [{"text": "answer"}]}}], "usageMetadata": {
+                "promptTokenCount": 435, "candidatesTokenCount": 80, "totalTokenCount": 2479}})
+        wire = response_from_result(result, response_id="fixture", model="fixture", created_at=0)
+        self.assertNotIn("output_tokens_details", wire["usage"])
+
     def setUp(self):
         self.transport = GoogleTransport(timeout=5)
 

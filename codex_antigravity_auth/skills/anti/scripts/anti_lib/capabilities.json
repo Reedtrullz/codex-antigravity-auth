@@ -368,7 +368,7 @@
             "function_call",
             "reasoning"
           ],
-          "structured_output": true,
+          "structured_output": false,
           "tools": true
         },
         "effective": {
@@ -396,7 +396,7 @@
           "reasoning_mapping": "thinking_budget",
           "reasoning_replay": false,
           "streaming": true,
-          "structured_output": true,
+          "structured_output": false,
           "tools": true
         },
         "family": "claude",
@@ -476,7 +476,7 @@
             "function_call",
             "reasoning"
           ],
-          "structured_output": true,
+          "structured_output": false,
           "tools": true
         },
         "effective": {
@@ -504,7 +504,7 @@
           "reasoning_mapping": "thinking_budget",
           "reasoning_replay": false,
           "streaming": true,
-          "structured_output": true,
+          "structured_output": false,
           "tools": true
         },
         "family": "claude",
@@ -578,7 +578,7 @@
             "refusal",
             "function_call"
           ],
-          "structured_output": true,
+          "structured_output": false,
           "tools": true
         },
         "effective": {
@@ -596,7 +596,7 @@
           "reasoning_mapping": null,
           "reasoning_replay": false,
           "streaming": true,
-          "structured_output": true,
+          "structured_output": false,
           "tools": true
         },
         "family": "gemini",

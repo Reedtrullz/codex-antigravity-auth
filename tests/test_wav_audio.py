@@ -185,6 +185,31 @@ def test_listen_truncated_output_is_retained_without_second_post(fixture, monkey
     assert result['metadata']['retry_disposition'] == 'disabled'
 
 
+def test_listen_explicit_schema_and_thought_usage_reach_owned_boundaries(fixture, monkeypatch, capsys):
+    anti, _, _, first, _ = fixture
+    bridge(monkeypatch, anti)
+    schema = {'type': 'object', 'properties': {'content': {'type': 'string'}},
+              'required': ['content'], 'additionalProperties': False}
+    raw = json.loads(response('{"content":"unknown"}')[2])
+    raw['response']['usageMetadata'] = {'promptTokenCount': 3, 'candidatesTokenCount': 4,
+        'totalTokenCount': 15, 'thoughtsTokenCount': 8}
+    with upstream((200, {'Content-Type': 'application/json'}, json.dumps(raw).encode())) as (base, seen):
+        endpoint(monkeypatch, base)
+        assert anti.main(listen_argv(first, '--response-schema', json.dumps(schema))) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert len(seen) == 1
+    assert seen[0]['body']['request']['generationConfig']['responseJsonSchema'] == schema
+    assert result['metadata']['usage']['output_tokens_details'] == {'reasoning_tokens': 8}
+    assert result['metadata']['response_schema_sha256']
+
+
+@pytest.mark.parametrize('schema', ['[]', '{"type":"object","type":"string"}', '{"minimum":NaN}'])
+def test_listen_bad_schema_refuses_before_gateway_lookup(fixture, monkeypatch, schema):
+    anti, _, _, first, _ = fixture
+    monkeypatch.setattr(anti, 'open_gateway_request', lambda *a, **kw: pytest.fail('no gateway lookup'))
+    assert anti.main(listen_argv(first, '--response-schema', schema)) == 1
+
+
 def test_listen_retryable_transport_error_makes_one_post(fixture, monkeypatch):
     anti, _, _, first, _ = fixture
     bridge(monkeypatch, anti)
