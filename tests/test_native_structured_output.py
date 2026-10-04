@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import httpx
 import pytest
 
-from codex_antigravity_auth import server
+from codex_antigravity_auth import server, models
 from codex_antigravity_auth.google_transport import AccountLease, GoogleTransport
 from codex_antigravity_auth.transform import transform_request
 
@@ -80,3 +80,21 @@ def test_explicit_plain_text_preserves_existing_request():
     plain = transform_request(request())["request"]
     explicit = transform_request(request({"type": "text"}))["request"]
     assert explicit == plain
+
+
+def test_unknown_gemini_overlay_cannot_gain_schema_support_from_its_name(monkeypatch):
+    overlay = models.NativeModel(id='gemini-overlay-test', backend_id='gemini-unverified',
+                                family='gemini', display_name='Unverified fixture', context_window=1000)
+    monkeypatch.setattr(models, 'load_model_overlays', lambda **kw: [overlay])
+    assert models.native_model_definition(overlay.id) is overlay
+    with pytest.raises(ValueError, match='structured output'):
+        transform_request(request({'type': 'json_schema', 'schema': SCHEMA}, overlay.id))
+
+
+def test_overlay_alias_of_supported_backend_keeps_schema_transport(monkeypatch):
+    overlay = models.NativeModel(id='gemini-overlay-alias', backend_id='gemini-3.8-flash-tiered',
+                                family='gemini', display_name='Alias fixture', context_window=1000)
+    monkeypatch.setattr(models, 'load_model_overlays', lambda **kw: [overlay])
+    body = transform_request(request({'type': 'json_schema', 'schema': SCHEMA}, overlay.id))
+    assert body['model'] == 'gemini-3.8-flash-tiered'
+    assert body['request']['generationConfig']['responseJsonSchema'] == SCHEMA

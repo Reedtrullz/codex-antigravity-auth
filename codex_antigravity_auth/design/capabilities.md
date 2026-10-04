@@ -90,7 +90,9 @@ instead of weakening them through the function-parameter sanitizer. `strict:true
 is rejected because OpenAI strict guarantees have not been established here.
 Malformed or unsupported requests fail before account acquisition. Claude,
 GPT-OSS, unknown native definitions and image-output routes do not advertise
-effective structured output. Public Gemini schema fields establish an encoding
+effective structured output. Overlays inherit schema transport only when their
+backend matches an eligible built-in; an unknown Gemini-looking backend ID does
+not establish this capability. Public Gemini schema fields establish an encoding
 contract; private OAuth acceptance and semantic correctness require separate
 verification. Explicit plain-text format keeps the ordinary request unchanged.
 
