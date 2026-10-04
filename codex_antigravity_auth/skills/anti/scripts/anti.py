@@ -1831,7 +1831,8 @@ def post_response(
     available_model_ids = model_ids
     if available_model_ids is None:
         available_model_ids = fetch_model_ids(base_url, timeout=timeout, token_env=token_env)
-    matched_model = next(
+    # Equivalent aliases are a fallback; set iteration must not retarget an exact ID.
+    matched_model = model if model in available_model_ids else next(
         (candidate for candidate in available_model_ids if catalog_model_matches(model, candidate)),
         None,
     )
