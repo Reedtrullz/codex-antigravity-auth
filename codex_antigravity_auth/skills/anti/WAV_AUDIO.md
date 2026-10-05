@@ -64,7 +64,8 @@ python scripts/anti.py listen --model gemini-3.1-pro \
 
 This command requires explicit audio and model selection, without `--local-profile`.
 It permits at most one
-generation attempt, 2,048 output tokens and a 90-second whole-run deadline. It
+generation attempt and a 90-second whole-run deadline. Output defaults to 2,048
+tokens; an explicit `--max-output-tokens` may raise the allowance to 4,096. It
 disables source pre-reading, automatic routing, retries and fallback. Smaller
 limits are allowed; looser limits fail before HTTP. A truncated response retains
 its partial output, records `retry_disposition: disabled` and exits nonzero without
@@ -102,7 +103,8 @@ The native Gemini bridge uses `responseMimeType: application/json` and
 triggers a text-only fallback for `listen`. Other native families and generated
 image routes refuse structured output until their transport is established.
 
-The2,048-token listen ceiling includes thinking and answer generation. Simple
+The listen output allowance includes thinking and answer generation. The default
+is 2,048 tokens, and the explicit ceiling is 4,096. Simple
 sound-recognition probes should use low reasoning and short answers. When Google
 reports `thoughtsTokenCount`, usage preserves it as
 `output_tokens_details.reasoning_tokens`, including an explicit zero; Responses

@@ -243,7 +243,7 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 `workflow quick-check` for fast free-model pre-commit gates (60s budget), and
 `workflow consensus` for disagreement-focused 3-model panels with min-successes 2.
 6. For code review, prefer `review --scope staged`, `workflow review-ready --scope staged`, or `panel --mode review --scope staged` when the user asks about commit readiness; use `review --scope working-tree` for current local changes and `review --scope diff --base origin/main` for a clean merge-candidate branch.
-7. For focused questions, use `consult --prompt` for one model or `panel --mode ask --prompt` for a bounded multi-model comparison. For explicit PCM WAV music input, use `listen` with a selected Gemini model and probe opt-in. This permits one attempt, no source pre-read/retry/fallback, at most 2,048 output tokens and 90 seconds. Musical findings remain advisory. Write temporary prompt files outside the repo and pass `--prompt-file` when useful.
+7. For focused questions, use `consult --prompt` for one model or `panel --mode ask --prompt` for a bounded multi-model comparison. For explicit PCM WAV music input, use `listen` with a selected Gemini model and probe opt-in. This permits one attempt, no source pre-read/retry/fallback, a default 2,048 output tokens (explicitly up to 4,096) and 90 seconds. The output allowance includes reasoning. Musical findings remain advisory; completing a response does not establish acoustic accuracy. Write temporary prompt files outside the repo and pass `--prompt-file` when useful.
 8. Read the helper output and synthesize it with native Codex analysis. Call out disagreements, caveats, and what was or was not live-verified.
 
 ## Operational Fallbacks

@@ -117,6 +117,24 @@ def validate_music_review(value, clips, claim_ids=()):
     return read_json(json.dumps(value, allow_nan=False, sort_keys=True))
 
 
+def parse_review_response(text, clips, claim_ids=()):
+    """Accept one complete JSON document, optionally in one whole JSON fence.
+
+    This only normalizes presentation. It does not repair JSON, select a
+    document from prose, or establish whether any acoustic claim is correct.
+    Evidence inputs continue to use the strict bare-JSON reader.
+    """
+    require(isinstance(text, str) and len(text.encode('utf-8')) <= MAX_BYTES,
+            'music JSON exceeds 64 KiB')
+    payload = text.strip()
+    encoding = 'json'
+    fence = re.fullmatch(r'```(?:json)?[ \t]*\r?\n(.*?)\r?\n```', payload, re.DOTALL)
+    if fence is not None:
+        payload = fence.group(1)
+        encoding = 'markdown-json-fence'
+    return validate_music_review(read_json(payload), clips, claim_ids), encoding
+
+
 def prepare(args, objective, attachments, registry, model):
     caps = registry.entries.get(model.lower()) or registry.entries.get(registry.canonical(model)) or {}
     require(caps.get('route') == 'antigravity' and caps.get('family') == 'gemini', 'review-music requires an eligible Antigravity Gemini route')

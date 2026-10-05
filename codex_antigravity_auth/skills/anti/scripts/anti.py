@@ -606,12 +606,12 @@ def run_control(args=None):
     local_settings = local_workflow.prepare_args(args)
     if getattr(args, 'command', None) in {'listen', 'review-music'}:
         limits = ((getattr(args, 'max_calls', None), 1),
-                  (getattr(args, 'max_output_tokens', None), 2048),
+                  (getattr(args, 'max_output_tokens', None), 4096),
                   (getattr(args, 'run_timeout', None), 90),
                   (getattr(args, 'timeout', None), 90))
         if any(value is None or not math.isfinite(float(value)) or value < 0 or value > ceiling
                for value, ceiling in limits):
-            raise AntiError('listen limits: at most one attempt, 2048 output tokens and 90 seconds')
+            raise AntiError('listen limits: at most one attempt, 4096 output tokens and 90 seconds')
         if (getattr(args, 'retry', None) != 0 or getattr(args, 'fallback_model', None)
                 or getattr(args, 'fallback_policy', None) != 'never'
                 or getattr(args, 'auto_route', False) or not getattr(args, 'no_pre_read', False)):
@@ -7435,9 +7435,13 @@ def command_consult(args: argparse.Namespace) -> int:
         metadata["musicalAcceptance"] = "not-established"
         if output_status == "success":
             try:
-                metadata["music_review"] = music_evidence.validate_music_review(
-                    music_evidence.read_json(text), args._music_evidence["clips"],
+                review, encoding = music_evidence.parse_review_response(
+                    text, args._music_evidence["clips"],
                     [claim["id"] for claim in args._music_evidence["claims"]])
+                metadata["music_review"] = review
+                metadata["music_response_encoding"] = encoding
+                if encoding == 'markdown-json-fence':
+                    caveats.append("Removed one whole JSON fence for validation; raw advisory output retained")
             except ValueError as exc:
                 output_status = "invalid"
                 metadata["result_quality"] = "incomplete"

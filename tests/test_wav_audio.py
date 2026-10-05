@@ -102,7 +102,7 @@ def test_listen_defaults_are_a_single_bounded_audio_attempt(fixture):
 
 
 @pytest.mark.parametrize('extra', [
-    ['--max-calls', '2'], ['--retry', '1'], ['--max-output-tokens', '2049'],
+    ['--max-calls', '2'], ['--retry', '1'], ['--max-output-tokens', '4097'],
     ['--run-timeout', '91'], ['--timeout', '91'],
     ['--fallback-model', 'gemini-3.1-pro'], ['--fallback-policy', 'on-retryable'],
     ['--auto-route'], ['--run-timeout', 'nan'], ['--timeout', 'inf'],
