@@ -216,3 +216,6 @@ musical-quality review from correct speech transcription. [#160](https://github.
 remains a draft and [#98](https://github.com/Reedtrullz/codex-antigravity-auth/issues/98)
 remains open. Catalog and per-run acceptance fields stay conservative; the
 helper does not certify listening from a successful response.
+
+The portable `review-music` profile shares these bounded listen controls and adds
+hash-bound optional evidence and response validation. See [MUSIC_REVIEW.md](MUSIC_REVIEW.md).

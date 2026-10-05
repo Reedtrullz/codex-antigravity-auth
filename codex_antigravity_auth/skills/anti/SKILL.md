@@ -422,3 +422,11 @@ have separate limits, and blocking OS work is not forcibly preempted.
 The executable entrypoint preserves compatibility helpers while captured-source
 rendering, coverage and record publication live in owned modules. See
 [ownership and retention boundaries](OWNERSHIP.md) before changing orchestration.
+
+## Optional Gemini music review
+
+For explicit audio/music review use the standalone `review-music` profile in
+[MUSIC_REVIEW.md](MUSIC_REVIEW.md). Evidence is optional and generic; Keyspilli,
+other providers and local music models are not dependencies. Prepare with
+`--dry-run`; only an explicitly authorized `--probe-unverified-audio` run uploads.
+Model observations remain advisory and cannot grant musical acceptance.

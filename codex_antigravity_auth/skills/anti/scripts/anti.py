@@ -44,7 +44,7 @@ from anti_lib import local_policy as local_workflow
 from anti_lib.context_budget import assess as assess_context, calibration as context_calibration
 from anti_lib import checkpoints as chunk_checkpoints
 from anti_lib import media as image_attachments
-from anti_lib import wav_audio
+from anti_lib import wav_audio, music_evidence
 from anti_lib.artifacts import (
     ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
     file_reference, read_record, validate_record, coverage_has_loss,
@@ -600,11 +600,11 @@ class SpendAdmissionError(SpendRefused, AntiError):
 
 
 def run_control(args=None):
-    if getattr(args, 'command', None) == 'listen':
+    if getattr(args, 'command', None) in {'listen', 'review-music'}:
         if not getattr(args, 'audio', None) or not getattr(args, 'model', None) or getattr(args, 'local_profile', None):
             raise AntiError('listen requires explicit --audio and --model without --local-profile')
     local_settings = local_workflow.prepare_args(args)
-    if getattr(args, 'command', None) == 'listen':
+    if getattr(args, 'command', None) in {'listen', 'review-music'}:
         limits = ((getattr(args, 'max_calls', None), 1),
                   (getattr(args, 'max_output_tokens', None), 2048),
                   (getattr(args, 'run_timeout', None), 90),
@@ -649,7 +649,7 @@ def run_control(args=None):
     if audio_paths:
         if not getattr(args,'model',None) or getattr(args,'auto_route',False):
             raise AntiError('WAV consult requires an explicit --model; automatic routing is disabled')
-        if getattr(args,'command',None) not in {'consult','ask','listen'} or getattr(args,'image',None):
+        if getattr(args,'command',None) not in {'consult','ask','listen','review-music'} or getattr(args,'image',None):
             raise AntiError('WAV input is consult/ask/listen-only and cannot be combined with images')
         if not getattr(args,'probe_unverified_audio',False) and not getattr(args,'dry_run',False):
             raise AntiError('Audio backend acceptance is unverified; --probe-unverified-audio explicitly authorizes the upload')
@@ -659,7 +659,7 @@ def run_control(args=None):
         with _BUDGET_STATE_INIT_LOCK:
             if not hasattr(args, '_media_session'):
                 args._media_session = (wav_audio.capture(audio_paths,policy=data_policy(args),probe=getattr(args,'probe_unverified_audio',False),
-                                                        single_backend_attempt=getattr(args,'command',None)=='listen')
+                                                        single_backend_attempt=getattr(args,'command',None) in {'listen','review-music'})
                                        if audio_paths else image_attachments.capture(args.image,policy=data_policy(args)))
             previous = getattr(current, 'media', None)
             if previous is not None and previous is not args._media_session:
@@ -7302,7 +7302,8 @@ def capture_response_schema(args):
 
 @controlled_command
 def command_consult(args: argparse.Namespace) -> int:
-    mode = "listen" if getattr(args, "command", None) == "listen" else "consult"
+    mode = args.command if args.command in {"listen", "review-music"} else "consult"
+    bounded_audio = mode in {"listen", "review-music"}
     progress(args, f"{mode}: querying model {getattr(args, 'model', 'sonnet')}")
     auto_route_model = None
     auto_route_reason = None
@@ -7312,6 +7313,13 @@ def command_consult(args: argparse.Namespace) -> int:
     else:
         model = resolve_model(args.model, default=DEFAULT_CONSULT_MODEL)
     prompt = read_prompt(args)
+    if mode == "review-music":
+        try:
+            prompt = music_evidence.prepare(args, prompt, captured_media(args).images, CAPABILITY_REGISTRY, model)
+        except (ValueError, OSError, UnicodeError) as exc:
+            raise AntiError(str(exc)) from exc
+        if args.max_prompt_chars and len(prompt) > args.max_prompt_chars:
+            raise AntiError("music evidence exceeds prompt budget; reduce the evidence explicitly")
     caveats: list[str] = []
     
     # Pre-read files mentioned in the prompt to prevent hallucination
@@ -7341,7 +7349,7 @@ def command_consult(args: argparse.Namespace) -> int:
         print(format_dry_run(mode=mode, model=model,
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
             output_json=args.json, stage_plan=[
-                {"name": mode, "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 0 if mode == "listen" else 1},
+                {"name": mode, "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 0 if bounded_audio else 1},
             ], budget_limit=args.budget))
         if not read_files:
             print()
@@ -7362,9 +7370,9 @@ def command_consult(args: argparse.Namespace) -> int:
     usage = generation_metadata.get("usage")
     output_status = lane_output_status(text, usage, args.max_output_tokens, generation_metadata)
     last_prompt_chars = len(prompt)
-    retry_disposition = "disabled" if mode == "listen" else "not_applicable"
+    retry_disposition = "disabled" if bounded_audio else "not_applicable"
     last_call_cap = args.max_output_tokens
-    if output_status == "truncated" and mode != "listen":
+    if output_status == "truncated" and not bounded_audio:
         retry_cap = min(PANEL_LANE_RETRY_CEILING_TOKENS, args.max_output_tokens * 2)
         retry_disposition = "attempted"
         progress(
@@ -7421,6 +7429,20 @@ def command_consult(args: argparse.Namespace) -> int:
         "performedBy": None,
         "evidence": [],
     }
+    if mode == "review-music":
+        metadata["music_evidence_sha256"] = args._music_evidence_sha256
+        metadata["music_origin"] = "model-advisory"
+        metadata["musicalAcceptance"] = "not-established"
+        if output_status == "success":
+            try:
+                metadata["music_review"] = music_evidence.validate_music_review(
+                    music_evidence.read_json(text), args._music_evidence["clips"],
+                    [claim["id"] for claim in args._music_evidence["claims"]])
+            except ValueError as exc:
+                output_status = "invalid"
+                metadata["result_quality"] = "incomplete"
+                metadata["music_validation_error"] = str(exc)
+                caveats.append("Music response failed validation; retained as unvalidated advisory output")
     if auto_route_model:
         metadata["auto_route_decision"] = auto_route_model
         metadata["auto_route_reason"] = auto_route_reason
@@ -9078,9 +9100,10 @@ def build_parser() -> argparse.ArgumentParser:
     for command, aliases, description in (
         ('consult', ['ask'], 'Ask Antigravity an explicit prompt'),
         ('listen', [], 'One bounded advisory listen to explicitly selected PCM WAV clips'),
+        ('review-music', [], 'Standalone bounded Gemini music review; evidence optional'),
     ):
         consult = sub.add_parser(command, aliases=aliases, help=description)
-        listening = command == "listen"
+        listening = command in {"listen", "review-music"}
         add_gateway_args(consult, default_timeout=90.0 if listening else 120.0)
         add_generation_control_args(consult, default_run_timeout=90.0 if listening else 1800.0)
         consult.add_argument("--model", default=None, help="opus, sonnet, or full model id")
@@ -9096,8 +9119,10 @@ def build_parser() -> argparse.ArgumentParser:
         consult.add_argument("prompt_parts", nargs="*", help="Positional prompt text")
         consult.add_argument('--audio',action='append',help='Explicit local PCM WAV for advisory consult; at most two files,2MiB each,30seconds each')
         consult.add_argument('--probe-unverified-audio',action='store_true',help='Explicitly authorize WAV upload to an advertised experimental Gemini route; does not establish verified listening')
+        if command == "review-music":
+            consult.add_argument("--evidence-json", help="Portable bounded music evidence; clip hashes must match attached WAVs")
         consult.set_defaults(func=command_consult)
-        if command == 'listen':
+        if listening:
             consult.set_defaults(max_calls=1, retry=0, max_output_tokens=2048,
                                  run_timeout=90.0, timeout=90.0, no_pre_read=True,
                                  fallback_policy='never')
