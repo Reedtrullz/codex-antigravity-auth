@@ -178,4 +178,7 @@ def test_compact_response_limits_enforced_one_attempt(fixture,monkeypatch,capsys
     output=json.loads(capsys.readouterr().out)
     assert output['metadata']['music_review_profile']=='compact-v1'
     assert output['metadata']['retry_disposition']=='disabled'
+    assert output['metadata']['music_request_configuration']['maxOutputTokens']==2048
+    assert output['metadata']['music_request_configuration']['timeoutSeconds']==90
+    assert output['metadata']['music_request_configuration']['helperSha256']
     if invalid: assert 'music_review' not in output['metadata']

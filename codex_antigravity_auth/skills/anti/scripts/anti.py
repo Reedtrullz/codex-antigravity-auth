@@ -7434,6 +7434,12 @@ def command_consult(args: argparse.Namespace) -> int:
         metadata["music_origin"] = "model-advisory"
         metadata["music_review_profile"] = "compact-v1" if getattr(args, "compact_review", False) else "standard-v1"
         metadata["musicalAcceptance"] = "not-established"
+        if getattr(args, "compact_review", False):
+            metadata["music_request_configuration"] = {
+                "maxOutputTokens": args.max_output_tokens, "timeoutSeconds": args.timeout,
+                "helperSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                "responseSchemaSha256": hashlib.sha256(args.response_schema.encode('utf-8')).hexdigest(),
+            }
         if output_status == "success":
             try:
                 review, encoding = music_evidence.parse_review_response(
