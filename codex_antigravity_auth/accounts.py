@@ -10,6 +10,7 @@ from .account_state import AccountState, scoped_cooldown_expiry
 from .oauth import OAuthRefreshError, refresh_access_token, token_expires_in_seconds
 from .redaction import redact_secret_text
 from .process_logs import account_ref
+from .account_binding import GATEWAY_INSTANCE, AccountBinding, canonical_sha256
 from .response_protocol import AttemptOutcome
 from .storage import (
     accounts_json_path_read_only,
@@ -157,6 +158,70 @@ class AccountManager:
     def get_accounts(self) -> list[dict[str, Any]]:
         with self._lock:
             return load_accounts().get("accounts", [])
+
+    def _binding_inventory_data(self, data: dict[str, Any], family: str) -> dict[str, Any]:
+        snapshot = copy.deepcopy(data)
+        owner = AccountState(snapshot, now=time.time, in_flight=copy.deepcopy(self._in_flight))
+        selection = owner.selection_snapshot(family)
+        rows = []
+        for item in selection["accounts"]:
+            account = snapshot.get("accounts", [])[item["index"]]
+            email = str(account.get("email", ""))
+            token_expires_at = self._normalize_expires_at(account.get("expiresAt"))
+            token_eligible = bool(account.get("accessToken")) and token_expires_at >= time.time() + 300
+            rows.append({
+                "accountRef": account_ref(email),
+                "eligible": not item["exclusion_reasons"] and token_eligible,
+                "tokenExpiresAt": token_expires_at,
+                "inFlight": int(self._in_flight.get(email, 0)),
+                "exclusionReasons": list(item["exclusion_reasons"]),
+            })
+        payload = {
+            "schemaVersion": 1,
+            "gatewayInstance": GATEWAY_INSTANCE,
+            "family": family,
+            "accounts": rows,
+        }
+        references = [row["accountRef"] for row in rows]
+        if len(references) != len(set(references)):
+            raise ValueError("duplicate account binding reference")
+        payload["inventorySha256"] = canonical_sha256(payload)
+        return payload
+
+    def binding_inventory(self, model: str) -> dict[str, Any]:
+        family = self._model_family(model)
+        if family != "gemini":
+            raise ValueError("account binding requires a Gemini route")
+        with self._lock:
+            return self._binding_inventory_data(load_accounts(), family)
+
+    def acquire_bound_account(self, model: str, binding: AccountBinding) -> dict[str, Any]:
+        family = self._model_family(model)
+        if family != "gemini":
+            raise ValueError("account binding requires a Gemini route")
+        if not isinstance(binding, AccountBinding):
+            binding = AccountBinding.from_mapping(binding)
+        if binding.gatewayInstance != GATEWAY_INSTANCE:
+            raise ValueError("stale gateway instance for account binding")
+        with self._lock:
+            data = load_accounts()
+            current = self._binding_inventory_data(data, family)
+            if current["inventorySha256"] != binding.inventorySha256:
+                raise ValueError("stale account binding inventory")
+            row = next((item for item in current["accounts"] if item["accountRef"] == binding.accountRef), None)
+            if row is None or not row["eligible"] or row["inFlight"]:
+                raise ValueError("bound account is not eligible for an exclusive lease")
+            if row["tokenExpiresAt"] < time.time() + 300:
+                raise ValueError("bound account token is expiring too soon")
+            account = next((item for item in data.get("accounts", []) if account_ref(item.get("email", "")) == binding.accountRef), None)
+            if account is None:
+                raise ValueError("bound account is missing")
+            email = str(account.get("email", ""))
+            self._in_flight[email] = self._in_flight.get(email, 0) + 1
+            selected = copy.deepcopy(account)
+            if not selected.get("fingerprint"):
+                selected["fingerprint"] = FINGERPRINT
+            return selected
 
     @classmethod
     def _same_credentials(cls, account: dict, snapshot: dict) -> bool:
