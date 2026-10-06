@@ -298,12 +298,13 @@ def test_observed_terminal_is_not_replaced_when_only_trailing_diagnostics_stall(
     asyncio.run(scenario())
 
 
-def stream_clients(monkeypatch, route, *, repeated=False, slow_connect=False):
+def stream_clients(monkeypatch, route, *, repeated=False, slow_connect=False, on_first_read=None):
     clients, contexts = [], []
     class Response:
         status_code = 200
         headers = {}
         async def aiter_bytes(self):
+            if on_first_read is not None: on_first_read()
             index = 0
             while True:
                 if route == "google":
@@ -336,13 +337,31 @@ def stream_clients(monkeypatch, route, *, repeated=False, slow_connect=False):
 
 @pytest.mark.parametrize("route", ROUTES)
 @pytest.mark.parametrize("policy", ["idle", "total"])
-def test_route_stream_timeouts_preserve_partial_output_and_close_owned_resources(monkeypatch, setup_route, route, policy):
-    state = setup_route(route, timeout=0.2)
+@pytest.mark.parametrize("preparation_delay", [0, 0.15])
+def test_route_stream_timeouts_preserve_partial_output_and_close_owned_resources(monkeypatch, setup_route, route, policy, preparation_delay):
+    state = setup_route(route, timeout=5)
     monkeypatch.setattr(server, "STREAM_IDLE_TIMEOUT_SECONDS", 0.04 if policy == "idle" else 0.3)
-    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 1.0 if policy == "idle" else 0.1)
-    clients, contexts = stream_clients(monkeypatch, route, repeated=policy == "total")
+    # This fixture tests an established stream. Preparation expiry has separate
+    # tests; arm its short fault-injection clock only after the fake first read.
+    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 5)
+    factory = server._new_request_budget
+    active = {}
+    def capture_budget(request):
+        budget = factory(request)
+        active['budget'] = budget
+        return budget
+    monkeypatch.setattr(server, '_new_request_budget', capture_budget)
+    def arm_stream_deadline():
+        active['budget'].deadline = time.monotonic() + (1 if policy == 'idle' else 0.1)
+    clients, contexts = stream_clients(monkeypatch, route, repeated=policy == "total", on_first_read=arm_stream_deadline)
     async def scenario():
-        response = await server.create_response(Request(route, stream=True))
+        request = Request(route, stream=True)
+        read_json = request.json
+        async def delayed_json():
+            await asyncio.sleep(preparation_delay)
+            return await read_json()
+        request.json = delayed_json
+        response = await server.create_response(request)
         return [chunk async for chunk in response.body_iterator]
     chunks = asyncio.run(scenario())
     assert clients and all(client.closed == 1 for client in clients)
