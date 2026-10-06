@@ -1499,6 +1499,7 @@ def request_json(
     payload: dict[str, Any] | None = None,
     timeout: float = 10.0,
     token_env: str = DEFAULT_TOKEN_ENV,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     control = CURRENT_RUN.get()
     if control is not None:
@@ -1510,6 +1511,8 @@ def request_json(
         raise AntiError(str(exc)) from exc
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {"Accept": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
     if body is not None:
         headers["Content-Type"] = "application/json"
     token = token_from_env(token_env)
@@ -1557,6 +1560,52 @@ def request_json(
         elif retry_after_header is not None:
             decoded["_retry_after_unsupported"] = True
     return status, decoded
+
+
+def load_account_binding_file(path: str) -> str:
+    file_path = Path(path)
+    if not file_path.is_absolute() or file_path.is_symlink() or not file_path.is_file() or file_path.stat().st_size > 2048:
+        raise AntiError('account binding file must be an absolute bounded local JSON file')
+    raw = file_path.read_bytes()
+    if len(raw) > 2048:
+        raise AntiError('account binding file exceeds 2048 bytes')
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate binding field')
+            result[key] = value
+        return result
+    try:
+        value = json.loads(raw, object_pairs_hook=unique, parse_constant=lambda item: (_ for _ in ()).throw(ValueError('nonfinite binding value')))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise AntiError('account binding file must contain bounded JSON') from exc
+    if not isinstance(value, dict) or set(value) != {'schemaVersion', 'gatewayInstance', 'accountRef', 'inventorySha256'} or value.get('schemaVersion') != 1:
+        raise AntiError('account binding fields are not exact')
+    if not re.fullmatch(r'[0-9a-f]{32}', str(value.get('gatewayInstance', ''))):
+        raise AntiError('account binding gateway instance is invalid')
+    if not re.fullmatch(r'acct_[0-9a-f]{12}', str(value.get('accountRef', ''))):
+        raise AntiError('account binding account reference is invalid')
+    if not re.fullmatch(r'[0-9a-f]{64}', str(value.get('inventorySha256', ''))):
+        raise AntiError('account binding inventory hash is invalid')
+    return json.dumps(value, sort_keys=True, separators=(',', ':'))
+
+
+def verify_gateway_binding(args, model: str, binding_header: str) -> dict[str, Any]:
+    binding = json.loads(binding_header)
+    url = f'{normalize_base_url(args.base_url)}/account-bindings?model={urllib.parse.quote(model, safe="")}'
+    status, payload = request_json('GET', url, timeout=args.timeout, token_env=args.gateway_token_env)
+    if status != 200:
+        raise AntiError(f'account binding eligibility read returned HTTP {status}')
+    if not isinstance(payload, dict) or payload.get('gatewayInstance') != binding.get('gatewayInstance') or payload.get('inventorySha256') != binding.get('inventorySha256'):
+        raise AntiError('stale gateway account binding inventory')
+    rows = payload.get('accounts')
+    if not isinstance(rows, list):
+        raise AntiError('gateway account binding inventory is malformed')
+    row = next((item for item in rows if isinstance(item, dict) and item.get('accountRef') == binding.get('accountRef')), None)
+    if row is None or row.get('eligible') is not True or row.get('inFlight'):
+        raise AntiError('selected gateway account is not eligible for a bound request')
+    return payload
 
 
 def model_ids_from_catalog(payload: dict[str, Any]) -> set[str]:
@@ -1823,7 +1872,10 @@ def post_response(
     budget_args: argparse.Namespace | None = None,
     budget_purpose: str | None = None,
     policy_fallback: bool = False,
+    account_binding_header: str | None = None,
 ) -> ResponseText:
+    if account_binding_header:
+        retries = 0
     control = run_control(budget_args)
 
     policy_submit(budget_args, model=model, prompt=prompt, base_url=base_url, fallback=policy_fallback)
@@ -1903,9 +1955,14 @@ def post_response(
                     else: attempt_metadata.pop(key, None)
                 payload['metadata'] = attempt_metadata
                 with image_attachments.submission_context(policy_fallback):
-                    status, decoded = request_json(
-                        "POST", response_url, payload=payload, timeout=attempt_timeout, token_env=token_env,
-                    )
+                    request_kwargs = {
+                        "payload": payload,
+                        "timeout": attempt_timeout,
+                        "token_env": token_env,
+                    }
+                    if account_binding_header:
+                        request_kwargs["extra_headers"] = {"X-Anti-Account-Binding": account_binding_header}
+                    status, decoded = request_json("POST", response_url, **request_kwargs)
                 if getattr(media,'kind',None)=='audio' and (status!=200 or decoded.get('status')=='failed'):
                     decoded={'detail':'Audio probe failed; backend listening remains unverified','status':'failed','error':{'message':'Audio probe failed; backend listening remains unverified'},
                              **{key:decoded[key] for key in ('_retry_after_seconds','_retry_after_unsupported') if key in decoded}}
@@ -2086,6 +2143,8 @@ def generate_with_fallback(
     fallback_policy = getattr(args, "fallback_policy", "never")
     if fallback_policy not in FALLBACK_POLICIES:
         raise AntiError(f"unsupported fallback policy: {fallback_policy}")
+    if getattr(args, "_account_binding_header", None):
+        fallback_policy = "never"
 
     if getattr(run_control(args), 'local_policy', None) is not None:
         if model_ids is None:
@@ -2185,6 +2244,7 @@ def generate_with_fallback(
                 run_id=getattr(args, "run_id", None),
                 budget_args=args,
                 budget_purpose=purpose,
+                account_binding_header=getattr(args, "_account_binding_header", None),
             )
         text = str(raw_text)
         call_metadata = response_call_metadata(raw_text)
@@ -2226,6 +2286,7 @@ def generate_with_fallback(
                     run_id=getattr(args, "run_id", None),
                     budget_args=args,
                     budget_purpose=f"{purpose} fallback",
+                    account_binding_header=getattr(args, "_account_binding_header", None),
                     **({"policy_fallback": True} if data_policy(args) or captured_media(args) else {}),
                 )
         except AntiError as fallback_exc:
@@ -7334,6 +7395,13 @@ def command_consult(args: argparse.Namespace) -> int:
     if read_files:
         progress(args, f"consult: pre-read {len(read_files)} file(s) for context")
     
+    binding_path = getattr(args, "account_binding_json", None)
+    if binding_path:
+        args._account_binding_header = load_account_binding_file(binding_path)
+        args._account_binding_gateway_instance = json.loads(args._account_binding_header)["gatewayInstance"]
+        args._account_binding_config_sha256 = hashlib.sha256(args._account_binding_header.encode("utf-8")).hexdigest()
+        if not args.dry_run:
+            verify_gateway_binding(args, model, args._account_binding_header)
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
     schema_text = capture_response_schema(args)
     if schema_text is not None:
@@ -7346,10 +7414,13 @@ def command_consult(args: argparse.Namespace) -> int:
     if policy_preflight(args, prompt, [(model, "primary")]):
         return 0
     if args.dry_run:
+        binding_dry_run = None
+        if binding_path:
+            binding_dry_run = {"configured": True, "accountRef": "[redacted]", "inventorySha256": "[redacted]"}
         print(format_dry_run(mode=mode, model=model,
             prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
             output_json=args.json, stage_plan=[
-                {"name": mode, "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 0 if bounded_audio else 1},
+                {"name": mode, "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 0 if bounded_audio else 1, **({"accountBinding": binding_dry_run} if binding_dry_run else {})},
             ], budget_limit=args.budget))
         if not read_files:
             print()
@@ -7440,6 +7511,9 @@ def command_consult(args: argparse.Namespace) -> int:
                 "helperSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 "responseSchemaSha256": hashlib.sha256(args.response_schema.encode('utf-8')).hexdigest(),
             }
+        if getattr(args, "_account_binding_header", None):
+            metadata["account_binding_config_sha256"] = args._account_binding_config_sha256
+            metadata["account_binding_gateway_instance"] = args._account_binding_gateway_instance
         if output_status == "success":
             try:
                 review, encoding = music_evidence.parse_review_response(
@@ -9134,6 +9208,7 @@ def build_parser() -> argparse.ArgumentParser:
         if command == "review-music":
             consult.add_argument("--compact-review", action="store_true", help="One clip/claim, at most one bounded advisory finding")
             consult.add_argument("--evidence-json", help="Portable bounded music evidence; clip hashes must match attached WAVs")
+            consult.add_argument("--account-binding-json", help="Private instance-scoped account binding JSON; never printed or uploaded")
         consult.set_defaults(func=command_consult)
         if listening:
             consult.set_defaults(max_calls=1, retry=0, max_output_tokens=2048,
