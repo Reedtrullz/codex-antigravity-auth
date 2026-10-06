@@ -45,3 +45,35 @@ def test_review_refuses_measurement_and_outside_time():
     with pytest.raises(ValueError): music.validate_music_review(value,evidence()['clips'],['c'])
     value=review();value['findings'][0]['claimIds']=['unknown']
     with pytest.raises(ValueError): music.validate_music_review(value,evidence()['clips'],['c'])
+
+
+def test_compact_requires_one_clip_and_one_claim_and_preserves_uncertainty():
+    prompt = music.build_compact_music_prompt(evidence(), 'Explain this estimate')
+    assert 'one finding' in prompt and 'untrusted data' in prompt
+    assert 'not independently heard' in prompt
+    assert music.validate_compact_music_review(review(), evidence()['clips'], ['c']) == review()
+    for key in ('clips', 'claims'):
+        value=evidence();value[key]=[]
+        with pytest.raises(ValueError): music.build_compact_music_prompt(value,'Review')
+        value=evidence();value[key].append({**value[key][0],'id':'extra'})
+        with pytest.raises(ValueError): music.build_compact_music_prompt(value,'Review')
+
+
+@pytest.mark.parametrize('change', ['findings','description','uncertainty','limitations','long-limitation','no-reference'])
+def test_compact_rejects_unbounded_or_unlinked_review_but_legacy_remains_valid(change):
+    value=review()
+    if change=='findings': value['findings'] *= 2
+    if change in ('description','uncertainty'): value['findings'][0][change]='x'*501
+    if change=='limitations': value['limitations']=['limitation']*5
+    if change=='long-limitation': value['limitations']=['x'*241]
+    if change=='no-reference': value['findings'][0]['claimIds']=[]
+    assert music.validate_music_review(value,evidence()['clips'],['c']) == value
+    with pytest.raises(ValueError): music.validate_compact_music_review(value,evidence()['clips'],['c'])
+
+
+def test_compact_fence_and_bare_response_use_strict_same_limits():
+    import json
+    for prefix,suffix,encoding in [('', '', 'json'),('```json\n','\n```','markdown-json-fence')]:
+        parsed,actual=music.parse_review_response(prefix+json.dumps(review())+suffix,evidence()['clips'],['c'],compact=True)
+        assert parsed==review() and actual==encoding
+        with pytest.raises(ValueError):music.parse_review_response(prefix+'{"broken":'+suffix,evidence()['clips'],['c'],compact=True)

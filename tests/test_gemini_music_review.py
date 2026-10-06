@@ -1,6 +1,12 @@
 import json
 import pytest
-from test_wav_audio import fixture as fixture, bridge, endpoint, response, upstream
+import importlib.util
+from pathlib import Path
+# File-bound fixture loading also works in the installed importlib-mode suite.
+_wav_spec = importlib.util.spec_from_file_location('anti_music_wav_fixture', Path(__file__).with_name('test_wav_audio.py'))
+_wav = importlib.util.module_from_spec(_wav_spec)
+_wav_spec.loader.exec_module(_wav)
+fixture, bridge, endpoint, response, upstream = (_wav.fixture, _wav.bridge, _wav.endpoint, _wav.response, _wav.upstream)
 
 
 def arguments(first, *extra):
@@ -141,3 +147,35 @@ def test_explicit_larger_music_cap_reaches_google_in_one_attempt(fixture, monkey
     value = json.loads(capsys.readouterr().out)
     assert value['metadata']['retry_disposition'] == 'disabled'
     assert value['metadata']['musicalAcceptance'] == 'not-established'
+
+
+def compact_evidence(first,tmp_path):
+    import hashlib
+    bundle={'schemaVersion':1,'kind':'anti-music-evidence','clips':[{'id':'A','sha256':hashlib.sha256(first.read_bytes()).hexdigest(),'durationSeconds':1}],
+            'claims':[{'id':'c','clipId':'A','startSeconds':0,'endSeconds':1,'text':'Measured synthetic control','origin':'measurement','uncertainty':'No musical qualification'}],
+            'context':{'sourceAuthority':'unknown','allowedDifferences':[]},'limitations':['No listening']}
+    path=tmp_path/'compact.json';path.write_text(json.dumps(bundle));return path
+
+
+def test_compact_dry_run_and_missing_claim_refusal_zero_dispatch(fixture,monkeypatch,capsys,tmp_path):
+    anti,_,_,first,_=fixture;calls=bridge(monkeypatch,anti)
+    path=compact_evidence(first,tmp_path)
+    assert anti.main(arguments(first,'--compact-review','--evidence-json',str(path),'--dry-run'))==0
+    assert calls==[]
+    assert 'one finding' in capsys.readouterr().out
+    assert anti.main(arguments(first,'--compact-review')) != 0
+    assert calls==[]
+
+
+@pytest.mark.parametrize('invalid', [False,True])
+def test_compact_response_limits_enforced_one_attempt(fixture,monkeypatch,capsys,tmp_path,invalid):
+    anti,_,_,first,_=fixture;bridge(monkeypatch,anti);path=compact_evidence(first,tmp_path)
+    value={**result(),'findings':[{'clipId':'A','startSeconds':0,'endSeconds':1,'description':'x'*(501 if invalid else 10),'origin':'model-advisory','claimIds':['c'],'uncertainty':'Supplied evidence, not independently heard'}]}
+    with upstream(response(json.dumps(value))) as (base,seen):
+        endpoint(monkeypatch,base)
+        assert anti.main(arguments(first,'--compact-review','--evidence-json',str(path))) == (1 if invalid else 0)
+        assert len(seen)==1
+    output=json.loads(capsys.readouterr().out)
+    assert output['metadata']['music_review_profile']=='compact-v1'
+    assert output['metadata']['retry_disposition']=='disabled'
+    if invalid: assert 'music_review' not in output['metadata']

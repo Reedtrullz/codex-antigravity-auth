@@ -334,3 +334,14 @@ def test_expiry_control_domain_is_explicit_and_fractional_boundary_is_covered(da
         assert 'finite Python int/float' in case['contract'] and 'no NaN, infinities or custom comparison types' in case['prompt']
         assert any(probe['args']==[0.5,0.5] and probe['expected'] is True for probe in case['probes'])
         assert all(type(v) in (int,float) and math.isfinite(v) for probe in case['probes'] for v in probe['args'])
+
+
+def test_shipped_corpus_works_through_installed_system_path_alias(tmp_path,monkeypatch):
+    # macOS /var points at /private/var. Resolve our own shipped module location,
+    # while retaining no-follow reads for caller-supplied replay/annotation files.
+    alias=tmp_path/'installed-alias'
+    alias.symlink_to(Path(b.__file__).resolve().parent,target_is_directory=True)
+    monkeypatch.setattr(b,'__file__',str(alias/'benchmark.py'))
+    value=b.corpus()
+    assert value['schemaVersion']==1
+    assert {case['id'] for case in value['cases']} == {'expiry-boundary','utf8-budget','false-default','expiry-equivalent','utf8-equivalent'}

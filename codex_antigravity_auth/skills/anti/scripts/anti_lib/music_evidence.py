@@ -117,7 +117,30 @@ def validate_music_review(value, clips, claim_ids=()):
     return read_json(json.dumps(value, allow_nan=False, sort_keys=True))
 
 
-def parse_review_response(text, clips, claim_ids=()):
+
+def build_compact_music_prompt(evidence, objective):
+    bundle = parse_music_evidence(evidence)
+    require(len(bundle['clips']) == 1 and len(bundle['claims']) == 1,
+            'compact review requires exactly one clip and one claim')
+    return (build_music_prompt(bundle, objective) +
+            '\nCompact profile: at most one finding tied to the one supplied claim. '
+            'Description and uncertainty each at most 500 characters; at most four '
+            'limitations of 240 characters each. A supplied measurement is not independently heard. '
+            'Retain unknown source authority and supplied uncertainty. Empty findings do not approve music.')
+
+
+def validate_compact_music_review(value, clips, claim_ids=()):
+    require(len(clips) == 1 and len(claim_ids) == 1, 'compact review requires one clip and one claim')
+    result = validate_music_review(value, clips, claim_ids)
+    require(len(result['findings']) <= 1, 'compact review permits at most one finding')
+    for row in result['findings']:
+        string(row['description'], 500); string(row['uncertainty'], 500)
+        require(row['claimIds'] == list(claim_ids), 'compact finding must cite the supplied claim')
+    require(len(result['limitations']) <= 4, 'compact review permits at most four limitations')
+    for text in result['limitations']: string(text, 240)
+    return result
+
+def parse_review_response(text, clips, claim_ids=(), *, compact=False):
     """Accept one complete JSON document, optionally in one whole JSON fence.
 
     This only normalizes presentation. It does not repair JSON, select a
@@ -132,7 +155,8 @@ def parse_review_response(text, clips, claim_ids=()):
     if fence is not None:
         payload = fence.group(1)
         encoding = 'markdown-json-fence'
-    return validate_music_review(read_json(payload), clips, claim_ids), encoding
+    validator = validate_compact_music_review if compact else validate_music_review
+    return validator(read_json(payload), clips, claim_ids), encoding
 
 
 def prepare(args, objective, attachments, registry, model):
@@ -156,6 +180,9 @@ def prepare(args, objective, attachments, registry, model):
                     'stale audio/evidence identity')
     args._music_evidence = parse_music_evidence(bundle)
     args._music_evidence_sha256 = hashlib.sha256(json.dumps(bundle,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-    schema = Path(__file__).resolve().parents[2] / 'schemas/music-review-v1.json'
+    compact = bool(getattr(args, 'compact_review', False))
+    prompt = build_compact_music_prompt(bundle, objective) if compact else build_music_prompt(bundle, objective)
+    schema_name = 'music-review-compact-v1.json' if compact else 'music-review-v1.json'
+    schema = Path(__file__).resolve().parents[2] / 'schemas' / schema_name
     args.response_schema = schema.read_text(encoding='utf-8')
-    return build_music_prompt(bundle, objective)
+    return prompt

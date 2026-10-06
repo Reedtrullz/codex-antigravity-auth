@@ -21,6 +21,7 @@
     "schemas/benchmark-replay-v1.json",
     "schemas/benchmark-report-v1.json",
     "schemas/music-evidence-v1.json",
+    "schemas/music-review-compact-v1.json",
     "schemas/music-review-v1.json",
     "schemas/raw-lane-v1.json",
     "schemas/review-report-v1.json",

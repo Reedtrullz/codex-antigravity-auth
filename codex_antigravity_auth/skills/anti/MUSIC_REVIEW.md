@@ -44,3 +44,23 @@ still pass independently. A bounded diagnostic run on 5 October found that Pro
 completed a repeated-note review at 4,096 tokens but reported five attacks on a
 four-attack capture. Neither completion nor format normalization qualifies a
 model for musical approval. Use narrower objectives and retain uncertainty.
+
+## Compact one-claim profile
+
+Use `review-music --compact-review --audio CLIP.wav --evidence-json ONE_CLAIM.json`
+with an explicitly selected eligible Antigravity Gemini model. Compact mode
+requires exactly one attached clip and one evidence claim. It returns at most
+one advisory finding citing that claim, descriptions/uncertainties of at most
+500 characters and at most four limitations of 240 characters each. Existing
+one-attempt, timeout, token, upload and route controls still apply. Defaults
+remain the standard profile; compact mode adds no dependency on Keyspilli.
+
+A supplied measured claim is evidence, not independent Gemini hearing. Unknown
+source authority and uncertainty remain explicit. Empty findings never approve
+music. Invalid or truncated output is retained as partial with no retry; the
+result records `music_review_profile` and its response-schema/evidence digests.
+Dry-run prepares the prompt/schema without contacting a provider.
+
+Character limits are enforced by the local result validator. The provider
+response schema uses only the gateway's supported native constraints; it does
+not promise provider-side string-length enforcement.

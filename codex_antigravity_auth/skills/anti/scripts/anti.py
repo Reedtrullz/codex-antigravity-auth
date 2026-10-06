@@ -7432,12 +7432,14 @@ def command_consult(args: argparse.Namespace) -> int:
     if mode == "review-music":
         metadata["music_evidence_sha256"] = args._music_evidence_sha256
         metadata["music_origin"] = "model-advisory"
+        metadata["music_review_profile"] = "compact-v1" if getattr(args, "compact_review", False) else "standard-v1"
         metadata["musicalAcceptance"] = "not-established"
         if output_status == "success":
             try:
                 review, encoding = music_evidence.parse_review_response(
                     text, args._music_evidence["clips"],
-                    [claim["id"] for claim in args._music_evidence["claims"]])
+                    [claim["id"] for claim in args._music_evidence["claims"]],
+                    compact=getattr(args, "compact_review", False))
                 metadata["music_review"] = review
                 metadata["music_response_encoding"] = encoding
                 if encoding == 'markdown-json-fence':
@@ -9124,6 +9126,7 @@ def build_parser() -> argparse.ArgumentParser:
         consult.add_argument('--audio',action='append',help='Explicit local PCM WAV for advisory consult; at most two files,2MiB each,30seconds each')
         consult.add_argument('--probe-unverified-audio',action='store_true',help='Explicitly authorize WAV upload to an advertised experimental Gemini route; does not establish verified listening')
         if command == "review-music":
+            consult.add_argument("--compact-review", action="store_true", help="One clip/claim, at most one bounded advisory finding")
             consult.add_argument("--evidence-json", help="Portable bounded music evidence; clip hashes must match attached WAVs")
         consult.set_defaults(func=command_consult)
         if listening:

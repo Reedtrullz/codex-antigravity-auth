@@ -1,0 +1,98 @@
+{
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "enum": [
+        1
+      ]
+    },
+    "kind": {
+      "enum": [
+        "anti-music-review"
+      ]
+    },
+    "comparisonStatus": {
+      "enum": [
+        "consistent",
+        "discrepancy",
+        "uncertain",
+        "not-compared"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "clipId": {
+            "type": "string"
+          },
+          "startSeconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 30
+          },
+          "endSeconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 30
+          },
+          "description": {
+            "type": "string",
+            "description": "At most 500 characters; enforced by the local compact validator."
+          },
+          "origin": {
+            "enum": [
+              "model-advisory"
+            ]
+          },
+          "claimIds": {
+            "type": "array",
+            "maxItems": 1,
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "uncertainty": {
+            "type": "string",
+            "description": "At most 500 characters; enforced by the local compact validator."
+          }
+        },
+        "required": [
+          "clipId",
+          "startSeconds",
+          "endSeconds",
+          "description",
+          "origin",
+          "claimIds",
+          "uncertainty"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "string",
+        "description": "At most 240 characters; enforced by the local compact validator."
+      }
+    },
+    "musicalAcceptance": {
+      "enum": [
+        "not-established"
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "kind",
+    "comparisonStatus",
+    "findings",
+    "limitations",
+    "musicalAcceptance"
+  ],
+  "additionalProperties": false
+}
