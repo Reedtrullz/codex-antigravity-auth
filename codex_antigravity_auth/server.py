@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
 from .accounts import AccountManager, AccountRefreshInProgress, classify_backend_status, is_validation_required_error
+from .account_binding import parse_account_binding_header, validate_binding_route
 from .account_state import scoped_cooldown_expiry
 from .byok import (
     PROVIDER_AUTH_MODE_API_KEY,
@@ -291,18 +292,19 @@ def request_uses_loopback_host(request: Request, client_host: str | None = None)
 
 
 def mutating_json_request_guard(request: Request) -> JSONResponse | None:
-    if request.method.upper() not in {"POST", "PUT", "PATCH"}:
-        return None
-    if request.url.path not in MUTATING_JSON_PATHS:
+    mutating_json = request.method.upper() in {"POST", "PUT", "PATCH"} and request.url.path in MUTATING_JSON_PATHS
+    sensitive_read = request.method.upper() == "GET" and request.url.path == "/v1/account-bindings"
+    if not mutating_json and not sensitive_read:
         return None
 
-    content_type = request.headers.get("content-type", "")
-    media_type = content_type.split(";", 1)[0].strip().lower()
-    if media_type != "application/json":
-        return JSONResponse(
-            status_code=415,
-            content={"detail": "Mutating gateway requests must use Content-Type: application/json."},
-        )
+    if mutating_json:
+        content_type = request.headers.get("content-type", "")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type != "application/json":
+            return JSONResponse(
+                status_code=415,
+                content={"detail": "Mutating gateway requests must use Content-Type: application/json."},
+            )
 
     if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
         return JSONResponse(status_code=403, content={"detail": "Cross-site browser requests are not allowed."})
@@ -367,6 +369,10 @@ async def select_active_account_for_request(model: str) -> dict | None:
 
 async def acquire_active_account_for_request(model: str) -> dict | None:
     return await run_in_threadpool(account_manager.acquire_account, model)
+
+
+async def acquire_bound_account_for_request(model: str, binding) -> dict | None:
+    return await run_in_threadpool(account_manager.acquire_bound_account, model, binding)
 
 
 async def release_account_for_request(email: str | None) -> None:
@@ -1007,6 +1013,14 @@ async def list_models():
     }
 
 
+@app.get("/v1/account-bindings")
+async def account_bindings(model: str):
+    try:
+        return await run_in_threadpool(account_manager.binding_inventory, model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=safe_error_detail(exc)) from exc
+
+
 @app.get("/health")
 async def health(request: Request):
     # The middleware applies the same local/authenticated boundary to every route.
@@ -1607,6 +1621,22 @@ async def _create_response(request: Request, budget: RequestBudget):
     unified_enabled = is_unified_mode_enabled()
     unified_route = await budget.sync(classify_route, model, unified_enabled=unified_enabled)
     budget.context.update(model=model, route="openai" if unified_route.startswith("openai") else "google" if unified_route == "antigravity" else unified_route, stream=stream)
+    account_binding = None
+    binding_header = request.headers.get("X-Anti-Account-Binding")
+    if binding_header:
+        try:
+            account_binding = parse_account_binding_header(binding_header)
+        except ValueError as exc:
+            await log_request("failed", model=model, route=unified_route, stream=stream, http_status=400,
+                              error_class="invalid_account_binding", error="Invalid account binding header")
+            raise HTTPException(status_code=400, detail="Invalid account binding header") from exc
+        try:
+            binding_family = await budget.sync(native_model_family, model) if unified_route == "antigravity" else None
+            validate_binding_route(unified_route, binding_family)
+        except ValueError as exc:
+            await log_request("failed", model=model, route=unified_route, stream=stream, http_status=400,
+                              error_class="unsupported_binding_route", error="Account binding requires a native Antigravity Gemini route")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if audio_request and (unified_route!='antigravity' or not native_model_capabilities(model).pcm_wav_probe):
         await log_request('failed',model=model,route=unified_route,stream=stream,http_status=400,
                           error_class='unsupported_audio_route',attempt_count=0)
@@ -2056,13 +2086,21 @@ async def _create_response(request: Request, budget: RequestBudget):
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await check_context()
-    schedule_refresh_accounts_ahead()
+    if account_binding is None:
+        schedule_refresh_accounts_ahead()
 
     # 1. Select account automatically from pool
     try:
         account = await run_bounded_operation(
-            lambda: acquire_active_account_for_request(model), release_late_result=True,
+            (lambda: acquire_bound_account_for_request(model, account_binding))
+            if account_binding is not None else
+            (lambda: acquire_active_account_for_request(model)),
+            release_late_result=True,
         )
+    except ValueError as exc:
+        await log_request("failed", model=model, route="google", family=family, stream=stream,
+                          http_status=400, error_class="binding_refused", error="Account binding refused")
+        raise HTTPException(status_code=400, detail=safe_error_detail(exc)) from exc
     except ClientDisconnect:
         await best_effort_diagnostic(log_request(
             "cancelled",
@@ -2180,7 +2218,7 @@ async def _create_response(request: Request, budget: RequestBudget):
             res = await request_backend_with_boundary(response_account)
             # Audio is an explicitly bounded upload. Do not silently submit the
             # same captured recording again through another account.
-            if not res and not audio_request:
+            if not res and not audio_request and account_binding is None:
                 new_account = await run_bounded_operation(
                     lambda: acquire_active_account_for_request(model),
                     release_late_result=True,
@@ -2255,7 +2293,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     error_class="validation_required" if is_validation else None,
                 )
                 new_account = None
-                if not audio_request:
+                if not audio_request and account_binding is None:
                     new_account = await run_bounded_operation(
                         lambda: acquire_active_account_for_request(model),
                         release_late_result=True,
@@ -2815,7 +2853,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     stream_terminal_logged = True
                     return
 
-            if attempt_num == 0 and not adapter.visible_output_started:
+            if attempt_num == 0 and not adapter.visible_output_started and account_binding is None:
                 try:
                     rotated = await run_bounded_operation(
                         lambda: acquire_active_account_for_request(model),

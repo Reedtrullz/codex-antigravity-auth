@@ -66,11 +66,15 @@ def fixture(monkeypatch,tmp_path):
 def bridge(monkeypatch,anti):
     client=TestClient(server.app);seen=[]
     def opened(request,*,timeout,payload=None,body=None):
-        path=urlsplit(request.full_url).path
-        assert path in {'/v1/models','/v1/responses'}
+        parsed=urlsplit(request.full_url)
+        path=parsed.path
+        assert path in {'/v1/models','/v1/responses','/v1/account-bindings'}
         anti.transport_entry_timeout(request.get_method(),timeout,payload=payload,body=body,url=request.full_url)
         seen.append((request.get_method(),path))
-        response=client.request(request.get_method(),path,content=body,headers={'Content-Type':'application/json'})
+        target=path + (f'?{parsed.query}' if parsed.query else '')
+        headers=dict(request.headers)
+        headers['Content-Type']='application/json'
+        response=client.request(request.get_method(),target,content=body,headers=headers)
         wire=io.BytesIO(response.content);wire.status=response.status_code;wire.headers=response.headers;return wire
     monkeypatch.setattr(anti,'open_gateway_request',opened)
     return seen

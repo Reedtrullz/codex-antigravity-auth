@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from starlette.requests import ClientDisconnect
 
 from codex_antigravity_auth import request_budget as budgets, server
+from codex_antigravity_auth.account_binding import GATEWAY_INSTANCE
 
 ROUTES = ["google", "byok", "openai", "openai_oauth"]
 NATIVE = {"id": "resp_fixture", "status": "completed", "output": [{"type": "message", "role": "assistant", "id": "msg_fixture",
@@ -23,6 +24,7 @@ class Request:
     def __init__(self, route, stream=False):
         self.payload = {"model": "fixture:model" if route == "byok" else "gemini-3.8-flash", "input": "fixture", "stream": stream}
         self.disconnected = False
+        self.headers = {}
     async def json(self):
         return deepcopy(self.payload)
     async def is_disconnected(self):
@@ -170,6 +172,50 @@ def test_late_account_acquisition_is_released_without_dispatch(monkeypatch, setu
             if state.release.await_count: break
             await asyncio.sleep(0.005)
         state.release.assert_awaited_once_with("late@example.invalid")
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("reason", ["deadline", "disconnect"])
+def test_late_bound_account_acquisition_is_released_without_dispatch(monkeypatch, setup_route, reason):
+    state = setup_route("google")
+    monkeypatch.setattr(
+        server,
+        "classify_route",
+        lambda model, **kwargs: "antigravity" if model == "gemini-3.8-flash" else "byok",
+    )
+
+    async def scenario():
+        finish = asyncio.Event()
+        started = asyncio.Event()
+
+        async def acquire(*args):
+            started.set()
+            await finish.wait()
+            return {"email": "late-bound@example.invalid", "accessToken": "synthetic-only"}
+
+        monkeypatch.setattr(server, "acquire_bound_account_for_request", acquire)
+        request = Request("google")
+        request.headers["X-Anti-Account-Binding"] = json.dumps({
+            "schemaVersion": 1,
+            "gatewayInstance": GATEWAY_INSTANCE,
+            "accountRef": "acct_" + "b" * 12,
+            "inventorySha256": "c" * 64,
+        })
+        task = asyncio.create_task(server.create_response(request))
+        await asyncio.wait_for(started.wait(), 2)
+        if reason == "disconnect":
+            request.disconnected = True
+        try:
+            with pytest.raises(HTTPException if reason == "deadline" else ClientDisconnect):
+                await asyncio.wait_for(task, 2)
+        finally:
+            finish.set()
+        for _ in range(40):
+            if state.release.await_count:
+                break
+            await asyncio.sleep(0.005)
+        state.release.assert_awaited_once_with("late-bound@example.invalid")
+
     asyncio.run(scenario())
 
 
