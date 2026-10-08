@@ -7402,6 +7402,7 @@ def command_consult(args: argparse.Namespace) -> int:
         args._account_binding_config_sha256 = hashlib.sha256(args._account_binding_header.encode("utf-8")).hexdigest()
         if not args.dry_run:
             verify_gateway_binding(args, model, args._account_binding_header)
+            args._account_binding_verified_before_attempt = True
     prompt = apply_prompt_limit(prompt, args.max_prompt_chars, caveats)
     schema_text = capture_response_schema(args)
     if schema_text is not None:
@@ -7500,6 +7501,10 @@ def command_consult(args: argparse.Namespace) -> int:
         "performedBy": None,
         "evidence": [],
     }
+    if getattr(args, "_account_binding_header", None):
+        metadata["account_binding_config_sha256"] = args._account_binding_config_sha256
+        metadata["account_binding_gateway_instance"] = args._account_binding_gateway_instance
+        metadata["account_binding_verified_before_attempt"] = getattr(args, "_account_binding_verified_before_attempt", False)
     if mode == "review-music":
         metadata["music_evidence_sha256"] = args._music_evidence_sha256
         metadata["music_origin"] = "model-advisory"
@@ -7511,9 +7516,6 @@ def command_consult(args: argparse.Namespace) -> int:
                 "helperSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 "responseSchemaSha256": hashlib.sha256(args.response_schema.encode('utf-8')).hexdigest(),
             }
-        if getattr(args, "_account_binding_header", None):
-            metadata["account_binding_config_sha256"] = args._account_binding_config_sha256
-            metadata["account_binding_gateway_instance"] = args._account_binding_gateway_instance
         if output_status == "success":
             try:
                 review, encoding = music_evidence.parse_review_response(
@@ -9208,6 +9210,7 @@ def build_parser() -> argparse.ArgumentParser:
         if command == "review-music":
             consult.add_argument("--compact-review", action="store_true", help="One clip/claim, at most one bounded advisory finding")
             consult.add_argument("--evidence-json", help="Portable bounded music evidence; clip hashes must match attached WAVs")
+        if command in {"listen", "review-music"}:
             consult.add_argument("--account-binding-json", help="Private instance-scoped account binding JSON; never printed or uploaded")
         consult.set_defaults(func=command_consult)
         if listening:

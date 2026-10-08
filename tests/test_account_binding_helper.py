@@ -6,6 +6,25 @@ import pytest
 
 from tests.test_wav_audio import fixture, bridge, endpoint, response, upstream, server
 from tests.test_gemini_music_review import arguments, result
+from tests.test_wav_audio import listen_argv
+
+
+def test_bound_listen_verifies_inventory_and_posts_once(fixture, monkeypatch, capsys, tmp_path):
+    anti, _, _, first, _ = fixture
+    inventory = __import__('fastapi.testclient', fromlist=['TestClient']).TestClient(server.app).get('/v1/account-bindings?model=gemini-3.8-flash').json()
+    row = inventory['accounts'][0]
+    path = tmp_path / 'binding.json'
+    path.write_text(json.dumps({'schemaVersion': 1, 'gatewayInstance': inventory['gatewayInstance'], 'accountRef': row['accountRef'], 'inventorySha256': inventory['inventorySha256']}))
+    calls = bridge(monkeypatch, anti)
+    with upstream(response('A piano observation.')) as (base, seen):
+        endpoint(monkeypatch, base)
+        assert anti.main(listen_argv(first, '--account-binding-json', str(path))) == 0
+    assert calls[0] == ('GET', '/v1/account-bindings')
+    assert len(seen) == 1
+    value = json.loads(capsys.readouterr().out)
+    assert value['metadata']['account_binding_verified_before_attempt'] is True
+    assert value['metadata']['account_binding_gateway_instance'] == inventory['gatewayInstance']
+    assert row['accountRef'] not in json.dumps(value)
 
 
 def binding_file(tmp_path, *, account_ref='acct_' + 'b' * 12, inventory='c' * 64):

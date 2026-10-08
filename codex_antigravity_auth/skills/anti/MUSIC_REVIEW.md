@@ -61,6 +61,22 @@ music. Invalid or truncated output is retained as partial with no retry; the
 result records `music_review_profile` and its response-schema/evidence digests.
 Dry-run prepares the prompt/schema without contacting a provider.
 
+## Private Bound Listen
+
+`listen` and `review-music` both accept `--account-binding-json /absolute/file`.
+The existing four-field private binding is verified against the selected model's
+current gateway inventory before generation; the gateway then acquires that exact
+lease. Stale, busy or ineligible bindings fail closed without refresh, rotation,
+retry or account substitution. Only the private request header carries the binding.
+Receipts expose its canonical digest, gateway instance and
+`account_binding_verified_before_attempt`, never the account reference or inventory.
+Dry-run does not contact the gateway and cannot establish account eligibility.
+
+Pairwise consumers can pass a JSON object as `--response-schema` (not a filename).
+The helper appends its canonical sorted JSON to the exact prompt identity; the
+consumer remains responsible for strict result and evidence validation. This is
+a transport/format contract, not acoustic qualification or musical approval.
+
 Character limits are enforced by the local result validator. The provider
 response schema uses only the gateway's supported native constraints; it does
 not promise provider-side string-length enforcement.
