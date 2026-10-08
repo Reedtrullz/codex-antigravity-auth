@@ -133,7 +133,8 @@ def test_bound_review_reads_eligibility_then_posts_once(fixture, monkeypatch, ca
 
 
 @pytest.mark.parametrize('failure', ['429', '503', 'transport'])
-def test_bound_gateway_failure_is_one_exact_attempt_without_rotation(fixture, monkeypatch, capsys, tmp_path, failure):
+@pytest.mark.parametrize('command', ['review-music', 'listen'])
+def test_bound_gateway_failure_is_one_exact_attempt_without_rotation(fixture, monkeypatch, capsys, tmp_path, failure, command):
     anti, _, _, first, _ = fixture
     selected = {
         'email': 'selected@example.invalid',
@@ -175,7 +176,9 @@ def test_bound_gateway_failure_is_one_exact_attempt_without_rotation(fixture, mo
     monkeypatch.setattr(server.account_manager, 'acquire_account', lambda *args, **kwargs: pytest.fail('automatic rotation'))
     monkeypatch.setattr(server, 'schedule_refresh_accounts_ahead', lambda *args, **kwargs: pytest.fail('background refresh'))
 
-    assert anti.main(arguments(first, '--account-binding-json', str(path))) != 0
+    argv = arguments(first, '--account-binding-json', str(path))
+    argv[0] = command
+    assert anti.main(argv) != 0
     assert calls[0] == ('GET', '/v1/account-bindings')
     assert sum(1 for method, path in calls if method == 'POST' and path == '/v1/responses') == 1
     assert len(captured) == 1
