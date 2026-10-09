@@ -1,6 +1,6 @@
 # Declared runtime floors on Python 3.10; compatibility only, not a deployment lock.
 httpx==0.28.0
-fastapi==0.115.6
+fastapi==0.142.2
 uvicorn==0.28.0
 keyring==25.0.0
 cryptography==42.0.0
