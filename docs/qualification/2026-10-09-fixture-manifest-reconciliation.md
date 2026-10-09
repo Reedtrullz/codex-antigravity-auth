@@ -7,7 +7,7 @@
 **Artifacts:**
 - Manifest: `docs/qualification/fixture-manifest.json` — SHA-256 `7e0d0822e622407de43fb016dd84c927b063a9bd6c1e2e2b6933a74fc1ba05c9`
 - Generator: `scripts/qualification/build_qualification_manifest.py`
-- Scorer: `scripts/qualification/score_qualification_run.py` (self-test 10/10 pass)
+- Scorer: `scripts/qualification/score_qualification_run.py` (self-test 10/10 pass; frozen 2026-10-09 after owner confirmation, final SHA-256 `c0450a0d38874513fe1d1441f17ec44532d343d1f9881fec8be55b697f1dc3fa`)
 
 ## 1. What the evidence tree actually contains
 
@@ -41,7 +41,7 @@ manifest records both: `clipSha256` (receipt-verified) and
 Total live generation calls under the reconciled set: 19 + 19 + 5 = **43**
 (spec assumed 60).
 
-## 3. Quiet threshold calibration (owner decision required)
+## 3. Quiet threshold calibration (owner-confirmed 2026-10-09)
 
 The spec set the quiet-note ratio at <= 0.15. No clip in the tree meets that:
 minimum available ratio is 0.180, so **zero** fixtures would have a "yes" ground
@@ -51,7 +51,9 @@ The rebuilt manifest uses **0.30**, which yields 4 "yes" / 15 "no" — a gate
 that actually tests perception. This is a deliberate, documented deviation from
 the spec, flagged for owner approval before arming.
 
-## 4. Gate scaling for the smaller set (owner decision required)
+**Owner decision (2026-10-09): confirmed 0.30.**
+
+## 4. Gate scaling for the smaller set (owner-confirmed 2026-10-09)
 
 The spec's absolute thresholds assume its larger fixture set. Proportional
 proposals preserving roughly the spec's error budgets:
@@ -66,9 +68,14 @@ proposals preserving roughly the spec's error budgets:
 | Latency p95 | <= 20 s | <= 20 s (unchanged) |
 | Peak RSS | <= 2 GiB | <= 2 GiB (unchanged) |
 
-The shipped scorer's built-in gate constants still match the **spec** values;
-the owner-approved reconciliation values must be confirmed before any run so
-the scorer can be finalized against them (scorer is frozen after that).
+Until owner confirmation on 2026-10-09 the shipped scorer's gate constants
+matched the **spec** values; the confirmed reconciliation values were then
+written into the scorer, which is now frozen at the final SHA-256 below.
+
+**Owner decision (2026-10-09): the proposed reconciliation gates are confirmed.**
+The scorer now carries exactly these constants (`quietMinCorrect` 17,
+`repeatMinCorrect` 4; all other values unchanged) and is frozen at the final
+SHA-256 above. Self-test re-run after the change: 10/10 pass.
 
 ## 5. Scorer
 
@@ -83,7 +90,7 @@ wrong count and the accepted-wrong gate; 25 s latency fails the p95 gate).
 
 | Criterion | Status |
 |---|---|
-| Owner read/approved spec | Pending (this doc is part of that review) |
+| Owner read spec; quiet threshold and scaled gates confirmed 2026-10-09 | **Confirmed** (arming decision remains owner-gated) |
 | Fixture manifest written, SHA-256 recorded | **Done** (rebuilt set; owner confirms) |
 | Independent scorer exists, tested, SHA-256 recorded | **Done** (self-test 10/10) |
 | No live generation under this protocol's run ID | **Holds** (no run ID minted) |
@@ -92,5 +99,5 @@ wrong count and the accepted-wrong gate; 25 s latency fails the p95 gate).
 
 - No run ID minted. No dispatch. No upload. No generation. No token refresh.
 - Refusal controls not executed (they run at preflight, under the run ID).
-- Scorer gate constants not yet updated to the owner-approved reconciliation
-  values (deliberately left at spec values until the owner confirms).
+- Arming, run-ID minting, and the one-time refresh decision remain open
+  owner gates.

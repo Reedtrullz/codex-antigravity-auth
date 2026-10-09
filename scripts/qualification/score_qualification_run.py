@@ -16,8 +16,12 @@ from pathlib import Path
 
 GATES = {
     "coreMaxErrors": 2,
-    "quietMinCorrect": 14,
-    "repeatMinCorrect": 10,
+    # Owner-confirmed 2026-10-09 reconciliation (docs/qualification/
+    # 2026-10-09-fixture-manifest-reconciliation.md section 4), scaled to the
+    # reconciled 19 core / 19 quiet / 5 repeat fixture set. Constants are
+    # frozen; changing them invalidates the recorded scorer SHA-256.
+    "quietMinCorrect": 17,
+    "repeatMinCorrect": 4,
     "refusalRequired": 12,
     "maxAcceptedWrong": 0,
     "latencyP95SecondsMax": 20.0,
