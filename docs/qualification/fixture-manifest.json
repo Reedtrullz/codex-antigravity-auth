@@ -1,0 +1,1912 @@
+{
+  "exclusions": [
+    {
+      "clipId": "foreign-solo-2",
+      "reason": "no fitted events"
+    },
+    {
+      "clipId": "foreign-solo-3",
+      "reason": "no fitted events"
+    },
+    {
+      "clipId": "fresh-00",
+      "reason": "missing receipt or clip for accepted capture"
+    },
+    {
+      "clipId": "fresh-01",
+      "reason": "missing receipt or clip for accepted capture"
+    },
+    {
+      "clipId": "fresh-02",
+      "reason": "missing receipt or clip for accepted capture"
+    },
+    {
+      "clipId": "fresh-03",
+      "reason": "missing receipt or clip for accepted capture"
+    },
+    {
+      "clipId": "fresh-04",
+      "reason": "missing receipt or clip for accepted capture"
+    },
+    {
+      "clipId": "fresh-05",
+      "reason": "missing receipt or clip for accepted capture"
+    },
+    {
+      "clipId": "fresh-06",
+      "reason": "missing receipt or clip for accepted capture"
+    }
+  ],
+  "fixtures": [
+    {
+      "attackTimesSeconds": [
+        0.296
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-0.json",
+      "clipClass": "core",
+      "clipId": "foreign-quiet-0",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-0.wav",
+      "clipSha256": "cf7bea5f8e454f93356daec3f4fc79011753c8013989cadf2ad4b6be28db4f56",
+      "events": [
+        {
+          "amplitude": 1.0009055923489103,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.296
+        },
+        {
+          "amplitude": 1.0010513340454958,
+          "id": "ref-64-v112",
+          "midi": 64,
+          "startSeconds": 0.296
+        }
+      ],
+      "fitBasisSha256": "f992633c1468101d5cc12d3911b839a44837d25ff852ea79904c56b3bbc92043",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.999854,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "unregistered-quiet",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.293
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-1.json",
+      "clipClass": "core",
+      "clipId": "foreign-quiet-1",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-1.wav",
+      "clipSha256": "40ae087010799ce9f88bc8e0173121bb710608a63dfe2e47b529cdb25dcf7e1e",
+      "events": [
+        {
+          "amplitude": 1.0003515788926456,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.293
+        },
+        {
+          "amplitude": 1.0011325007557326,
+          "id": "ref-64-v112",
+          "midi": 64,
+          "startSeconds": 0.293
+        }
+      ],
+      "fitBasisSha256": "f696e9e4371d4ff2fbfec619df42488de8ae25758b3c3f4d64a1d5c515b478a1",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.99922,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "unregistered-quiet",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.297
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-2.json",
+      "clipClass": "core",
+      "clipId": "foreign-quiet-2",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-2.wav",
+      "clipSha256": "2b5a564381fd0fcb92bb87273926b45973ff743ff691c8acf8c72f6abaed3b2c",
+      "events": [
+        {
+          "amplitude": 1.000776030010789,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.297
+        },
+        {
+          "amplitude": 1.0009953823794255,
+          "id": "ref-64-v112",
+          "midi": 64,
+          "startSeconds": 0.297
+        }
+      ],
+      "fitBasisSha256": "396527b0037b6618982cd0a7c9d13639264d606eac51b20a048e7f7650b65311",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.999781,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "unregistered-quiet",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.296
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-3.json",
+      "clipClass": "core",
+      "clipId": "foreign-quiet-3",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-3.wav",
+      "clipSha256": "1fbeb8f0f04119632c6739b19bdbb59b605df1a3b6331427b0c4db4cd632076a",
+      "events": [
+        {
+          "amplitude": 1.0005144546625648,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.296
+        },
+        {
+          "amplitude": 1.001032948853969,
+          "id": "ref-64-v112",
+          "midi": 64,
+          "startSeconds": 0.296
+        }
+      ],
+      "fitBasisSha256": "c12b7d021df809d7d1accccfa84a7602f5d4b35072385cfc0ca806dbcf37a99f",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.999482,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "unregistered-quiet",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.291,
+        0.305,
+        0.328,
+        0.339,
+        0.378
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-solo-0.json",
+      "clipClass": "core",
+      "clipId": "foreign-solo-0",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-solo-0.wav",
+      "clipSha256": "3c520fe59724727c5ee26310ebfd0bef3c149b582a3922169ddb5bb1deeda5dc",
+      "events": [
+        {
+          "amplitude": 0.4324926748727617,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.291
+        },
+        {
+          "amplitude": 0.44287691844915794,
+          "id": "ref-48-v56",
+          "midi": 48,
+          "startSeconds": 0.305
+        },
+        {
+          "amplitude": 0.24567701463140762,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.328
+        },
+        {
+          "amplitude": 0.41736268999025106,
+          "id": "ref-48-v56",
+          "midi": 48,
+          "startSeconds": 0.339
+        },
+        {
+          "amplitude": 0.3694721010438085,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.378
+        }
+      ],
+      "fitBasisSha256": "df0ece48d7a5719d369ad18be605f7860f14ad142ae4c307c9f4d42818e57fa3",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.55473,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 3,
+        "midi": 60
+      },
+      "responseField": "attackCount",
+      "split": "unregistered-solo",
+      "temporalAttackCount": 5
+    },
+    {
+      "attackTimesSeconds": [
+        0.327,
+        0.345,
+        0.363,
+        0.381,
+        0.398,
+        0.42,
+        0.438,
+        0.456
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-solo-1.json",
+      "clipClass": "core",
+      "clipId": "foreign-solo-1",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-solo-1.wav",
+      "clipSha256": "b90d759731105a067557ece046aed16ce481e5b47d3521411d8d779e20993d9d",
+      "events": [
+        {
+          "amplitude": 0.7260289854294035,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.327
+        },
+        {
+          "amplitude": 1.0986619038596654,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.345
+        },
+        {
+          "amplitude": 1.3832221133544862,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.363
+        },
+        {
+          "amplitude": 1.1067562239172062,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.381
+        },
+        {
+          "amplitude": 1.100494163512685,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.398
+        },
+        {
+          "amplitude": 1.05966459285025,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.42
+        },
+        {
+          "amplitude": 2.56679523785241,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.438
+        },
+        {
+          "amplitude": 1.6756703063154794,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.456
+        }
+      ],
+      "fitBasisSha256": "d467b9e95a66077754be831e006acace64f5d4109ada13c2390ae11a5076c22b",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.282854,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 8,
+        "midi": 60
+      },
+      "responseField": "attackCount",
+      "split": "unregistered-solo",
+      "temporalAttackCount": 8
+    },
+    {
+      "attackTimesSeconds": [
+        0.387
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-07.json",
+      "clipClass": "core",
+      "clipId": "fresh-07",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-07.wav",
+      "clipSha256": "34e62ca52b2be8d75b181a8e9ccfc5ed6f9b2c3e7b74e170e8ee7bd70b127070",
+      "events": [
+        {
+          "amplitude": 1.5624705048228926,
+          "id": "ref-48-v32",
+          "midi": 48,
+          "startSeconds": 0.387
+        },
+        {
+          "amplitude": 1.038240406435912,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.387
+        },
+        {
+          "amplitude": 2.139320864116019,
+          "id": "ref-60-v92",
+          "midi": 60,
+          "startSeconds": 0.387
+        }
+      ],
+      "fitBasisSha256": "cb09f8d804ddc6120e4c0d38a2e5c4ad09fac78985bd0afb43f61ff829a121d4",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.485313,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "registered",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.307
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-08.json",
+      "clipClass": "core",
+      "clipId": "fresh-08",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-08.wav",
+      "clipSha256": "e4ef1d4e76d7db508c27b49615aa3a647dca8ba7a60c8ed307e678b6a2a8f6e6",
+      "events": [
+        {
+          "amplitude": 2.5924335127227494,
+          "id": "ref-60-v112",
+          "midi": 60,
+          "startSeconds": 0.307
+        },
+        {
+          "amplitude": 3.0589241685412163,
+          "id": "ref-72-v76",
+          "midi": 72,
+          "startSeconds": 0.307
+        }
+      ],
+      "fitBasisSha256": "4138a6539cffef6e63b7a11db1c4dba48eb97abba69248ccb88210d816bfded5",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.847498,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "registered",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.342
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-09.json",
+      "clipClass": "core",
+      "clipId": "fresh-09",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-09.wav",
+      "clipSha256": "9d842387f66db94b7987b88c39bf2480f70c356baa1e104799a4340d63313576",
+      "events": [
+        {
+          "amplitude": 2.959038867823519,
+          "id": "ref-64-v92",
+          "midi": 64,
+          "startSeconds": 0.342
+        },
+        {
+          "amplitude": 0.5313913074309129,
+          "id": "ref-52-v56",
+          "midi": 52,
+          "startSeconds": 0.342
+        },
+        {
+          "amplitude": 2.0045130642739855,
+          "id": "ref-76-v76",
+          "midi": 76,
+          "startSeconds": 0.342
+        }
+      ],
+      "fitBasisSha256": "03e1df3a9d2fbc25dc67d5236f96ef8f310c92832c26fe30d2df8a9412ffd64e",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.179582,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "registered",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.291,
+        0.725
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-10.json",
+      "clipClass": "core",
+      "clipId": "fresh-10",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-10.wav",
+      "clipSha256": "7ab8259642bb6f35a6a119c1f01f858d2a13fb94a459f6e449ab350b8f64b194",
+      "events": [
+        {
+          "amplitude": 1.18285445415784,
+          "id": "ref-60-v92",
+          "midi": 60,
+          "startSeconds": 0.291
+        },
+        {
+          "amplitude": 1.3069007515893754,
+          "id": "ref-67-v56",
+          "midi": 67,
+          "startSeconds": 0.291
+        },
+        {
+          "amplitude": 0.8557912698016883,
+          "id": "ref-55-v92",
+          "midi": 55,
+          "startSeconds": 0.725
+        },
+        {
+          "amplitude": 0.5364409588760384,
+          "id": "ref-64-v56",
+          "midi": 64,
+          "startSeconds": 0.725
+        }
+      ],
+      "fitBasisSha256": "699fe7e7557a6982bcaeddb16f57fd3fdfc47a342fb3c59066bda1b2d4ebfcdc",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.410468,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.303,
+        0.664
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-11.json",
+      "clipClass": "core",
+      "clipId": "fresh-11",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-11.wav",
+      "clipSha256": "46c8c750ab955216f645cc777ba8cba288cc383b8c68496ebdc3e0b3d9b0ce37",
+      "events": [
+        {
+          "amplitude": 3.0580483707275965,
+          "id": "ref-76-v76",
+          "midi": 76,
+          "startSeconds": 0.303
+        },
+        {
+          "amplitude": 3.5806011545323697,
+          "id": "ref-67-v56",
+          "midi": 67,
+          "startSeconds": 0.303
+        },
+        {
+          "amplitude": 1.4066243519595225,
+          "id": "ref-48-v32",
+          "midi": 48,
+          "startSeconds": 0.664
+        },
+        {
+          "amplitude": 1.4071735031791224,
+          "id": "ref-52-v32",
+          "midi": 52,
+          "startSeconds": 0.664
+        }
+      ],
+      "fitBasisSha256": "0d9ecfe36b799a47eeb98cf6c61cc6c43e9a9b0275505e10fa8f2da9857d326b",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.392846,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.269,
+        0.619
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-12.json",
+      "clipClass": "core",
+      "clipId": "fresh-12",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-12.wav",
+      "clipSha256": "7f1e19fecbadca5b21ab81d5f043784e6a73f0b72905b5151567ec26d6e12be9",
+      "events": [
+        {
+          "amplitude": 0.5629214147645483,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.269
+        },
+        {
+          "amplitude": 1.5633936897108551,
+          "id": "ref-67-v32",
+          "midi": 67,
+          "startSeconds": 0.269
+        },
+        {
+          "amplitude": 2.0357895698621284,
+          "id": "ref-52-v112",
+          "midi": 52,
+          "startSeconds": 0.619
+        },
+        {
+          "amplitude": 1.2211971859402964,
+          "id": "ref-64-v76",
+          "midi": 64,
+          "startSeconds": 0.619
+        }
+      ],
+      "fitBasisSha256": "a65df82aaff040868151e7147076b4286c1222b39682ccd9969259366ebae290",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.276513,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.358,
+        0.619
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-13.json",
+      "clipClass": "core",
+      "clipId": "fresh-13",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-13.wav",
+      "clipSha256": "9095421715aa7055ddac0c85380c20c5d6b902cc145a84114a468f61d891ed0e",
+      "events": [
+        {
+          "amplitude": 0.8152786494804163,
+          "id": "ref-48-v112",
+          "midi": 48,
+          "startSeconds": 0.358
+        },
+        {
+          "amplitude": 2.593117226304613,
+          "id": "ref-52-v112",
+          "midi": 52,
+          "startSeconds": 0.358
+        },
+        {
+          "amplitude": 2.0341466131724206,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.619
+        },
+        {
+          "amplitude": 2.960201765722696,
+          "id": "ref-55-v92",
+          "midi": 55,
+          "startSeconds": 0.619
+        }
+      ],
+      "fitBasisSha256": "aec0199c8727811ade8fb1045f9426e11a62d39bacd98dfd8c14c8afc7b3c658",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.275413,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.254,
+        0.689
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-14.json",
+      "clipClass": "core",
+      "clipId": "fresh-14",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-14.wav",
+      "clipSha256": "8b5adceb2a792426150b44537f4dee7c9483750216fa75c8413bb9f8d4d1b597",
+      "events": [
+        {
+          "amplitude": 1.0015544310789288,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.254
+        },
+        {
+          "amplitude": 1.0017950249048875,
+          "id": "ref-67-v112",
+          "midi": 67,
+          "startSeconds": 0.254
+        },
+        {
+          "amplitude": 1.000480211470765,
+          "id": "ref-52-v32",
+          "midi": 52,
+          "startSeconds": 0.689
+        }
+      ],
+      "fitBasisSha256": "e8017021e1f5f668558f5dd3af72995942377c666134ee37e0ff9ec1e3c594a8",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.998688,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.361,
+        0.751
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-15.json",
+      "clipClass": "core",
+      "clipId": "fresh-15",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-15.wav",
+      "clipSha256": "4f9f7aada323b86c58898c95b435c6c5cb48d8dedeb15a7dda9e6a0dcac32c7c",
+      "events": [
+        {
+          "amplitude": 1.001487831853215,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.361
+        },
+        {
+          "amplitude": 2.506525054906594,
+          "id": "ref-76-v112",
+          "midi": 76,
+          "startSeconds": 0.361
+        },
+        {
+          "amplitude": 1.0001019652881262,
+          "id": "ref-52-v32",
+          "midi": 52,
+          "startSeconds": 0.751
+        }
+      ],
+      "fitBasisSha256": "2016ad4d376077c6ac0324c86924a7c3abc90a8b434dfa231f8c7975618a8520",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.398999,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.228,
+        0.709
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-16.json",
+      "clipClass": "core",
+      "clipId": "fresh-16",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-16.wav",
+      "clipSha256": "3035be1b4b28baddb62241e06696513df2e0bdd41a7099ec1190e5e71f67819f",
+      "events": [
+        {
+          "amplitude": 2.5046642481369434,
+          "id": "ref-67-v112",
+          "midi": 67,
+          "startSeconds": 0.228
+        },
+        {
+          "amplitude": 1.001042136220134,
+          "id": "ref-64-v112",
+          "midi": 64,
+          "startSeconds": 0.228
+        },
+        {
+          "amplitude": 1.0000891650657124,
+          "id": "ref-52-v32",
+          "midi": 52,
+          "startSeconds": 0.709
+        }
+      ],
+      "fitBasisSha256": "e79df8bca0f3fc32a9a09e06f8013a987b8171b0b3188c362551d867cbb1fc01",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.399291,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "attackCount",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.311,
+        0.716
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-17.json",
+      "clipClass": "core",
+      "clipId": "fresh-17",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-17.wav",
+      "clipSha256": "cbf210a7847be177533c90fc9edb8eb2f8e97e11b08acbd20342de8861c7aba9",
+      "events": [
+        {
+          "amplitude": 1.4314929422569744,
+          "id": "ref-72-v56",
+          "midi": 72,
+          "startSeconds": 0.311
+        },
+        {
+          "amplitude": 2.004570945264575,
+          "id": "ref-72-v76",
+          "midi": 72,
+          "startSeconds": 0.716
+        }
+      ],
+      "fitBasisSha256": "5f13c8442151d69e7e4cbd09f22f57f4d31d81459bfb44638d79173c7579a3d1",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.714114,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 2,
+        "midi": 72
+      },
+      "responseField": "attackCount",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.248,
+        0.807
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-18.json",
+      "clipClass": "core",
+      "clipId": "fresh-18",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-18.wav",
+      "clipSha256": "b1a5bf08b5d9e15ce7caf16625988cf87eff19fad17462ad3446b9a6196e4285",
+      "events": [
+        {
+          "amplitude": 0.8549776221604803,
+          "id": "ref-67-v92",
+          "midi": 67,
+          "startSeconds": 0.248
+        },
+        {
+          "amplitude": 0.8013036520758846,
+          "id": "ref-67-v76",
+          "midi": 67,
+          "startSeconds": 0.807
+        }
+      ],
+      "fitBasisSha256": "2a375c1b9b95c909288b9dfc77c2928a7b537f32315d39085ad2f1e837dd57cf",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.937222,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 2,
+        "midi": 67
+      },
+      "responseField": "attackCount",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.305,
+        0.802
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-19.json",
+      "clipClass": "core",
+      "clipId": "fresh-19",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-19.wav",
+      "clipSha256": "b5684c4b0a5b7f7d1aaa3dbd1302da488156911ca8b5b9b57bb71065635f50d9",
+      "events": [
+        {
+          "amplitude": 1.3411821836849673,
+          "id": "ref-55-v56",
+          "midi": 55,
+          "startSeconds": 0.305
+        },
+        {
+          "amplitude": 1.4074979325184591,
+          "id": "ref-55-v32",
+          "midi": 55,
+          "startSeconds": 0.802
+        }
+      ],
+      "fitBasisSha256": "4d1430ea6b2536180a6eca9320637a98c3fae700564def7c9c8c50c80f5a8e40",
+      "question": "How many distinct piano note attacks do you hear in this clip?",
+      "quietRatio": 0.952884,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 2,
+        "midi": 55
+      },
+      "responseField": "attackCount",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.296
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-0.json",
+      "clipClass": "quiet",
+      "clipId": "foreign-quiet-0",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-0.wav",
+      "clipSha256": "cf7bea5f8e454f93356daec3f4fc79011753c8013989cadf2ad4b6be28db4f56",
+      "events": [
+        {
+          "amplitude": 1.0009055923489103,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.296
+        },
+        {
+          "amplitude": 1.0010513340454958,
+          "id": "ref-64-v112",
+          "midi": 64,
+          "startSeconds": 0.296
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "f992633c1468101d5cc12d3911b839a44837d25ff852ea79904c56b3bbc92043",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.999854,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "unregistered-quiet",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.293
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-1.json",
+      "clipClass": "quiet",
+      "clipId": "foreign-quiet-1",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-1.wav",
+      "clipSha256": "40ae087010799ce9f88bc8e0173121bb710608a63dfe2e47b529cdb25dcf7e1e",
+      "events": [
+        {
+          "amplitude": 1.0003515788926456,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.293
+        },
+        {
+          "amplitude": 1.0011325007557326,
+          "id": "ref-64-v112",
+          "midi": 64,
+          "startSeconds": 0.293
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "f696e9e4371d4ff2fbfec619df42488de8ae25758b3c3f4d64a1d5c515b478a1",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.99922,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "unregistered-quiet",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.297
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-2.json",
+      "clipClass": "quiet",
+      "clipId": "foreign-quiet-2",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-2.wav",
+      "clipSha256": "2b5a564381fd0fcb92bb87273926b45973ff743ff691c8acf8c72f6abaed3b2c",
+      "events": [
+        {
+          "amplitude": 1.000776030010789,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.297
+        },
+        {
+          "amplitude": 1.0009953823794255,
+          "id": "ref-64-v112",
+          "midi": 64,
+          "startSeconds": 0.297
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "396527b0037b6618982cd0a7c9d13639264d606eac51b20a048e7f7650b65311",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.999781,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "unregistered-quiet",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.296
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-3.json",
+      "clipClass": "quiet",
+      "clipId": "foreign-quiet-3",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-3.wav",
+      "clipSha256": "1fbeb8f0f04119632c6739b19bdbb59b605df1a3b6331427b0c4db4cd632076a",
+      "events": [
+        {
+          "amplitude": 1.0005144546625648,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.296
+        },
+        {
+          "amplitude": 1.001032948853969,
+          "id": "ref-64-v112",
+          "midi": 64,
+          "startSeconds": 0.296
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "c12b7d021df809d7d1accccfa84a7602f5d4b35072385cfc0ca806dbcf37a99f",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.999482,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "unregistered-quiet",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.291,
+        0.305,
+        0.328,
+        0.339,
+        0.378
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-solo-0.json",
+      "clipClass": "quiet",
+      "clipId": "foreign-solo-0",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-solo-0.wav",
+      "clipSha256": "3c520fe59724727c5ee26310ebfd0bef3c149b582a3922169ddb5bb1deeda5dc",
+      "events": [
+        {
+          "amplitude": 0.4324926748727617,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.291
+        },
+        {
+          "amplitude": 0.44287691844915794,
+          "id": "ref-48-v56",
+          "midi": 48,
+          "startSeconds": 0.305
+        },
+        {
+          "amplitude": 0.24567701463140762,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.328
+        },
+        {
+          "amplitude": 0.41736268999025106,
+          "id": "ref-48-v56",
+          "midi": 48,
+          "startSeconds": 0.339
+        },
+        {
+          "amplitude": 0.3694721010438085,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.378
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "df0ece48d7a5719d369ad18be605f7860f14ad142ae4c307c9f4d42818e57fa3",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.55473,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 3,
+        "midi": 60
+      },
+      "responseField": "quietNotePresent",
+      "split": "unregistered-solo",
+      "temporalAttackCount": 5
+    },
+    {
+      "attackTimesSeconds": [
+        0.327,
+        0.345,
+        0.363,
+        0.381,
+        0.398,
+        0.42,
+        0.438,
+        0.456
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-solo-1.json",
+      "clipClass": "quiet",
+      "clipId": "foreign-solo-1",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-solo-1.wav",
+      "clipSha256": "b90d759731105a067557ece046aed16ce481e5b47d3521411d8d779e20993d9d",
+      "events": [
+        {
+          "amplitude": 0.7260289854294035,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.327
+        },
+        {
+          "amplitude": 1.0986619038596654,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.345
+        },
+        {
+          "amplitude": 1.3832221133544862,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.363
+        },
+        {
+          "amplitude": 1.1067562239172062,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.381
+        },
+        {
+          "amplitude": 1.100494163512685,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.398
+        },
+        {
+          "amplitude": 1.05966459285025,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.42
+        },
+        {
+          "amplitude": 2.56679523785241,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.438
+        },
+        {
+          "amplitude": 1.6756703063154794,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.456
+        }
+      ],
+      "expectedQuietNotePresent": true,
+      "fitBasisSha256": "d467b9e95a66077754be831e006acace64f5d4109ada13c2390ae11a5076c22b",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.282854,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 8,
+        "midi": 60
+      },
+      "responseField": "quietNotePresent",
+      "split": "unregistered-solo",
+      "temporalAttackCount": 8
+    },
+    {
+      "attackTimesSeconds": [
+        0.387
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-07.json",
+      "clipClass": "quiet",
+      "clipId": "fresh-07",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-07.wav",
+      "clipSha256": "34e62ca52b2be8d75b181a8e9ccfc5ed6f9b2c3e7b74e170e8ee7bd70b127070",
+      "events": [
+        {
+          "amplitude": 1.5624705048228926,
+          "id": "ref-48-v32",
+          "midi": 48,
+          "startSeconds": 0.387
+        },
+        {
+          "amplitude": 1.038240406435912,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.387
+        },
+        {
+          "amplitude": 2.139320864116019,
+          "id": "ref-60-v92",
+          "midi": 60,
+          "startSeconds": 0.387
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "cb09f8d804ddc6120e4c0d38a2e5c4ad09fac78985bd0afb43f61ff829a121d4",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.485313,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "registered",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.307
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-08.json",
+      "clipClass": "quiet",
+      "clipId": "fresh-08",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-08.wav",
+      "clipSha256": "e4ef1d4e76d7db508c27b49615aa3a647dca8ba7a60c8ed307e678b6a2a8f6e6",
+      "events": [
+        {
+          "amplitude": 2.5924335127227494,
+          "id": "ref-60-v112",
+          "midi": 60,
+          "startSeconds": 0.307
+        },
+        {
+          "amplitude": 3.0589241685412163,
+          "id": "ref-72-v76",
+          "midi": 72,
+          "startSeconds": 0.307
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "4138a6539cffef6e63b7a11db1c4dba48eb97abba69248ccb88210d816bfded5",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.847498,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "registered",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.342
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-09.json",
+      "clipClass": "quiet",
+      "clipId": "fresh-09",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-09.wav",
+      "clipSha256": "9d842387f66db94b7987b88c39bf2480f70c356baa1e104799a4340d63313576",
+      "events": [
+        {
+          "amplitude": 2.959038867823519,
+          "id": "ref-64-v92",
+          "midi": 64,
+          "startSeconds": 0.342
+        },
+        {
+          "amplitude": 0.5313913074309129,
+          "id": "ref-52-v56",
+          "midi": 52,
+          "startSeconds": 0.342
+        },
+        {
+          "amplitude": 2.0045130642739855,
+          "id": "ref-76-v76",
+          "midi": 76,
+          "startSeconds": 0.342
+        }
+      ],
+      "expectedQuietNotePresent": true,
+      "fitBasisSha256": "03e1df3a9d2fbc25dc67d5236f96ef8f310c92832c26fe30d2df8a9412ffd64e",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.179582,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "registered",
+      "temporalAttackCount": 1
+    },
+    {
+      "attackTimesSeconds": [
+        0.291,
+        0.725
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-10.json",
+      "clipClass": "quiet",
+      "clipId": "fresh-10",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-10.wav",
+      "clipSha256": "7ab8259642bb6f35a6a119c1f01f858d2a13fb94a459f6e449ab350b8f64b194",
+      "events": [
+        {
+          "amplitude": 1.18285445415784,
+          "id": "ref-60-v92",
+          "midi": 60,
+          "startSeconds": 0.291
+        },
+        {
+          "amplitude": 1.3069007515893754,
+          "id": "ref-67-v56",
+          "midi": 67,
+          "startSeconds": 0.291
+        },
+        {
+          "amplitude": 0.8557912698016883,
+          "id": "ref-55-v92",
+          "midi": 55,
+          "startSeconds": 0.725
+        },
+        {
+          "amplitude": 0.5364409588760384,
+          "id": "ref-64-v56",
+          "midi": 64,
+          "startSeconds": 0.725
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "699fe7e7557a6982bcaeddb16f57fd3fdfc47a342fb3c59066bda1b2d4ebfcdc",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.410468,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.303,
+        0.664
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-11.json",
+      "clipClass": "quiet",
+      "clipId": "fresh-11",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-11.wav",
+      "clipSha256": "46c8c750ab955216f645cc777ba8cba288cc383b8c68496ebdc3e0b3d9b0ce37",
+      "events": [
+        {
+          "amplitude": 3.0580483707275965,
+          "id": "ref-76-v76",
+          "midi": 76,
+          "startSeconds": 0.303
+        },
+        {
+          "amplitude": 3.5806011545323697,
+          "id": "ref-67-v56",
+          "midi": 67,
+          "startSeconds": 0.303
+        },
+        {
+          "amplitude": 1.4066243519595225,
+          "id": "ref-48-v32",
+          "midi": 48,
+          "startSeconds": 0.664
+        },
+        {
+          "amplitude": 1.4071735031791224,
+          "id": "ref-52-v32",
+          "midi": 52,
+          "startSeconds": 0.664
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "0d9ecfe36b799a47eeb98cf6c61cc6c43e9a9b0275505e10fa8f2da9857d326b",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.392846,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.269,
+        0.619
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-12.json",
+      "clipClass": "quiet",
+      "clipId": "fresh-12",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-12.wav",
+      "clipSha256": "7f1e19fecbadca5b21ab81d5f043784e6a73f0b72905b5151567ec26d6e12be9",
+      "events": [
+        {
+          "amplitude": 0.5629214147645483,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.269
+        },
+        {
+          "amplitude": 1.5633936897108551,
+          "id": "ref-67-v32",
+          "midi": 67,
+          "startSeconds": 0.269
+        },
+        {
+          "amplitude": 2.0357895698621284,
+          "id": "ref-52-v112",
+          "midi": 52,
+          "startSeconds": 0.619
+        },
+        {
+          "amplitude": 1.2211971859402964,
+          "id": "ref-64-v76",
+          "midi": 64,
+          "startSeconds": 0.619
+        }
+      ],
+      "expectedQuietNotePresent": true,
+      "fitBasisSha256": "a65df82aaff040868151e7147076b4286c1222b39682ccd9969259366ebae290",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.276513,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.358,
+        0.619
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-13.json",
+      "clipClass": "quiet",
+      "clipId": "fresh-13",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-13.wav",
+      "clipSha256": "9095421715aa7055ddac0c85380c20c5d6b902cc145a84114a468f61d891ed0e",
+      "events": [
+        {
+          "amplitude": 0.8152786494804163,
+          "id": "ref-48-v112",
+          "midi": 48,
+          "startSeconds": 0.358
+        },
+        {
+          "amplitude": 2.593117226304613,
+          "id": "ref-52-v112",
+          "midi": 52,
+          "startSeconds": 0.358
+        },
+        {
+          "amplitude": 2.0341466131724206,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.619
+        },
+        {
+          "amplitude": 2.960201765722696,
+          "id": "ref-55-v92",
+          "midi": 55,
+          "startSeconds": 0.619
+        }
+      ],
+      "expectedQuietNotePresent": true,
+      "fitBasisSha256": "aec0199c8727811ade8fb1045f9426e11a62d39bacd98dfd8c14c8afc7b3c658",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.275413,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.254,
+        0.689
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-14.json",
+      "clipClass": "quiet",
+      "clipId": "fresh-14",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-14.wav",
+      "clipSha256": "8b5adceb2a792426150b44537f4dee7c9483750216fa75c8413bb9f8d4d1b597",
+      "events": [
+        {
+          "amplitude": 1.0015544310789288,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.254
+        },
+        {
+          "amplitude": 1.0017950249048875,
+          "id": "ref-67-v112",
+          "midi": 67,
+          "startSeconds": 0.254
+        },
+        {
+          "amplitude": 1.000480211470765,
+          "id": "ref-52-v32",
+          "midi": 52,
+          "startSeconds": 0.689
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "e8017021e1f5f668558f5dd3af72995942377c666134ee37e0ff9ec1e3c594a8",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.998688,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.361,
+        0.751
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-15.json",
+      "clipClass": "quiet",
+      "clipId": "fresh-15",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-15.wav",
+      "clipSha256": "4f9f7aada323b86c58898c95b435c6c5cb48d8dedeb15a7dda9e6a0dcac32c7c",
+      "events": [
+        {
+          "amplitude": 1.001487831853215,
+          "id": "ref-72-v112",
+          "midi": 72,
+          "startSeconds": 0.361
+        },
+        {
+          "amplitude": 2.506525054906594,
+          "id": "ref-76-v112",
+          "midi": 76,
+          "startSeconds": 0.361
+        },
+        {
+          "amplitude": 1.0001019652881262,
+          "id": "ref-52-v32",
+          "midi": 52,
+          "startSeconds": 0.751
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "2016ad4d376077c6ac0324c86924a7c3abc90a8b434dfa231f8c7975618a8520",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.398999,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.228,
+        0.709
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-16.json",
+      "clipClass": "quiet",
+      "clipId": "fresh-16",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-16.wav",
+      "clipSha256": "3035be1b4b28baddb62241e06696513df2e0bdd41a7099ec1190e5e71f67819f",
+      "events": [
+        {
+          "amplitude": 2.5046642481369434,
+          "id": "ref-67-v112",
+          "midi": 67,
+          "startSeconds": 0.228
+        },
+        {
+          "amplitude": 1.001042136220134,
+          "id": "ref-64-v112",
+          "midi": 64,
+          "startSeconds": 0.228
+        },
+        {
+          "amplitude": 1.0000891650657124,
+          "id": "ref-52-v32",
+          "midi": 52,
+          "startSeconds": 0.709
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "e79df8bca0f3fc32a9a09e06f8013a987b8171b0b3188c362551d867cbb1fc01",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.399291,
+      "quietThreshold": 0.3,
+      "repeatPitch": null,
+      "responseField": "quietNotePresent",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.311,
+        0.716
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-17.json",
+      "clipClass": "quiet",
+      "clipId": "fresh-17",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-17.wav",
+      "clipSha256": "cbf210a7847be177533c90fc9edb8eb2f8e97e11b08acbd20342de8861c7aba9",
+      "events": [
+        {
+          "amplitude": 1.4314929422569744,
+          "id": "ref-72-v56",
+          "midi": 72,
+          "startSeconds": 0.311
+        },
+        {
+          "amplitude": 2.004570945264575,
+          "id": "ref-72-v76",
+          "midi": 72,
+          "startSeconds": 0.716
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "5f13c8442151d69e7e4cbd09f22f57f4d31d81459bfb44638d79173c7579a3d1",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.714114,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 2,
+        "midi": 72
+      },
+      "responseField": "quietNotePresent",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.248,
+        0.807
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-18.json",
+      "clipClass": "quiet",
+      "clipId": "fresh-18",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-18.wav",
+      "clipSha256": "b1a5bf08b5d9e15ce7caf16625988cf87eff19fad17462ad3446b9a6196e4285",
+      "events": [
+        {
+          "amplitude": 0.8549776221604803,
+          "id": "ref-67-v92",
+          "midi": 67,
+          "startSeconds": 0.248
+        },
+        {
+          "amplitude": 0.8013036520758846,
+          "id": "ref-67-v76",
+          "midi": 67,
+          "startSeconds": 0.807
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "2a375c1b9b95c909288b9dfc77c2928a7b537f32315d39085ad2f1e837dd57cf",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.937222,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 2,
+        "midi": 67
+      },
+      "responseField": "quietNotePresent",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.305,
+        0.802
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-19.json",
+      "clipClass": "quiet",
+      "clipId": "fresh-19",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-19.wav",
+      "clipSha256": "b5684c4b0a5b7f7d1aaa3dbd1302da488156911ca8b5b9b57bb71065635f50d9",
+      "events": [
+        {
+          "amplitude": 1.3411821836849673,
+          "id": "ref-55-v56",
+          "midi": 55,
+          "startSeconds": 0.305
+        },
+        {
+          "amplitude": 1.4074979325184591,
+          "id": "ref-55-v32",
+          "midi": 55,
+          "startSeconds": 0.802
+        }
+      ],
+      "expectedQuietNotePresent": false,
+      "fitBasisSha256": "4d1430ea6b2536180a6eca9320637a98c3fae700564def7c9c8c50c80f5a8e40",
+      "question": "Is any very quiet note present in this clip?",
+      "quietRatio": 0.952884,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 2,
+        "midi": 55
+      },
+      "responseField": "quietNotePresent",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.291,
+        0.305,
+        0.328,
+        0.339,
+        0.378
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-solo-0.json",
+      "clipClass": "repeat",
+      "clipId": "foreign-solo-0",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-solo-0.wav",
+      "clipSha256": "3c520fe59724727c5ee26310ebfd0bef3c149b582a3922169ddb5bb1deeda5dc",
+      "events": [
+        {
+          "amplitude": 0.4324926748727617,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.291
+        },
+        {
+          "amplitude": 0.44287691844915794,
+          "id": "ref-48-v56",
+          "midi": 48,
+          "startSeconds": 0.305
+        },
+        {
+          "amplitude": 0.24567701463140762,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.328
+        },
+        {
+          "amplitude": 0.41736268999025106,
+          "id": "ref-48-v56",
+          "midi": 48,
+          "startSeconds": 0.339
+        },
+        {
+          "amplitude": 0.3694721010438085,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.378
+        }
+      ],
+      "fitBasisSha256": "df0ece48d7a5719d369ad18be605f7860f14ad142ae4c307c9f4d42818e57fa3",
+      "question": "How many times is the pitch repeated in this clip?",
+      "quietRatio": 0.55473,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 3,
+        "midi": 60
+      },
+      "responseField": "repeatPitchCount",
+      "split": "unregistered-solo",
+      "temporalAttackCount": 5
+    },
+    {
+      "attackTimesSeconds": [
+        0.327,
+        0.345,
+        0.363,
+        0.381,
+        0.398,
+        0.42,
+        0.438,
+        0.456
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-solo-1.json",
+      "clipClass": "repeat",
+      "clipId": "foreign-solo-1",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-solo-1.wav",
+      "clipSha256": "b90d759731105a067557ece046aed16ce481e5b47d3521411d8d779e20993d9d",
+      "events": [
+        {
+          "amplitude": 0.7260289854294035,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.327
+        },
+        {
+          "amplitude": 1.0986619038596654,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.345
+        },
+        {
+          "amplitude": 1.3832221133544862,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.363
+        },
+        {
+          "amplitude": 1.1067562239172062,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.381
+        },
+        {
+          "amplitude": 1.100494163512685,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.398
+        },
+        {
+          "amplitude": 1.05966459285025,
+          "id": "ref-60-v56",
+          "midi": 60,
+          "startSeconds": 0.42
+        },
+        {
+          "amplitude": 2.56679523785241,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.438
+        },
+        {
+          "amplitude": 1.6756703063154794,
+          "id": "ref-60-v32",
+          "midi": 60,
+          "startSeconds": 0.456
+        }
+      ],
+      "fitBasisSha256": "d467b9e95a66077754be831e006acace64f5d4109ada13c2390ae11a5076c22b",
+      "question": "How many times is the pitch repeated in this clip?",
+      "quietRatio": 0.282854,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 8,
+        "midi": 60
+      },
+      "responseField": "repeatPitchCount",
+      "split": "unregistered-solo",
+      "temporalAttackCount": 8
+    },
+    {
+      "attackTimesSeconds": [
+        0.311,
+        0.716
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-17.json",
+      "clipClass": "repeat",
+      "clipId": "fresh-17",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-17.wav",
+      "clipSha256": "cbf210a7847be177533c90fc9edb8eb2f8e97e11b08acbd20342de8861c7aba9",
+      "events": [
+        {
+          "amplitude": 1.4314929422569744,
+          "id": "ref-72-v56",
+          "midi": 72,
+          "startSeconds": 0.311
+        },
+        {
+          "amplitude": 2.004570945264575,
+          "id": "ref-72-v76",
+          "midi": 72,
+          "startSeconds": 0.716
+        }
+      ],
+      "fitBasisSha256": "5f13c8442151d69e7e4cbd09f22f57f4d31d81459bfb44638d79173c7579a3d1",
+      "question": "How many times is the pitch repeated in this clip?",
+      "quietRatio": 0.714114,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 2,
+        "midi": 72
+      },
+      "responseField": "repeatPitchCount",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.248,
+        0.807
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-18.json",
+      "clipClass": "repeat",
+      "clipId": "fresh-18",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-18.wav",
+      "clipSha256": "b1a5bf08b5d9e15ce7caf16625988cf87eff19fad17462ad3446b9a6196e4285",
+      "events": [
+        {
+          "amplitude": 0.8549776221604803,
+          "id": "ref-67-v92",
+          "midi": 67,
+          "startSeconds": 0.248
+        },
+        {
+          "amplitude": 0.8013036520758846,
+          "id": "ref-67-v76",
+          "midi": 67,
+          "startSeconds": 0.807
+        }
+      ],
+      "fitBasisSha256": "2a375c1b9b95c909288b9dfc77c2928a7b537f32315d39085ad2f1e837dd57cf",
+      "question": "How many times is the pitch repeated in this clip?",
+      "quietRatio": 0.937222,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 2,
+        "midi": 67
+      },
+      "responseField": "repeatPitchCount",
+      "split": "registered",
+      "temporalAttackCount": 2
+    },
+    {
+      "attackTimesSeconds": [
+        0.305,
+        0.802
+      ],
+      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-19.json",
+      "clipClass": "repeat",
+      "clipId": "fresh-19",
+      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-19.wav",
+      "clipSha256": "b5684c4b0a5b7f7d1aaa3dbd1302da488156911ca8b5b9b57bb71065635f50d9",
+      "events": [
+        {
+          "amplitude": 1.3411821836849673,
+          "id": "ref-55-v56",
+          "midi": 55,
+          "startSeconds": 0.305
+        },
+        {
+          "amplitude": 1.4074979325184591,
+          "id": "ref-55-v32",
+          "midi": 55,
+          "startSeconds": 0.802
+        }
+      ],
+      "fitBasisSha256": "4d1430ea6b2536180a6eca9320637a98c3fae700564def7c9c8c50c80f5a8e40",
+      "question": "How many times is the pitch repeated in this clip?",
+      "quietRatio": 0.952884,
+      "quietThreshold": 0.3,
+      "repeatPitch": {
+        "count": 2,
+        "midi": 55
+      },
+      "responseField": "repeatPitchCount",
+      "split": "registered",
+      "temporalAttackCount": 2
+    }
+  ],
+  "notes": [
+    "Amplitudes are fitted on the pre-compressor audio (fitBasisSha256); post-compressor quiet ratios differ.",
+    "The manifest is immutable once a run ID is minted. Regeneration requires a new run ID."
+  ],
+  "quietThreshold": 0.3,
+  "refusalControls": [
+    {
+      "controlId": "malformed-payload",
+      "expected": "refused"
+    },
+    {
+      "controlId": "stale-binding",
+      "expected": "refused"
+    },
+    {
+      "controlId": "expired-token",
+      "expected": "refused"
+    },
+    {
+      "controlId": "inventory-mismatch",
+      "expected": "refused"
+    },
+    {
+      "controlId": "oversized-file",
+      "expected": "refused"
+    },
+    {
+      "controlId": "wrong-sample-rate",
+      "expected": "refused"
+    },
+    {
+      "controlId": "stereo-input",
+      "expected": "refused"
+    },
+    {
+      "controlId": "unsupported-route",
+      "expected": "refused"
+    },
+    {
+      "controlId": "missing-binding",
+      "expected": "refused"
+    },
+    {
+      "controlId": "tampered-binding",
+      "expected": "refused"
+    },
+    {
+      "controlId": "second-file-over-limit",
+      "expected": "refused"
+    },
+    {
+      "controlId": "unauthorized-model",
+      "expected": "refused"
+    }
+  ],
+  "schemaVersion": 1
+}
