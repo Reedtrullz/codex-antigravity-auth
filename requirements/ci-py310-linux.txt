@@ -165,5 +165,5 @@ urllib3==2.8.0
     # via requests
 uvicorn==0.54.0
     # via codex-antigravity-auth (pyproject.toml)
-zipp==4.1.0
+zipp==4.1.1
     # via importlib-metadata
