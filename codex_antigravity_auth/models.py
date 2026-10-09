@@ -519,12 +519,19 @@ def capabilities_for_native_definition(definition: NativeModel | None) -> Provid
         parallel_tool_calls=(
             definition.supports_parallel_tool_calls if definition is not None else True
         ),
-        structured_output=True,
+        structured_output=bool(definition and definition.family == 'gemini'
+                               and not required_output_bridge(definition)
+                               and any(known.family == 'gemini'
+                                       and known.backend_id.startswith('gemini-')
+                                       and known.backend_id == definition.backend_id
+                                       and not known.output_bridge_required
+                                       for known in NATIVE_MODELS)),
         stop_sequences=True,
         reasoning=bool(definition and definition.reasoning_mapping),
         streaming_usage=True,
         input_modalities=frozenset(definition.input_modalities if definition else {"text"}),
         image_detail=False,
+        pcm_wav_probe=bool(definition and definition.family=="gemini" and definition.backend_id.startswith("gemini-") and not required_output_bridge(definition)),
         reasoning_replay=False,
         reasoning_effort_levels=(("low", "medium", "high", "xhigh") if definition.reasoning_mapping == "thinking_budget" else ("low", "medium", "high")) if definition and definition.reasoning_mapping else (),
         reasoning_effort_parameter=definition.reasoning_mapping if definition else None,

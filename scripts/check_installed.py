@@ -44,7 +44,10 @@ def main():
             (suite / "scripts").mkdir()
             shutil.copy2(ROOT / "scripts/run_tests.py", suite / "scripts/run_tests.py")
             (suite / "tests").mkdir()
-            for test in ('conftest.py', 'test_hermetic_replay.py', 'test_installed_contract.py', 'test_service_manager.py', 'test_request_shapes.py', 'test_final_tool_calls.py', 'test_google_output_parts.py', 'test_anti_run_control.py', 'test_anti_spend_controls.py', 'test_anti_inventory.py', 'test_orchestration_ownership.py', 'test_model_observations.py', 'test_local_only.py', 'test_context_preflight.py', 'test_chunk_resume.py', 'test_image_attachments.py', 'test_anti_diff_provenance.py', 'test_review_benchmark.py'):
+            (suite / "tests" / "__init__.py").touch()
+            for test in ('conftest.py', 'test_hermetic_replay.py', 'test_installed_contract.py', 'test_service_manager.py', 'test_request_shapes.py', 'test_final_tool_calls.py', 'test_google_output_parts.py', 'test_anti_run_control.py', 'test_anti_spend_controls.py', 'test_anti_inventory.py', 'test_orchestration_ownership.py', 'test_model_observations.py', 'test_local_only.py', 'test_context_preflight.py', 'test_chunk_resume.py', 'test_image_attachments.py', 'test_wav_audio.py', 'test_music_evidence.py', 'test_gemini_music_review.py', 'test_anti_diff_provenance.py', 'test_review_benchmark.py'):
+                shutil.copy2(ROOT / "tests" / test, suite / "tests" / test)
+            for test in ('test_account_binding.py', 'test_server_account_binding.py', 'test_account_binding_helper.py'):
                 shutil.copy2(ROOT / "tests" / test, suite / "tests" / test)
             # An explicit external root and cwd prevent pytest from finding the
             # checkout's conftest, pythonpath config, or editable source imports.

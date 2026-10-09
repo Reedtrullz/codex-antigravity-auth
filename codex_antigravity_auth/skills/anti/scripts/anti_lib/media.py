@@ -109,6 +109,9 @@ class Session:
     def content_sha256(self, prompt):
         return content_digest(prompt,self.identity())
 
+    def supports(self, registry, model):
+        return supports(registry, model)
+
     def require(self, registry, model, stage):
         if not supports(registry,model):
             raise MediaError(f'Image attachments require a gateway declaration of data-URL image support for the {stage} stage; no text-only substitution')
@@ -149,6 +152,9 @@ class Session:
 
 def projection(value, *, hashes=False):
     """Bounded persistence receipts; never-mode omits image content hashes."""
+    if isinstance(value,dict) and value.get('kind')=='audio':
+        from .wav_audio import projection as audio_projection
+        return audio_projection(value,hashes=hashes)
     if not isinstance(value,dict) or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=1:
         return None
     for key, limit in (('captured_count',MAX_IMAGES),('captured_bytes',MAX_TOTAL_BYTES),('gateway_attempts',2**63-1)):

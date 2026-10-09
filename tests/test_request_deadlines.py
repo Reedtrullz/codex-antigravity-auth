@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from starlette.requests import ClientDisconnect
 
 from codex_antigravity_auth import request_budget as budgets, server
+from codex_antigravity_auth.account_binding import GATEWAY_INSTANCE
 
 ROUTES = ["google", "byok", "openai", "openai_oauth"]
 NATIVE = {"id": "resp_fixture", "status": "completed", "output": [{"type": "message", "role": "assistant", "id": "msg_fixture",
@@ -23,6 +24,7 @@ class Request:
     def __init__(self, route, stream=False):
         self.payload = {"model": "fixture:model" if route == "byok" else "gemini-3.8-flash", "input": "fixture", "stream": stream}
         self.disconnected = False
+        self.headers = {}
     async def json(self):
         return deepcopy(self.payload)
     async def is_disconnected(self):
@@ -173,6 +175,50 @@ def test_late_account_acquisition_is_released_without_dispatch(monkeypatch, setu
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("reason", ["deadline", "disconnect"])
+def test_late_bound_account_acquisition_is_released_without_dispatch(monkeypatch, setup_route, reason):
+    state = setup_route("google")
+    monkeypatch.setattr(
+        server,
+        "classify_route",
+        lambda model, **kwargs: "antigravity" if model == "gemini-3.8-flash" else "byok",
+    )
+
+    async def scenario():
+        finish = asyncio.Event()
+        started = asyncio.Event()
+
+        async def acquire(*args):
+            started.set()
+            await finish.wait()
+            return {"email": "late-bound@example.invalid", "accessToken": "synthetic-only"}
+
+        monkeypatch.setattr(server, "acquire_bound_account_for_request", acquire)
+        request = Request("google")
+        request.headers["X-Anti-Account-Binding"] = json.dumps({
+            "schemaVersion": 1,
+            "gatewayInstance": GATEWAY_INSTANCE,
+            "accountRef": "acct_" + "b" * 12,
+            "inventorySha256": "c" * 64,
+        })
+        task = asyncio.create_task(server.create_response(request))
+        await asyncio.wait_for(started.wait(), 2)
+        if reason == "disconnect":
+            request.disconnected = True
+        try:
+            with pytest.raises(HTTPException if reason == "deadline" else ClientDisconnect):
+                await asyncio.wait_for(task, 2)
+        finally:
+            finish.set()
+        for _ in range(40):
+            if state.release.await_count:
+                break
+            await asyncio.sleep(0.005)
+        state.release.assert_awaited_once_with("late-bound@example.invalid")
+
+    asyncio.run(scenario())
+
+
 def test_refresh_in_progress_is_retryable_and_logged_without_a_lease(monkeypatch, setup_route):
     state = setup_route("google")
 
@@ -298,12 +344,13 @@ def test_observed_terminal_is_not_replaced_when_only_trailing_diagnostics_stall(
     asyncio.run(scenario())
 
 
-def stream_clients(monkeypatch, route, *, repeated=False, slow_connect=False):
+def stream_clients(monkeypatch, route, *, repeated=False, slow_connect=False, on_first_read=None):
     clients, contexts = [], []
     class Response:
         status_code = 200
         headers = {}
         async def aiter_bytes(self):
+            if on_first_read is not None: on_first_read()
             index = 0
             while True:
                 if route == "google":
@@ -336,13 +383,31 @@ def stream_clients(monkeypatch, route, *, repeated=False, slow_connect=False):
 
 @pytest.mark.parametrize("route", ROUTES)
 @pytest.mark.parametrize("policy", ["idle", "total"])
-def test_route_stream_timeouts_preserve_partial_output_and_close_owned_resources(monkeypatch, setup_route, route, policy):
-    state = setup_route(route, timeout=0.2)
+@pytest.mark.parametrize("preparation_delay", [0, 0.15])
+def test_route_stream_timeouts_preserve_partial_output_and_close_owned_resources(monkeypatch, setup_route, route, policy, preparation_delay):
+    state = setup_route(route, timeout=5)
     monkeypatch.setattr(server, "STREAM_IDLE_TIMEOUT_SECONDS", 0.04 if policy == "idle" else 0.3)
-    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 1.0 if policy == "idle" else 0.1)
-    clients, contexts = stream_clients(monkeypatch, route, repeated=policy == "total")
+    # This fixture tests an established stream. Preparation expiry has separate
+    # tests; arm its short fault-injection clock only after the fake first read.
+    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 5)
+    factory = server._new_request_budget
+    active = {}
+    def capture_budget(request):
+        budget = factory(request)
+        active['budget'] = budget
+        return budget
+    monkeypatch.setattr(server, '_new_request_budget', capture_budget)
+    def arm_stream_deadline():
+        active['budget'].deadline = time.monotonic() + (1 if policy == 'idle' else 0.1)
+    clients, contexts = stream_clients(monkeypatch, route, repeated=policy == "total", on_first_read=arm_stream_deadline)
     async def scenario():
-        response = await server.create_response(Request(route, stream=True))
+        request = Request(route, stream=True)
+        read_json = request.json
+        async def delayed_json():
+            await asyncio.sleep(preparation_delay)
+            return await read_json()
+        request.json = delayed_json
+        response = await server.create_response(request)
         return [chunk async for chunk in response.body_iterator]
     chunks = asyncio.run(scenario())
     assert clients and all(client.closed == 1 for client in clients)

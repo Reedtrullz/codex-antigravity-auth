@@ -72,7 +72,7 @@ class ProviderTerminal:
 @dataclass(frozen=True)
 class ProviderResult:
     output: tuple[dict[str, Any], ...]
-    usage: dict[str, int]
+    usage: dict[str, Any]
     terminal: ProviderTerminal
     provider_response_id: str | None = None
 
@@ -118,6 +118,7 @@ class ProviderCapabilities:
     input_modalities: frozenset[str] = frozenset({"text"})
     image_forms: frozenset[str] = frozenset({"url", "data_url"})
     image_detail: bool = True
+    pcm_wav_probe: bool = False
     reasoning_effort_parameter: str | None = None
     reasoning_effort_levels: tuple[str, ...] = ()
     reasoning_replay: bool = True
@@ -151,17 +152,21 @@ def normalize_usage(
     input_tokens: Any = 0,
     output_tokens: Any = 0,
     total_tokens: Any = 0,
-) -> dict[str, int]:
+    *, reasoning_tokens: Any = None,
+) -> dict[str, Any]:
     normalized_input = _token_count(input_tokens)
     normalized_output = _token_count(output_tokens)
     normalized_total = _token_count(total_tokens)
     if normalized_total <= 0 and (normalized_input or normalized_output):
         normalized_total = normalized_input + normalized_output
-    return {
+    result = {
         "input_tokens": normalized_input,
         "output_tokens": normalized_output,
         "total_tokens": normalized_total,
     }
+    if type(reasoning_tokens) is int and reasoning_tokens >= 0:
+        result['output_tokens_details'] = {'reasoning_tokens': reasoning_tokens}
+    return result
 
 
 def refusal_item(safety_block: dict[str, Any] | None = None, *, refusal_text: str | None = None) -> dict[str, Any]:
@@ -357,7 +362,7 @@ def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabil
     from .input_fidelity import validate_input
     try:
         validate_input(request, capabilities.input_modalities, capabilities.image_forms, image_detail=capabilities.image_detail,
-                       native_passthrough=capabilities.native_responses)
+                       native_passthrough=capabilities.native_responses, pcm_wav_probe=capabilities.pcm_wav_probe)
     except ValueError as exc:
         raise CapabilityError(str(exc)) from exc
 
@@ -412,7 +417,8 @@ def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabil
                 raise CapabilityError(f"input[{index}]: opaque reasoning replay is not supported by the selected route")
 
     text = request.get("text")
-    if isinstance(text, dict) and text.get("format") is not None and not capabilities.structured_output:
+    if (isinstance(text, dict) and isinstance(text.get("format"), dict)
+            and text['format'].get('type') != 'text' and not capabilities.structured_output):
         raise CapabilityError("structured output is not supported by the selected route")
 
 
@@ -433,6 +439,7 @@ def response_from_result(
             result.usage.get("input_tokens"),
             result.usage.get("output_tokens"),
             result.usage.get("total_tokens"),
+            reasoning_tokens=(result.usage.get('output_tokens_details') or {}).get('reasoning_tokens'),
         ),
         "status": result.terminal.kind.value,
     }

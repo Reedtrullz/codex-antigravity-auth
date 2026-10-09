@@ -230,6 +230,10 @@ def _redact_text(text: str, depth: int = 0) -> str:
         return LIMIT_MARKER
     if not text:
         return text
+    # Canonical RIFF/WAV base64 can be echoed inside model/error text. Remove
+    # the entire token (including partial echoes) before parsing or clipping.
+    text = re.sub(r"(?<![A-Za-z0-9+/])(?:data:audio/wav;base64,)?UklGR[A-Za-z0-9+/=]{11,}",
+                  REDACTED + " (WAV payload)", text)
     if text.lstrip().startswith(("{", "[", '"')):
         try:
             parsed = json.loads(text)

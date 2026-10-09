@@ -13,6 +13,10 @@ def test_installed_origin_and_complete_skill(tmp_path):
     if not (here.parent / "pyproject.toml").exists():
         assert Path(cli.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
     names = cli.bundled_skill_asset_names()
+    assert "MUSIC_REVIEW.md" in names
+    assert "schemas/music-evidence-v1.json" in names
+    assert "schemas/music-review-v1.json" in names
+    assert "scripts/anti_lib/music_evidence.py" in names
     assert "scripts/anti_lib/reflections.py" in names
     assert "scripts/anti_lib/verifier.py" in names
     assert "scripts/anti_lib/capabilities.json" in names
