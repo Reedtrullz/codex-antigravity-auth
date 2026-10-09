@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-antigravity-auth"
-version = "2.4.2"
+version = "2.4.3"
 description = "Google Antigravity OAuth model access for OpenAI Codex"
 readme = "README.md"
 license = "MIT"
@@ -24,11 +24,11 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-  "httpx>=0.28",
+  "httpx>=0.28.1",
   "fastapi>=0.142.2",
   "uvicorn>=0.28",
   "keyring>=25.0.0",
-  "cryptography>=42.0.0",
+  "cryptography>=50.0.2",
   "tomlkit>=0.13.2",
 ]
 
@@ -76,6 +76,8 @@ codex_antigravity_auth = [
   "skills/anti/CONTEXT_PREFLIGHT.md",
   "skills/anti/CHUNK_RESUME.md",
   "skills/anti/ARTIFACTS.md",
+  "skills/anti/WAV_AUDIO.md",
+  "skills/anti/MUSIC_REVIEW.md",
   "skills/anti/ATTACHMENTS.md",
   "skills/anti/BENCHMARK.md",
   "skills/anti/DATA_POLICY.md",

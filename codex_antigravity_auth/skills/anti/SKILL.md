@@ -5,6 +5,11 @@ description: Use the optional Anti helper after Antigravity Claude Opus/Sonnet i
 
 # Anti
 
+Experimental [PCM WAV listening input](WAV_AUDIO.md) requires explicit local files,
+an explicit Gemini model and `--probe-unverified-audio` before upload. Never treat
+a text response, filename or transcript as proof of listening; actual backend
+audio acceptance remains unverified. No live probe is implied by this skill.
+
 Explicit local PNG/JPEG attachments use repeatable `--image PATH` and require
 gateway-declared image support at every stage. Read [attachments](ATTACHMENTS.md)
 for limits, unscanned pixels/metadata, retention, and bounded real-media
@@ -130,7 +135,8 @@ fit. Never trim source silently to make a request appear to fit. See
 
 The current gateway transports accept declared text/image inputs and emit text,
 reasoning summaries, function calls and refusals. They do not carry audio/video
-input or generated image/audio/video output. Standalone BYOK capabilities are
+input on ordinary routes or generated image/audio/video output. The separate
+experimental WAV extension for `listen` and `consult` is documented in [WAV_AUDIO.md](WAV_AUDIO.md). Standalone BYOK capabilities are
 unknown until the gateway supplies a compatible contract. Local short aliases,
 quality ranks and cost tiers are selection heuristics, not capability evidence.
 
@@ -143,7 +149,7 @@ quality ranks and cost tiers are selection heuristics, not capability evidence.
 - When Opus quota is low, use `nemotron-ultra` (70 quality, free, 1M) for broad scans and planning.
 - For quick consults, prefer `flash-3.8` (current Flash, quota, 1M).
 - For code review, prefer `poolside` (60 quality, free, coding-focused) first, then fall back to quota models.
-- For image tasks, require image support in the effective gateway contract. Audio/video input is currently unsupported, including on upstream models that support those modalities.
+- For image tasks, require image support in the effective gateway contract. Ordinary audio/video input remains unsupported; the PCM WAV probe extension requires explicit upload intent and leaves listening unverified.
 - Gemini 3.8 Flash is the current default; use explicit 3.7/3.6 IDs only when a pinned workflow requires them.
 - The helper's `cheapest_models_for_task()` function automates this: it filters by capability requirements, then sorts free models first, then by quality.
 
@@ -177,6 +183,7 @@ python3 ~/.codex/skills/anti/scripts/anti.py consult --model sonnet --prompt "Re
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model deepseek-v4-flash --prompt "Give a fast second opinion"
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model flash-high --prompt "Quick sanity check on this approach"
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model gemini-pro --prompt "Deep analysis of this architecture"
+python3 ~/.codex/skills/anti/scripts/anti.py listen --model gemini-3.1-pro --audio reference.wav --audio candidate.wav --probe-unverified-audio --prompt-file listening-prompt.txt --json
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model nemotron-ultra --prompt "Review this large codebase change"
 python3 ~/.codex/skills/anti/scripts/anti.py consult --model poolside --prompt "Suggest refactoring for this function"
 python3 ~/.codex/skills/anti/scripts/anti.py panel --mode review --scope staged --model sonnet --model opus --model flash-high --judge opus
@@ -228,7 +235,7 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 
 ## Workflow
 
-1. Infer whether the user wants `consult`, `plan`, `review`, `workflow`, `runs`, `panel`/`moa`/`fusion`, `smoke`, `start`, `setup-google`, `configure-codex`, or `doctor`.
+1. Infer whether the user wants `listen`, `consult`, `plan`, `review`, `workflow`, `runs`, `panel`/`moa`/`fusion`, `smoke`, `start`, `setup-google`, `configure-codex`, or `doctor`.
 2. Run `smoke` first when helper readiness is uncertain. Use `codex-antigravity setup --check` or `codex-antigravity doctor --codex-ready` when the user asks whether Claude is native-ready in Codex. Default `smoke` is sidecar readiness; use `smoke --mode full` only when the user asked to make Antigravity the active Codex backend.
 3. For deep autonomous work planning, use `plan --model opus`. Add `--scope working-tree`, `--scope staged`, or `--file` when the plan should account for current repo state.
 4. For multi-model review or planning, use `panel --mode review` or `panel --mode plan`. Use `--role` for lenses such as correctness, security, tests, protocol, or UX. Use `--output findings` when you want machine-readable `id`, `claim`, `severity`, `lanes`, `verify`, `confidence`, `file`, `line`, `evidence`, and `fingerprint` fields. Cross-lane dedup is automatic by fingerprint. Use BYOK `provider:model` ids only when `/v1/models` advertises them.
@@ -236,7 +243,7 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 `workflow quick-check` for fast free-model pre-commit gates (60s budget), and
 `workflow consensus` for disagreement-focused 3-model panels with min-successes 2.
 6. For code review, prefer `review --scope staged`, `workflow review-ready --scope staged`, or `panel --mode review --scope staged` when the user asks about commit readiness; use `review --scope working-tree` for current local changes and `review --scope diff --base origin/main` for a clean merge-candidate branch.
-7. For focused questions, use `consult --prompt` for one model or `panel --mode ask --prompt` for a bounded multi-model comparison. Write temporary prompt files outside the repo and pass `--prompt-file` when useful.
+7. For focused questions, use `consult --prompt` for one model or `panel --mode ask --prompt` for a bounded multi-model comparison. For explicit PCM WAV music input, use `listen` with a selected Gemini model and probe opt-in. This permits one attempt, no source pre-read/retry/fallback, a default 2,048 output tokens (explicitly up to 4,096) and 90 seconds. The output allowance includes reasoning. Musical findings remain advisory; completing a response does not establish acoustic accuracy. Write temporary prompt files outside the repo and pass `--prompt-file` when useful.
 8. Read the helper output and synthesize it with native Codex analysis. Call out disagreements, caveats, and what was or was not live-verified.
 
 ## Operational Fallbacks
@@ -415,3 +422,11 @@ have separate limits, and blocking OS work is not forcibly preempted.
 The executable entrypoint preserves compatibility helpers while captured-source
 rendering, coverage and record publication live in owned modules. See
 [ownership and retention boundaries](OWNERSHIP.md) before changing orchestration.
+
+## Optional Gemini music review
+
+For explicit audio/music review use the standalone `review-music` profile in
+[MUSIC_REVIEW.md](MUSIC_REVIEW.md). Evidence is optional and generic; Keyspilli,
+other providers and local music models are not dependencies. Prepare with
+`--dry-run`; only an explicitly authorized `--probe-unverified-audio` run uploads.
+Model observations remain advisory and cannot grant musical acceptance.

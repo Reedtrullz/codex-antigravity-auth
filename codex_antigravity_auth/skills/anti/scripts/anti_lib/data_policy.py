@@ -41,6 +41,10 @@ def digest(value: str) -> str:
 def content_digest(prompt, media=None):
     if not media:
         return digest(prompt)
+    if isinstance(media,list) and any(isinstance(item,dict) and item.get('mime')=='audio/wav' for item in media):
+        from .wav_audio import valid_identity
+        if not valid_identity(media):raise PolicyError('Invalid captured audio identity')
+        return digest(json.dumps({'version':2,'promptSha256':digest(prompt),'audio':media},sort_keys=True,separators=(',',':')))
     if (not isinstance(media,list) or len(media)>4 or any(not isinstance(item,dict)
             or set(item)!={'index','mime','bytes','sha256'} or type(item['index']) is not int or item['index']!=index
             or not isinstance(item['mime'],str) or item['mime'] not in {'image/png','image/jpeg'} or type(item['bytes']) is not int or not 0<item['bytes']<=2*1024*1024

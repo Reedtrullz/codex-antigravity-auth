@@ -148,6 +148,19 @@ def _safe_client_metadata(value: object) -> dict[str, Any]:
     return metadata
 
 
+def _google_usage(usage):
+    result = normalize_usage(usage.get('promptTokenCount'), usage.get('candidatesTokenCount'),
+                             usage.get('totalTokenCount'), reasoning_tokens=usage.get('thoughtsTokenCount'))
+    details = result.get('output_tokens_details')
+    if details is not None:
+        # Google candidates exclude thoughts; Responses output tokens include
+        # them. Never infer thoughts from a difference in the reported total.
+        result['output_tokens'] += details['reasoning_tokens']
+        if not usage.get('totalTokenCount'):
+            result['total_tokens'] += details['reasoning_tokens']
+    return result
+
+
 class GoogleResponseAccumulator:
     def __init__(self, *, tool_validator=None) -> None:
         self.tool_validator = tool_validator or FunctionCallValidator()
@@ -193,11 +206,7 @@ class GoogleResponseAccumulator:
 
         usage = payload.get("usageMetadata")
         if isinstance(usage, dict):
-            self._usage = normalize_usage(
-                usage.get("promptTokenCount"),
-                usage.get("candidatesTokenCount"),
-                usage.get("totalTokenCount"),
-            )
+            self._usage = _google_usage(usage)
 
         try:
             candidates = self._primary.select(payload.get("candidates", []))
@@ -631,11 +640,7 @@ class GoogleTransport:
 
         usage = unwrapped.get("usageMetadata")
         usage = usage if isinstance(usage, dict) else {}
-        normalized_usage = normalize_usage(
-            usage.get("promptTokenCount"),
-            usage.get("candidatesTokenCount"),
-            usage.get("totalTokenCount"),
-        )
+        normalized_usage = _google_usage(usage)
         terminal = classify_terminal(
             output=output,
             finish_reason=finish_reason,
