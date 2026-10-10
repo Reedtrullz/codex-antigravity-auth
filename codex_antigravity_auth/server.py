@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
 from .accounts import AccountManager, AccountRefreshInProgress, classify_backend_status, is_validation_required_error
+from .provider_diagnostics import parse_provider_error, provider_error_class
 from .account_binding import parse_account_binding_header, validate_binding_route
 from .account_state import scoped_cooldown_expiry
 from .byok import (
@@ -2230,8 +2231,8 @@ async def _create_response(request: Request, budget: RequestBudget):
                     lambda: acquire_active_account_for_request(model),
                     release_late_result=True,
                 )
-                rotation_attempted = True
-                if new_account:
+                if new_account and new_account.get("email") != response_account.get("email"):
+                    rotation_attempted = True
                     previous_account = response_account
                     response_attempts.append(new_account)
                     response_account = new_account
@@ -2287,6 +2288,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                 is_validation = is_validation_required_error(res.status_code, res.text)
                 cooldown_scope = "family" if error_category == "rate_limit" else "account"
                 cooldown_category = error_category
+                retry_diagnostics = parse_provider_error(res.status_code, res.text)
                 await run_nonstream_diagnostic(
                     record_attempt_outcome,
                     response_account.get("email", ""),
@@ -2297,7 +2299,11 @@ async def _create_response(request: Request, budget: RequestBudget):
                         retry_after_seconds=retry_after_seconds,
                     ),
                     status_code=res.status_code,
-                    error_class="validation_required" if is_validation else None,
+                    error_class=(
+                        provider_error_class(retry_diagnostics)
+                        if retry_diagnostics.reason
+                        else None
+                    ),
                 )
                 new_account = None
                 if not audio_request and account_binding is None:
@@ -2305,8 +2311,8 @@ async def _create_response(request: Request, budget: RequestBudget):
                         lambda: acquire_active_account_for_request(model),
                         release_late_result=True,
                     )
+                if new_account and new_account.get("email") != response_account.get("email"):
                     rotation_attempted = True
-                if new_account:
                     response_attempts.append(new_account)
                     response_account = new_account
                     res = await request_backend_with_boundary(response_account)
@@ -2347,7 +2353,10 @@ async def _create_response(request: Request, budget: RequestBudget):
                 retry_after_seconds = retry_after_seconds_from_response(res)
                 retry_after_source = retry_after_source_from_response(res)
                 is_validation = is_validation_required_error(res.status_code, res.text)
-                error_class = "validation_required" if is_validation else "auth_failure"
+                diagnostics = parse_provider_error(res.status_code, res.text)
+                error_class = (
+                    provider_error_class(diagnostics) if diagnostics.reason else "auth"
+                )
                 await run_nonstream_diagnostic(
                     record_attempt_outcome,
                     response_account.get("email", ""),
@@ -2371,16 +2380,21 @@ async def _create_response(request: Request, budget: RequestBudget):
                     attempt_count=len(response_attempts),
                     rotation_count=max(0, len(response_attempts) - 1),
                 )
-                if is_validation:
-                    safe_text = safe_request_error(res.text)
+                safe_text = diagnostics.message
+                if error_class == "validation_required":
                     detail_msg = (
-                        f"Google account requires verification (VALIDATION_REQUIRED). "
-                        f"Run 'codex-antigravity login' to re-authenticate. "
+                        "Google account requires verification (VALIDATION_REQUIRED). "
+                        "Run 'codex-antigravity login' to re-authenticate. "
+                        f"{safe_text}"
+                    )
+                elif error_class == "age_ineligible":
+                    detail_msg = (
+                        "Google account is not eligible for this model (age restriction). "
+                        "This is an account-eligibility problem; re-authentication will not fix it. "
                         f"{safe_text}"
                     )
                 else:
-                    safe_text = safe_request_error(res.text)
-                    detail_msg = f"Google Authentication failure: {safe_text}"
+                    detail_msg = f"Google provider rejected the request ({error_class}): {safe_text}"
                 raise HTTPException(
                     status_code=res.status_code,
                     detail=google_failure_detail(
@@ -2720,22 +2734,34 @@ async def _create_response(request: Request, budget: RequestBudget):
                     category=exc.outcome.category,
                     retry_after_seconds=retry_after,
                 )
-                is_validation = is_validation_required_error(exc.status_code, response_text)
-                error_class = "validation_required" if is_validation else outcome.category
+                stream_diagnostics = parse_provider_error(exc.status_code, response_text)
+                error_class = (
+                    provider_error_class(stream_diagnostics)
+                    if stream_diagnostics.reason
+                    else (exc.outcome.category or "auth_failure")
+                )
                 await record_stream_attempt(
                     stream_account,
                     outcome,
                     status_code=exc.status_code,
                     error_class=error_class,
                 )
-                error_code = outcome.category
-                if is_validation:
+                error_code = error_class
+                if error_class == "validation_required":
                     error_message = (
-                        f"Google account requires verification (VALIDATION_REQUIRED). "
-                        f"Run 'codex-antigravity login' to re-authenticate."
+                        "Google account requires verification (VALIDATION_REQUIRED). "
+                        "Run 'codex-antigravity login' to re-authenticate."
+                    )
+                elif error_class == "age_ineligible":
+                    error_message = (
+                        "Google account is not eligible for this model (age restriction). "
+                        "This is an account-eligibility problem; re-authentication will not fix it."
                     )
                 else:
-                    error_message = f"Google Antigravity returned HTTP {exc.status_code}."
+                    error_message = (
+                        f"Google Antigravity returned HTTP {exc.status_code} "
+                        f"({stream_diagnostics.message[:120]})"
+                    )
             except GoogleStreamPayloadError as exc:
                 outcome = outcome_for_backend_error(exc.code, exc.message)
                 await record_stream_attempt(
@@ -2895,6 +2921,8 @@ async def _create_response(request: Request, budget: RequestBudget):
                 error_class=error_code,
                 error=error_message,
                 rotation_attempted=attempt_num > 0,
+                attempt_count=len(stream_attempts),
+                rotation_count=attempt_num,
             )
             return
 
