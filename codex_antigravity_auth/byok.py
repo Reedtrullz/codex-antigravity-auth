@@ -1,14 +1,17 @@
+from .console import console_print as print
+import logging
 import os
 import re
 import math
-import sys
 from pathlib import Path
 from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory
 
 from .namespaces import gateway_file
+from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory
 from typing import Any
 from urllib.parse import urlparse
 
+from .endpoint_policy import validate_endpoint_url
 from .constants import is_loopback_host
 from .response_protocol import ProviderCapabilities
 from .storage import (
@@ -35,6 +38,7 @@ PROVIDER_CAPABILITY_FIELDS = frozenset(
         "structured_output",
         "stop_sequences",
         "reasoning",
+        "reasoning_replay",
         "streaming_usage",
     }
 )
@@ -151,34 +155,7 @@ def validate_provider_id(provider_id: str) -> str:
 
 
 def validate_http_base_url(base_url: Any, *, label: str = "base URL") -> str:
-    value = _non_empty_string(base_url)
-    if not value:
-        raise ValueError(f"{label} must be a non-empty absolute http(s) URL")
-    value = value.rstrip("/")
-    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
-        raise ValueError(f"{label} must not contain whitespace or control characters")
-    try:
-        parsed = urlparse(value)
-        hostname = parsed.hostname
-    except ValueError as e:
-        raise ValueError(f"{label} must be an absolute http(s) URL") from e
-    try:
-        port = parsed.port
-    except ValueError as e:
-        raise ValueError(f"{label} must include a valid port if a port is specified") from e
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not hostname:
-        raise ValueError(f"{label} must be an absolute http(s) URL")
-    if ":" in hostname:
-        valid_ipv6_netloc = f"[{hostname}]" + (f":{port}" if port is not None else "")
-        if parsed.netloc.lower() != valid_ipv6_netloc.lower():
-            raise ValueError(f"{label} must be an absolute http(s) URL")
-    if parsed.username or parsed.password:
-        raise ValueError(f"{label} must not include username or password")
-    if parsed.query or parsed.fragment:
-        raise ValueError(f"{label} must not include query strings or fragments")
-    if parsed.scheme == "http" and not is_loopback_host(hostname):
-        raise ValueError(f"{label} must use https unless it points at a loopback/local host")
-    return value
+    return validate_endpoint_url(base_url, label=label).rstrip("/")
 
 
 def _non_empty_string(value: Any) -> str | None:
@@ -257,6 +234,17 @@ def provider_auth_mode(provider: dict[str, Any]) -> str:
     return configured or PROVIDER_AUTH_MODE_API_KEY
 
 
+def validate_supported_provider_kind(provider: dict[str, Any]) -> None:
+    """Reject configured transports the gateway cannot dispatch."""
+    kind = provider.get("kind", "openai_chat")
+    if kind != "openai_chat":
+        raise ValueError(
+            f"Unsupported BYOK provider kind: {kind}. This gateway supports only "
+            "openai_chat BYOK routes; configure an OpenAI-compatible Chat Completions "
+            "endpoint with kind openai_chat, or remove this provider."
+        )
+
+
 def provider_capabilities(
     provider: dict[str, Any], provider_model: str | None = None
 ) -> ProviderCapabilities:
@@ -268,7 +256,8 @@ def provider_capabilities(
         "parallel_tool_calls": True,
         "structured_output": True,
         "stop_sequences": True,
-        "reasoning": True,
+        "reasoning": False,
+        "reasoning_replay": False,
         "streaming_usage": True,
     }
     overrides: list[object] = [provider.get("capabilities")]
@@ -284,14 +273,49 @@ def provider_capabilities(
                 break
 
     tool_choice_modes = PROVIDER_TOOL_CHOICE_MODES
+    input_modalities = frozenset({"text"})
+    image_forms = frozenset({"url", "data_url"})
+    reasoning_parameter = None
+    reasoning_levels = ()
+    reasoning_switch = None
     for raw_overrides in overrides:
         if raw_overrides is None:
             continue
         if not isinstance(raw_overrides, dict):
             raise ValueError("provider capabilities must be an object")
-        unknown = set(raw_overrides) - PROVIDER_CAPABILITY_FIELDS - {"tool_choice_modes"}
+        unknown = set(raw_overrides) - PROVIDER_CAPABILITY_FIELDS - {"tool_choice_modes", "input_modalities", "image_forms", "reasoning_effort"}
         if unknown:
             raise ValueError(f"unknown provider capability: {sorted(unknown)[0]}")
+        if "reasoning" in raw_overrides:
+            reasoning_switch = raw_overrides["reasoning"]
+        if "reasoning_effort" in raw_overrides:
+            mapping = raw_overrides["reasoning_effort"]
+            if mapping is None:
+                reasoning_parameter, reasoning_levels = None, ()
+            else:
+                if not isinstance(mapping, dict) or set(mapping) != {"parameter", "levels"}:
+                    raise ValueError("reasoning_effort requires parameter and levels")
+                # Documented OpenRouter chat mapping; never infer support from
+                # provider ID or model name. Other wire contracts need evidence.
+                if mapping["parameter"] != "reasoning.effort":
+                    raise ValueError("unsupported reasoning_effort parameter")
+                levels = mapping["levels"]
+                allowed = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+                if not isinstance(levels, list) or not levels or not all(isinstance(v, str) and v in allowed for v in levels):
+                    raise ValueError("reasoning_effort levels must be a non-empty list of supported efforts")
+                reasoning_parameter = mapping["parameter"]
+                reasoning_levels = tuple(dict.fromkeys(levels))
+        for name, allowed in (("input_modalities", {"text", "image"}), ("image_forms", {"url", "data_url"})):
+            if name in raw_overrides:
+                values = raw_overrides[name]
+                if not isinstance(values, list) or not all(isinstance(v, str) and v in allowed for v in values):
+                    raise ValueError(f"{name} contains an unsupported value")
+                if name == "input_modalities":
+                    if "text" not in values:
+                        raise ValueError("input_modalities must include text")
+                    input_modalities = frozenset(values)
+                else:
+                    image_forms = frozenset(values)
         for field_name in PROVIDER_CAPABILITY_FIELDS:
             if field_name not in raw_overrides:
                 continue
@@ -308,7 +332,8 @@ def provider_capabilities(
                 raise ValueError("tool_choice_modes contains an unsupported mode")
             tool_choice_modes = normalized_modes
 
-    return ProviderCapabilities(**defaults, tool_choice_modes=tool_choice_modes)
+    defaults["reasoning"] = reasoning_parameter is not None and reasoning_switch is not False
+    return ProviderCapabilities(**defaults, tool_choice_modes=tool_choice_modes, input_modalities=input_modalities, image_forms=image_forms, reasoning_effort_parameter=reasoning_parameter, reasoning_effort_levels=reasoning_levels if defaults["reasoning"] else ())
 
 
 def provider_oauth_unsupported_message(provider_id: str) -> str:
@@ -462,15 +487,18 @@ def validate_provider_headers(headers: dict[str, Any] | None) -> dict[str, str] 
     return normalized or None
 
 
-def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
+def normalize_provider_entry(provider: dict[str, Any], *, quiet: bool = False) -> dict[str, Any]:
     normalized = dict(provider)
+    # These markers are computed for read-only diagnostics, never trusted from
+    # stored provider data or retained by a normal write.
+    normalized.pop("_configuration_error", None)
+    normalized.pop("_declared_model_count", None)
 
     if "kind" in normalized:
         kind = _non_empty_string(normalized.get("kind"))
-        if kind in {"openai_chat", "openai_responses"}:
-            normalized["kind"] = kind
-        else:
-            normalized.pop("kind", None)
+        # Retain explicit unsupported kinds so diagnostics can reject them.
+        # Dropping the field would silently select the default chat transport.
+        normalized["kind"] = kind
     if "displayName" in normalized:
         try:
             display_name = validate_provider_display_name(normalized.get("displayName"))
@@ -481,14 +509,12 @@ def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
         else:
             normalized.pop("displayName", None)
     if "baseUrl" in normalized:
-        base_url = _non_empty_string(normalized.get("baseUrl"))
-        if base_url:
-            try:
-                normalized["baseUrl"] = validate_http_base_url(base_url, label="BYOK provider baseUrl")
-            except ValueError:
-                normalized.pop("baseUrl", None)
-        else:
-            normalized.pop("baseUrl", None)
+        try:
+            normalized["baseUrl"] = validate_http_base_url(normalized["baseUrl"], label="BYOK provider baseUrl")
+        except ValueError:
+            # Keep an explicit invalid override blocked, rather than erasing it
+            # and silently sending credentials to the provider preset URL.
+            normalized["baseUrl"] = None
     if "apiKeyEnv" in normalized:
         try:
             api_key_env = validate_provider_api_key_env(normalized.get("apiKeyEnv"))
@@ -514,12 +540,10 @@ def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
         else:
             normalized.pop("apiKey", None)
             provider_label = normalized.get("displayName") or normalized.get("id") or "unknown"
-            if provider_label not in _warned_invalid_provider_keys:
+            if not quiet and provider_label not in _warned_invalid_provider_keys:
                 _warned_invalid_provider_keys.add(provider_label)
-                print(
-                    f"[gateway] BYOK provider {provider_label}: stored apiKey failed validation "
-                    "and was dropped (control characters or non-ASCII); fix the provider config",
-                    file=sys.stderr,
+                logging.getLogger(__name__).warning(
+                    "BYOK provider stored apiKey failed validation and was dropped; fix the provider config"
                 )
     aliases = normalized.get("apiKeyEnvAliases")
     if "apiKeyEnvAliases" in normalized:
@@ -564,20 +588,37 @@ def normalize_provider_entry(provider: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def normalize_provider_config(data: dict[str, Any]) -> dict[str, Any]:
+def normalize_provider_config(
+    data: dict[str, Any], *, quiet: bool = False, retain_invalid: bool = False
+) -> dict[str, Any]:
     if not isinstance(data, dict):
+        if retain_invalid:
+            raise ValueError("Provider configuration must be an object")
         data = {}
     providers = data.get("providers")
     if not isinstance(providers, dict):
+        if retain_invalid and "providers" in data:
+            raise ValueError("Provider entries must be an object")
         data["providers"] = {}
     else:
         normalized_providers = {}
         for provider_id, provider in providers.items():
             provider_id = str(provider_id)
             if not isinstance(provider, dict) or not PROVIDER_ID_RE.fullmatch(str(provider_id)):
+                if retain_invalid:
+                    raise ValueError("Provider entry is malformed")
                 continue
-            normalized = normalize_provider_entry(provider)
+            normalized = normalize_provider_entry(provider, quiet=quiet)
             if provider_id not in PROVIDER_PRESETS and not _non_empty_string(normalized.get("baseUrl")):
+                if retain_invalid:
+                    entries = provider.get("models")
+                    normalized_providers[provider_id] = {
+                        "kind": "openai_chat",
+                        "baseUrl": None,
+                        "models": [],
+                        "_configuration_error": "invalid_base_url",
+                        "_declared_model_count": len(entries) if isinstance(entries, list) else None,
+                    }
                 continue
             normalized_providers[provider_id] = normalized
         data["providers"] = normalized_providers
@@ -598,7 +639,7 @@ def load_provider_config_read_only() -> dict[str, Any]:
     return load_secure_json_file_read_only(
         providers_json_path_read_only(),
         default_provider_config,
-        normalize=normalize_provider_config,
+        normalize=lambda data: normalize_provider_config(data, quiet=True, retain_invalid=True),
         error_label="BYOK providers",
     )
 
@@ -813,7 +854,12 @@ def remove_provider_config(provider_id: str) -> bool:
     ))
 
 
-def split_provider_model(model: str) -> tuple[str | None, str]:
+def split_provider_model(
+    model: str,
+    *,
+    read_only: bool = False,
+    provider_configs: dict | None = None,
+) -> tuple[str | None, str]:
     model = str(model)
     colon_index = model.find(":")
     slash_index = model.find("/")
@@ -824,7 +870,14 @@ def split_provider_model(model: str) -> tuple[str | None, str]:
         provider_id, provider_model = model.split("/", 1)
         if provider_id in RESERVED_SLASH_PROVIDER_PREFIXES:
             return None, model
-        if provider_id in PROVIDER_PRESETS or provider_id in all_provider_configs(include_env_enabled=False):
+        if provider_id in PROVIDER_PRESETS:
+            return provider_id, provider_model
+        if provider_configs is not None:
+            configured = provider_configs
+        else:
+            configs = all_provider_configs_read_only if read_only else all_provider_configs
+            configured = configs(include_env_enabled=False)
+        if provider_id in configured:
             return provider_id, provider_model
     return None, model
 

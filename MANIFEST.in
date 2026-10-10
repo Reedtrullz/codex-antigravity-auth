@@ -1,1 +1,4 @@
-include tests/conftest.py
+include conftest.py
+recursive-include test_support *.py *.md
+recursive-include scripts *.py
+recursive-include tests *.py

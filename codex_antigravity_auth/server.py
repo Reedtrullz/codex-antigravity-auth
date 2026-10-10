@@ -1,3 +1,5 @@
+from .console import console_print as print
+import logging
 import json
 import asyncio
 import math
@@ -5,11 +7,14 @@ import os
 import secrets
 import sys
 import time
+import threading
 import httpx
+
+from .endpoint_policy import httpx_client_options
 import anyio
 import email.utils
 import re
-from contextlib import asynccontextmanager, suppress
+from contextlib import aclosing, asynccontextmanager, suppress
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
 from urllib.parse import urlparse
@@ -18,7 +23,8 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
-from .accounts import AccountManager, classify_backend_status, is_validation_required_error
+from .accounts import AccountManager, AccountRefreshInProgress, classify_backend_status, is_validation_required_error
+from .account_binding import parse_account_binding_header, validate_binding_route
 from .account_state import scoped_cooldown_expiry
 from .byok import (
     PROVIDER_AUTH_MODE_API_KEY,
@@ -31,6 +37,8 @@ from .byok import (
     split_provider_model,
     validate_provider_api_key,
     validate_provider_id,
+    validate_http_base_url,
+    validate_supported_provider_kind,
 )
 from .transform import safe_project_id, transform_chat_response, valid_function_name
 from .constants import get_platform, is_loopback_host, validate_gateway_token_strength
@@ -39,10 +47,21 @@ from .models import (
     NATIVE_MODELS,
     canonical_model_id,
     native_model_capabilities,
+    required_output_bridge,
     native_model_catalog,
     native_model_family,
 )
 from .observability import request_log_info, write_request_record
+from .route_lifecycle import write_route_lifecycle
+from .skills.anti.scripts.anti_lib.local_policy import environment_enabled as local_environment_enabled, endpoint_scope, VERSION as LOCAL_POLICY_VERSION
+from .resource_limits import (
+    ADMISSION, ResourceLimits, ResourceLimitError, read_request_json,
+    limited_post, read_response_bytes, response_context, response_json,
+)
+from .request_budget import (
+    RequestBudget, RequestDeadlineExceeded, owned_context, shielded_cleanup, stream_with_budget,
+    CURRENT_BUDGET, NativeStreamState, call_sync,
+)
 from .redaction import redact_secret_text
 from .google_transport import (
     AccountLease,
@@ -59,6 +78,9 @@ from .openai_transport import (
     PreparedOpenAIRequest,
     TransportConfigError,
 )
+from .capability_catalog import CATALOG_VERSION, contract, native_contract
+from .models import native_model_definition
+from .unified import openai_model_capabilities
 from .response_protocol import (
     CURABLE_AUTH_ERROR_CLASSES,
     AttemptOutcome,
@@ -68,6 +90,7 @@ from .response_protocol import (
     response_from_result,
     validate_capabilities,
 )
+from .provider_clients import ProviderClientPool
 from .storage import load_accounts, load_accounts_read_only
 from .unified import (
     OPENAI_UPSTREAM_TIMEOUT_SECONDS,
@@ -83,20 +106,78 @@ from .unified import (
 from .unified import OpenAIUpstreamAuthError
 
 
+class _ClosingStreamingResponse(StreamingResponse):
+    """Own the body iterator when disconnect cancels ASGI send between yields."""
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            close = getattr(self.body_iterator, "aclose", None)
+            if close is not None:
+                with anyio.CancelScope(shield=True):
+                    await close()
+
+
+def gateway_local_only() -> bool:
+    captured = getattr(app.state, 'local_only_mode', None)
+    return local_environment_enabled() if captured is None else captured
+
+
 @asynccontextmanager
 async def gateway_lifespan(_app: FastAPI):
-    schedule_refresh_accounts_ahead(force=True)
-    yield
+    startup_limits = ResourceLimits.from_env()  # Refuse invalid operator policy before serving.
+    global _refresh_ahead_owner, _provider_client_pool
+    if _refresh_ahead_owner is not None or _provider_client_pool is not None:
+        raise RuntimeError("Gateway refresh lifecycle is already running")
+    _app.state.local_only_mode = local_environment_enabled()
+    owner = None
+    pool = None
+    try:
+        pool = ProviderClientPool(max_connections=startup_limits.inflight, client_factory=httpx.AsyncClient)
+        _provider_client_pool = pool
+        ADMISSION.set_startup_ceiling(startup_limits.inflight)
+        if not _app.state.local_only_mode:
+            owner = _RefreshAheadOwner()
+            _refresh_ahead_owner = owner
+            owner.start()
+        yield
+    finally:
+        try:
+            if owner is not None:
+                await owner.close()
+        finally:
+            try:
+                if pool is not None:
+                    await pool.aclose()
+            finally:
+                ADMISSION.set_startup_ceiling(None)
+                _provider_client_pool = None
+                _refresh_ahead_owner = None
+                _app.state.local_only_mode = None
 
 
 app = FastAPI(title="Codex Antigravity Gateway", lifespan=gateway_lifespan)
 account_manager = AccountManager()
-_last_refresh_ahead_at = 0.0
-_refresh_ahead_task: asyncio.Task | None = None
+_refresh_ahead_owner: "_RefreshAheadOwner | None" = None
+_provider_client_pool: "ProviderClientPool | None" = None
+
+
+def provider_client(lane, *, timeout, trust_env=True, follow_redirects=False):
+    if type(trust_env) is not bool:
+        raise ValueError("Provider client trust_env policy must be boolean")
+    if follow_redirects is not False:
+        raise ValueError("Provider redirects must remain disabled")
+    if _provider_client_pool is None:
+        # Standalone helpers/tests retain their existing operation ownership.
+        return httpx.AsyncClient(timeout=timeout, trust_env=trust_env, follow_redirects=False)
+    return _provider_client_pool.borrow(lane, timeout=timeout, trust_env=trust_env)
+
 REFRESH_AHEAD_THROTTLE_SECONDS = 60.0
 STREAM_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 REQUEST_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-MUTATING_JSON_PATHS = {"/v1/responses"}
+from .route_identity import identity as routing_identity, observe as observe_routing_identity
+
+MUTATING_JSON_PATHS = {"/v1/responses", "/v1/local/responses", "/v1/context/preflight"}
 MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS = 2.0
 GOOGLE_BACKEND_TIMEOUT_SECONDS = 60.0
 GOOGLE_BACKEND_TIMEOUT_MIN_SECONDS = 1.0
@@ -105,8 +186,13 @@ GOOGLE_BACKEND_TIMEOUT_METADATA_KEY = "antigravity_backend_timeout_seconds"
 GOOGLE_REQUEST_TIMEOUT_METADATA_KEY = "antigravity_request_timeout_seconds"
 GOOGLE_REQUEST_TIMEOUT_MIN_SECONDS = 1.0
 GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS = 600.0
+STREAM_IDLE_TIMEOUT_SECONDS = 60.0
+STREAM_TOTAL_TIMEOUT_SECONDS = 1800.0
 CLIENT_DISCONNECT_POLL_SECONDS = 0.1
-TEST_CLIENT_HOSTS = {"testserver"}
+TEST_CLIENT_HOSTS = {"testserver", "testclient"}
+PROXY_INDICATOR_HEADERS = frozenset({
+    "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "x-real-ip",
+})
 REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
     native_responses=True,
     parallel_tool_calls=True,
@@ -114,15 +200,9 @@ REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
     stop_sequences=True,
     reasoning=True,
     streaming_usage=True,
-)
-# OpenAI upstream speaks Responses natively, so the full boundary holds.
-OPENAI_ROUTE_CAPABILITIES = ProviderCapabilities(
-    native_responses=True,
-    parallel_tool_calls=True,
-    structured_output=True,
-    stop_sequences=True,
-    reasoning=True,
-    streaming_usage=True,
+    input_modalities=frozenset({"text", "image"}),
+    opaque_reasoning_replay=True,
+    pcm_wav_probe=True,  # Common body validation only; route gate precedes auth.
 )
 PACKAGE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}$")
 
@@ -144,10 +224,6 @@ class OpenAIUpstreamHTTPError(Exception):
         self.status_code = status_code
         self.body = body
         self.retry_after = retry_after
-
-
-class RequestDeadlineExceeded(Exception):
-    """The bounded native non-stream request budget expired."""
 
 
 def local_package_version() -> str:
@@ -174,7 +250,9 @@ def request_origin_matches(request: Request, origin: str) -> bool:
     if request_port is None:
         request_port = 443 if request_url.scheme == "https" else 80
     host_matches = parsed_origin.hostname.lower() == (request_url.hostname or "").lower()
-    if not host_matches and is_loopback_host(parsed_origin.hostname) and is_loopback_host(request_url.hostname):
+    if (not host_matches and parsed_origin.hostname.lower() not in TEST_CLIENT_HOSTS
+            and (request_url.hostname or "").lower() not in TEST_CLIENT_HOSTS
+            and is_loopback_host(parsed_origin.hostname) and is_loopback_host(request_url.hostname)):
         host_matches = True
     return (
         parsed_origin.scheme == request_url.scheme
@@ -184,29 +262,49 @@ def request_origin_matches(request: Request, origin: str) -> bool:
 
 
 def request_uses_loopback_host(request: Request, client_host: str | None = None) -> bool:
-    hostname = request.url.hostname
-    if is_loopback_host(hostname):
-        return True
-    return (hostname or "").lower() in TEST_CLIENT_HOSTS and client_host == "testclient"
+    # Some ASGI URL implementations fall back to scope.server for a malformed
+    # Host. Access control must inspect the supplied authority before that
+    # fallback can turn invalid input into an apparently local request.
+    hosts = request.headers.getlist("host")
+    if len(hosts) != 1:
+        return False
+    authority = hosts[0]
+    if (not authority or any(ch.isspace() or ord(ch) < 0x20 or 0x7f <= ord(ch) < 0xa0 for ch in authority)
+            or any(ch in authority for ch in "/?#@\\") or authority.endswith(":")):
+        return False
+    try:
+        parsed = urlparse("//" + authority)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    if authority.startswith("["):
+        suffix = authority[authority.find("]") + 1:]
+        if suffix and not re.fullmatch(r":\d+", suffix):
+            return False
+    elif authority.count(":") > 1:
+        return False
+    if port is not None and not 1 <= port <= 65535:
+        return False
+    if (hostname or "").lower() in TEST_CLIENT_HOSTS:
+        return client_host == "testclient"
+    return is_loopback_host(hostname)
 
 
 def mutating_json_request_guard(request: Request) -> JSONResponse | None:
-    if request.method.upper() not in {"POST", "PUT", "PATCH"}:
-        return None
-    if request.url.path not in MUTATING_JSON_PATHS:
+    mutating_json = request.method.upper() in {"POST", "PUT", "PATCH"} and request.url.path in MUTATING_JSON_PATHS
+    sensitive_read = request.method.upper() == "GET" and request.url.path == "/v1/account-bindings"
+    if not mutating_json and not sensitive_read:
         return None
 
-    content_type = request.headers.get("content-type", "")
-    media_type = content_type.split(";", 1)[0].strip().lower()
-    if media_type != "application/json":
-        return JSONResponse(
-            status_code=415,
-            content={"detail": "Mutating gateway requests must use Content-Type: application/json."},
-        )
-
-    client_host = request.client.host if request.client else None
-    if is_loopback_host(client_host) and not request_uses_loopback_host(request, client_host):
-        return JSONResponse(status_code=403, content={"detail": "Loopback gateway requests must use a loopback Host."})
+    if mutating_json:
+        content_type = request.headers.get("content-type", "")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type != "application/json":
+            return JSONResponse(
+                status_code=415,
+                content={"detail": "Mutating gateway requests must use Content-Type: application/json."},
+            )
 
     if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
         return JSONResponse(status_code=403, content={"detail": "Cross-site browser requests are not allowed."})
@@ -220,25 +318,41 @@ def mutating_json_request_guard(request: Request) -> JSONResponse | None:
 
 @app.middleware("http")
 async def require_remote_gateway_token(request: Request, call_next):
+    async def guarded_response():
+        response = await call_next(request)
+        report = getattr(request.state, 'context_preflight', None)
+        if isinstance(report, dict):
+            response.headers['X-Antigravity-Context-Status'] = report['status']
+            response.headers['X-Antigravity-Context-Estimate'] = 'utf8-estimate-not-token-guarantee'
+        receipt = getattr(request.state, 'routing_identity', None)
+        if isinstance(receipt, dict) and receipt.get('version') == 1 and isinstance(receipt.get('sha256'), str):
+            response.headers['X-Antigravity-Route-Identity'] = 'v1:' + receipt['sha256']
+        return response
+
     client_host = request.client.host if request.client else None
-    if is_loopback_host(client_host):
+    allow_remote = os.environ.get("ANTIGRAVITY_ALLOW_REMOTE") == "1"
+    proxy_marked = any(name in request.headers for name in PROXY_INDICATOR_HEADERS)
+    # Header values can never grant the local exemption. In authenticated mode
+    # even a loopback peer may be a reverse proxy acting for a remote client.
+    if is_loopback_host(client_host) and not allow_remote and not proxy_marked:
+        if not request_uses_loopback_host(request, client_host):
+            return JSONResponse(status_code=403, content={"detail": "Loopback gateway requests must use a loopback Host."})
         guard_response = mutating_json_request_guard(request)
         if guard_response is not None:
             return guard_response
-        return await call_next(request)
+        return await guarded_response()
 
-    allow_remote = os.environ.get("ANTIGRAVITY_ALLOW_REMOTE") == "1"
     try:
         token = validate_gateway_token_strength(os.environ.get("ANTIGRAVITY_GATEWAY_TOKEN")) if allow_remote else ""
     except ValueError as e:
         return JSONResponse(status_code=403, content={"detail": str(e)})
     expected_auth = f"Bearer {token}" if token else ""
     supplied_auth = request.headers.get("authorization", "")
-    if allow_remote and token and secrets.compare_digest(supplied_auth, expected_auth):
+    if allow_remote and token and secrets.compare_digest(supplied_auth.encode("utf-8"), expected_auth.encode("ascii")):
         guard_response = mutating_json_request_guard(request)
         if guard_response is not None:
             return guard_response
-        return await call_next(request)
+        return await guarded_response()
 
     return JSONResponse(
         status_code=403,
@@ -255,6 +369,10 @@ async def select_active_account_for_request(model: str) -> dict | None:
 
 async def acquire_active_account_for_request(model: str) -> dict | None:
     return await run_in_threadpool(account_manager.acquire_account, model)
+
+
+async def acquire_bound_account_for_request(model: str, binding) -> dict | None:
+    return await run_in_threadpool(account_manager.acquire_bound_account, model, binding)
 
 
 async def release_account_for_request(email: str | None) -> None:
@@ -292,27 +410,72 @@ async def record_attempt_outcome(
     )
 
 
-def schedule_refresh_accounts_ahead(*, force: bool = False) -> bool:
-    global _last_refresh_ahead_at, _refresh_ahead_task
-    now = time.monotonic()
-    if _refresh_ahead_task is not None and not _refresh_ahead_task.done():
-        return False
-    if not force and now - _last_refresh_ahead_at < REFRESH_AHEAD_THROTTLE_SECONDS:
-        return False
-    _last_refresh_ahead_at = now
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return False
+class _RefreshAheadOwner:
+    """One timer and at most one worker, owned and drained by lifespan."""
 
-    async def _refresh_runner() -> None:
+    def __init__(self) -> None:
+        self.stop = threading.Event()
+        self.wake = asyncio.Event()
+        self.worker: asyncio.Task | None = None
+        self.timer: asyncio.Task | None = None
+        self.last_started = float("-inf")
+
+    def start(self) -> None:
+        schedule_refresh_accounts_ahead(force=True)
+        self.timer = asyncio.create_task(self._periodic(), name="gateway-refresh-timer")
+
+    async def _periodic(self) -> None:
+        while not self.stop.is_set():
+            try:
+                await asyncio.wait_for(self.wake.wait(), REFRESH_AHEAD_THROTTLE_SECONDS)
+            except asyncio.TimeoutError:
+                schedule_refresh_accounts_ahead()
+
+    def schedule(self, *, force: bool = False) -> bool:
+        if self.stop.is_set() or (self.worker is not None and not self.worker.done()):
+            return False
+        now = time.monotonic()
+        if not force and now - self.last_started < REFRESH_AHEAD_THROTTLE_SECONDS:
+            return False
+        self.last_started = now
+        self.worker = asyncio.create_task(self._refresh(), name="gateway-refresh-worker")
+        return True
+
+    async def _refresh(self) -> None:
         try:
-            await run_in_threadpool(account_manager.refresh_expiring_accounts, 300)
+            await asyncio.to_thread(account_manager.refresh_expiring_accounts, 300, stop_event=self.stop)
         except Exception:
+            # A transient store/refresh failure must not kill the periodic owner.
             return
 
-    _refresh_ahead_task = loop.create_task(_refresh_runner())
-    return True
+    async def close(self) -> None:
+        self.stop.set()
+        self.wake.set()
+        cancelled = False
+        for task in (self.timer, self.worker):
+            if task is None:
+                continue
+            # Cancelling to_thread abandons its running thread. Drain the owned
+            # worker instead; it observes stop before discovery and merge.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if not task.cancelled():
+                task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+
+def schedule_refresh_accounts_ahead(*, force: bool = False) -> bool:
+    if gateway_local_only():
+        return False
+    # Requests without a running lifespan may not create unowned background work.
+    owner = _refresh_ahead_owner
+    if owner is None:
+        return False
+    return owner.schedule(force=force)
 
 
 def account_health_summary() -> dict:
@@ -552,6 +715,7 @@ def codex_model_metadata(
     default_reasoning_level: str = "high",
     supports_parallel_tool_calls: bool = True,
     input_modalities: list[str] | None = None,
+    supported_reasoning_efforts: tuple[str, ...] | None = None,
 ) -> dict:
     reasoning_levels = [
         {"effort": "low", "description": "Fast responses with lighter reasoning"},
@@ -559,6 +723,11 @@ def codex_model_metadata(
         {"effort": "high", "description": "Greater reasoning depth for complex problems"},
         {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
     ]
+    if supported_reasoning_efforts is not None:
+        descriptions = {item["effort"]: item["description"] for item in reasoning_levels}
+        reasoning_levels = [{"effort": effort, "description": descriptions.get(effort, effort)} for effort in supported_reasoning_efforts]
+        if default_reasoning_level not in supported_reasoning_efforts:
+            default_reasoning_level = supported_reasoning_efforts[0] if supported_reasoning_efforts else None
     modalities = input_modalities if input_modalities is not None else ["text"]
     return {
         "id": model_id,
@@ -595,63 +764,84 @@ def codex_model_metadata(
 
 
 def native_model_catalog_with_input_modalities() -> list[dict]:
-    """Return Google Antigravity models with accurate input_modalities."""
-    builtin_ids = {model.id for model in NATIVE_MODELS}
-    # Map every known alias to its canonical builtin id so backward-compat
-    # catalog entries (e.g. "claude-3.5-sonnet") inherit image modality.
-    alias_to_canonical: dict[str, str] = {}
-    for model in NATIVE_MODELS:
-        for alias in model.aliases:
-            alias_to_canonical[alias] = model.id
-    # Models that are text-only despite being built-in (no image support).
-    _TEXT_ONLY_BUILTIN = {"gpt-oss-120b-medium"}
-    models = []
-    for m in native_model_catalog():
-        mid = m.get("id", "")
-        canonical = alias_to_canonical.get(mid, mid)
-        # Built-in models and their backward-compat aliases are multimodal;
-        # user-defined overlay models and known text-only models get ['text'].
-        if canonical in builtin_ids and canonical not in _TEXT_ONLY_BUILTIN:
-            modalities = ["text", "image"]
-        else:
-            modalities = ["text"]
-        models.append({**m, "input_modalities": modalities})
-    return models
+    """Compatibility accessor for the canonical input modality contract."""
+    return native_model_catalog()
 
 
-def provider_model_catalog(created: int) -> list[dict]:
+def provider_diagnostic_id(provider_id) -> str:
+    from .model_observations import public_id, ObservationError
+    try:
+        return public_id(provider_id)
+    except ObservationError:
+        return "redacted"
+
+
+def provider_model_catalog(created: int, *, diagnostics: list | None = None) -> list[dict]:
     byok_models = []
+    diagnostics = diagnostics if diagnostics is not None else []
     seen_model_ids: set[str] = set()
     try:
         providers = all_provider_configs_read_only()
     except Exception:
+        diagnostics.append({"provider":None, "status":"configuration_unreadable", "omitted_models":None})
         return byok_models
     for provider_id, provider in providers.items():
+        label = provider_diagnostic_id(provider_id)
+        configured_models = provider.get("models", [])
+        diagnostic = {"provider":label, "status":"complete", "omitted_models":len(configured_models) if isinstance(configured_models, list) else None}
+        diagnostics.append(diagnostic)
+        if provider.get("_configuration_error"):
+            count = provider.get("_declared_model_count")
+            diagnostic.update(status="invalid_configuration", omitted_models=count if type(count) is int and count >= 0 else None)
+            continue
+        try:
+            validate_http_base_url(provider.get("baseUrl"))
+        except ValueError:
+            diagnostic["status"] = "invalid_configuration"
+            continue
+        if gateway_local_only() and endpoint_scope(provider.get('baseUrl')) != 'loopback':
+            diagnostic['status'] = 'excluded_by_local_policy'
+            continue
+        try:
+            validate_supported_provider_kind(provider)
+        except ValueError:
+            diagnostic["status"] = "unsupported_route"
+            continue
         try:
             usable = provider_has_usable_key(provider)
         except Exception:
             usable = False
         if not usable:
+            diagnostic["status"] = "unusable_configuration"
             continue
+        diagnostic["omitted_models"] = 0
         for model_entry in provider.get("models", []):
             if isinstance(model_entry, dict):
                 provider_model = model_entry.get("id")
                 display_name = model_entry.get("display_name") or model_entry.get("displayName") or provider_model
-                context_window = model_entry.get("context_window") or model_entry.get("contextWindow") or 128000
+                context_window = model_entry.get("context_window") or model_entry.get("contextWindow")
             else:
                 provider_model = str(model_entry)
                 display_name = provider_model
-                context_window = 128000
+                context_window = None
             if not provider_model:
+                diagnostic["status"] = "partial"
+                diagnostic["omitted_models"] += 1
                 continue
             catalog_model_id = normalize_byok_model_id(provider_model, provider_id)
             model_id = f"{provider_id}:{catalog_model_id}"
+            if gateway_local_only() and classify_route(model_id, provider_configs=providers) != "byok":
+                diagnostic["status"] = "partial"
+                diagnostic["omitted_models"] += 1
+                continue
             if model_id in seen_model_ids:
                 continue
             seen_model_ids.add(model_id)
             try:
                 capabilities = provider_capabilities(provider, provider_model)
             except ValueError:
+                diagnostic["status"] = "partial"
+                diagnostic["omitted_models"] += 1
                 continue
             display_name = display_name if display_name != provider_model else catalog_model_id
             byok_models.append(
@@ -662,19 +852,39 @@ def provider_model_catalog(created: int) -> list[dict]:
                     provider_id,
                     created,
                     supports_parallel_tool_calls=capabilities.parallel_tool_calls,
+                    input_modalities=sorted(capabilities.input_modalities),
+                    supported_reasoning_efforts=capabilities.reasoning_effort_levels,
                 )
             )
+            declared = dict(provider.get("capabilities") or {})
+            if isinstance(model_entry, dict):
+                declared.update(model_entry.get("capabilities") or {})
+            byok_models[-1]["capabilities"] = contract(
+                canonical_id=model_id, backend_id=catalog_model_id, route="byok", family=provider_id,
+                aliases=[], capabilities=capabilities, context_window=context_window,
+                declaration_source="provider_configuration", declared_capabilities=declared,
+            )
+            byok_models[-1]['capabilities']['destination_scope'] = endpoint_scope(provider.get('baseUrl'))
+            byok_models[-1]['capabilities']['routing_identity'] = routing_identity('byok', model_id, provider=provider)
     return byok_models
 
 
-async def provider_model_catalog_fail_soft(created: int) -> list[dict]:
+async def provider_model_catalog_fail_soft(created: int, *, with_diagnostics: bool = False):
+    diagnostics = []
     try:
-        return await asyncio.wait_for(
-            run_in_threadpool(provider_model_catalog, created),
+        models = await asyncio.wait_for(
+            run_in_threadpool(provider_model_catalog, created, diagnostics=diagnostics),
             timeout=MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS,
         )
+        state = "partial" if any(item["status"] not in {"complete", "excluded_by_local_policy"} for item in diagnostics) else "complete"
+        report = {"status":state, "providers":diagnostics}
+        if gateway_local_only():
+            report['scope'] = 'loopback_routes_only'
+    except asyncio.TimeoutError:
+        models, report = [], {"status":"timeout", "providers":[]}
     except Exception:
-        return []
+        models, report = [], {"status":"error", "providers":[]}
+    return (models, report) if with_diagnostics else models
 
 
 def provider_health_catalog() -> list[dict]:
@@ -684,17 +894,23 @@ def provider_health_catalog() -> list[dict]:
     except Exception:
         return providers
     for provider_id, provider in provider_configs.items():
+        if gateway_local_only() and endpoint_scope(provider.get('baseUrl')) != 'loopback':
+            continue
         models = provider.get("models", [])
+        count = len(models) if isinstance(models, list) else 0
+        if provider.get("_configuration_error"):
+            declared = provider.get("_declared_model_count")
+            count = declared if type(declared) is int and declared >= 0 else None
         try:
             usable = provider_has_usable_key(provider)
         except Exception:
             usable = False
         providers.append(
             {
-                "id": provider_id,
+                "id": provider_diagnostic_id(provider_id),
                 "kind": provider.get("kind"),
                 "usable": usable,
-                "model_count": len(models) if isinstance(models, list) else 0,
+                "model_count": count,
             }
         )
     return providers
@@ -717,7 +933,7 @@ async def provider_health_catalog_fail_soft() -> tuple[list[dict], str]:
 async def list_models():
     """Return model catalog so Codex Desktop can populate its picker dropdown."""
     created = int(time.time())
-    byok_models = await provider_model_catalog_fail_soft(created)
+    byok_models, catalog_diagnostics = await provider_model_catalog_fail_soft(created, with_diagnostics=True)
     models = [
         codex_model_metadata(
             m["id"],
@@ -728,14 +944,23 @@ async def list_models():
             default_reasoning_level=m.get("default_reasoning_level", "high"),
             supports_parallel_tool_calls=bool(m.get("supports_parallel_tool_calls", True)),
             input_modalities=m.get("input_modalities", ["text"]),
+            supported_reasoning_efforts=native_model_capabilities(m["id"]).reasoning_effort_levels,
         )
-        for m in native_model_catalog_with_input_modalities()
+        for m in ([] if gateway_local_only() else native_model_catalog_with_input_modalities())
     ]
-    if is_unified_mode_enabled():
+    if is_unified_mode_enabled() and not gateway_local_only():
         # Unified picker: same gateway also advertises OpenAI/Codex ids.
         # Registry lives in unified.openai_catalog (env-extendable), so the
         # catalog and the router can never drift apart.
         for m in openai_catalog():
+            # Native definitions win collisions exactly as classify_route does.
+            # Explain the suppressed identity on the retained native entry.
+            if classify_route(m["id"], unified_enabled=True) != "openai":
+                definition = native_model_definition(m["id"])
+                for entry in models:
+                    if definition and entry["id"] == definition.id:
+                        entry.setdefault("shadowed_routes", []).append({"route": "openai", "id": m["id"], "reason": "native_definition_precedence"})
+                continue
             models.append(
                 codex_model_metadata(
                     m["id"],
@@ -745,30 +970,70 @@ async def list_models():
                     created,
                     default_reasoning_level=m.get("default_reasoning_level", "high"),
                     supports_parallel_tool_calls=bool(m.get("supports_parallel_tool_calls", True)),
-                    input_modalities=["text", "image"],
+                    input_modalities=m.get("input_modalities", ["text"]),
+                    supported_reasoning_efforts=openai_model_capabilities(m["id"]).reasoning_effort_levels,
                 )
             )
+    catalog_auth = None
+    if is_unified_mode_enabled() and not gateway_local_only():
+        try:
+            catalog_auth = await asyncio.wait_for(run_in_threadpool(resolve_openai_auth), timeout=MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS)
+        except Exception:
+            pass  # A missing receipt never becomes an availability claim.
+    for entry in models:
+        definition = native_model_definition(entry["id"])
+        if definition is not None:
+            source = "builtin" if definition in NATIVE_MODELS else "overlay"
+            entry["capabilities"] = native_contract(definition, source=source, aliases=[alias for alias in (*definition.aliases, definition.backend_id) if (native_model_definition(alias) or definition).id == definition.id])
+        else:
+            entry["capabilities"] = contract(
+                canonical_id=entry["id"], backend_id=entry["id"], route="openai", family="openai", aliases=[],
+                capabilities=openai_model_capabilities(entry["id"]), context_window=entry["context_window"],
+                declaration_source="openai_registry",
+            )
+        entry["capabilities"]["routing_identity"] = routing_identity(
+            'antigravity' if definition is not None else 'openai', entry['id'], auth=catalog_auth)
+        entry["canonical_id"] = entry["capabilities"]["canonical_id"]
+        entry["alias_of"] = entry["canonical_id"] if entry["id"] != entry["canonical_id"] else None
     models = models + byok_models
+    unique = {}
+    for entry in models:
+        entry.setdefault("canonical_id", entry["id"])
+        entry.setdefault("alias_of", None)
+        unique.setdefault(entry["id"].lower(), entry)
+    models = list(unique.values())
     return {
+        "capability_catalog_version": CATALOG_VERSION,
+        "local_only_policy": {"version":LOCAL_POLICY_VERSION, "enabled":gateway_local_only()},
+        "provider_catalog_diagnostics": catalog_diagnostics,
+        "collision_policy": "native definitions precede OpenAI registry entries; first canonical catalog identity wins",
         "object": "list",
         "data": models,
         "models": models,
     }
 
 
+@app.get("/v1/account-bindings")
+async def account_bindings(model: str):
+    try:
+        return await run_in_threadpool(account_manager.binding_inventory, model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=safe_error_detail(exc)) from exc
+
+
 @app.get("/health")
 async def health(request: Request):
-    client_host = request.client.host if request.client else None
-    if not request_uses_loopback_host(request, client_host):
-        raise HTTPException(status_code=403, detail="Health checks are loopback-only.")
+    # The middleware applies the same local/authenticated boundary to every route.
     providers, provider_catalog_status = await provider_health_catalog_fail_soft()
-    catalog = native_model_catalog()
-    unified = is_unified_mode_enabled()
+    local_mode = gateway_local_only()
+    catalog = [] if local_mode else native_model_catalog()
+    unified = is_unified_mode_enabled() and not local_mode
     openai_models = openai_catalog() if unified else []
     openai_status = openai_auth_status() if unified else {"configured": False, "detail": "unified picker disabled"}
     return {
         "ok": True,
         "package_version": local_package_version(),
+        "local_only_policy": {"version":LOCAL_POLICY_VERSION, "enabled":local_mode},
         "model_count": len(catalog) + len(openai_models),
         "advertised_native_models": [model["id"] for model in catalog],
         "advertised_openai_models": [model["id"] for model in openai_models],
@@ -780,7 +1045,7 @@ async def health(request: Request):
             "byok": providers,
         },
         "provider_catalog_status": provider_catalog_status,
-        "accounts": account_health_summary(),
+        "accounts": {"status":"not_inspected_local_only"} if local_mode else account_health_summary(),
         "request_log": request_log_info(),
     }
 
@@ -826,6 +1091,10 @@ def validate_response_request_body(value: object) -> dict:
         if not isinstance(metadata, dict):
             raise HTTPException(status_code=400, detail="metadata must be an object")
         normalized_metadata = {}
+        if 'antigravity_local_only' in metadata:
+            if type(metadata['antigravity_local_only']) is not bool:
+                raise HTTPException(status_code=400, detail='metadata.antigravity_local_only must be boolean')
+            normalized_metadata['antigravity_local_only'] = metadata['antigravity_local_only']
         run_id = metadata.get("run_id")
         if run_id is not None:
             if not isinstance(run_id, str) or not REQUEST_RUN_ID_RE.fullmatch(run_id):
@@ -852,10 +1121,24 @@ def validate_response_request_body(value: object) -> dict:
                 maximum=GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS,
             )
             normalized_metadata[GOOGLE_REQUEST_TIMEOUT_METADATA_KEY] = float(request_timeout)
+        for timeout_key, maximum in (("antigravity_stream_idle_timeout_seconds", 600.0),
+                                     ("antigravity_stream_total_timeout_seconds", 7200.0)):
+            if timeout_key in metadata:
+                validate_finite_number_option(metadata[timeout_key], f"metadata.{timeout_key}", minimum=1.0, maximum=maximum)
+                normalized_metadata[timeout_key] = float(metadata[timeout_key])
         value["metadata"] = normalized_metadata
     validate_response_generation_options(value)
     validate_response_tool_choice(value)
-    validate_response_tool_schemas(value)
+    from .request_shapes import validate_request_shapes
+    try:
+        validate_request_shapes(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    from .tool_calls import FunctionCallValidator, ToolCallError
+    try:
+        FunctionCallValidator(value)  # Check rule containers before auth/account work.
+    except ToolCallError as exc:
+        raise HTTPException(status_code=400, detail="tools: function declarations cannot be validated") from exc
     try:
         validate_capabilities(value, REQUEST_BOUNDARY_CAPABILITIES)
     except CapabilityError as exc:
@@ -927,8 +1210,10 @@ def validate_response_tool_choice(codex_req: dict) -> None:
         if tool_choice not in {"auto", "none", "required"}:
             raise HTTPException(status_code=400, detail="tool_choice must be auto, none, required, or a function choice object")
         return
-    if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
+    if not isinstance(tool_choice, dict) or not isinstance(tool_choice.get("type"), str) or not tool_choice["type"]:
         raise HTTPException(status_code=400, detail="tool_choice must be auto, none, required, or a function choice object")
+    if tool_choice["type"] != "function":
+        return  # Provider-native choices are validated on the selected route.
     nested = tool_choice.get("function")
     name = tool_choice.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
     if not valid_function_name(name):
@@ -939,40 +1224,12 @@ def validate_response_tool_choice(codex_req: dict) -> None:
 
 
 def validate_response_tool_schemas(codex_req: dict) -> None:
-    """Reject malformed tool schemas before any provider/account work."""
-    tools = codex_req.get("tools")
-    if not isinstance(tools, list):
-        return
-
-    def visit(schema: object, path: str) -> None:
-        if not isinstance(schema, dict):
-            raise HTTPException(status_code=400, detail=f"{path} must be an object")
-        if "$ref" in schema and not isinstance(schema["$ref"], str):
-            raise HTTPException(status_code=400, detail=f"{path}.$ref must be a string")
-        if "properties" in schema:
-            properties = schema["properties"]
-            if not isinstance(properties, dict):
-                raise HTTPException(status_code=400, detail=f"{path}.properties must be an object")
-            for name, child in properties.items():
-                visit(child, f"{path}.properties[{name!r}]")
-        if "items" in schema:
-            visit(schema["items"], f"{path}.items")
-        for key in ("anyOf", "oneOf", "allOf"):
-            if key in schema:
-                options = schema[key]
-                if not isinstance(options, list):
-                    raise HTTPException(status_code=400, detail=f"{path}.{key} must be an array")
-                for index, option in enumerate(options):
-                    visit(option, f"{path}.{key}[{index}]")
-
-    for index, tool in enumerate(tools):
-        if not isinstance(tool, dict) or tool.get("type") != "function":
-            continue
-        function = tool.get("function")
-        if not isinstance(function, dict):
-            function = tool
-        if isinstance(function, dict) and "parameters" in function:
-            visit(function["parameters"], f"tools[{index}].function.parameters")
+    """Compatibility entry point for pure tool definition/schema validation."""
+    from .request_shapes import validate_request_shapes
+    try:
+        validate_request_shapes({"tools": codex_req["tools"]} if "tools" in codex_req else {})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def response_stream_flag(codex_req: dict) -> bool:
@@ -1094,83 +1351,201 @@ def prepare_openai_compatible_request(
     return prepared.payload, prepared.url, prepared.headers, prepared.timeout
 
 
+class OwnedStreamingResponse(StreamingResponse):
+    """Retain Starlette's task-group disconnect ownership on every ASGI version."""
+    def __init__(self, *args, budget, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.budget = budget
+        source = self.body_iterator
+        async def owned_body():
+            try:
+                async for chunk in source:
+                    yield chunk
+            finally:
+                callbacks = [budget.close]
+                if hasattr(source, "aclose"):
+                    callbacks.append(source.aclose)
+                try:
+                    await shielded_cleanup(*callbacks)
+                finally:
+                    budget.run_finalizers()
+        self.body_iterator = owned_body()
+
+    async def __call__(self, scope, receive, send):
+        disconnected = False
+        expired = False
+        headers_started = False
+        async def final_send(message):
+            nonlocal headers_started
+            if message["type"] == "http.response.start":
+                headers_started = True
+            deadline = max(self.budget.deadline, time.monotonic() + 0.05)
+            await self.budget.run(lambda: send(message), deadline=deadline, watch_disconnect=False)
+
+        async def bounded_send(message):
+            if message["type"] == "http.response.start":
+                # Handoff and ASGI execution may be separated by scheduling.
+                # Failure-send grace must never authorize expired 200 headers.
+                self.budget.check_deadline()
+                async def send_headers():
+                    nonlocal headers_started
+                    self.budget.check_deadline()
+                    headers_started = True
+                    await send(message)
+                await self.budget.run(send_headers, deadline=self.budget.deadline, watch_disconnect=False)
+            else:
+                await final_send(message)
+        try:
+            with self.budget.active():
+                async with anyio.create_task_group() as group:
+                    async def send_body():
+                        nonlocal disconnected, expired
+                        try:
+                            await self.stream_response(bounded_send)
+                        except RequestDeadlineExceeded:
+                            expired = True
+                            if not headers_started:
+                                failure = JSONResponse(status_code=504, content={"detail": "Gateway request deadline exceeded"})
+                                try:
+                                    await failure(scope, receive, final_send)
+                                except (RequestDeadlineExceeded, OSError):
+                                    pass
+                        except OSError:
+                            disconnected = True
+                        finally:
+                            group.cancel_scope.cancel()
+                    group.start_soon(send_body)
+                    await self.listen_for_disconnect(receive)
+                    disconnected = True
+                    group.cancel_scope.cancel()
+        finally:
+            if disconnected and not self.budget.terminal_observed:
+                self.budget.cancelled = True
+            try:
+                await shielded_cleanup(self.body_iterator.aclose, self.budget.close)
+            finally:
+                self.budget.run_finalizers()
+            if (disconnected or expired) and not self.budget.terminal_observed and not self.budget.abort_reported and self.budget.abort:
+                await shielded_cleanup(lambda: self.budget.abort(expired), timeout=0.05)
+        if self.background is not None:
+            await self.background()
+
+
+@app.post('/v1/context/preflight')
+async def context_preflight(request: Request):
+    """No generation, auth refresh, remote token-count API or request mutation."""
+    from .context_preflight import inspect
+    budget = _new_request_budget(request)
+    try:
+        with budget.active():
+            raw = await budget.run(lambda: read_request_json(request, budget.limits))
+            budget.body_read = True
+            value = await budget.sync(validate_response_request_body, raw)
+            value['model'] = response_model_id(value)
+            providers = await budget.sync(all_provider_configs_read_only)
+            return await budget.sync(inspect, value, providers)
+    except ResourceLimitError as exc:
+        raise _resource_limit_http_exception(exc) from exc
+    except RequestDeadlineExceeded as exc:
+        raise HTTPException(status_code=504, detail='Context preflight deadline exceeded') from exc
+    except HTTPException:
+        raise
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail='Invalid context preflight request') from exc
+    finally:
+        await budget.close()
+
+
+@app.post('/v1/local/responses')
+async def create_local_response(request: Request):
+    request.state.require_local_mode = True
+    return await create_response(request)
+
+
+def _resource_limit_http_exception(exc):
+    headers = {"Retry-After": "1"} if exc.status == 503 else None
+    return HTTPException(status_code=exc.status,
+                         detail={"code": exc.code, "message": str(exc)},
+                         headers=headers)
+
+
+def _new_request_budget(request):
+    """Apply the shared request parser, admission ceiling and permit cleanup."""
+    try:
+        limits = ResourceLimits.from_env()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    try:
+        permit = ADMISSION.acquire(limits)
+    except ResourceLimitError as exc:
+        raise _resource_limit_http_exception(exc) from exc
+    budget = RequestBudget(request, timeout=GOOGLE_BACKEND_TIMEOUT_SECONDS,
+                           release_account=release_account_for_request)
+    budget.limits = limits
+    budget.permit = permit
+    budget.register_finalizer(permit.release)
+    return budget
+
+
 @app.post("/v1/responses")
 async def create_response(request: Request):
-    request_id = f"req_{secrets.token_hex(8)}"
-    request_started = time.monotonic()
-    request_run_id: str | None = None
-    diagnostic_deadline: float | None = None
+    budget = _new_request_budget(request)
+    transferred = False
+    try:
+        with budget.active():
+            response = await _create_response(request, budget)
+        transferred = isinstance(response, OwnedStreamingResponse)
+        return response
+    except ResourceLimitError as exc:
+        report = getattr(budget, "report_limit", None)
+        if report is not None:
+            await shielded_cleanup(lambda: report(exc), timeout=0.05)
+        raise _resource_limit_http_exception(exc) from exc
+    except (RequestDeadlineExceeded, ClientDisconnect, asyncio.CancelledError) as exc:
+        if not isinstance(exc, RequestDeadlineExceeded) and not budget.terminal_observed:
+            budget.cancelled = True
+        if budget.abort is not None and not budget.abort_reported:
+            # Diagnostics are best effort; essential resource cleanup is owned
+            # separately, so a stalled writer cannot retain a lease or client.
+            await shielded_cleanup(lambda: budget.abort(isinstance(exc, RequestDeadlineExceeded)), timeout=0.05)
+        if isinstance(exc, RequestDeadlineExceeded):
+            raise HTTPException(status_code=504, detail="Gateway request deadline exceeded") from exc
+        raise
+    finally:
+        if not transferred:
+            await budget.close()
 
-    async def log_request(
-        status: str,
-        *,
-        model: str = "",
-        route: str = "unknown",
-        provider: str | None = None,
-        family: str | None = None,
-        stream: bool = False,
-        http_status: int | None = None,
-        retry_after_source: str | None = None,
-        rotation_attempted: bool = False,
-        usage: dict | None = None,
-        error_class: str | None = None,
-        error: object | None = None,
-        terminal_kind: str | None = None,
-        terminal_reason: str | None = None,
-        attempt_count: int | None = None,
-        rotation_count: int | None = None,
-        cooldown_scope: str | None = None,
-        cooldown_category: str | None = None,
-        outcome_category: str | None = None,
-        cancelled: bool = False,
-        terminal_cleanup: bool = False,
-    ) -> None:
-        record = {
-            "request_id": request_id,
-            "run_id": request_run_id,
-            "model": model,
-            "route": route,
-            "provider": provider,
-            "family": family,
-            "stream": stream,
-            "status": status,
-            "latency_ms": int((time.monotonic() - request_started) * 1000),
-            "http_status": http_status,
-            "retry_after_source": retry_after_source,
-            "rotation_attempted": rotation_attempted,
-            "usage": usage,
-            "error_class": error_class,
-            "error": safe_error_detail(error) if error is not None else None,
-            "terminal_kind": terminal_kind,
-            "terminal_reason": terminal_reason,
-            "attempt_count": attempt_count,
-            "rotation_count": rotation_count,
-            "cooldown_scope": cooldown_scope,
-            "cooldown_category": cooldown_category,
-            "outcome_category": outcome_category,
-            "cancelled": cancelled,
-        }
-        if diagnostic_deadline is None and not terminal_cleanup:
-            await run_in_threadpool(write_request_record, record)
-            return
-        remaining = 2.0 if terminal_cleanup else diagnostic_deadline - time.monotonic()
-        if remaining <= 0:
-            raise RequestDeadlineExceeded()
-        try:
-            with anyio.fail_after(min(2.0, remaining)):
-                await anyio.to_thread.run_sync(
-                    write_request_record,
-                    record,
-                    abandon_on_cancel=True,
-                )
-        except TimeoutError as exc:
-            raise RequestDeadlineExceeded() from exc
+
+async def _create_response(request: Request, budget: RequestBudget):
+    request_id = f"req_{secrets.token_hex(8)}"
+    request_started = budget.started
+    request_run_id: str | None = None
+    upstream_observation: dict = {}
+    audio_request = False
+
+    def safe_request_error(value):
+        return ('Audio probe failed; provider payload diagnostics withheld and listening remains unverified'
+                if audio_request else safe_error_detail(value))
+
+    async def run_bounded_operation(factory, *, release_late_result=False):
+        return await (budget.acquire(factory) if release_late_result else budget.run(factory))
+
+    async def release_owned_account(email):
+        await budget.release(email)
+
+    async def log_request(status: str, **fields) -> None:
+        await write_route_lifecycle(
+            status, request_id=request_id, request_run_id=request_run_id, request_started=request_started,
+            upstream_observation=upstream_observation, budget=budget, writer=write_request_record,
+            sanitize_error=safe_request_error, clock=time.monotonic, **fields)
 
     async def best_effort_diagnostic(awaitable, *, deadline: float | None = None) -> None:
-        timeout = 2.0
+        timeout = 0.05
         if deadline is not None:
             timeout = min(timeout, max(0.0, deadline - time.monotonic()))
         if timeout <= 0:
+            if hasattr(awaitable, "close"):
+                awaitable.close()
             return
         try:
             with anyio.fail_after(timeout):
@@ -1178,23 +1553,105 @@ async def create_response(request: Request):
         except Exception:
             pass
 
+    async def abort_request(expired):
+        await log_request("failed" if expired else "cancelled", **budget.context,
+                          http_status=504 if expired else None,
+                          error_class="request_deadline_exceeded" if expired else "cancelled",
+                          cancelled=not expired, terminal_cleanup=True)
+    budget.abort = abort_request
+    if getattr(getattr(request, 'state', None), 'require_local_mode', False) is True and not gateway_local_only():
+        await log_request('failed', http_status=403, error_class='local_only_mode_required', attempt_count=0)
+        raise HTTPException(status_code=403, detail='Dedicated local generation requires gateway --local-only mode')
+
+    async def report_limit(exc):
+        if getattr(exc, "upstream_status", None) is not None:
+            upstream_observation["http_status"] = exc.upstream_status
+        await log_request("failed", **budget.context, http_status=exc.status,
+                          error_class=exc.code, error=str(exc), terminal_cleanup=True)
+    budget.report_limit = report_limit
+
     try:
-        codex_req = await request.json()
+        codex_req = await budget.run(lambda: read_request_json(request, budget.limits))
+        budget.body_read = True
+    except (RequestDeadlineExceeded, ClientDisconnect):
+        raise
+    except ResourceLimitError:
+        raise
     except Exception:
         await log_request("failed", http_status=400, error_class="invalid_json", error="Invalid JSON body")
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-    codex_req = validate_response_request_body(codex_req)
-    request_metadata = codex_req.pop("metadata", None)
-    if isinstance(request_metadata, dict) and isinstance(request_metadata.get("run_id"), str):
-        request_run_id = request_metadata["run_id"]
-    google_backend_timeout = google_backend_timeout_from_metadata(request_metadata)
+    try:
+        codex_req = await budget.sync(validate_response_request_body, codex_req)
+        from .skills.anti.scripts.anti_lib.wav_audio import parts as audio_parts
+        audio_request = bool(audio_parts(codex_req))
+        request_metadata = codex_req.pop("metadata", None)
+        if isinstance(request_metadata, dict) and isinstance(request_metadata.get("run_id"), str):
+            request_run_id = request_metadata["run_id"]
+        budget.local_only = gateway_local_only() or (request_metadata or {}).get('antigravity_local_only') is True
+        google_backend_timeout = google_backend_timeout_from_metadata(request_metadata)
+        budget.deadline = budget.started + google_request_timeout_from_metadata(request_metadata)
+        budget.stream_idle = (request_metadata or {}).get("antigravity_stream_idle_timeout_seconds", STREAM_IDLE_TIMEOUT_SECONDS)
+        budget.stream_total = (request_metadata or {}).get("antigravity_stream_total_timeout_seconds", STREAM_TOTAL_TIMEOUT_SECONDS)
+        stream = response_stream_flag(codex_req)
+        budget.context.update(stream=stream)
+        if stream:
+            budget.deadline = min(budget.deadline, budget.started + budget.stream_total)
+        budget.check_deadline()
 
-    reject_unsupported_previous_response(codex_req)
-    model = response_model_id(codex_req)
-    codex_req["model"] = model
-    stream = response_stream_flag(codex_req)
+        model = await budget.sync(response_model_id, codex_req)
+        codex_req["model"] = model
+    except HTTPException as exc:
+        await log_request("failed", http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
+        raise
+    async def check_context(providers=None, *, deployment=None):
+        from .context_preflight import enforce, ContextLimitExceeded
+        try:
+            report = await budget.sync(enforce, codex_req, providers or {}, deployment=deployment, route=unified_route)
+        except ContextLimitExceeded as exc:
+            await log_request('failed', model=model, stream=stream, http_status=400,
+                              error_class='context_limit_exceeded', attempt_count=0)
+            raise HTTPException(status_code=400, detail={'code':'context_limit_exceeded',
+                'message':str(exc), 'context_preflight':exc.report}) from exc
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail='Request cannot be assessed as finite JSON')
+        budget.context_preflight = report
+        if isinstance(request, Request):
+            request.state.context_preflight = report
+
     unified_enabled = is_unified_mode_enabled()
-    unified_route = classify_route(model, unified_enabled=unified_enabled)
+    unified_route = await budget.sync(classify_route, model, unified_enabled=unified_enabled)
+    budget.context.update(model=model, route="openai" if unified_route.startswith("openai") else "google" if unified_route == "antigravity" else unified_route, stream=stream)
+    account_binding = None
+    binding_header = request.headers.get("X-Anti-Account-Binding")
+    if binding_header:
+        try:
+            account_binding = parse_account_binding_header(binding_header)
+        except ValueError as exc:
+            await log_request("failed", model=model, route=unified_route, stream=stream, http_status=400,
+                              error_class="invalid_account_binding", error="Invalid account binding header")
+            raise HTTPException(status_code=400, detail="Invalid account binding header") from exc
+        try:
+            binding_family = await budget.sync(native_model_family, model) if unified_route == "antigravity" else None
+            validate_binding_route(unified_route, binding_family)
+        except ValueError as exc:
+            await log_request("failed", model=model, route=unified_route, stream=stream, http_status=400,
+                              error_class="unsupported_binding_route", error="Account binding requires a native Antigravity Gemini route")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if audio_request and (unified_route!='antigravity' or not native_model_capabilities(model).pcm_wav_probe):
+        await log_request('failed',model=model,route=unified_route,stream=stream,http_status=400,
+                          error_class='unsupported_audio_route',attempt_count=0)
+        raise HTTPException(status_code=400,detail='Experimental WAV input is unsupported on this route; no audio was submitted')
+    if budget.local_only and unified_route != 'byok':
+        await log_request('failed', model=model, route=unified_route, stream=stream, http_status=403,
+                          error_class='local_only_route_forbidden', attempt_count=0)
+        raise HTTPException(status_code=403, detail={'code':'local_only_route_forbidden', 'message':'Local-only mode requires a configured loopback BYOK route.'})
+    if unified_route == "antigravity" and required_output_bridge(native_model_definition(model)):
+        detail = {"code":"unsupported_output_modality", "message":"Generated image output is not supported by this gateway; select a text-generation model."}
+        await log_request("failed", model=model, route="google", stream=stream, http_status=400,
+                          error_class=detail["code"], error=detail["message"])
+        raise HTTPException(status_code=400, detail=detail)
+    if unified_route in {"openai", "google", "antigravity", "byok"}:
+        budget.permit.bind_route("google" if unified_route == "antigravity" else unified_route)
     if unified_route == "unknown":
         from .unified import unknown_model_error as _unknown_model_error
 
@@ -1226,8 +1683,9 @@ async def create_response(request: Request):
         )
         raise HTTPException(status_code=404, detail=detail)
     if unified_route == "openai":
+        budget.context.update(provider="openai", family="openai")
         try:
-            validate_capabilities(codex_req, OPENAI_ROUTE_CAPABILITIES)
+            await budget.sync(validate_capabilities, codex_req, openai_model_capabilities(model))
         except CapabilityError as exc:
             await log_request(
                 "failed",
@@ -1242,7 +1700,7 @@ async def create_response(request: Request):
             )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
-            auth = resolve_openai_auth()
+            auth = await budget.sync(resolve_openai_auth)
         except OpenAIUpstreamAuthError as exc:
             await log_request(
                 "failed",
@@ -1256,12 +1714,19 @@ async def create_response(request: Request):
                 error=str(exc),
             )
             raise HTTPException(status_code=exc.status_code, detail=openai_failure_detail(model, str(exc))) from exc
+        deployment = None
+        auth_kind = getattr(auth, 'kind', None)
+        if auth_kind == 'codex_oauth' or (auth_kind == 'api_key' and isinstance(getattr(auth, 'base_url', None), str)):
+            account_ref = getattr(auth, 'account_id', None)
+            if account_ref is None or isinstance(account_ref, str):
+                deployment = {'kind':auth_kind, 'endpoint':openai_responses_url(auth), 'account':account_ref}
+        await check_context(deployment=deployment)
         upstream_model = strip_reserved_openai_prefix(model).strip() or model
         if stream:
             try:
-                openai_stream_state = await _open_openai_upstream_stream(
-                    codex_req, upstream_model, auth
-                )
+                openai_stream_state = await run_bounded_operation(lambda: _open_openai_upstream_stream(
+                    codex_req, upstream_model, auth, telemetry=upstream_observation
+                ))
             except OpenAIUpstreamHTTPError as exc:
                 if exc.status_code in (401, 403):
                     hint = (
@@ -1271,12 +1736,12 @@ async def create_response(request: Request):
                     )
                     message = (
                         f"OpenAI authentication failed. {hint} "
-                        f"{safe_error_detail(exc.body)[:300]}"
+                        f"{safe_request_error(exc.body)[:300]}"
                     )
                 else:
                     message = (
                         f"OpenAI upstream error HTTP {exc.status_code}. "
-                        f"{safe_error_detail(exc.body)[:300]}"
+                        f"{safe_request_error(exc.body)[:300]}"
                     )
                 await log_request(
                     "failed",
@@ -1296,8 +1761,10 @@ async def create_response(request: Request):
                     detail=openai_failure_detail(model, message),
                     headers=response_headers,
                 ) from exc
+            except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+                raise
             except Exception as exc:
-                message = f"OpenAI upstream is unreachable: {safe_error_detail(exc)}"
+                message = f"OpenAI upstream is unreachable: {safe_request_error(exc)}"
                 await log_request(
                     "failed",
                     model=model,
@@ -1314,22 +1781,23 @@ async def create_response(request: Request):
                     detail=openai_failure_detail(model, message),
                 ) from exc
 
-            await log_request("stream_started", model=model, route="openai", provider="openai", family="openai", stream=True)
+            await log_request("stream_started", model=model, route="openai", provider="openai", family="openai", stream=True, http_status=200)
 
             async def logged_openai_stream() -> AsyncGenerator[str, None]:
                 terminal_status = "ended"
-                terminal_http_status = None
+                terminal_http_status = 200  # The native upstream stream is already open.
                 terminal_error_class = None
                 terminal_error = None
                 terminal_usage = None
+                terminal_response_payload = None
                 try:
-                    async for chunk in openai_upstream_sse_generator(
+                    async for chunk in stream_with_budget(openai_upstream_sse_generator(
                         codex_req,
                         upstream_model,
                         auth,
                         model,
                         stream_state=openai_stream_state,
-                    ):
+                    ), budget):
                         # Track terminal Responses events for sanitized telemetry only.
                         for line in chunk.splitlines():
                             if not line.startswith("data: ") or line == "data: [DONE]":
@@ -1341,40 +1809,55 @@ async def create_response(request: Request):
                             if not isinstance(event, dict):
                                 continue
                             etype = event.get("type")
+                            if etype in {"response.completed", "response.incomplete", "response.failed"}:
+                                terminal_response_payload = event.get("response")
+                                if isinstance(terminal_response_payload, dict) and isinstance(terminal_response_payload.get("usage"), dict):
+                                    terminal_usage = terminal_response_payload["usage"]
                             if etype in {"response.completed", "response.incomplete"}:
-                                terminal_status = "success"
+                                terminal_status = "success" if etype == "response.completed" else "incomplete"
                                 terminal_http_status = 200
                                 resp = event.get("response")
                                 if isinstance(resp, dict) and isinstance(resp.get("usage"), dict):
                                     terminal_usage = resp["usage"]
                             elif etype == "response.failed":
                                 terminal_status = "failed"
+                                terminal_http_status = 200
                                 err = event.get("response", {}).get("error", {}) if isinstance(event.get("response"), dict) else {}
                                 terminal_error_class = err.get("code") if isinstance(err, dict) else "stream_error"
                                 terminal_error = err.get("message") if isinstance(err, dict) else "OpenAI stream failed"
                         yield chunk
+                except (asyncio.CancelledError, GeneratorExit):
+                    if terminal_response_payload is None:
+                        terminal_status = "cancelled"
+                        terminal_error_class = "cancelled"
+                    raise
                 except Exception as exc:
+                    terminal_response_payload = None
                     terminal_status = "failed"
                     terminal_error_class = "stream_exception"
                     terminal_error = exc
                     raise
                 finally:
-                    await log_request(
-                        terminal_status,
-                        model=model,
-                        route="openai",
-                        provider="openai",
-                        family="openai",
-                        stream=True,
-                        http_status=terminal_http_status,
-                        usage=terminal_usage,
-                        error_class=terminal_error_class,
-                        error=terminal_error,
-                    )
+                    with anyio.CancelScope(shield=True):
+                        await log_request(
+                            terminal_status,
+                            model=model,
+                            route="openai",
+                            provider="openai",
+                            family="openai",
+                            stream=True,
+                            http_status=terminal_http_status,
+                            usage=terminal_usage,
+                            error_class=terminal_error_class,
+                            error=terminal_error,
+                            response_payload=terminal_response_payload,
+                            terminal_cleanup=True,
+                        )
 
-            return StreamingResponse(logged_openai_stream(), media_type="text/event-stream")
+            budget.start_stream()
+            return OwnedStreamingResponse(logged_openai_stream(), media_type="text/event-stream", budget=budget)
         try:
-            response = await create_openai_upstream_response(codex_req, upstream_model, auth, model)
+            response = await run_bounded_operation(lambda: create_openai_upstream_response(codex_req, upstream_model, auth, model, telemetry=upstream_observation))
         except HTTPException as exc:
             detail_text = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail)
             await log_request(
@@ -1398,16 +1881,32 @@ async def create_response(request: Request):
             stream=False,
             http_status=200,
             usage=response.get("usage") if isinstance(response, dict) else None,
+            response_payload=response if isinstance(response, dict) else None,
         )
         return response
-    provider_id, provider_model = split_provider_model(model)
-    validate_provider_model_id(provider_id, provider_model)
+    provider_id, provider_model = await budget.sync(split_provider_model, model)
+    if provider_id is not None:
+        budget.context.update(route="byok", provider=provider_id)
+    from .request_shapes import validate_request_shapes
+    try:
+        await budget.sync(validate_provider_model_id, provider_id, provider_model)
+        await budget.sync(validate_request_shapes, codex_req, route="byok" if provider_id is not None else "google")
+    except HTTPException as exc:
+        await log_request("failed", model=model, route="byok" if provider_id is not None else "google", provider=provider_id, stream=stream, http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
+        raise
+    except ValueError as exc:
+        await log_request(
+            "failed", model=model, route="byok" if provider_id is not None else "google",
+            provider=provider_id, stream=stream, http_status=400, error_class="invalid_request",
+            error="Request shape is unsupported for this route.", attempt_count=0,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if provider_id is not None:
         # Normalize self-referential prefixes (openrouter:openrouter/x ->
         # openrouter:x) so catalog ids, capability lookup, and the upstream
         # payload all agree on the API-level model id.
         provider_model = normalize_byok_model_id(provider_model, provider_id)
-        providers = all_provider_configs()
+        providers = await budget.sync(all_provider_configs)
         provider = providers.get(provider_id)
         if not provider:
             await log_request(
@@ -1421,6 +1920,25 @@ async def create_response(request: Request):
                 error=f"BYOK provider '{provider_id}' is not configured",
             )
             raise HTTPException(status_code=404, detail=f"BYOK provider '{provider_id}' is not configured")
+        if budget.local_only and endpoint_scope(provider.get('baseUrl')) != 'loopback':
+            await log_request('failed', model=model, route='byok', provider=provider_id, stream=stream,
+                              http_status=403, error_class='local_only_route_forbidden', attempt_count=0)
+            raise HTTPException(status_code=403, detail={'code':'local_only_route_forbidden', 'message':'The configured provider endpoint is not loopback.'})
+        try:
+            validate_supported_provider_kind(provider)
+        except ValueError as exc:
+            detail = safe_request_error(exc)
+            await log_request(
+                "failed",
+                model=model,
+                route="byok",
+                provider=provider_id,
+                stream=stream,
+                http_status=400,
+                error_class="unsupported_provider_kind",
+                error=detail,
+            )
+            raise HTTPException(status_code=400, detail=detail) from exc
         try:
             validate_capabilities(
                 codex_req,
@@ -1435,24 +1953,12 @@ async def create_response(request: Request):
                 stream=stream,
                 http_status=400,
                 error_class="unsupported_route_capability",
-                error=safe_error_detail(exc),
+                error=safe_request_error(exc),
             )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        provider_kind = provider.get("kind")
-        if provider_kind != "openai_chat":
-            await log_request(
-                "failed",
-                model=model,
-                route="byok",
-                provider=provider_id,
-                stream=stream,
-                http_status=500,
-                error_class="unsupported_provider_kind",
-                error=f"Unsupported BYOK provider kind: {provider_kind}",
-            )
-            raise HTTPException(status_code=500, detail=f"Unsupported BYOK provider kind: {provider_kind}")
+        await check_context(providers)
         if stream:
-            payload, url, headers, timeout = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=True)
+            payload, url, headers, timeout = await budget.sync(prepare_openai_compatible_request, codex_req, provider, provider_model, stream=True)
             await log_request("stream_started", model=model, route="byok", provider=provider_id, stream=True)
 
             async def logged_byok_stream() -> AsyncGenerator[str, None]:
@@ -1461,8 +1967,10 @@ async def create_response(request: Request):
                 terminal_error_class = None
                 terminal_error = None
                 terminal_usage = None
+                terminal_response_payload = None
+                telemetry = upstream_observation
                 try:
-                    async for chunk in openai_compatible_sse_generator(payload, url, headers, timeout, provider, model):
+                    async for chunk in stream_with_budget(openai_compatible_sse_generator(payload, url, headers, timeout, provider, model, telemetry=telemetry), budget):
                         for line in chunk.splitlines():
                             if not line.startswith("data: ") or line == "data: [DONE]":
                                 continue
@@ -1476,6 +1984,8 @@ async def create_response(request: Request):
                             # completions into Responses events before yielding.
                             event_type = event.get("type")
                             response_payload = event.get("response")
+                            if event_type in {"response.completed", "response.incomplete", "response.failed"}:
+                                terminal_response_payload = response_payload
                             if event_type == "response.failed":
                                 error_payload = response_payload.get("error") if isinstance(response_payload, dict) else None
                                 terminal_status = "failed"
@@ -1495,35 +2005,45 @@ async def create_response(request: Request):
                             if event_type is None:
                                 choices = event.get("choices")
                                 if isinstance(choices, list) and choices and isinstance(choices[0], dict) and choices[0].get("finish_reason"):
-                                    terminal_status = "success"
+                                    terminal_status = "incomplete" if choices[0]["finish_reason"] in {"length", "content_filter"} else "success"
                                     terminal_http_status = 200
                             if isinstance(usage, dict):
                                 terminal_usage = usage
                         yield chunk
+                except (asyncio.CancelledError, GeneratorExit):
+                    if terminal_response_payload is None:
+                        terminal_status = "cancelled"
+                        terminal_error_class = "cancelled"
+                    raise
                 except Exception as exc:
+                    terminal_response_payload = None
                     terminal_status = "failed"
                     terminal_error_class = "stream_exception"
                     terminal_error = exc
                     raise
                 finally:
-                    await log_request(
-                        terminal_status,
-                        model=model,
-                        route="byok",
-                        provider=provider_id,
-                        stream=True,
-                        http_status=terminal_http_status,
-                        usage=terminal_usage,
-                        error_class=terminal_error_class,
-                        error=terminal_error,
-                    )
+                    with anyio.CancelScope(shield=True):
+                        await log_request(
+                            terminal_status,
+                            model=model,
+                            route="byok",
+                            provider=provider_id,
+                            stream=True,
+                            http_status=telemetry.get("http_status", terminal_http_status),
+                            usage=terminal_usage,
+                            error_class=terminal_error_class,
+                            error=terminal_error,
+                            response_payload=terminal_response_payload,
+                            terminal_cleanup=True,
+                        )
 
-            return StreamingResponse(
+            budget.start_stream()
+            return OwnedStreamingResponse(
                 logged_byok_stream(),
-                media_type="text/event-stream",
+                media_type="text/event-stream", budget=budget,
             )
         try:
-            response = await create_openai_compatible_response(codex_req, provider, provider_model, model)
+            response = await run_bounded_operation(lambda: create_openai_compatible_response(codex_req, provider, provider_model, model, telemetry=upstream_observation))
         except HTTPException as exc:
             await log_request(
                 "failed",
@@ -1544,156 +2064,86 @@ async def create_response(request: Request):
             stream=False,
             http_status=200,
             usage=response.get("usage") if isinstance(response, dict) else None,
+            response_payload=response if isinstance(response, dict) else None,
         )
         return response
     
+    family = await budget.sync(native_model_family, model)
+    budget.context.update(route="google", family=family)
     try:
-        validate_capabilities(codex_req, native_model_capabilities(model))
+        capabilities = await budget.sync(native_model_capabilities, model)
+        await budget.sync(validate_capabilities, codex_req, capabilities)
     except CapabilityError as exc:
         await log_request(
             "failed",
             model=model,
             route="google",
-            family=native_model_family(model),
+            family=family,
             stream=stream,
             http_status=400,
             error_class="unsupported_route_capability",
             error=exc,
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    schedule_refresh_accounts_ahead()
+    await check_context()
+    if account_binding is None:
+        schedule_refresh_accounts_ahead()
 
     # 1. Select account automatically from pool
-    family = native_model_family(model)
-    operation_deadline = time.monotonic() + google_request_timeout_from_metadata(request_metadata)
-    diagnostic_deadline = operation_deadline if not stream else None
-
-    async def wait_for_disconnect(stop_event: asyncio.Event) -> bool:
-        while not stop_event.is_set():
-            if await request_disconnected_now():
-                return True
-            try:
-                await asyncio.wait_for(
-                    stop_event.wait(),
-                    timeout=CLIENT_DISCONNECT_POLL_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                pass
-        return False
-
-    def release_late_account(task: asyncio.Task) -> None:
-        async def cleanup() -> None:
-            if task.cancelled():
-                return
-            try:
-                late_account = task.result()
-            except Exception:
-                return
-            if isinstance(late_account, dict):
-                try:
-                    with anyio.fail_after(2.0):
-                        await release_account_for_request(late_account.get("email"))
-                except Exception:
-                    pass
-
-        asyncio.create_task(cleanup())
-
-    async def request_disconnected_now() -> bool:
-        return await request.is_disconnected()
-
-    async def drain_task(task: asyncio.Task, timeout: float, *, cancel: bool = False) -> bool:
-        done, _ = await asyncio.wait({task}, timeout=timeout)
-        if not done and cancel:
-            task.cancel()
-            done, _ = await asyncio.wait({task}, timeout=timeout)
-        if task.done():
-            with suppress(asyncio.CancelledError, Exception):
-                task.result()
-        return task.done()
-
-    async def run_bounded_operation(operation_factory, *, release_late_result: bool = False):
-        if await request_disconnected_now():
-            raise ClientDisconnect()
-        if time.monotonic() >= operation_deadline:
-            raise RequestDeadlineExceeded()
-        operation_task = asyncio.create_task(operation_factory())
-        disconnect_stop = asyncio.Event()
-        disconnect_task = asyncio.create_task(wait_for_disconnect(disconnect_stop))
-        deadline_task = asyncio.create_task(
-            asyncio.sleep(max(0.0, operation_deadline - time.monotonic()))
+    try:
+        account = await run_bounded_operation(
+            (lambda: acquire_bound_account_for_request(model, account_binding))
+            if account_binding is not None else
+            (lambda: acquire_active_account_for_request(model)),
+            release_late_result=True,
         )
-        abandoned = False
-
-        async def abandon_operation() -> None:
-            nonlocal abandoned
-            abandoned = True
-            if release_late_result:
-                operation_task.add_done_callback(release_late_account)
-                return
-            operation_task.cancel()
-            if not await drain_task(operation_task, 0.2):
-                operation_task.add_done_callback(
-                    lambda task: task.exception() if not task.cancelled() else None
-                )
-
-        try:
-            done, _ = await asyncio.wait(
-                {operation_task, disconnect_task, deadline_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if disconnect_task in done:
-                await abandon_operation()
-                raise ClientDisconnect()
-            if deadline_task in done or time.monotonic() >= operation_deadline:
-                await abandon_operation()
-                raise RequestDeadlineExceeded()
-            return await operation_task
-        except asyncio.CancelledError:
-            await abandon_operation()
-            raise
-        finally:
-            disconnect_stop.set()
-            await drain_task(disconnect_task, 0.2, cancel=True)
-            deadline_task.cancel()
-            await drain_task(deadline_task, 0.2)
-            if not operation_task.done() and not abandoned:
-                await abandon_operation()
-
-    if stream:
-        account = await acquire_active_account_for_request(model)
-    else:
-        try:
-            account = await run_bounded_operation(
-                lambda: acquire_active_account_for_request(model),
-                release_late_result=True,
-            )
-        except ClientDisconnect:
-            await best_effort_diagnostic(log_request(
-                "cancelled",
-                model=model,
-                route="google",
-                family=family,
-                stream=False,
-                error_class="cancelled",
-                outcome_category="cancelled",
-                cancelled=True,
-                error="Client disconnected before account acquisition completed",
-                terminal_cleanup=True,
-            ))
-            raise
-        except RequestDeadlineExceeded:
-            await best_effort_diagnostic(log_request(
-                "failed",
-                model=model,
-                route="google",
-                family=family,
-                stream=False,
-                http_status=504,
-                error_class="request_deadline_exceeded",
-                error="Native non-stream request deadline expired during account acquisition",
-                terminal_cleanup=True,
-            ))
-            raise HTTPException(status_code=504, detail="Antigravity request deadline exceeded")
+    except ValueError as exc:
+        await log_request("failed", model=model, route="google", family=family, stream=stream,
+                          http_status=400, error_class="binding_refused", error="Account binding refused")
+        raise HTTPException(status_code=400, detail=safe_error_detail(exc)) from exc
+    except ClientDisconnect:
+        await best_effort_diagnostic(log_request(
+            "cancelled",
+            model=model,
+            route="google",
+            family=family,
+            stream=False,
+            error_class="cancelled",
+            outcome_category="cancelled",
+            cancelled=True,
+            error="Client disconnected before account acquisition completed",
+            terminal_cleanup=True,
+        ))
+        raise
+    except RequestDeadlineExceeded:
+        await best_effort_diagnostic(log_request(
+            "failed",
+            model=model,
+            route="google",
+            family=family,
+            stream=False,
+            http_status=504,
+            error_class="request_deadline_exceeded",
+            error="Native non-stream request deadline expired during account acquisition",
+            terminal_cleanup=True,
+        ))
+        raise HTTPException(status_code=504, detail="Antigravity request deadline exceeded")
+    except AccountRefreshInProgress as exc:
+        await log_request(
+            "failed",
+            model=model,
+            route="google",
+            family=family,
+            stream=stream,
+            http_status=503,
+            error_class="account_refresh_in_progress",
+            error="Google account refresh is in progress; retry the request shortly.",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Google account refresh is in progress; retry the request shortly.",
+            headers={"Retry-After": "1"},
+        ) from exc
     if not account:
         await log_request(
             "failed",
@@ -1715,8 +2165,8 @@ async def create_response(request: Request):
         
     google_transport = GoogleTransport(
         timeout=google_backend_timeout,
-        platform_name=get_platform(),
-        client_factory=httpx.AsyncClient,
+        platform_name=await budget.sync(get_platform),
+        client_factory=lambda **kwargs: provider_client("google", **kwargs),
     )
 
     def account_lease(selected_account: dict) -> AccountLease:
@@ -1736,18 +2186,19 @@ async def create_response(request: Request):
         try:
             if stream:
                 return None
-            return await google_transport.post(codex_req, account_lease(selected_account))
+            upstream_observation.pop("http_status", None)
+            response = await google_transport.post(codex_req, account_lease(selected_account))
+            upstream_observation["http_status"] = response.status_code
+            return response
+        except ResourceLimitError:
+            raise
         except (httpx.HTTPError, OSError, GoogleHTTPError, GoogleStreamPayloadError):
             return None
         except Exception as exc:
             # Transport failures are expected; anything else is a bug that must
             # surface as a 500 (not be silently masked as an account-rotation
             # trigger and turned into a misleading 502).
-            print(
-                f"[gateway] request_backend unexpected error: "
-                f"{type(exc).__name__}: {redact_secret_text(str(exc))[:300]}",
-                file=sys.stderr,
-            )
+            logging.getLogger(__name__).error("request_backend unexpected error: %s", type(exc).__name__)
             raise
 
     async def request_backend_with_boundary(selected_account: dict) -> httpx.Response | None:
@@ -1765,7 +2216,9 @@ async def create_response(request: Request):
         cooldown_category: str | None = None
         try:
             res = await request_backend_with_boundary(response_account)
-            if not res:
+            # Audio is an explicitly bounded upload. Do not silently submit the
+            # same captured recording again through another account.
+            if not res and not audio_request and account_binding is None:
                 new_account = await run_bounded_operation(
                     lambda: acquire_active_account_for_request(model),
                     release_late_result=True,
@@ -1786,6 +2239,9 @@ async def create_response(request: Request):
                     res = await request_backend_with_boundary(response_account)
 
             if not res:
+                connection_failure = "Failed to communicate with Antigravity backend" + (
+                    "" if audio_request else " after rotation"
+                )
                 await run_nonstream_diagnostic(
                     record_attempt_outcome,
                     response_account.get("email", ""),
@@ -1803,13 +2259,13 @@ async def create_response(request: Request):
                     http_status=502,
                     rotation_attempted=rotation_attempted,
                     error_class="connection_error",
-                    error="Failed to communicate with Antigravity backend after rotation",
+                    error=connection_failure,
                 )
                 raise HTTPException(
                     status_code=502,
                     detail=google_failure_detail(
                         model,
-                        "Failed to communicate with Antigravity backend after rotation",
+                        connection_failure,
                         rotation_attempted=rotation_attempted,
                         attempt_count=len(response_attempts),
                     ),
@@ -1836,11 +2292,13 @@ async def create_response(request: Request):
                     status_code=res.status_code,
                     error_class="validation_required" if is_validation else None,
                 )
-                new_account = await run_bounded_operation(
-                    lambda: acquire_active_account_for_request(model),
-                    release_late_result=True,
-                )
-                rotation_attempted = True
+                new_account = None
+                if not audio_request and account_binding is None:
+                    new_account = await run_bounded_operation(
+                        lambda: acquire_active_account_for_request(model),
+                        release_late_result=True,
+                    )
+                    rotation_attempted = True
                 if new_account:
                     response_attempts.append(new_account)
                     response_account = new_account
@@ -1907,14 +2365,14 @@ async def create_response(request: Request):
                     rotation_count=max(0, len(response_attempts) - 1),
                 )
                 if is_validation:
-                    safe_text = safe_error_detail(res.text)
+                    safe_text = safe_request_error(res.text)
                     detail_msg = (
                         f"Google account requires verification (VALIDATION_REQUIRED). "
                         f"Run 'codex-antigravity login' to re-authenticate. "
                         f"{safe_text}"
                     )
                 else:
-                    safe_text = safe_error_detail(res.text)
+                    safe_text = safe_request_error(res.text)
                     detail_msg = f"Google Authentication failure: {safe_text}"
                 raise HTTPException(
                     status_code=res.status_code,
@@ -1955,7 +2413,8 @@ async def create_response(request: Request):
                     status_code=429,
                     detail=google_failure_detail(
                         model,
-                        "Antigravity account rate limit reached. Auto-switching to next account.",
+                        ("Antigravity account rate limit reached. Audio was not resubmitted."
+                         if audio_request else "Antigravity account rate limit reached. Auto-switching to next account."),
                         retry_after_seconds=retry_after_seconds,
                         retry_after_source=retry_after_source,
                         rotation_attempted=rotation_attempted,
@@ -1981,13 +2440,13 @@ async def create_response(request: Request):
                     retry_after_source=retry_after_source_from_response(res),
                     rotation_attempted=rotation_attempted,
                     error_class="backend_http_error",
-                    error=safe_error_detail(res.text),
+                    error=safe_request_error(res.text),
                 )
                 raise HTTPException(
                     status_code=res.status_code,
                     detail=google_failure_detail(
                         model,
-                        f"Google Antigravity API error: {safe_error_detail(res.text)}",
+                        f"Google Antigravity API error: {safe_request_error(res.text)}",
                         retry_after_seconds=retry_after_seconds_from_response(res),
                         retry_after_source=retry_after_source_from_response(res),
                         rotation_attempted=rotation_attempted,
@@ -1995,7 +2454,7 @@ async def create_response(request: Request):
                 )
 
             try:
-                gemini_resp = res.json()
+                gemini_resp = await call_sync(response_json, res)
                 if isinstance(gemini_resp, list) and gemini_resp:
                     gemini_resp = gemini_resp[0]
                 backend_error = backend_error_from_payload(gemini_resp)
@@ -2024,11 +2483,11 @@ async def create_response(request: Request):
                         status_code=status_code_from_backend_error(code, message),
                         detail=google_failure_detail(
                             model,
-                            f"Google Antigravity API error: {safe_error_detail(message)}",
+                            f"Google Antigravity API error: {safe_request_error(message)}",
                             rotation_attempted=rotation_attempted,
                         ),
                     )
-                provider_result = google_transport.parse_response(gemini_resp)
+                provider_result = await call_sync(google_transport.parse_response, gemini_resp, request=codex_req)
                 codex_resp = response_from_result(
                     provider_result,
                     response_id=provider_result.provider_response_id or f"resp_{secrets.token_hex(6)}",
@@ -2059,6 +2518,7 @@ async def create_response(request: Request):
                     usage=codex_resp.get("usage") if isinstance(codex_resp, dict) else None,
                     error_class=None if request_succeeded else provider_result.terminal.error_code,
                     error=None if request_succeeded else provider_result.terminal.error_message,
+                    response_payload=codex_resp,
                     terminal_kind=provider_result.terminal.kind.value,
                     terminal_reason=provider_result.terminal.reason,
                     attempt_count=len(response_attempts),
@@ -2068,7 +2528,7 @@ async def create_response(request: Request):
                     cooldown_category=cooldown_category,
                 )
                 return codex_resp
-            except HTTPException:
+            except (HTTPException, ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
                 raise
             except Exception as e:
                 await run_nonstream_diagnostic(
@@ -2088,9 +2548,34 @@ async def create_response(request: Request):
                     http_status=500,
                     rotation_attempted=rotation_attempted,
                     error_class="translation_error",
-                    error=safe_error_detail(e),
+                    error=safe_request_error(e),
                 )
-                raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
+                raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_request_error(e)}")
+        except AccountRefreshInProgress as exc:
+            if cooldown_category is None:
+                await best_effort_diagnostic(record_attempt_outcome(
+                    response_account.get("email", ""),
+                    model,
+                    AttemptOutcome(scope="none", category="transport"),
+                    status_code=502,
+                    error_class="connection_error",
+                ))
+            await log_request(
+                "failed",
+                model=model,
+                route="google",
+                family=family,
+                stream=False,
+                http_status=503,
+                rotation_attempted=True,
+                error_class="account_refresh_in_progress",
+                error="Google account refresh is in progress; retry the request shortly.",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Google account refresh is in progress; retry the request shortly.",
+                headers={"Retry-After": "1"},
+            ) from exc
         except RequestDeadlineExceeded:
             await best_effort_diagnostic(log_request(
                 "failed",
@@ -2136,7 +2621,7 @@ async def create_response(request: Request):
                 for used_account in response_attempts:
                     try:
                         with anyio.fail_after(2.0):
-                            await release_account_for_request(used_account.get("email"))
+                            await release_owned_account(used_account.get("email"))
                     except Exception:
                         pass
 
@@ -2146,6 +2631,9 @@ async def create_response(request: Request):
     # Handle standard SSE streaming response path
     stream_attempts = [account]
     recorded_stream_attempts: set[str] = set()
+    observed_stream_terminal: dict | None = None
+    observed_stream_account: dict | None = None
+    stream_terminal_logged = False
 
     async def record_stream_attempt(
         selected_account: dict,
@@ -2169,9 +2657,10 @@ async def create_response(request: Request):
         recorded_stream_attempts.add(email)
 
     async def sse_generator() -> AsyncGenerator[str, None]:
+        nonlocal observed_stream_terminal, observed_stream_account, stream_terminal_logged
         import uuid
         response_id = f"resp_{uuid.uuid4().hex[:12]}"
-        adapter = GoogleStreamEventAdapter(response_id=response_id, display_model=model)
+        adapter = GoogleStreamEventAdapter(response_id=response_id, display_model=model, request=codex_req)
         attempt_num = 0
 
         def serialize_transport_event(event: dict | str) -> str:
@@ -2182,22 +2671,28 @@ async def create_response(request: Request):
         while attempt_num < len(stream_attempts):
             stream_account = stream_attempts[attempt_num]
             terminal_event: dict | None = None
+            upstream_observation.pop("http_status", None)
             try:
-                async for event in google_transport.stream_events(
+                async with aclosing(google_transport.stream_events(
                     codex_req,
                     account_lease(stream_account),
                     response_id=response_id,
                     display_model=model,
                     adapter=adapter,
-                ):
-                    if isinstance(event, dict) and event.get("type") in {
-                        "response.completed",
-                        "response.incomplete",
-                        "response.failed",
-                    }:
-                        terminal_event = event
-                    yield serialize_transport_event(event)
+                    telemetry=upstream_observation,
+                )) as events:
+                    async for event in events:
+                        if isinstance(event, dict) and event.get("type") in {
+                            "response.completed",
+                            "response.incomplete",
+                            "response.failed",
+                        }:
+                            terminal_event = event
+                            observed_stream_terminal = event
+                            observed_stream_account = stream_account
+                        yield serialize_transport_event(event)
             except GoogleHTTPError as exc:
+                upstream_observation["http_status"] = exc.status_code
                 try:
                     retry_after = (
                         retry_after_seconds_from_response(exc.response)
@@ -2242,8 +2737,8 @@ async def create_response(request: Request):
                     error_class=exc.code,
                 )
                 error_code = exc.code
-                error_message = safe_error_detail(exc.message)
-                if adapter.visible_output_started:
+                error_message = safe_request_error(exc.message)
+                if adapter.visible_output_started or exc.code == "provider_output_limit":
                     if not adapter.created_emitted:
                         yield serialize_transport_event(adapter.created())
                     for event in adapter.fail(error_code, error_message):
@@ -2254,11 +2749,39 @@ async def create_response(request: Request):
                         route="google",
                         family=family,
                         stream=True,
+                        http_status=upstream_observation.get("http_status"),
+                        usage=adapter.accumulator.usage,
                         error_class=error_code,
                         error=error_message,
                         rotation_attempted=attempt_num > 0,
                     )
                     return
+            except ResourceLimitError as exc:
+                error_code = exc.code
+                error_message = safe_error_detail(exc)
+                await record_stream_attempt(
+                    stream_account,
+                    AttemptOutcome(scope="none", category="invalid_request"),
+                    error_class=error_code,
+                )
+                if not adapter.created_emitted:
+                    yield serialize_transport_event(adapter.created())
+                for event in adapter.fail(error_code, error_message):
+                    yield serialize_transport_event(event)
+                await log_request(
+                    "failed",
+                    model=model,
+                    route="google",
+                    family=family,
+                    stream=True,
+                    http_status=upstream_observation.get("http_status"),
+                    usage=adapter.accumulator.usage,
+                    error_class=error_code,
+                    error=error_message,
+                    rotation_attempted=attempt_num > 0,
+                )
+                stream_terminal_logged = True
+                return
             except Exception as exc:
                 outcome = AttemptOutcome(scope="none", category="transport")
                 await record_stream_attempt(
@@ -2267,7 +2790,7 @@ async def create_response(request: Request):
                     error_class="connection_error",
                 )
                 error_code = "connection_error"
-                error_message = safe_error_detail(exc)
+                error_message = safe_request_error(exc)
             else:
                 if terminal_event is None:
                     error_code = "missing_terminal_signal"
@@ -2296,6 +2819,7 @@ async def create_response(request: Request):
                             http_status=200,
                             rotation_attempted=attempt_num > 0,
                             usage=usage_payload,
+                            response_payload=response_payload,
                             terminal_kind=terminal_status,
                             terminal_reason=terminal_status,
                             attempt_count=len(stream_attempts),
@@ -2324,11 +2848,21 @@ async def create_response(request: Request):
                             error_class=error.get("code") if isinstance(error, dict) else None,
                             error=error.get("message") if isinstance(error, dict) else None,
                             rotation_attempted=attempt_num > 0,
+                            response_payload=response_payload,
                         )
+                    stream_terminal_logged = True
                     return
 
-            if attempt_num == 0 and not adapter.visible_output_started:
-                rotated = await acquire_active_account_for_request(model)
+            if attempt_num == 0 and not adapter.visible_output_started and account_binding is None:
+                try:
+                    rotated = await run_bounded_operation(
+                        lambda: acquire_active_account_for_request(model),
+                        release_late_result=True,
+                    )
+                except AccountRefreshInProgress:
+                    rotated = None
+                    error_code = "account_refresh_in_progress"
+                    error_message = "Google account refresh is in progress; retry the request shortly."
                 if rotated and rotated.get("email") != stream_account.get("email"):
                     adapter.reset_attempt()
                     stream_attempts.append(rotated)
@@ -2338,7 +2872,7 @@ async def create_response(request: Request):
                     # Same-email rotation (single-account configs) or an
                     # already-tracked account: the extra lease must still be
                     # released, otherwise in-flight accounting leaks.
-                    await release_account_for_request(rotated.get("email"))
+                    await release_owned_account(rotated.get("email"))
             if not adapter.created_emitted:
                 yield serialize_transport_event(adapter.created())
             for event in adapter.fail(error_code, error_message):
@@ -2349,6 +2883,8 @@ async def create_response(request: Request):
                 route="google",
                 family=family,
                 stream=True,
+                http_status=upstream_observation.get("http_status"),
+                usage=adapter.accumulator.usage,
                 error_class=error_code,
                 error=error_message,
                 rotation_attempted=attempt_num > 0,
@@ -2358,9 +2894,17 @@ async def create_response(request: Request):
         return
 
     async def managed_sse_generator() -> AsyncGenerator[str, None]:
+        nonlocal observed_stream_terminal, observed_stream_account
         try:
-            async for chunk in sse_generator():
-                yield chunk
+            async with aclosing(stream_with_budget(sse_generator(), budget)) as source:
+                async for chunk in source:
+                    for line in chunk.splitlines():
+                        if line.startswith("data: ") and line != "data: [DONE]":
+                            event = json.loads(line[6:])
+                            if event.get("type") in {"response.completed", "response.incomplete", "response.failed"}:
+                                observed_stream_terminal = event
+                                observed_stream_account = stream_attempts[-1]
+                    yield chunk
         finally:
             async def cleanup_stream_accounts() -> None:
                 cancelled = any(
@@ -2369,7 +2913,17 @@ async def create_response(request: Request):
                 )
                 try:
                     with anyio.fail_after(1.0):
-                        if cancelled:
+                        if observed_stream_terminal is not None and not stream_terminal_logged:
+                            terminal_payload = observed_stream_terminal.get("response", {})
+                            await log_request(
+                                "ended", model=model, route="google", family=family, stream=True,
+                                http_status=upstream_observation.get("http_status"),
+                                response_payload=terminal_payload,
+                                attempt_count=len(stream_attempts),
+                                rotation_count=max(0, len(stream_attempts) - 1),
+                                terminal_cleanup=True,
+                            )
+                        elif cancelled and observed_stream_terminal is None:
                             await log_request(
                                 "cancelled",
                                 model=model,
@@ -2390,10 +2944,14 @@ async def create_response(request: Request):
                 for used_account in stream_attempts:
                     try:
                         with anyio.fail_after(1.0):
+                            final_account = observed_stream_account is not None and used_account.get("email") == observed_stream_account.get("email")
+                            terminal_payload = observed_stream_terminal.get("response", {}) if observed_stream_terminal is not None and final_account else {}
+                            final_kind = terminal_payload.get("status")
                             await record_stream_attempt(
                                 used_account,
-                                AttemptOutcome(scope="none", category="cancelled"),
-                                error_class="cancelled",
+                                AttemptOutcome(scope="none", category=("success" if final_kind in {"completed", "incomplete"} else "transport") if final_account else "cancelled"),
+                                usage=terminal_payload.get("usage"),
+                                error_class=None if final_kind in {"completed", "incomplete"} else "provider_error" if final_account else "cancelled",
                             )
                     except Exception:
                         pass
@@ -2402,7 +2960,7 @@ async def create_response(request: Request):
                         released_emails.add(email)
                         try:
                             with anyio.fail_after(2.0):
-                                await release_account_for_request(email)
+                                await release_owned_account(email)
                         except Exception:
                             pass
 
@@ -2411,20 +2969,26 @@ async def create_response(request: Request):
             with anyio.CancelScope(shield=True):
                 await cleanup_stream_accounts()
 
-    return StreamingResponse(managed_sse_generator(), media_type="text/event-stream")
+    await log_request("stream_started", model=model, route="google", family=family, stream=True)
+    budget.start_stream()
+    return OwnedStreamingResponse(managed_sse_generator(), media_type="text/event-stream", budget=budget)
 
 
-async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str) -> dict:
-    payload, url, headers, timeout = prepare_openai_compatible_request(codex_req, provider, provider_model, stream=False)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+async def create_openai_compatible_response(codex_req: dict, provider: dict, provider_model: str, display_model: str, *, telemetry: dict | None = None) -> dict:
+    payload, url, headers, timeout = await call_sync(prepare_openai_compatible_request, codex_req, provider, provider_model, stream=False)
+    async with owned_context(provider_client("byok", **httpx_client_options(url, timeout=timeout))) as client:
         try:
-            res = await client.post(url, json=payload, headers=headers)
+            res = await limited_post(client, url, payload=payload, headers=headers)
+            if telemetry is not None:
+                telemetry["http_status"] = res.status_code
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"{provider['id']} connection error: {safe_error_detail(e)}") from e
     if res.status_code != 200:
         raise HTTPException(status_code=res.status_code, detail=f"{provider['id']} API error: {safe_error_detail(res.text)}")
     try:
-        chat_resp = res.json()
+        chat_resp = await call_sync(response_json, res)
         backend_error = backend_error_from_payload(chat_resp)
         if backend_error:
             code, message = backend_error
@@ -2432,63 +2996,55 @@ async def create_openai_compatible_response(codex_req: dict, provider: dict, pro
                 status_code=status_code_from_backend_error(code, message),
                 detail=f"{provider['id']} API error: {safe_error_detail(message)}",
             )
-        return transform_chat_response(chat_resp, display_model)
-    except HTTPException:
+        return await call_sync(transform_chat_response, chat_resp, display_model, request=codex_req)
+    except (HTTPException, ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{provider['id']} response translation failed: {safe_error_detail(e)}") from e
 
 async def create_openai_upstream_response(
-    codex_req: dict, upstream_model: str, auth, display_model: str
+    codex_req: dict, upstream_model: str, auth, display_model: str, *, telemetry: dict | None = None
 ) -> dict:
     """Native Responses passthrough to the OpenAI upstream (no translation)."""
     from .unified import build_openai_payload as _build_payload
 
     url = openai_responses_url(auth)
     headers = openai_request_headers(auth)
+    observe_routing_identity(routing_identity('openai', upstream_model, auth=auth, backend=upstream_model))
     if auth.kind == "codex_oauth":
-        # ChatGPT backend is stream-only: collect SSE into one Response object.
-        payload = _build_payload(codex_req, upstream_model, stream=True)
+        # Collect validated terminal state incrementally; never buffer the whole
+        # OAuth SSE body before the decoder's limits can apply.
+        payload = await call_sync(_build_payload, codex_req, upstream_model, stream=True)
         payload["store"] = bool(codex_req.get("store", False))
         try:
-            async with httpx.AsyncClient(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS) as client:
-                res = await client.post(url, json=payload, headers=headers)
+            async with owned_context(provider_client("native", **httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))) as client:
+                async with response_context(client, url, payload=payload, headers=headers) as res:
+                    if telemetry is not None:
+                        telemetry["http_status"] = res.status_code
+                    if res.status_code != 200:
+                        raw = await read_response_bytes(res, limit=65536)
+                        message = "OpenAI upstream error: " + safe_error_detail(raw.decode("utf-8", errors="replace"))
+                        if res.status_code in (401, 403):
+                            message = "OpenAI ChatGPT authentication failed or expired. Run `codex login` again."
+                        raise HTTPException(status_code=res.status_code, detail=openai_failure_detail(display_model, message))
+                    adapter = NativeResponsesStreamAdapter(display_model=display_model, request=codex_req)
+                    async for chunk in res.aiter_bytes():
+                        adapter.consume_bytes(chunk)
+                        if adapter.protocol_failed:
+                            break
+                    return adapter.finish()[-1]["response"]
+        except (HTTPException, ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=openai_failure_detail(display_model, f"OpenAI upstream is unreachable: {exc}"),
-            ) from exc
-        if res.status_code != 200:
-            if res.status_code in (401, 403):
-                raise HTTPException(
-                    status_code=res.status_code,
-                    detail=openai_failure_detail(
-                        display_model,
-                        "OpenAI ChatGPT authentication failed or expired. "
-                        f"Run `codex login` again. {safe_error_detail(res.text)}",
-                    ),
-                )
-            raise HTTPException(
-                status_code=res.status_code,
-                detail=openai_failure_detail(display_model, f"OpenAI upstream error: {safe_error_detail(res.text)}"),
-            )
-        try:
-            terminal = _collect_openai_sse_terminal(res.text, display_model)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=openai_failure_detail(display_model, f"OpenAI stream did not terminate cleanly: {exc}"),
-            ) from exc
-        if terminal is None:
-            raise HTTPException(
-                status_code=502,
-                detail=openai_failure_detail(display_model, "OpenAI stream ended without a terminal response event."),
-            )
-        return terminal
-    payload = _build_payload(codex_req, upstream_model, stream=False)
+            raise HTTPException(status_code=502, detail=openai_failure_detail(display_model, "OpenAI stream could not be collected.")) from exc
+    payload = await call_sync(_build_payload, codex_req, upstream_model, stream=False)
     try:
-        async with httpx.AsyncClient(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS) as client:
-            res = await client.post(url, json=payload, headers=headers)
+        async with owned_context(provider_client("native", **httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))) as client:
+            res = await limited_post(client, url, payload=payload, headers=headers)
+            if telemetry is not None:
+                telemetry["http_status"] = res.status_code
+    except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -2509,85 +3065,80 @@ async def create_openai_upstream_response(
             detail=openai_failure_detail(display_model, f"OpenAI upstream error: {safe_error_detail(res.text)}"),
         )
     try:
-        data = res.json()
+        data = await call_sync(response_json, res)
+    except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=502,
             detail=openai_failure_detail(display_model, f"OpenAI returned non-JSON data: {exc}"),
         ) from exc
-    if isinstance(data, dict):
-        data["model"] = display_model
-    return data
+    try:
+        return await call_sync(
+            OpenAICompatibleTransport(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS).validate_native_response,
+            data,
+            display_model=display_model,
+            request=codex_req,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=openai_failure_detail(display_model, "OpenAI returned an invalid native response.")) from exc
 
 
-def _collect_openai_sse_terminal(sse_text: str, display_model: str) -> dict | None:
-    """Extract the terminal Responses object from a buffered SSE body."""
-    terminal: dict | None = None
-    for raw_line in sse_text.splitlines():
-        line = raw_line.strip()
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            continue
-        try:
-            event = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        if event.get("type") in {"response.completed", "response.incomplete", "response.failed"}:
-            response = event.get("response")
-            if isinstance(response, dict):
-                terminal = dict(response)
-                terminal["model"] = display_model
-    return terminal
+def _collect_openai_sse_terminal(sse_text: str | bytes, display_model: str, *, request=None) -> dict:
+    """Apply the same terminal authority to buffered and streamed native SSE."""
+    wire = sse_text.encode("utf-8") if isinstance(sse_text, str) else sse_text
+    adapter = NativeResponsesStreamAdapter(display_model=display_model, request=request)
+    for offset in range(0, len(wire), 65536):
+        adapter.consume_bytes(wire[offset:offset + 65536])
+        if adapter.protocol_failed:
+            break
+    return adapter.finish()[-1]["response"]
 
 
 async def _close_openai_upstream_stream(client, stream_context) -> None:
-    """Close the response context and its client, including on cancellation."""
-    exc_info = sys.exc_info()
-    try:
-        await stream_context.__aexit__(*exc_info)
-    finally:
-        await client.aclose()
+    """Close both resources under a bounded shield, even if one close stalls."""
+    await shielded_cleanup(lambda: stream_context.__aexit__(None, None, None), client.aclose)
 
 
 async def _open_openai_upstream_stream(
-    codex_req: dict, upstream_model: str, auth
+    codex_req: dict, upstream_model: str, auth, *, telemetry: dict | None = None
 ):
     """Open an OpenAI SSE request and validate its status before streaming."""
     from .unified import build_openai_payload as _build_payload
 
     url = openai_responses_url(auth)
     headers = openai_request_headers(auth)
-    payload = _build_payload(codex_req, upstream_model, stream=True)
+    observe_routing_identity(routing_identity('openai', upstream_model, auth=auth, backend=upstream_model))
+    payload = await call_sync(_build_payload, codex_req, upstream_model, stream=True)
     if auth.kind == "codex_oauth":
         payload["store"] = bool(codex_req.get("store", False))
 
-    client = httpx.AsyncClient(timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS)
+    client = provider_client("native", **httpx_client_options(url, timeout=OPENAI_UPSTREAM_TIMEOUT_SECONDS))
     stream_context = client.stream("POST", url, json=payload, headers=headers)
+    state = NativeStreamState(client, stream_context)
+    budget = CURRENT_BUDGET.get()
+    if budget is not None:
+        budget.register_close(state.close)
     try:
         response = await stream_context.__aenter__()
+        state.owner.entered = True
+        state.response = response
+        if state.owner.requested:
+            raise RequestDeadlineExceeded()
+        if telemetry is not None:
+            telemetry["http_status"] = response.status_code
+        if response.status_code != 200:
+            try:
+                body = (await read_response_bytes(response, limit=65536)).decode("utf-8", errors="replace")
+            except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+                raise
+            except Exception:
+                body = ""
+            raise OpenAIUpstreamHTTPError(response.status_code, body, response.headers.get("retry-after"))
+        return state
     except BaseException:
-        await client.aclose()
+        await state.close()
         raise
-
-    if response.status_code != 200:
-        try:
-            body = (await response.aread()).decode("utf-8", errors="replace")
-        except Exception:
-            body = ""
-        retry_after = response.headers.get("retry-after")
-        try:
-            await stream_context.__aexit__(None, None, None)
-        finally:
-            await client.aclose()
-        raise OpenAIUpstreamHTTPError(response.status_code, body, retry_after)
-
-    # The caller transfers ownership of all three objects to the downstream
-    # generator, which closes them after the body is consumed or cancelled.
-    return client, stream_context, response
 
 
 async def openai_upstream_sse_generator(
@@ -2628,6 +3179,8 @@ async def openai_upstream_sse_generator(
             yield f"data: {json.dumps(error_event)}\n\n"
             yield "data: [DONE]\n\n"
             return
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
         except Exception as exc:
             error_event = {
                 "type": "response.failed",
@@ -2648,16 +3201,47 @@ async def openai_upstream_sse_generator(
             return
 
     client, stream_context, response = stream_state
-    adapter = NativeResponsesStreamAdapter(display_model=display_model)
+    adapter = NativeResponsesStreamAdapter(display_model=display_model, request=codex_req)
+    tail_deadline = None
     try:
-        async for chunk in response.aiter_text():
-            for event in adapter.consume_bytes(chunk.encode("utf-8", errors="replace")):
-                yield f"data: {json.dumps(event)}\n\n"
-        for event in adapter.finish():
+        iterator = response.aiter_bytes().__aiter__()
+        try:
+            while True:
+                try:
+                    if tail_deadline is None:
+                        chunk = await anext(iterator)
+                    else:
+                        remaining = tail_deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError
+                        with anyio.fail_after(remaining):
+                            chunk = await anext(iterator)
+                except StopAsyncIteration:
+                    break
+                for event in adapter.consume_bytes(chunk):
+                    yield f"data: {json.dumps(event)}\n\n"
+                if adapter.protocol_failed:
+                    break
+                if adapter.awaiting_eof and tail_deadline is None:
+                    # Bound terminal-to-EOF waiting even if keepalive comments
+                    # repeatedly reset HTTPX's per-read timeout.
+                    tail_deadline = time.monotonic() + OPENAI_UPSTREAM_TIMEOUT_SECONDS
+        except (TimeoutError, httpx.TimeoutException):
+            terminal_events = adapter.abort("stream_timeout", "The provider stream timed out before EOF.")
+        except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+            raise
+        except Exception:
+            terminal_events = adapter.abort("stream_interrupted", "The provider stream was interrupted before EOF.")
+        else:
+            terminal_events = adapter.finish()
+        for event in terminal_events:
             yield f"data: {json.dumps(event)}\n\n"
         yield "data: [DONE]\n\n"
     finally:
-        await _close_openai_upstream_stream(client, stream_context)
+        if isinstance(stream_state, NativeStreamState):
+            await stream_state.close()
+        else:
+            await _close_openai_upstream_stream(client, stream_context)
 
 
 async def openai_compatible_sse_generator(
@@ -2667,13 +3251,15 @@ async def openai_compatible_sse_generator(
     timeout: float,
     provider: dict,
     display_model: str,
+    *,
+    telemetry: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     import uuid
 
     response_id = f"resp_{uuid.uuid4().hex[:12]}"
     transport = OpenAICompatibleTransport(
         timeout=timeout,
-        client_factory=httpx.AsyncClient,
+        client_factory=lambda **kwargs: provider_client("byok", **kwargs),
     )
     prepared = PreparedOpenAIRequest(
         payload=payload,
@@ -2687,12 +3273,15 @@ async def openai_compatible_sse_generator(
             prepared,
             response_id=response_id,
             display_model=display_model,
+            **({"telemetry": telemetry} if telemetry is not None else {}),
         ):
             if event == "[DONE]":
                 yield "data: [DONE]\n\n"
                 done_sent = True
             else:
                 yield f"data: {json.dumps(event)}\n\n"
+    except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
+        raise
     except Exception as exc:
         # Parity with the xAI OAuth SSE generator: surface a client-visible
         # error event plus [DONE] instead of dropping the stream mid-flight.

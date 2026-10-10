@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import math
+import re
 from itertools import islice
 from typing import Any
 
+from .data_policy import audit_projection
 from .redaction import REDACTION_MARKER, key_looks_secret, redact_sensitive_text
 
 SUMMARY_STRING_CHARS = 1600
@@ -97,15 +99,93 @@ def summary_retention() -> dict[str, Any]:
     }
 
 
+def control_metadata(source: dict[str, Any]) -> dict[str, Any]:
+    """Fixed-size content-free counters shared by never and summary receipts."""
+    def numbers(value, keys, *, nullable=False):
+        result = {}
+        if not isinstance(value, dict): return result
+        for key in keys:
+            item = value.get(key)
+            if type(item) is int and 0 <= item <= 2**63 - 1:
+                result[key] = item
+            elif nullable and key in value and item is None:
+                result[key] = None
+        return result
+
+    from .media import projection as media_projection
+    result = {}
+    media = media_projection(source.get('media_coverage'))
+    if media is not None:
+        result['media_coverage'] = media
+    runtime = source.get('run_control')
+    if isinstance(runtime, dict):
+        projected = numbers(runtime, ('attempts_started','permits_acquired','permits_released','deferred_calls','events_omitted'))
+        for key in ('limit_seconds','elapsed_seconds','remaining_seconds'):
+            value = runtime.get(key)
+            if type(value) in (int,float) and 0 <= value <= 2**63 - 1 and math.isfinite(value):
+                projected[key] = value
+        if runtime.get('scope') == 'process_local': projected['scope'] = 'process_local'
+        if type(runtime.get('deadline_exceeded')) is bool: projected['deadline_exceeded'] = runtime['deadline_exceeded']
+        projected['eventsRetained'] = False
+        result['run_control'] = projected
+    admission = source.get('admission_controls')
+    if isinstance(admission, dict):
+        projected = numbers(admission, ('refused_attempts','attempts_omitted'))
+        for key in ('enabled','assumption_exceeded'):
+            if type(admission.get(key)) is bool: projected[key] = admission[key]
+        for key in ('token_limit_guarantee','billing_guarantee'):
+            if admission.get(key) is False: projected[key] = False
+        for key in ('limits','reserved','committed','observed_tokens','missing_usage_attempts'):
+            if isinstance(admission.get(key), dict):
+                projected[key] = numbers(admission[key], ('calls','input_tokens','output_tokens'), nullable=key=='limits')
+        for key in ('currency_budget','currency_reserved','currency_committed_ceiling'):
+            value = admission.get(key)
+            if value is None and key in admission:
+                projected[key] = None
+            elif isinstance(value,str) and len(value) <= 32 and re.fullmatch(r'[0-9]{1,12}(?:\.[0-9]{1,9})?(?:E-[1-9])?',value):
+                projected[key] = value
+        currency = admission.get('currency')
+        if currency is None and 'currency' in admission:
+            projected['currency'] = None
+        elif isinstance(currency,dict):
+            quote = {}
+            if isinstance(currency.get('currency'),str) and re.fullmatch(r'[A-Z]{3}',currency['currency']):
+                quote['currency'] = currency['currency']
+            if isinstance(currency.get('sha256'),str) and re.fullmatch(r'[0-9a-f]{64}',currency['sha256']):
+                quote['sha256'] = currency['sha256']
+            if currency.get('basis') == 'user_declared_complete_attempt_ceiling':
+                quote['basis'] = currency['basis']
+            if currency.get('provider_price_verified') is False:
+                quote['provider_price_verified'] = False
+            projected['currency'] = quote
+        projected['attemptsRetained'] = False
+        result['admission_controls'] = projected
+    return result
+
+
 def lifecycle_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     """Allow only known numeric counters and fixed enums in never mode."""
     source = metadata if isinstance(metadata, dict) else {}
-    result = {}
-    for key in ("prompt_chars", "output_chars", "omitted_file_count", "omitted_chunk_count", "finding_count", "attempt_count"):
+    result = control_metadata(source)
+    local = source.get('local_policy')
+    if isinstance(local, dict) and local.get('enabled') is True and local.get('destination_scope') == 'declared_loopback':
+        result['local_policy'] = {'enabled':True, 'destination_scope':'declared_loopback',
+                                  'third_party_network_behavior':'not_attested'}
+        digest = local.get('profile_sha256')
+        if digest is None:
+            result['local_policy']['profile_sha256'] = None
+        elif isinstance(digest,str) and re.fullmatch(r'[0-9a-f]{64}',digest):
+            result['local_policy']['profile_sha256'] = digest
+    policy = audit_projection(source.get("dataPolicy"))
+    if policy is not None:
+        result["dataPolicy"] = policy
+    for key in ("prompt_chars", "output_chars", "omitted_file_count", "omitted_chunk_count", "finding_count", "attempt_count", "panel_lane_count", "judge_attempt_count", "consult_attempt_count", "completed_chunk_count", "failed_chunk_count", "not_sent_chunk_count"):
         value = source.get(key)
         if type(value) is int and 0 <= value <= 2**63 - 1:
             result[key] = value
     for key, choices in {
+        "synthesis_status": {"not_sent", "failed", "success", "truncated", "empty", "non_answer"},
+        "retry_disposition": {"not_applicable", "attempted", "succeeded", "exhausted"},
         "runStatus": {"running", "success", "partial", "failed", "interrupted"},
         "scope_status": {"complete", "incomplete", "partial"},
         "scopeStatus": {"complete", "incomplete", "partial"},

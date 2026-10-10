@@ -119,6 +119,8 @@ class WindowsFileSecurity:
                 raise OSError("Private DACL must contain exactly one owner ACE")
             ace = ctypes.c_void_p()
             self._ok(self.advapi.GetAce(dacl, 0, ctypes.byref(ace)))
+            if ace.value is None:
+                raise ctypes.WinError(ctypes.get_last_error())
             header = (ctypes.c_ubyte * 4).from_address(ace.value)
             mask = w.DWORD.from_address(ace.value + 4).value
             if (header[0] != 0 or header[1] != 0 or mask != 0x1F01FF
@@ -192,10 +194,27 @@ class WindowsFileSecurity:
         finally:
             self.kernel.CloseHandle(handle)
 
+    def _protect_existing_children(self, path):
+        import os
+        with os.scandir(str(path)) as entries:
+            for entry in entries:
+                attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+                if attributes & 0x400:
+                    continue
+                if attributes & 0x10:
+                    self.protect_directory(entry.path)
+                    continue
+                handle = self._handle(self.kernel.CreateFileW(entry.path, 0xE0080, 7, None, 3, 0x02200000, None))
+                try:
+                    self._protect(handle)
+                finally:
+                    self.kernel.CloseHandle(handle)
+
     def protect_directory(self, path):
         # An exclusive directory handle prevents SetSecurityInfo propagation to
         # existing children (documented by Microsoft). Children are protected
         # individually before their own writes; unrelated ACLs stay untouched.
+        self._protect_existing_children(path)
         deadline = time.monotonic() + 2.0
         while True:
             try:

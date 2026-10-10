@@ -8,6 +8,8 @@ Released local gateway for using Google Antigravity Claude Opus/Sonnet from Open
 
 The default setup is intentionally conservative: it can install the Codex provider block and start the gateway, but it will not replace your active Codex model unless you explicitly pass `--activate`.
 
+Current contracts and evidence boundaries: [STATUS.md](STATUS.md). Package metadata describes this source; historical live or release results do not certify this checkout.
+
 ## Quick Start
 
 ```bash
@@ -118,7 +120,7 @@ Install or refresh the Codex provider block without changing your active default
 codex-antigravity configure-codex --write
 ```
 
-The command validates the Codex model id, provider id, provider name, and gateway base URL before writing. It updates `~/.codex/config.toml` through a private atomic write, follows an existing symlink to update the real config target, and writes a timestamped private backup first when it changes an existing config. By default it writes only `[model_providers.antigravity]`; it does not change top-level `model` or `model_provider`. Add `--activate` only when you explicitly want Antigravity to become the active Codex default.
+The command validates the Codex model id, provider id, provider name, and gateway base URL before writing. It parses and edits TOML semantically, preserving comments, multiline strings and unrelated values; invalid or ambiguous input is refused. Cooperating gateway writers share a lock across read, merge, backup and private atomic replacement. It follows an existing symlink to update the real config target, and writes a timestamped private backup first when it changes an existing config. By default it writes only `[model_providers.antigravity]`; it does not change top-level `model` or `model_provider`. Add `--activate` only when you explicitly want Antigravity to become the active Codex default.
 
 To inspect the TOML without writing it:
 
@@ -236,7 +238,7 @@ codex-antigravity start
 codex-antigravity start --background
 ```
 
-Background mode writes pid/log files under `~/.codex/`. The log file is append-only and created with private permissions; remove or rotate it manually if it grows too large.
+Gateway process logs are sanitized and bounded: `~/.codex/antigravity-process-logs/gateway-<port>.log` retains at most 2 MiB plus two 2 MiB backups per port. Foreground, background and newly installed services use this same writer. Existing append-only logs are preserved; reinstall services to adopt the new policy. `status --json` distinguishes process logs from structured request logs. See [process-log privacy and retention](codex_antigravity_auth/PROCESS_LOGS.md).
 
 Request diagnostics are written to a sanitized capped JSONL file under `~/.codex/antigravity-requests.jsonl`. The log records request ids, model/route metadata, latency, status, retry/rotation hints, HTTP status, usage totals when available, and redacted error classes/messages. It never stores prompts, request bodies, OAuth material, provider keys, or account emails.
 
@@ -417,7 +419,7 @@ codex-antigravity doctor --byok-only
 Before tagging a release, run the local verification stack. Run credentialed live smokes only with explicit authorization and record them separately from local/package evidence:
 
 ```bash
-python3 -m pytest -q
+python3 scripts/run_tests.py -q
 python3 -m compileall -q codex_antigravity_auth tests
 git diff --check
 codex-antigravity models doctor
@@ -425,14 +427,39 @@ codex-antigravity models doctor
 codex-antigravity doctor --codex-ready --live --live-model claude-sonnet-4-6
 ```
 
-The gateway binds to `127.0.0.1` by default. Binding to a non-loopback host requires both `--allow-remote` and an `ANTIGRAVITY_GATEWAY_TOKEN` of at least 32 visible ASCII characters; remote callers must send `Authorization: Bearer <token>`. The built-in server still speaks plain HTTP, so use remote mode only behind a trusted tunnel, local network boundary, or TLS-terminating proxy.
+The gateway binds to `127.0.0.1` by default. Reverse proxies require authenticated mode even with a loopback backend: `--allow-remote` requires a strong `ANTIGRAVITY_GATEWAY_TOKEN` and bearer authentication on every request, including local health checks. Launchers disable forwarded-header interpretation. See [Gateway access and reverse proxies](USAGE.md#gateway-access-and-reverse-proxies) for the access boundary and deployment requirements.
 
 And execute full unit test coverage:
 ```bash
-python3 -m pytest
+python3 scripts/run_tests.py
 ```
 
 Protected stores and standalone Anti use descriptor-validated process locks and owner-only file protection. Unsupported locking or Windows ACL facilities fail explicitly; see [private storage and lock files](USAGE.md#private-storage-and-lock-files).
+The offline test runner isolates personal configuration and credentials before test
+collection and denies network access except owned loopback fixtures. See the
+[test contract](test_support/README.md). Install the development extra (`pip
+install -e ".[dev]"`), including the explicit TOML parser dependency on Python 3.10.
+
+CI and publish gates cover Ubuntu Python 3.10/3.11/3.12/3.14, Windows 3.12 and
+macOS 3.12. To reproduce the package gates:
+
+```bash
+python3 -m build --sdist --wheel
+python3 scripts/check_artifacts.py
+python3 scripts/check_installed.py
+```
+
+The [capability contract](codex_antigravity_auth/design/capabilities.md) describes
+attachment validation, explicit BYOK reasoning mappings, canonical identities and
+the versioned catalog consumed by standalone Anti.
+
+The asset manifest in `codex_antigravity_auth/skill_assets.json` is checked against
+the entire bundled skill tree and both archives, and is also used by skill
+installation verification. Add new assets there when adding packaged helpers or
+fixtures. Installed checks create fresh environments outside the checkout for the
+wheel and rebuilt sdist, assert import origins, exercise real HTTP fixture flows,
+and run the installed standalone Anti suite. They use synthetic state; platform
+fixtures do not establish real Keychain, OAuth, or service-manager acceptance.
 
 ## Client and gateway directories
 
@@ -509,6 +536,13 @@ the `antigravity-unified` provider block for unified pickers.
 
 ## Release Automation
 
-Tagged releases are prepared for PyPI Trusted Publishing. The `.github/workflows/publish.yml` workflow runs on `v*` tags, requires the full Ubuntu Python 3.10/3.11/3.12/3.14 plus Windows Python 3.12 test matrix and a checked sdist/wheel build, then publishes with `pypa/gh-action-pypi-publish@release/v1` using OIDC (`id-token: write`) in the `pypi` environment. The tag must exactly match the package version.
+Tagged releases are prepared for PyPI Trusted Publishing. The `.github/workflows/publish.yml` workflow runs on `v*` tags, requires the [test matrix and installed-artifact gates](#verification) plus a checked sdist/wheel build, then publishes with `pypa/gh-action-pypi-publish@release/v1` using OIDC (`id-token: write`) in the `pypi` environment. The tag must exactly match the package version. External actions are pinned to reviewed commits, and publishing also requires the focused lint, minimum/snapshot compatibility and dependency-audit gates. See [CI dependency and action policy](requirements/README.md) for reproducible commands, scope and expiring audit exceptions.
 
 Before the first PyPI publish, configure the PyPI project `codex-antigravity-auth` with a trusted publisher for this GitHub repository, workflow file `.github/workflows/publish.yml`, and environment `pypi`. No local PyPI API token is required or expected.
+
+Setup can now emit a no-write `setup --plan`, apply named non-secret `profiles`, and record explicitly restorable local changes. See [setup plans and restoration](codex_antigravity_auth/SETUP.md).
+
+Developer ownership of route telemetry, request resources, Anti scope rendering
+and immutable run publication is mapped in [the orchestration guide](codex_antigravity_auth/design/orchestration.md).
+
+Setup can now emit a no-write `setup --plan`, apply named non-secret `profiles`, and record explicitly restorable local changes. See [setup plans and restoration](codex_antigravity_auth/SETUP.md).

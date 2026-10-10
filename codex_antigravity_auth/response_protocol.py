@@ -19,6 +19,47 @@ class TerminalKind(str, Enum):
     FAILED = "failed"
 
 
+POLICY_FINISH_REASONS = frozenset({
+    "content_filter", "safety", "recitation", "blocklist", "prohibited_content", "spii",
+    "image_safety", "image_prohibited_content", "image_recitation", "escalation",
+})
+_ERROR_FINISH_REASONS = frozenset({
+    "language", "malformed_function_call", "unexpected_tool_call", "too_many_tool_calls",
+    "missing_thought_signature", "malformed_response", "no_image", "image_other", "pup_limited_disabled",
+})
+
+
+class PrimaryAlternativeSelector:
+    """Select index zero without merging provider alternatives across frames.
+
+    A sole unindexed item is the legacy single-answer format. Once a stream
+    contains nonprimary indices, unindexed chunks are ambiguous and rejected.
+    """
+
+    def __init__(self) -> None:
+        self._unindexed_seen = False
+        self._nonprimary_seen = False
+
+    def select(self, alternatives: object) -> list[dict[str, Any]]:
+        if not isinstance(alternatives, list) or any(not isinstance(item, dict) for item in alternatives):
+            raise ValueError("Provider alternatives must be a list of objects")
+        if not alternatives:
+            return []
+        if any("index" not in item for item in alternatives):
+            if len(alternatives) != 1 or self._nonprimary_seen:
+                raise ValueError("Unindexed provider alternatives are ambiguous")
+            self._unindexed_seen = True
+            return alternatives
+        indices = [item["index"] for item in alternatives]
+        if any(type(index) is not int or index < 0 for index in indices) or indices.count(0) > 1:
+            raise ValueError("Provider alternative indices must be nonnegative integers with one primary index")
+        nonprimary = any(index != 0 for index in indices)
+        if nonprimary and self._unindexed_seen:
+            raise ValueError("Mixed indexed and unindexed provider alternatives are ambiguous")
+        self._nonprimary_seen = self._nonprimary_seen or nonprimary
+        return [item for item in alternatives if item["index"] == 0]
+
+
 @dataclass(frozen=True)
 class ProviderTerminal:
     kind: TerminalKind
@@ -31,7 +72,7 @@ class ProviderTerminal:
 @dataclass(frozen=True)
 class ProviderResult:
     output: tuple[dict[str, Any], ...]
-    usage: dict[str, int]
+    usage: dict[str, Any]
     terminal: ProviderTerminal
     provider_response_id: str | None = None
 
@@ -74,6 +115,14 @@ class ProviderCapabilities:
     stop_sequences: bool
     reasoning: bool
     streaming_usage: bool
+    input_modalities: frozenset[str] = frozenset({"text"})
+    image_forms: frozenset[str] = frozenset({"url", "data_url"})
+    image_detail: bool = True
+    pcm_wav_probe: bool = False
+    reasoning_effort_parameter: str | None = None
+    reasoning_effort_levels: tuple[str, ...] = ()
+    reasoning_replay: bool = True
+    opaque_reasoning_replay: bool = False
     tool_choice_modes: frozenset[str] = field(
         default_factory=lambda: frozenset({"auto", "none", "required", "function"})
     )
@@ -103,21 +152,25 @@ def normalize_usage(
     input_tokens: Any = 0,
     output_tokens: Any = 0,
     total_tokens: Any = 0,
-) -> dict[str, int]:
+    *, reasoning_tokens: Any = None,
+) -> dict[str, Any]:
     normalized_input = _token_count(input_tokens)
     normalized_output = _token_count(output_tokens)
     normalized_total = _token_count(total_tokens)
     if normalized_total <= 0 and (normalized_input or normalized_output):
         normalized_total = normalized_input + normalized_output
-    return {
+    result = {
         "input_tokens": normalized_input,
         "output_tokens": normalized_output,
         "total_tokens": normalized_total,
     }
+    if type(reasoning_tokens) is int and reasoning_tokens >= 0:
+        result['output_tokens_details'] = {'reasoning_tokens': reasoning_tokens}
+    return result
 
 
-def refusal_item(safety_block: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Build a refusal without exposing provider policy internals."""
+def refusal_item(safety_block: dict[str, Any] | None = None, *, refusal_text: str | None = None) -> dict[str, Any]:
+    """Preserve user-facing refusal text; do not expose policy metadata as text."""
 
     reason = "The provider declined to produce this response."
     if isinstance(safety_block, dict):
@@ -128,6 +181,8 @@ def refusal_item(safety_block: dict[str, Any] | None = None) -> dict[str, Any]:
             and all(character.isupper() or character.isdigit() or character == "_" for character in block_reason)
         ):
             reason = f"The provider declined this response ({block_reason})."
+    if isinstance(refusal_text, str) and refusal_text:
+        reason = refusal_text
     return {
         "type": "message",
         "id": f"msg_{uuid.uuid4().hex[:12]}",
@@ -195,6 +250,12 @@ def classify_terminal(
         )
 
     normalized_reason = finish_reason.strip().lower() if isinstance(finish_reason, str) else ""
+    if isinstance(finish_reason, str) and not normalized_reason:
+        return ProviderTerminal(
+            TerminalKind.FAILED, "missing_terminal_signal",
+            error_code="missing_terminal_signal",
+            error_message="The provider ended without a nonblank finish reason.",
+        )
     if normalized_reason in {"max_tokens", "max_output_tokens", "length"}:
         return ProviderTerminal(
             TerminalKind.INCOMPLETE,
@@ -202,16 +263,51 @@ def classify_terminal(
             incomplete_reason="max_output_tokens",
         )
 
-    if bool(meaningful_output_items(output)):
-        return ProviderTerminal(TerminalKind.COMPLETED, normalized_reason or "completed")
+    if normalized_reason in _ERROR_FINISH_REASONS:
+        return ProviderTerminal(
+            TerminalKind.FAILED, normalized_reason,
+            error_code=f"provider_finish_{normalized_reason}",
+            error_message=f"The provider stopped with {normalized_reason}.",
+        )
+    if normalized_reason not in {"", "stop", "tool_calls", "function_call"} | POLICY_FINISH_REASONS:
+        return ProviderTerminal(
+            TerminalKind.FAILED, "unknown_finish_reason",
+            error_code="unknown_finish_reason",
+            error_message="The provider returned an unsupported finish reason.",
+        )
 
-    if safety_block:
+    meaningful = meaningful_output_items(output)
+    if safety_block or normalized_reason in POLICY_FINISH_REASONS:
+        ordinary_output = any(
+            item.get("type") == "function_call" or (
+                item.get("type") == "message" and any(
+                    isinstance(part, dict) and part.get("type") == "output_text"
+                    and isinstance(part.get("text"), str) and bool(part["text"])
+                    for part in item.get("content", [])
+                )
+            ) for item in meaningful
+        )
+        if ordinary_output:
+            return ProviderTerminal(
+                TerminalKind.INCOMPLETE, normalized_reason or "content_filter", incomplete_reason="content_filter",
+            )
+        if any(
+            item.get("type") == "message" and any(
+                isinstance(part, dict) and part.get("type") == "refusal"
+                and isinstance(part.get("refusal"), str) and bool(part["refusal"])
+                for part in item.get("content", [])
+            ) for item in meaningful
+        ):
+            return ProviderTerminal(TerminalKind.COMPLETED, normalized_reason or "refusal")
         return ProviderTerminal(
             TerminalKind.FAILED,
             "blocked_without_refusal",
             error_code="blocked_without_refusal",
             error_message="The provider blocked the response without a refusal item.",
         )
+
+    if meaningful:
+        return ProviderTerminal(TerminalKind.COMPLETED, normalized_reason or "completed")
 
     return ProviderTerminal(
         TerminalKind.FAILED,
@@ -231,12 +327,26 @@ def _function_choice_name(tool_choice: dict[str, Any]) -> str | None:
     return None
 
 
-def _advertised_function_names(request: dict[str, Any]) -> set[str]:
+def _advertised_function_names(request: dict[str, Any], *, native=False) -> set[str]:
     names: set[str] = set()
-    tools = request.get("tools")
-    if not isinstance(tools, list):
-        return names
-    for tool in tools:
+    from .tool_calls import declaration_sources
+    tools = [tool for tool, _ in declaration_sources(request, native=native)]
+    if len(tools) > 100000:
+        raise CapabilityError("tools: declaration limit exceeded")
+    pending = list(tools)
+    visited = 0
+    while pending:
+        tool = pending.pop()
+        visited += 1
+        if visited > 100000:
+            raise CapabilityError("tools: declaration limit exceeded")
+        if native and isinstance(tool, dict) and tool.get("type") == "namespace":
+            children = tool.get("tools", [])
+            if isinstance(children, list):
+                if len(children) + len(pending) + visited > 100000:
+                    raise CapabilityError("tools: declaration limit exceeded")
+                pending.extend(children)
+            continue
         if not isinstance(tool, dict) or tool.get("type") != "function":
             continue
         name = tool.get("name")
@@ -249,6 +359,13 @@ def _advertised_function_names(request: dict[str, Any]) -> set[str]:
 
 
 def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabilities) -> None:
+    from .input_fidelity import validate_input
+    try:
+        validate_input(request, capabilities.input_modalities, capabilities.image_forms, image_detail=capabilities.image_detail,
+                       native_passthrough=capabilities.native_responses, pcm_wav_probe=capabilities.pcm_wav_probe)
+    except ValueError as exc:
+        raise CapabilityError(str(exc)) from exc
+
     if "parallel_tool_calls" in request and not isinstance(request["parallel_tool_calls"], bool):
         raise CapabilityError("parallel_tool_calls must be a boolean")
     if "parallel_tool_calls" in request and not capabilities.parallel_tool_calls:
@@ -256,10 +373,12 @@ def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabil
 
     tool_choice = request.get("tool_choice")
     if tool_choice is not None:
-        mode = tool_choice if isinstance(tool_choice, str) else "function"
-        if mode not in capabilities.tool_choice_modes:
+        native_choice = (capabilities.native_responses and isinstance(tool_choice, dict)
+                         and tool_choice.get("type") != "function")
+        mode = tool_choice if isinstance(tool_choice, str) else tool_choice.get("type", "function") if isinstance(tool_choice, dict) else "function"
+        if not native_choice and mode not in capabilities.tool_choice_modes:
             raise CapabilityError(f"tool_choice mode '{mode}' is not supported by the selected route")
-        if mode == "required" and not _advertised_function_names(request):
+        if mode == "required" and not (_advertised_function_names(request, native=capabilities.native_responses) or (capabilities.native_responses and request.get("tools"))):
             raise CapabilityError("tool_choice 'required' needs at least one advertised function")
         if mode == "function":
             if not isinstance(tool_choice, dict):
@@ -267,16 +386,39 @@ def validate_capabilities(request: dict[str, Any], capabilities: ProviderCapabil
             name = _function_choice_name(tool_choice)
             if not name:
                 raise CapabilityError("function tool_choice requires a function name")
-            if name not in _advertised_function_names(request):
+            if name not in _advertised_function_names(request, native=capabilities.native_responses):
                 raise CapabilityError(f"tool_choice function '{name}' was not advertised")
 
     if "stop" in request and not capabilities.stop_sequences:
         raise CapabilityError("stop sequences are not supported by the selected route")
-    if "reasoning" in request and not capabilities.reasoning:
-        raise CapabilityError("reasoning is not supported by the selected route")
+    if request.get("reasoning") is not None:
+        if not capabilities.reasoning:
+            raise CapabilityError("reasoning is not supported by the selected route")
+        if isinstance(request["reasoning"], dict) and request["reasoning"].get("effort") is not None and capabilities.reasoning_effort_levels and request["reasoning"]["effort"] not in capabilities.reasoning_effort_levels:
+            raise CapabilityError("reasoning.effort is not supported by the selected route")
+        if capabilities.reasoning_effort_parameter is not None:
+            reasoning = request["reasoning"]
+            if not isinstance(reasoning, dict):
+                raise CapabilityError("reasoning must be an object")
+            if set(reasoning) != {"effort"}:
+                raise CapabilityError("reasoning: the selected mapping requires exactly one effort setting")
+            if capabilities.reasoning_effort_parameter == "thinking_budget" and isinstance(request.get("max_output_tokens"), int) and request["max_output_tokens"] <= 1024:
+                raise CapabilityError("max_output_tokens must exceed 1024 when requesting a thinking budget")
+            if "effort" in reasoning and reasoning["effort"] not in capabilities.reasoning_effort_levels:
+                raise CapabilityError("reasoning.effort is not supported by the selected provider/model")
+    items = request.get("input")
+    if isinstance(items, list):
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("type") != "reasoning":
+                continue
+            if not capabilities.reasoning_replay:
+                raise CapabilityError(f"input[{index}]: reasoning replay is not supported by the selected route")
+            if not capabilities.opaque_reasoning_replay and any(key in item for key in ("encrypted_content", "reasoning_details")):
+                raise CapabilityError(f"input[{index}]: opaque reasoning replay is not supported by the selected route")
 
     text = request.get("text")
-    if isinstance(text, dict) and text.get("format") is not None and not capabilities.structured_output:
+    if (isinstance(text, dict) and isinstance(text.get("format"), dict)
+            and text['format'].get('type') != 'text' and not capabilities.structured_output):
         raise CapabilityError("structured output is not supported by the selected route")
 
 
@@ -297,6 +439,7 @@ def response_from_result(
             result.usage.get("input_tokens"),
             result.usage.get("output_tokens"),
             result.usage.get("total_tokens"),
+            reasoning_tokens=(result.usage.get('output_tokens_details') or {}).get('reasoning_tokens'),
         ),
         "status": result.terminal.kind.value,
     }
@@ -304,7 +447,7 @@ def response_from_result(
         response["incomplete_details"] = {
             "reason": result.terminal.incomplete_reason or result.terminal.reason
         }
-    if result.terminal.kind is TerminalKind.FAILED:
+    if result.terminal.kind is TerminalKind.FAILED or result.terminal.error_code:
         response["error"] = {
             "code": result.terminal.error_code or "provider_error",
             "message": result.terminal.error_message or "The provider request failed.",
@@ -390,7 +533,7 @@ class ResponseEventBuilder:
             self._text_state = {
                 "id": f"msg_{uuid.uuid4().hex[:12]}",
                 "output_index": self._next_output_index,
-                "text": "",
+                "fragments": [],
                 "finished": False,
             }
             self._next_output_index += 1
@@ -419,7 +562,7 @@ class ResponseEventBuilder:
             )
         if self._text_state["finished"]:
             raise ProtocolStateError("text output has already been finished")
-        self._text_state["text"] += delta
+        self._text_state["fragments"].append(delta)
         events.append(
             self._event(
                 "response.output_text.delta",
@@ -436,7 +579,7 @@ class ResponseEventBuilder:
         if self._text_state is None or self._text_state["finished"]:
             raise ProtocolStateError("text output is not active")
         self._text_state["finished"] = True
-        text = self._text_state["text"]
+        text = "".join(self._text_state.pop("fragments"))
         part = {"type": "output_text", "text": text, "annotations": []}
         item = {
             "type": "message",
@@ -470,7 +613,7 @@ class ResponseEventBuilder:
             self._reasoning_state = {
                 "id": f"rs_{uuid.uuid4().hex[:12]}",
                 "output_index": self._next_output_index,
-                "text": "",
+                "fragments": [],
                 "finished": False,
             }
             self._next_output_index += 1
@@ -481,14 +624,13 @@ class ResponseEventBuilder:
                     item={
                         "type": "reasoning",
                         "id": self._reasoning_state["id"],
-                        "encrypted_content": "",
                         "step_by_step_summary": "",
                     },
                 )
             )
         if self._reasoning_state["finished"]:
             raise ProtocolStateError("reasoning output has already been finished")
-        self._reasoning_state["text"] += delta
+        self._reasoning_state["fragments"].append(delta)
         events.append(
             self._event(
                 "response.reasoning_text.delta",
@@ -504,11 +646,11 @@ class ResponseEventBuilder:
         if self._reasoning_state is None or self._reasoning_state["finished"]:
             raise ProtocolStateError("reasoning output is not active")
         self._reasoning_state["finished"] = True
+        text = "".join(self._reasoning_state.pop("fragments"))
         item = {
             "type": "reasoning",
             "id": self._reasoning_state["id"],
-            "encrypted_content": "",
-            "step_by_step_summary": self._reasoning_state["text"],
+            "step_by_step_summary": text,
         }
         self._completed_items[self._reasoning_state["output_index"]] = dict(item)
         return [
@@ -516,7 +658,7 @@ class ResponseEventBuilder:
                 "response.reasoning_text.done",
                 item_id=self._reasoning_state["id"],
                 output_index=self._reasoning_state["output_index"],
-                text=self._reasoning_state["text"],
+                text=text,
             ),
             self._event(
                 "response.output_item.done",

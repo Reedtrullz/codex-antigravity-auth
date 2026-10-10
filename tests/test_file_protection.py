@@ -1,17 +1,18 @@
 """Private-file fixtures only; no real stores, keyring, service or network use."""
-import json
 import os
 from pathlib import Path
 import stat
 import subprocess
 import sys
 import time
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
+from typing import Any
 
 import pytest
 
 from codex_antigravity_auth import secure_store
 from codex_antigravity_auth.skills.anti.scripts.anti_lib import file_protection as protection
+from standalone import without_installed_packages
 
 
 @pytest.mark.parametrize("kind", ["symlink", "hardlink", "directory", "fifo"])
@@ -113,7 +114,7 @@ def test_windows_acl_failure_refuses_before_secret_write(tmp_path, monkeypatch):
     fake.protect_descriptor.assert_called_once()
 
 
-def test_windows_backend_sentinel_write_only_after_descriptor_protection(tmp_path, monkeypatch):
+def test_windows_backend_locks_after_descriptor_protection_without_initialization_write(tmp_path, monkeypatch):
     path = tmp_path / "state.json"
     events = []
     original_protect = protection.protect_descriptor
@@ -122,10 +123,13 @@ def test_windows_backend_sentinel_write_only_after_descriptor_protection(tmp_pat
         original_protect(fd, **kwargs)
         events.append("protected")
     monkeypatch.setattr(protection, "protect_descriptor", protect)
+    def forbidden_write(*args):
+        raise AssertionError("lock acquisition must not initialize the file")
+    monkeypatch.setattr(protection.os, "write", forbidden_write)
     backend = Mock(LK_LOCK=1, LK_UNLCK=2)
     def lock(fd, operation, count):
         assert events and events[0] == "protected"
-        assert os.fstat(fd).st_size == 1 and count == 1
+        assert os.fstat(fd).st_size == 0 and count == 1
         events.append(operation)
     backend.locking.side_effect = lock
     with protection.file_lock(path, posix_backend=None, windows_backend=backend):
@@ -147,7 +151,7 @@ with file_lock(Path(sys.argv[2])):
     child = None
     try:
         with secure_store.file_lock(target):
-            child = subprocess.Popen([sys.executable, "-S", "-c", code, str(scripts), str(target), str(started), str(entered)],
+            child = subprocess.Popen([sys.executable, "-c", without_installed_packages(code), str(scripts), str(target), str(started), str(entered)], cwd=str(scripts),
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             deadline = time.monotonic() + 3
             while not started.exists() and child.poll() is None and time.monotonic() < deadline:
@@ -164,26 +168,85 @@ with file_lock(Path(sys.argv[2])):
             child.communicate(timeout=5)
 
 
-def _native_acl_snapshot(path):
+def _native_acl_snapshot(path) -> dict[str, Any]:
     import ctypes
     from ctypes import wintypes as w
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    pointer = ctypes.c_void_p
+    pp = ctypes.POINTER(pointer)
+    advapi.GetNamedSecurityInfoW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, pp, pp, pp, pp, pp]
+    advapi.GetNamedSecurityInfoW.restype = w.DWORD
+    advapi.ConvertSidToStringSidW.argtypes = [pointer, ctypes.POINTER(w.LPWSTR)]
+    advapi.ConvertSidToStringSidW.restype = w.BOOL
+    advapi.GetSecurityDescriptorControl.argtypes = [pointer, ctypes.POINTER(w.WORD), ctypes.POINTER(w.DWORD)]
+    advapi.GetSecurityDescriptorControl.restype = w.BOOL
+    advapi.GetSecurityDescriptorDacl.argtypes = [pointer, ctypes.POINTER(w.BOOL), pp, ctypes.POINTER(w.BOOL)]
+    advapi.GetSecurityDescriptorDacl.restype = w.BOOL
+    advapi.GetAclInformation.argtypes = [pointer, ctypes.c_void_p, w.DWORD, w.DWORD]
+    advapi.GetAclInformation.restype = w.BOOL
+    advapi.GetAce.argtypes = [pointer, w.DWORD, pp]
+    advapi.GetAce.restype = w.BOOL
+    advapi.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE)]
+    advapi.OpenProcessToken.restype = w.BOOL
+    advapi.GetTokenInformation.argtypes = [w.HANDLE, w.DWORD, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD)]
+    advapi.GetTokenInformation.restype = w.BOOL
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.GetSystemDirectoryW.argtypes = [w.LPWSTR, w.UINT]
-    kernel.GetSystemDirectoryW.restype = w.UINT
-    buffer = ctypes.create_unicode_buffer(32768)
-    size = kernel.GetSystemDirectoryW(buffer, len(buffer))
-    assert 0 < size < len(buffer)
-    system_directory = Path(buffer.value)
-    shell = system_directory / "WindowsPowerShell/v1.0/powershell.exe"
-    script = '''$acl=Get-Acl -LiteralPath $env:ANTIGRAVITY_ACL_FIXTURE;
-$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
-$entries=@($acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]));
-@{Protected=$acl.AreAccessRulesProtected;Owner=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;Current=$sid;Entries=@($entries | ForEach-Object {@{Sid=$_.IdentityReference.Value;Rights=[int]$_.FileSystemRights;Allow=($_.AccessControlType -eq 'Allow');Inherited=$_.IsInherited}})} | ConvertTo-Json -Depth 4 -Compress
-'''
-    env = {**os.environ, "SystemRoot": str(system_directory.parent), "ANTIGRAVITY_ACL_FIXTURE": str(path)}
-    result = subprocess.run([str(shell), "-NoProfile", "-NonInteractive", "-Command", script], env=env,
-                            capture_output=True, text=True, check=True, timeout=15)
-    return json.loads(result.stdout)
+    kernel.GetCurrentProcess.argtypes = []
+    kernel.GetCurrentProcess.restype = w.HANDLE
+    kernel.LocalFree.argtypes = [pointer]
+    kernel.LocalFree.restype = pointer
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    kernel.CloseHandle.restype = w.BOOL
+
+    def sid_text(value):
+        text = w.LPWSTR()
+        assert advapi.ConvertSidToStringSidW(value, ctypes.byref(text))
+        try:
+            return text.value
+        finally:
+            kernel.LocalFree(text)
+
+    token = w.HANDLE()
+    assert advapi.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token))
+    try:
+        size = w.DWORD()
+        advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
+        buffer = ctypes.create_string_buffer(size.value)
+        assert advapi.GetTokenInformation(token, 1, buffer, size, ctypes.byref(size))
+        current = sid_text(ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0])
+    finally:
+        kernel.CloseHandle(token)
+    owner, _group, dacl, _sacl, descriptor = (pointer(), pointer(), pointer(), pointer(), pointer())
+    code = advapi.GetNamedSecurityInfoW(str(path), 1, 0x5,
+                                        ctypes.byref(owner), None, ctypes.byref(dacl), None, ctypes.byref(descriptor))
+    assert not code, ctypes.WinError(code)
+    try:
+        control, revision = w.WORD(), w.DWORD()
+        assert advapi.GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision))
+        entries = []
+        present, defaulted = w.BOOL(), w.BOOL()
+        acl = pointer()
+        assert advapi.GetSecurityDescriptorDacl(descriptor, ctypes.byref(present), ctypes.byref(acl), ctypes.byref(defaulted))
+        if present.value and acl.value:
+            information = (w.DWORD * 3)()
+            assert advapi.GetAclInformation(acl, information, ctypes.sizeof(information), 2)
+            for index in range(information[0]):
+                ace = pointer()
+                assert advapi.GetAce(acl, index, ctypes.byref(ace))
+                assert ace.value is not None
+                ace_address: int = ace.value
+                header = (ctypes.c_ubyte * 4).from_address(ace_address)
+                mask = w.DWORD.from_address(ace_address + 4).value
+                entries.append({
+                    "Sid": sid_text(pointer(ace_address + 8)),
+                    "Rights": mask,
+                    "Allow": header[0] == 0,
+                    "Inherited": bool(header[1] & 0x10),
+                })
+        return {"Protected": bool(control.value & 0x1000), "Owner": sid_text(owner),
+                "Current": current, "Entries": entries}
+    finally:
+        kernel.LocalFree(descriptor)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows ACL inspection")
@@ -199,15 +262,20 @@ def test_native_windows_file_dacl_is_current_user_only_and_protected(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows child ACL inspection")
-def test_native_windows_directory_protection_preserves_unrelated_child_acl(tmp_path):
+def test_native_windows_directory_protection_shields_existing_child_acl(tmp_path):
     directory = tmp_path / "parent"
     directory.mkdir()
     child = directory / "unrelated-fixture"
     child.write_bytes(b"synthetic unrelated content")
-    before = _native_acl_snapshot(child)
     protection.ensure_private_directory(directory, enforce_existing=True)
-    assert _native_acl_snapshot(child) == before
+    child_acl = _native_acl_snapshot(child)
     assert child.read_bytes() == b"synthetic unrelated content"
+    assert child_acl["Protected"] and child_acl["Owner"] == child_acl["Current"]
+    assert len(child_acl["Entries"]) == 1
+    entry = child_acl["Entries"][0]
+    assert entry["Sid"] == child_acl["Current"] and entry["Rights"] == 0x1F01FF
+    assert entry["Allow"] and not entry["Inherited"]
+    assert _native_acl_snapshot(directory)["Protected"]
 
 
 @pytest.mark.parametrize("failure", ["foreign_owner", "null_dacl", "verification"])
@@ -246,8 +314,9 @@ def test_windows_acl_control_refuses_unsafe_owner_null_acl_or_unverified_result(
     assert security.kernel.LocalFree.call_count == (1 if failure == "foreign_owner" else 2)
 
 
-def test_windows_directory_protection_uses_exclusive_handle_to_prevent_propagation():
+def test_windows_directory_protection_uses_exclusive_handle_for_the_directory(monkeypatch):
     from codex_antigravity_auth.skills.anti.scripts.anti_lib.windows_file_security import WindowsFileSecurity
+    monkeypatch.setattr(os, "scandir", lambda _path: MagicMock(__enter__=MagicMock(return_value=iter([])), __exit__=Mock(return_value=False)))
     security = WindowsFileSecurity.__new__(WindowsFileSecurity)
     security.kernel = Mock()
     security.kernel.CreateFileW.return_value = 123
@@ -264,6 +333,7 @@ def test_windows_directory_protection_retries_transient_sharing_conflict(monkeyp
     security.kernel = Mock()
     busy = OSError("synthetic sharing conflict")
     busy.winerror = 32
+    monkeypatch.setattr(os, "scandir", lambda _path: MagicMock(__enter__=MagicMock(return_value=iter([])), __exit__=Mock(return_value=False)))
     security._handle = Mock(side_effect=[busy, 123])
     security._protect = Mock()
     monkeypatch.setattr(windows.time, "sleep", Mock())
@@ -271,6 +341,29 @@ def test_windows_directory_protection_retries_transient_sharing_conflict(monkeyp
     assert security.kernel.CreateFileW.call_count == 2
     security._protect.assert_called_once_with(123, directory=True)
     security.kernel.CloseHandle.assert_called_once_with(123)
+
+
+def test_windows_directory_protection_shields_existing_file_children(tmp_path, monkeypatch):
+    from unittest.mock import call
+    from codex_antigravity_auth.skills.anti.scripts.anti_lib.windows_file_security import WindowsFileSecurity
+    security = WindowsFileSecurity.__new__(WindowsFileSecurity)
+    security.kernel = Mock()
+    security.kernel.CreateFileW.return_value = 123
+    security._handle = lambda result: result
+    security._protect = Mock()
+    file_entry = Mock(path=str(tmp_path / "state.json"))
+    file_entry.stat = lambda follow_symlinks=False: Mock(st_file_attributes=0x20)
+    directory_entry = Mock(path=str(tmp_path / "nested"))
+    directory_entry.stat = lambda follow_symlinks=False: Mock(st_file_attributes=0x10)
+    reparse_entry = Mock(path=str(tmp_path / "link"))
+    reparse_entry.stat = lambda follow_symlinks=False: Mock(st_file_attributes=0x400)
+    scans = [[file_entry, directory_entry, reparse_entry], []]
+    monkeypatch.setattr(os, "scandir", lambda _path: MagicMock(__enter__=MagicMock(return_value=iter(scans.pop(0))), __exit__=Mock(return_value=False)))
+    security.protect_directory(tmp_path)
+    assert security.kernel.CreateFileW.call_args_list[0].args == (str(tmp_path / "state.json"), 0xE0080, 7, None, 3, 0x02200000, None)
+    assert security._protect.call_args_list == [call(123), call(123, directory=True), call(123, directory=True)]
+    assert security.kernel.CreateFileW.call_count == 3
+    assert security.kernel.CloseHandle.call_count == 3
 
 
 def test_windows_native_identity_mismatch_refuses_before_acl_changes(monkeypatch):
