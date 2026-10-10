@@ -406,6 +406,14 @@ class AccountState:
                 return
             if curable_auth:
                 outcome = replace(outcome, curable_auth=True)
+            if outcome.category == "auth" and error_class == "age_ineligible":
+                self._disable_account(
+                    email,
+                    reason="provider reported age ineligibility (RESTRICTED_AGE)",
+                    error_class="age_ineligible",
+                )
+                counter["last_failure_class"] = "age_ineligible"
+                return
             self._apply_cooldown(email, family, outcome)
 
     def _apply_cooldown(self, email: str, family: str, outcome: AttemptOutcome) -> float:

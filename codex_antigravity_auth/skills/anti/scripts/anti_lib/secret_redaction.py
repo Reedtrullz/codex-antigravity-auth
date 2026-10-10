@@ -87,7 +87,7 @@ _UNQUOTED_FIELD_RE = re.compile(r"(?<![\w\"'])\b(?P<key>[A-Za-z_][\w.-]*)\s*[=:]
 _DOUBLE_QUOTED_VALUE_RE = re.compile(r'"(?:\\.|[^"\\])*"')
 _BARE_VALUE_RE = re.compile(r"[^\s,;}&]+")
 _GOOGLE_VALIDATION_URL_RE = re.compile(
-    r'(?i)(https://accounts\.google\.com/[^\s"<>]+)[?][^\s"<>]*'
+    r'(?i)(https://[^\s"<>]+\.(?:google\.com|googleapis\.com|gstatic\.com)/[^\s"<>]*)[?][^\s"<>]*'
 )
 
 
