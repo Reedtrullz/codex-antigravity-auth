@@ -56,6 +56,7 @@ include = ["codex_antigravity_auth*"]
 
 [tool.setuptools.package-data]
 codex_antigravity_auth = [
+  "STORAGE.md",
   "SETUP.md",
   "skill_assets.json",
   "NATIVE_RESPONSES.md",
@@ -71,7 +72,6 @@ codex_antigravity_auth = [
   "HTTP_CLIENTS.md",
   "CLI_JSON.md",
   "schemas/*.json",
-  "SETUP.md",
   "skills/anti/SKILL.md",
   "skills/anti/RUN_CONTROL.md",
   "skills/anti/SPEND_CONTROL.md",

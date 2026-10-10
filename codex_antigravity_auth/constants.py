@@ -7,7 +7,6 @@ import tempfile
 from pathlib import Path
 from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory, protect_descriptor, verify_regular_descriptor
 from .namespaces import gateway_home, gateway_file
-from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory, protect_descriptor
 
 # Defaults
 DEFAULT_CLIENT_ID = None

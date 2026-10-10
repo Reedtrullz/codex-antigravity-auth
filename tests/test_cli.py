@@ -411,7 +411,7 @@ wire_api = "responses"
                         self.assertTrue(run_doctor(config=str(config_path)))
 
         printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
-        self.assertIn("ANTIGRAVITY_STORAGE_KEY configured", printed_text)
+        self.assertIn("Token Storage Encryption: AVAILABLE (selected environment key)", printed_text)
 
     def test_normalize_epoch_seconds_treats_non_finite_values_as_expired(self):
         for value in (float("nan"), float("inf"), float("-inf")):
