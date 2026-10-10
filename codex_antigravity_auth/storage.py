@@ -1,7 +1,7 @@
 import json
 import os
 import threading
-import keyring
+import keyring as keyring
 import base64
 import hashlib
 import time
