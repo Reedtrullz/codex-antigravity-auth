@@ -6,7 +6,7 @@ import ipaddress
 import tempfile
 from pathlib import Path
 from .namespaces import gateway_home, gateway_file
-from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory
+from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory, protect_descriptor
 
 # Defaults
 DEFAULT_CLIENT_ID = None
@@ -133,10 +133,7 @@ def _load_file_credentials(
             )
             return None, None
         if not read_only and mode & 0o077:
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, 0o600)
-            else:
-                os.chmod(cred_path, 0o600)
+            protect_descriptor(fd, path=cred_path)
         with os.fdopen(fd, "r", encoding="utf-8") as f:
             fd = None
             data = json.load(f)
