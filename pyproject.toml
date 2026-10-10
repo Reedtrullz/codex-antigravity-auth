@@ -58,6 +58,9 @@ include = ["codex_antigravity_auth*"]
 codex_antigravity_auth = [
   "STORAGE.md",
   "SETUP.md",
+  "SERVICES.md",
+
+
   "skill_assets.json",
   "NATIVE_RESPONSES.md",
   "design/request-shapes.md",

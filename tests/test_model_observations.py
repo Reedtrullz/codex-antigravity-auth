@@ -278,6 +278,19 @@ def test_cli_explain_json_is_offline_and_probe_requires_network(monkeypatch, cap
     assert exc.value.code == 1 and '--network' in json.loads(capsys.readouterr().out)['message']
 
 
+def test_cli_overlay_import_json_previews_actual_proposal_without_writing(state, monkeypatch, capsys):
+    source = state / 'incoming.toml'
+    source.write_text('[[models]]\nid="new-fixture"\nbackend_id="new-fixture"\nfamily="gemini"\ncontext_window=1000\n')
+    before = {path: path.read_bytes() for path in state.rglob('*') if path.is_file()}
+    monkeypatch.setattr(sys, 'argv', ['codex-antigravity', 'models', 'import', str(source), '--json'])
+    cli.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result['schemaVersion'] == 1 and result['operation'] == 'import'
+    assert result['add'] == ['new-fixture'] and result['saved'] is False
+    assert len(result['digest']) == 64
+    assert {path: path.read_bytes() for path in state.rglob('*') if path.is_file()} == before
+
+
 def test_preloaded_route_classification_preserves_preset_short_circuit(monkeypatch):
     guard = Mock(side_effect=AssertionError('no mutable config lookup'))
     monkeypatch.setattr(byok, 'all_provider_configs', guard)

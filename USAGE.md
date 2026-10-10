@@ -249,6 +249,10 @@ codex-antigravity doctor --codex-ready --live --live-model claude-sonnet-4-6
 
 Live readiness requires a completed response with usable text in a completed assistant message. HTTP success alone, failed or incomplete responses (including token-cap exhaustion), refusals, empty output, and malformed responses do not pass. The live probe in `doctor --codex-ready --json` separates `transport_ok` from `generation_ok` and reports `terminal_kind`, `terminal_reason`, and a redacted `error`; `ok` reflects generation success. The check sends one request with the existing token budget and does not retry automatically.
 
+Token refresh and project discovery run outside account-selection and storage locks. A concurrent selection can use another eligible account; a busy refresh never makes an expired token eligible. Each account has one refresh owner per gateway process. The credential snapshot is checked before refresh and before writing back, so removal, changed credentials, and newer token state take precedence. Family cooldowns remain independent of token refresh.
+
+The gateway lifespan starts a refresh-ahead check and repeats checks every 60 seconds while idle, refreshing tokens within five minutes of expiry. At most one refresh-ahead worker runs at a time. Shutdown stops the timer, signals the worker to stop before further discovery/merges/accounts, and waits for the current synchronous call to finish using its existing network timeouts. It does not abandon a live worker thread. This is process-local refresh ownership; multiple gateway processes are not coordinated by a distributed refresh lease.
+
 Google and Chat Completions responses select provider alternative index `0`, consistently across streaming and non-streaming output. Other alternatives cannot contribute text, tools, or terminal reasons. A single unindexed alternative remains supported; ambiguous multi-answer or mixed unindexed/alternative streams fail explicitly. Usage stays the provider-reported aggregate, since per-alternative token usage cannot be inferred.
 
 Token refresh and project discovery run outside account-selection and storage locks. A concurrent selection can use another eligible account; a busy refresh never makes an expired token eligible. Each account has one refresh owner per gateway process. The credential snapshot is checked before refresh and before writing back, so removal, changed credentials, and newer token state take precedence. Family cooldowns remain independent of token refresh.
@@ -397,6 +401,11 @@ command nor diagnostics changes the current environment or service automatically
 ## Setup plans and profiles
 
 Use `setup --plan` for JSON stages/prerequisites without credential resolution or network. `profiles create/apply` default to no-write plans; `setup-history restore` requires explicit config/skill selection and refuses drift. Credentials and services are not rolled back. See [the setup contract](codex_antigravity_auth/SETUP.md) for commands, retention and recovery limits.
+
+## Versioned command JSON and support bundles
+
+Operational `--json` commands now return a version-1 envelope with command data under `data`, warnings separate from blocking failures, and explicit exit codes. Migrate consumers of the previous root-level JSON fields. `support-bundle` previews bounded allowlisted offline evidence; only `--output PATH --write` creates a private local export, and existing files are preserved. See [the JSON and support contract](codex_antigravity_auth/CLI_JSON.md) for supported commands, schemas, limits and privacy details.
+
 ## Request shape and schema diagnostics
 
 Malformed message/content/tool shapes and orphan outputs return field-specific HTTP400 errors before account work. Translated routes reject unsupported built-in tools and explicit schema weakening; Google cannot honor `strict: true`. Native Responses keeps provider-specific items/tools and continuation intact. See [request validation and translation-loss behavior](codex_antigravity_auth/design/request-shapes.md) for compatibility changes and limits.
@@ -498,6 +507,10 @@ dry runs write nothing and report hashes instead of source. See the bundled
 ## Request time budgets
 
 Google, BYOK and native OpenAI requests now share a monotonic 60-second preparation/nonstream deadline. Streaming has separate 60-second event-idle and 30-minute total defaults, including preparation, with validated metadata overrides. Downstream backpressure and resource cleanup are bounded; timeouts never trigger replay after visible output. See [request deadlines and cleanup](codex_antigravity_auth/REQUEST_DEADLINES.md) for overrides, failure outcomes, cleanup grace and cancellation limits.
+
+## Service configuration drift
+
+`service status` distinguishes catalog reachability from owned service readiness. New installs record nonsecret launch intent; `service repair` and `service restart` preview changes until `--write` is supplied. Repairs retain protected backups and report incomplete registration explicitly. See [service identity, migration and recovery](codex_antigravity_auth/SERVICES.md).
 
 ## Completed function-call validation
 

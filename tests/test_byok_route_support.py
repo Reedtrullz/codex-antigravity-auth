@@ -92,10 +92,13 @@ def test_doctor_reports_exact_unsupported_kind_and_fails(monkeypatch, capsys, di
     assert "Chat Completions" in output
     if "--json" in flags:
         report = json.loads(output)
-        route = next(check for check in report["checks"] if check["name"] == "model_route")
+        assert report["schemaVersion"] == 1 and report["command"] == "doctor"
+        assert report["status"] == "failed" and report["exitCode"] == 1
+        route = next(check for check in report["data"]["checks"] if check["name"] == "model_route")
         assert route["status"] == "fail"
         assert "openai_responses" in route["detail"]
         assert not report["ok"]
+        assert not report["data"]["ok"]
 
 
 def test_setup_preflight_and_capability_diagnostics_reject_unsupported_route(diagnostic_environment):

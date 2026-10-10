@@ -133,6 +133,9 @@ def test_service_definitions_freeze_both_selected_roots(roots, monkeypatch):
     agent = plistlib.loads(service.render_macos_launch_agent(51122, "127.0.0.1").encode())
     assert agent["ProgramArguments"] == command
     assert agent["StandardOutPath"] == "/dev/null"
+    from codex_antigravity_auth.process_logs import log_path
+    assert command[command.index("--process-log") + 1] == str(log_path(state, 51122))
+
     assert Path(command[command.index("--process-log") + 1]).parent.parent == state
     unit = service.render_linux_systemd_unit(51122, "127.0.0.1")
     exec_start = unit.split("ExecStart=", 1)[1].splitlines()[0].replace("%%", "%")
