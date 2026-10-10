@@ -14,8 +14,9 @@ import uuid
 
 from .namespaces import gateway_home, client_config_path, client_skills_path
 from .secure_store import SecureStore, file_lock
+from .skills.anti.scripts.anti_lib.inventory import _open_file
 from .skills.anti.scripts.anti_lib.file_protection import (
-    ensure_private_directory, verify_regular_descriptor, _directory,
+    ensure_private_directory, verify_regular_descriptor, protect_descriptor, _directory, _windows_security,
 )
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -47,20 +48,133 @@ def _json(path: Path, value):
     SecureStore().atomic_write_text(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
+def _check_path(path: Path):
+    # Check outer components first, including for missing/empty targets.
+    for component in (*reversed(path.parents), path):
+        try:
+            entry = component.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(entry.st_mode) or getattr(entry, "st_file_attributes", 0) & 0x400:
+            raise SetupError("Setup refuses symlinked or reparse paths")
+        if component != path and not stat.S_ISDIR(entry.st_mode):
+            raise SetupError("Setup parents must be directories")
+
+
+@contextlib.contextmanager
+def _parent_handle(path: Path):
+    """Anchor POSIX operations; hold Windows parents against rename/reparse swaps."""
+    _check_path(path)
+    if os.name == "nt":
+        security = _windows_security()
+        with contextlib.ExitStack() as handles:
+            for parent in reversed(path.parents):
+                # READ_ATTRIBUTES, SHARE_READ|SHARE_WRITE (no SHARE_DELETE),
+                # OPEN_EXISTING, BACKUP_SEMANTICS|OPEN_REPARSE_POINT.
+                handle = security._handle(security.kernel.CreateFileW(str(parent), 0x80, 3, None, 3, 0x02200000, None))
+                handles.callback(security.kernel.CloseHandle, handle)
+                security._check_object(handle, True)
+            yield None
+    else:
+        if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+            raise SetupError("Anchored setup file operations are unavailable")
+        root = Path(path.anchor)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        descriptor = (os.open(root, flags) if path.parent == root else
+                      _open_file(root, path.parent.relative_to(root).as_posix(), flags))
+        try:
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+
 def _read_file(path: Path, limit=MAX_BYTES):
+    path = path.absolute()
+    _check_path(path)
     try:
-        info = path.lstat()
+        before = path.lstat()
     except FileNotFoundError:
         return None
-    if not stat.S_ISREG(info.st_mode) or path.is_symlink() or info.st_size > limit:
+    if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
         raise SetupError("Unsupported or oversized setup file; preserve it for manual inspection")
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    with os.fdopen(fd, "rb") as stream:
-        verify_regular_descriptor(stream.fileno(), path)
-        value = stream.read(limit + 1)
+    with _parent_handle(path) as parent:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags) if parent is None else os.open(path.name, flags, dir_fd=parent)
+        with os.fdopen(fd, "rb") as stream:
+            opened = verify_regular_descriptor(stream.fileno(), path)
+            value = stream.read(limit + 1)
+            after = verify_regular_descriptor(stream.fileno(), path)
+        _check_path(path)
+        final = path.lstat()
+        identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        # Compare like APIs: Windows lstat/fstat ctime meanings can differ.
+        if identity(before) != identity(final) or identity(opened) != identity(after):
+            raise SetupError("Setup file changed during capture")
     if len(value) > limit:
         raise SetupError("Setup file exceeds the operation size limit")
     return value
+
+
+def _write_bound_config(path: Path, content: bytes, *, expected_sha256):
+    with _parent_handle(path) as parent:
+        def check_parent():
+            _check_path(path)
+            if parent is not None:
+                held = os.fstat(parent)
+                current = path.parent.lstat()
+                if (not stat.S_ISDIR(current.st_mode)
+                        or (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino)):
+                    raise SetupError("Config parent changed during publication; setup mutation refused")
+        def unchanged():
+            check_parent()
+            current = _read_file(path)
+            check_parent()
+            if (_hash(current) if current is not None else None) != expected_sha256:
+                raise SetupError("Config changed since its snapshot; setup mutation refused")
+        def verify_published():
+            check_parent()
+            if _read_file(path) != content:
+                raise SetupError("Published config differs from the intended bytes; inspect the target before retrying")
+            check_parent()
+        unchanged()
+        if parent is None:
+            # Held parent handles prevent path redirection; atomic replacement
+            # replaces a leaf entry rather than following it.
+            check_parent()
+            SecureStore()._atomic_write_bytes_unlocked(path, content)
+            verify_published()
+            return
+        temporary = f".{path.name}.{uuid.uuid4().hex}.tmp"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                protect_descriptor(stream.fileno())
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            unchanged()
+            check_parent()
+            os.replace(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+            os.fsync(parent)
+            verify_published()
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+
+
+def write_planned_config(plan, **options):
+    target = Path(plan["configTarget"])
+    raw = _read_file(target)
+    if (_hash(raw) if raw is not None else None) != plan["configBeforeSha256"]:
+        raise SetupError("Config changed since planning; create a fresh plan")
+    original = raw.decode("utf-8") if raw is not None else ""
+    updated = _cli().merge_codex_config(original, **options)
+    if original == updated:
+        return False, None
+    _write_bound_config(target, updated.encode("utf-8"), expected_sha256=plan["configBeforeSha256"])
+    return True, None  # The journal retains the original config backup.
 
 
 def _load_json(path, limit=65536):
@@ -81,6 +195,7 @@ def _hash(raw):
 
 
 def _tree(path):
+    _check_path(path.absolute())
     if path.is_symlink():
         raise SetupError("Setup refuses symlinked skill trees")
     if not path.exists():
@@ -228,8 +343,8 @@ def setup_plan(args, *, profile=None):
     else:
         settings = profile["settings"]
     config_entry = client_config_path(args.config).absolute()
-    config = config_entry.resolve()
-    raw = _read_file(config)
+    raw = _read_file(config_entry)
+    config = Path(os.path.abspath(config_entry))
     try:
         text = raw.decode("utf-8") if raw is not None else ""
     except UnicodeError as exc:
@@ -244,6 +359,8 @@ def setup_plan(args, *, profile=None):
     skill = (client_skills_path(getattr(args, "skill_dir", cli.DEFAULT_CODEX_SKILLS_DIR)) / cli.BUNDLED_CODEX_SKILL_NAME).absolute()
     repair = bool(getattr(args, "repair", False))
     manages_skill = bool(getattr(args, "install_skill", False)) and not repair
+    if manages_skill:
+        _check_path(skill)
     def overlaps(first, second):
         return first == second or first in second.parents or second in first.parents
     targets = [config, *([skill.resolve()] if manages_skill else [])]
@@ -343,9 +460,7 @@ class SetupJournal:
             self.persist()
             if isinstance(exc, KeyboardInterrupt) or public_outcome:
                 raise
-            if isinstance(exc, (SystemExit, RuntimeError)):
-                raise SetupError(f"Setup stage {stage_id} failed; inspect receipt {self.id}. No automatic rollback was attempted") from None
-            raise
+            raise SetupError(f"Setup stage {stage_id} failed; inspect receipt {self.id}. No automatic rollback was attempted") from None
 
     def finish(self, *, ok):
         self.data["state"] = "completed" if ok else "failed"
@@ -366,6 +481,8 @@ class SetupJournal:
 
 def stage(args, name, operation, *positional, **kwargs):
     journal = getattr(args, "_setup_journal", None)
+    if journal and name == "config" and positional:
+        positional[0]._setup_config_plan = journal.data["plan"]
     return journal.run(name, operation, *positional, **kwargs) if journal else operation(*positional, **kwargs)
 
 
@@ -567,7 +684,7 @@ def apply_profile(args):
         raw = _read_file(target)
         merged = merge_profile_config(raw.decode("utf-8") if raw is not None else "", settings=settings,
                                       token_env=profile["secretReferences"]["gatewayTokenEnv"], activate=args.activate)
-        SecureStore().atomic_write_text(target, merged)
+        _write_bound_config(target, merged.encode("utf-8"), expected_sha256=plan["configBeforeSha256"])
     try:
         journal.run("config", configure)
         if args.install_skill:

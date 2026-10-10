@@ -5,6 +5,7 @@ import stat
 import ipaddress
 import tempfile
 from pathlib import Path
+from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory, protect_descriptor, verify_regular_descriptor
 from .namespaces import gateway_home, gateway_file
 from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory, protect_descriptor
 
@@ -57,7 +58,7 @@ def validate_gateway_token_strength(token: str | None) -> str:
 
 
 def get_codex_home() -> Path:
-    """Legacy gateway-state helper; client config/auth use client_home instead."""
+    """Gateway-state root; client config/auth use client_home instead."""
     p = gateway_home()
     ensure_private_directory(p, enforce_existing=True)
     return p
@@ -123,16 +124,17 @@ def _load_file_credentials(
             warn(f"OAuth credentials path changed during inspection: {cred_path}; retry after checking the file")
             return None, None
         mode = stat.S_IMODE(stat_result.st_mode)
-        # Windows mode bits do not describe ACL access. Keep its existing read
-        # behavior without invoking chmod during a diagnostic inspection.
-        if read_only and os.name != "nt" and mode & 0o077:
-            warn(
-                f"Unsafe OAuth credential permissions {mode:04o} at {cred_path}; "
-                "file credentials were not used. Set the file mode to 0600, or run "
-                "`codex-antigravity setup --write` or `codex-antigravity login` to repair it"
-            )
-            return None, None
-        if not read_only and mode & 0o077:
+        if read_only:
+            verify_regular_descriptor(fd, cred_path)
+            # Inspection never repairs file modes or Windows ACLs.
+            if os.name != "nt" and mode & 0o077:
+                warn(
+                    f"Unsafe OAuth credential permissions {mode:04o} at {cred_path}; "
+                    "file credentials were not used. Set the file mode to 0600, or run "
+                    "`codex-antigravity setup --write` or `codex-antigravity login` to repair it"
+                )
+                return None, None
+        else:
             protect_descriptor(fd, path=cred_path)
         with os.fdopen(fd, "r", encoding="utf-8") as f:
             fd = None

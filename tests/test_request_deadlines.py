@@ -683,7 +683,10 @@ def test_public_stream_total_expires_during_preparation_before_http_200(monkeypa
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_total_expiry_after_preparation_handoff_sends_504_without_sse_headers(monkeypatch, setup_route, route):
-    state = setup_route(route, timeout=0.3)
+    # Expiry is injected after preparation; scheduler load must not move this
+    # fixture into the separately tested preparation-expiry phase.
+    state = setup_route(route, timeout=3)
+    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 3)
     clients, contexts = stream_clients(monkeypatch, route)
     async def scenario():
         response = await server.create_response(Request(route, stream=True))

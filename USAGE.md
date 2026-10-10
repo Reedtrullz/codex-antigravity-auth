@@ -315,6 +315,43 @@ The local server natively isolates explicit thinking blocks and stream envelopes
 - **Thinking/Reasoning block**: Emits `response.reasoning_text.delta` for explicit backend thinking parts while preserving regular `thoughtSignature` text as visible output.
 - **SSE Stream**: Formats candidates, function calls, usage metadata, and completion events into Responses API SSE chunks parsed correctly by both Codex CLI and Codex Desktop.
 
+## Private storage and lock files
+
+Gateway secure stores and packaged/standalone Anti persistence share one checked
+process-lock implementation. Lock files must be regular, singly linked files
+owned by the current user. The opened descriptor is compared with the directory
+entry (native volume plus 128-bit file identity on Windows) before permissions change or the Windows lock byte is written. Symlinks,
+reparse points, hardlinks, FIFOs and unexpected path types are refused. If neither
+POSIX flock nor Windows byte-range locking is available, the operation fails;
+there is no thread-only success path.
+
+Managed leaf directories and newly created parents are protected before files
+are opened; unrelated pre-existing ancestors are not chmodded. POSIX directories
+use 0700 and files 0600, with descriptor-based permission updates. Managed leaf
+directory symlinks are refused; use the canonical directory when configuring a
+protected store. These checks do not claim protection against the same user or
+an administrator replacing every ancestor directory.
+
+Windows uses handle-based ownership and DACL checks rather than treating chmod
+as an ACL guarantee. Objects must initially belong to the current user or its
+process-default owner (for example an elevated token's default owner group).
+Protection sets the current user as owner, applies a protected current-user-only
+full-control DACL, then verifies owner, ACE type/count/access mask and inheritance
+on the opened object. Files are protected before secret bytes are written;
+private directories use an exclusive handle to avoid rewriting unrelated child
+ACLs. Each managed child is protected independently before its content is written. If required ACL,
+handle or filesystem facilities are unavailable, access fails explicitly.
+Administrators' backup/ownership privileges remain outside this boundary.
+
+The Windows implementation follows Microsoft's
+[ReOpenFile](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile),
+[GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo),
+[FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info)
+and [SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo)
+contracts. Native Windows tests inspect temporary-file ACLs independently through
+PowerShell; non-Windows runs skip that check and exercise synthetic refusal paths.
+No Windows ACL success is inferred from POSIX mode bits or mocked tests.
+
 ## Namespace copy
 
 Use `CODEX_HOME=/absolute/client/root` for client config/auth/skills and
@@ -356,6 +393,10 @@ starts a separate history. Log in through Codex with the selected `CODEX_HOME`
 when a new client identity is needed. Finally set `ANTIGRAVITY_STATE_HOME` to the
 new root and reinstall any service to capture the selection. Neither the copy
 command nor diagnostics changes the current environment or service automatically.
+
+## Setup plans and profiles
+
+Use `setup --plan` for JSON stages/prerequisites without credential resolution or network. `profiles create/apply` default to no-write plans; `setup-history restore` requires explicit config/skill selection and refuses drift. Credentials and services are not rolled back. See [the setup contract](codex_antigravity_auth/SETUP.md) for commands, retention and recovery limits.
 ## Request shape and schema diagnostics
 
 Malformed message/content/tool shapes and orphan outputs return field-specific HTTP400 errors before account work. Translated routes reject unsupported built-in tools and explicit schema weakening; Google cannot honor `strict: true`. Native Responses keeps provider-specific items/tools and continuation intact. See [request validation and translation-loss behavior](codex_antigravity_auth/design/request-shapes.md) for compatibility changes and limits.
@@ -369,6 +410,47 @@ Legacy gateway/service log files are left untouched; reinstall an existing
 service to stop its old append-only output routing. Account references in runtime
 messages are opaque and change on restart; explicit account-management commands
 still show local account identity. See [the process-log contract](codex_antigravity_auth/PROCESS_LOGS.md).
+
+## Private storage and lock files
+
+Gateway secure stores and packaged/standalone Anti persistence share one checked
+process-lock implementation. Lock files must be regular, singly linked files
+owned by the current user. The opened descriptor is compared with the directory
+entry (native volume plus 128-bit file identity on Windows) before permissions change or the Windows lock byte is written. Symlinks,
+reparse points, hardlinks, FIFOs and unexpected path types are refused. If neither
+POSIX flock nor Windows byte-range locking is available, the operation fails;
+there is no thread-only success path.
+
+Managed leaf directories and newly created parents are protected before files
+are opened; unrelated pre-existing ancestors are not chmodded. POSIX directories
+use 0700 and files 0600, with descriptor-based permission updates. Managed leaf
+directory symlinks are refused; use the canonical directory when configuring a
+protected store. These checks do not claim protection against the same user or
+an administrator replacing every ancestor directory.
+
+Windows uses handle-based ownership and DACL checks rather than treating chmod
+as an ACL guarantee. Objects must initially belong to the current user or its
+process-default owner (for example an elevated token's default owner group).
+Protection sets the current user as owner, applies a protected current-user-only
+full-control DACL, then verifies owner, ACE type/count/access mask and inheritance
+on the opened object. Files are protected before secret bytes are written;
+private directories pin the target handle and use `SetFileSecurityW` to preserve
+existing child descriptors. Read/write sharing permits in-use directories while
+delete sharing remains denied. Their owner-only ACE inherits to newly created files and
+directories; managed files then receive a protected, non-inheriting ACE before
+content is written. If required ACL,
+handle or filesystem facilities are unavailable, access fails explicitly.
+Administrators' backup/ownership privileges remain outside this boundary.
+
+The Windows implementation follows Microsoft's
+[ReOpenFile](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile),
+[GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo),
+[FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info)
+[SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo),
+and [SetFileSecurityW](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-setfilesecurityw)
+contracts. Native Windows tests inspect temporary-file security descriptors through
+read-only Win32 APIs; non-Windows runs skip that check and exercise synthetic refusal paths.
+No Windows ACL success is inferred from POSIX mode bits or mocked tests.
 
 ## Model discovery and recent readiness
 

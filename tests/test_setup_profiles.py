@@ -1,7 +1,9 @@
 """Synthetic setup state and injected local callbacks; no live login, gateway or keyring."""
 import argparse
 import json
+import os
 from pathlib import Path
+import stat
 import sys
 from unittest.mock import Mock
 
@@ -464,3 +466,192 @@ def test_plan_and_stage_evidence_must_agree_before_restore(isolated, mutation):
     with pytest.raises(setup.SetupError):
         setup.restore_receipt(run_id, ["config"], write=True)
     assert (tree(client), tree(state)) == before
+
+
+@pytest.mark.parametrize("kind", ["file", "parent", "missing_below_parent"])
+def test_setup_plan_rejects_raw_symlink_components_without_reading_or_writing(isolated, tmp_path, kind):
+    client, state = isolated
+    real = tmp_path / "real-config"
+    real.mkdir()
+    target = real / "config.toml"
+    target.write_text(ORIGINAL)
+    link = tmp_path / "linked-config"
+    try:
+        link.symlink_to(target if kind == "file" else real, target_is_directory=kind != "file")
+    except OSError:
+        pytest.skip("fixture symlink creation unavailable")
+    selected = link if kind == "file" else link / ("absent/config.toml" if kind == "missing_below_parent" else "config.toml")
+    before = target.read_bytes(), target.stat().st_mode, target.stat().st_mtime_ns
+    with pytest.raises((setup.SetupError, ValueError, OSError)):
+        setup.setup_plan(options(config=str(selected)))
+    assert (target.read_bytes(), target.stat().st_mode, target.stat().st_mtime_ns) == before
+    assert not client.exists() and not state.exists()
+    assert link.is_symlink()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX directory rename fixture")
+def test_config_read_rejects_parent_replacement_before_open(isolated, tmp_path, monkeypatch):
+    import os
+    client, _state = isolated
+    target = existing_config(client)
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    external = foreign / "config.toml"
+    external.write_text('model = "external-secret"\n')
+    moved = tmp_path / "moved-client"
+    native_open = os.open
+    swapped = False
+    def replace_parent(path, flags, *args, **kwargs):
+        nonlocal swapped
+        selected = Path(path)
+        if not swapped and (selected == target or (selected == Path(target.name) and "dir_fd" in kwargs)):
+            client.rename(moved)
+            client.symlink_to(foreign, target_is_directory=True)
+            swapped = True
+        return native_open(path, flags, *args, **kwargs)
+    monkeypatch.setattr(setup.os, "open", replace_parent)
+    monkeypatch.setattr(setup.os, "supports_dir_fd", {*os.supports_dir_fd, replace_parent})
+    with pytest.raises((setup.SetupError, ValueError, OSError)):
+        setup._read_file(target)
+    assert swapped and external.read_text() == 'model = "external-secret"\n'
+    assert (moved / "config.toml").read_text() == ORIGINAL
+
+
+def test_config_read_rejects_content_change_during_capture(isolated, monkeypatch):
+    client, _state = isolated
+    target = existing_config(client)
+    native_fdopen = setup.os.fdopen
+    captured = []
+    class ChangingRead:
+        def __init__(self, stream): self.stream = stream
+        def __enter__(self): return self
+        def __exit__(self, *args): self.stream.close()
+        def fileno(self): return self.stream.fileno()
+        def read(self, count):
+            value = self.stream.read(count)
+            captured.append(True)
+            target.write_bytes(ORIGINAL.encode() + b"# concurrent edit\n")
+            return value
+    monkeypatch.setattr(setup.os, "fdopen", lambda *a, **kw: ChangingRead(native_fdopen(*a, **kw)))
+    with pytest.raises((setup.SetupError, ValueError, OSError)):
+        setup._read_file(target)
+    assert captured, "The rejection must exercise an actual changing read"
+
+
+def test_journal_config_writer_never_follows_a_late_leaf_link(isolated, tmp_path, monkeypatch):
+    client, _state = isolated
+    target = existing_config(client)
+    external = tmp_path / "external.toml"
+    external.write_text(ORIGINAL)
+    native_configure = cli.run_configure_codex
+    def replace_then_configure(args):
+        target.unlink()
+        try:
+            target.symlink_to(external)
+        except OSError:
+            pytest.skip("fixture symlink creation unavailable")
+        return native_configure(args)
+    monkeypatch.setattr(cli, "run_configure_codex", replace_then_configure)
+    with pytest.raises((setup.SetupError, SystemExit)) as failure:
+        cli_setup.run_setup(options(write=True))
+    assert external.read_text() == ORIGINAL
+    assert target.is_symlink(), str(failure.value)
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_setup_plan_rejects_linked_ancestors_of_empty_or_missing_skill(isolated, tmp_path, existing):
+    client, state = isolated
+    actual = tmp_path / "actual-skills"
+    actual.mkdir()
+    if existing:
+        (actual / "skills" / "anti").mkdir(parents=True)
+    alias = tmp_path / "alias-skills"
+    try:
+        alias.symlink_to(actual, target_is_directory=True)
+    except OSError:
+        pytest.skip("fixture symlink creation unavailable")
+    with pytest.raises((setup.SetupError, ValueError, OSError)):
+        setup.setup_plan(options(install_skill=True, skill_dir=str(alias / "skills")))
+    assert not client.exists() and not state.exists()
+    assert not (actual / "skills" / "anti" / "SKILL.md").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Native held parent handles prohibit this POSIX directory rename")
+def test_config_writer_refuses_same_hash_parent_swap_during_temp_fsync(isolated, tmp_path, monkeypatch):
+    client, _state = isolated
+    target = existing_config(client)
+    replacement_parent = tmp_path / "replacement-client"
+    replacement_parent.mkdir(mode=0o700)
+    replacement_target = replacement_parent / target.name
+    setup.SecureStore().atomic_write_bytes(replacement_target, ORIGINAL.encode())
+    displaced_parent = tmp_path / "displaced-client"
+    intended = (ORIGINAL + "# intended config update\n").encode()
+    native_fsync = os.fsync
+    swapped = False
+
+    def swap_parent_after_temp_fsync(descriptor):
+        nonlocal swapped
+        native_fsync(descriptor)
+        info = os.fstat(descriptor)
+        if not swapped and stat.S_ISREG(info.st_mode):
+            assert info.st_size == len(intended), "The hook must reach the intended temporary config write"
+            client.rename(displaced_parent)
+            replacement_parent.rename(client)
+            swapped = True
+
+    monkeypatch.setattr(setup.os, "fsync", swap_parent_after_temp_fsync)
+    failure = None
+    completed = False
+    try:
+        setup._write_bound_config(target, intended, expected_sha256=setup._hash(ORIGINAL.encode()))
+        completed = True
+    except setup.SetupError as exc:
+        failure = exc
+
+    assert swapped, "The fixture must replace an ordinary parent during the temporary regular-file fsync"
+    assert target.read_bytes() == ORIGINAL.encode(), "The replacement parent's config must be preserved"
+    assert (displaced_parent / target.name).read_bytes() == ORIGINAL.encode(), "The displaced original config must be preserved"
+    assert isinstance(failure, setup.SetupError), "The writer must refuse the changed parent rather than return normally"
+    assert not completed
+
+
+def test_planned_config_refuses_ordinary_leaf_replacement_after_publication(isolated, tmp_path, monkeypatch):
+    client, _state = isolated
+    target = existing_config(client)
+    original_bytes = target.read_bytes()
+    args = options()
+    plan = setup.setup_plan(args)
+    merge_options = dict(model=args.model, provider_id=args.provider, provider_name=args.provider_name,
+                         base_url=args.base_url, activate=args.activate)
+    intended = cli.merge_codex_config(original_bytes.decode('utf-8'), **merge_options).encode()
+    assert intended != original_bytes
+    replacement = tmp_path / "replacement-config.toml"
+    setup.SecureStore().atomic_write_bytes(replacement, original_bytes)
+    native_replace = os.replace
+    swapped = False
+    published = None
+
+    def replace_then_swap_leaf(source, destination, *positional, **kwargs):
+        nonlocal swapped, published
+        result = native_replace(source, destination, *positional, **kwargs)
+        selected = Path(destination)
+        if not swapped and (selected == target or
+                            (selected == Path(target.name) and kwargs.get("dst_dir_fd") is not None)):
+            published = target.read_bytes()
+            assert published == intended, "The fixture must run after native publication of the intended bytes"
+            native_replace(replacement, target)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(setup.os, "replace", replace_then_swap_leaf)
+    failure = None
+    result = None
+    try:
+        result = setup.write_planned_config(plan, **merge_options)
+    except setup.SetupError as exc:
+        failure = exc
+
+    assert swapped and published == intended
+    assert target.read_bytes() == original_bytes
+    assert isinstance(failure, setup.SetupError), f"Changed success was returned for different visible bytes: {result}"
+    assert result is None
