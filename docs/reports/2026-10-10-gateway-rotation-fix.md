@@ -76,9 +76,35 @@ redaction, panel fail-closed source assertions.
 
 ## Bounded live probe
 
-One request through the local gateway, no fallback, no rotation, via
-`python3 ~/.codex/skills/anti/scripts/anti.py smoke --probe flash`.
-Results to be filled after execution.
+Two bounded probes, one request each, no fallback, no rotation:
+
+1. Installed gateway (v2.4.2, pre-fix binary) via the anti sidecar smoke:
+   transport + generation passed (312 output chars, gemini-3.8-flash).
+   Proves provider transport only; it does not exercise this PR's code.
+2. PR code (this branch, commit `4c60f1b`) served the request itself:
+   HTTP 200, response text `probe-ok`, upstream 200, request log shows
+   `attempt_count: 1`, `rotation_count: 0`, `rotation_attempted:
+   false`, `terminal_kind: completed`.
+
+The PR-code probe ran against a temporary isolated
+`ANTIGRAVITY_STATE_HOME` with a copy of the account store and the
+keyring key supplied via `ANTIGRAVITY_STORAGE_KEY`. The production store
+was never written (mtime verified unchanged before/after) and the key was
+never printed or persisted.
+
+Probe context: the default `~/.codex` state home currently has a
+fail-closed `key_conflict` between the file fallback key and the legacy
+keyring key (`antigravity-storage-key.json` selection is absent). The
+PR-code gateway correctly refuses to run there. The installed 2.4.2
+gateway predates that gate, which is why its smoke still works. This is a
+pre-existing local state issue for the owner to resolve separately (see
+recommendations below); it is not a regression from this branch.
+
+What the probe proves: PR code starts, resolves accounts from the real
+schema, completes a real generation, and records truthful counts on
+success. What it does not prove: rotation behavior under 401/403 (that
+path is covered by synthetic tests only), provider-side VALIDATION_REQUIRED
+recovery, or production admission.
 
 ## Remaining scope
 
