@@ -517,7 +517,7 @@ def maybe_prompt_and_save_oauth_credentials(args, checks: list[dict]) -> tuple[s
     return client_id, client_secret
 
 
-def run_setup(args) -> dict:
+def _validate_setup_request(args) -> None:
     if getattr(args, "check", False) and getattr(args, "write", False):
         raise SystemExit("Use either --check or --write, not both.")
     if getattr(args, "json", False) and getattr(args, "write", False):
@@ -529,6 +529,50 @@ def run_setup(args) -> dict:
     if getattr(args, "repair", False) and getattr(args, "json", False):
         raise SystemExit("setup --repair mutates Codex config; omit --json.")
 
+def run_setup(args) -> dict:
+    from .setup_profiles import SetupError, SetupJournal, setup_plan
+    planning = bool(getattr(args, "plan", False))
+    if planning and getattr(args, "write", False):
+        raise SystemExit("Use --plan without --write")
+    if not planning:
+        _validate_setup_request(args)
+        if not (getattr(args, "write", False) or getattr(args, "repair", False)):
+            return _run_setup(args)
+    try:
+        plan = setup_plan(args)
+    except (ValueError, RuntimeError, OSError) as exc:
+        report = {"schemaVersion": 1, "ok": False, "mode": "plan" if planning else "write",
+                  "checks": [{"name": "target_config", "status": "fail", "detail": _cli.redact_secret_text(str(exc))}],
+                  "next_command": "codex-antigravity setup --plan"}
+        if planning:
+            print(json.dumps(report, indent=2))
+        else:
+            _cli._print_setup_report(report)
+        raise SystemExit(1) from None
+    if planning:
+        print(json.dumps(plan, indent=2))
+        return plan
+    journal = SetupJournal(plan)
+    args._setup_journal = journal
+    try:
+        report = _run_setup(args)
+    except SetupError as exc:
+        journal.finish(ok=False)
+        raise SystemExit(str(exc)) from None
+    except BaseException:
+        journal.finish(ok=False)
+        raise
+    else:
+        journal.finish(ok=bool(report.get("ok")))
+        report["setup_receipt"] = str(journal.path)
+        return report
+    finally:
+        args._setup_journal = None
+        print(f"[*] Setup receipt: {journal.path}")
+
+
+def _run_setup(args) -> dict:
+    from .setup_profiles import stage
     checks: list[dict] = []
     base_url = ""
     model = str(getattr(args, "model", "") or "")
@@ -595,7 +639,7 @@ def run_setup(args) -> dict:
         raise SystemExit(1)
 
     if getattr(args, "repair", False):
-        _cli.run_configure_codex(
+        stage(args, "config", _cli.run_configure_codex,
             argparse.Namespace(
                 write=True,
                 config=args.config,
@@ -608,7 +652,7 @@ def run_setup(args) -> dict:
             )
         )
         _cli._setup_check(checks, "codex_config_repair", "pass", f"repaired {_cli.client_config_path(args.config)}")
-        readiness = _cli.codex_ready_report(
+        readiness = stage(args, "readiness", _cli.codex_ready_report,
             config=args.config,
             provider_id=args.provider,
             expected_base_url=base_url,
@@ -619,6 +663,7 @@ def run_setup(args) -> dict:
             live_timeout=getattr(args, "live_timeout", 30.0),
             selected_model=model,
             require_active_provider=getattr(args, "activate", False),
+            include_version_check=not getattr(args, "json", False),
         )
         checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
         ok = all(check["status"] != "fail" for check in checks)
@@ -662,11 +707,11 @@ def run_setup(args) -> dict:
                 raise SystemExit("OpenAI upstream is not configured; Codex config was not modified.")
     elif google_route:
         credential_warnings: list[str] = []
-        cid, csec = _cli.resolve_oauth_credentials(read_only=not args.write, warnings=credential_warnings)
+        cid, csec = stage(args, "credentials", _cli.resolve_oauth_credentials, read_only=not args.write, warnings=credential_warnings)
         for warning in credential_warnings:
             _cli._setup_check(checks, "google_oauth_credentials_file", "warn", _cli.redact_secret_text(warning))
         if args.write and (not cid or not csec):
-            prompted_cid, prompted_csec = _cli.maybe_prompt_and_save_oauth_credentials(args, checks)
+            prompted_cid, prompted_csec = stage(args, "credentials", _cli.maybe_prompt_and_save_oauth_credentials, args, checks)
             cid = cid or prompted_cid
             csec = csec or prompted_csec
         if cid and csec:
@@ -732,7 +777,7 @@ def run_setup(args) -> dict:
             _cli._setup_check(checks, "anti_skill_install", "skip", "--install-skill is only applied when --write is used")
         if args.start:
             _cli._setup_check(checks, "gateway_start", "skip", "--start is only applied when --write is used")
-        readiness = _cli.codex_ready_report(
+        readiness = stage(args, "readiness", _cli.codex_ready_report,
             config=args.config,
             provider_id=provider_id,
             expected_base_url=base_url,
@@ -743,6 +788,7 @@ def run_setup(args) -> dict:
             live_timeout=getattr(args, "live_timeout", 30.0),
             selected_model=model,
             require_active_provider=getattr(args, "activate", False),
+            include_version_check=not getattr(args, "json", False),
         )
         checks.extend({**check, "name": f"readiness.{check['name']}"} for check in readiness["checks"])
         ok = all(check["status"] != "fail" for check in checks)
@@ -765,12 +811,12 @@ def run_setup(args) -> dict:
         return report
 
     if google_route:
-        _cli.run_login(argparse.Namespace(count=args.accounts, select_account=True, no_browser=getattr(args, "no_browser", False)))
+        stage(args, "login", _cli.run_login, argparse.Namespace(count=args.accounts, select_account=True, no_browser=getattr(args, "no_browser", False)))
         _cli._setup_check(checks, "google_login", "pass", f"completed {args.accounts} OAuth login flow(s)")
     elif openai_route:
         _cli._setup_check(checks, "google_login", "skip", f"{model} routes to OpenAI; Google login not required")
 
-    _cli.run_configure_codex(
+    stage(args, "config", _cli.run_configure_codex,
         argparse.Namespace(
             write=True,
             config=args.config,
@@ -785,7 +831,7 @@ def run_setup(args) -> dict:
     _cli._setup_check(checks, "codex_config_write", "pass", f"updated {_cli.client_config_path(args.config)}")
 
     if args.install_skill:
-        _cli.run_install_skill(
+        stage(args, "skill", _cli.run_install_skill,
             argparse.Namespace(
                 skill_dir=args.skill_dir,
                 force=args.force,
@@ -800,21 +846,23 @@ def run_setup(args) -> dict:
     gateway_ids: set[str] | None = None
     if args.start:
         try:
-            _cli.start_gateway_background(
-                argparse.Namespace(
-                    host=args.host,
-                    port=args.port,
-                    allow_remote=args.allow_remote,
-                    op_env_file=getattr(args, "op_env_file", None),
-                    op_environment=getattr(args, "op_environment", None),
-                    unified_model_picker=unified,
+            def start_and_verify_gateway():
+                _cli.start_gateway_background(
+                    argparse.Namespace(
+                        host=args.host,
+                        port=args.port,
+                        allow_remote=args.allow_remote,
+                        op_env_file=getattr(args, "op_env_file", None),
+                        op_environment=getattr(args, "op_environment", None),
+                        unified_model_picker=unified,
+                    )
                 )
-            )
-            gateway_ids = _cli.wait_for_gateway_model_ids(
-                base_url,
-                timeout=args.gateway_timeout,
-                token_env=args.gateway_token_env,
-            )
+                return _cli.wait_for_gateway_model_ids(
+                    base_url,
+                    timeout=args.gateway_timeout,
+                    token_env=args.gateway_token_env,
+                )
+            gateway_ids = stage(args, "gateway", start_and_verify_gateway)
             _cli._setup_check(checks, "gateway_start", "pass", f"started background gateway on {args.host}:{args.port} and /v1/models is reachable")
             _cli._setup_check(
                 checks,
@@ -858,7 +906,7 @@ def run_setup(args) -> dict:
     except RuntimeError as exc:
         _cli._setup_check(checks, "gateway_models", "fail", _cli.redact_secret_text(str(exc)))
 
-    readiness = _cli.codex_ready_report(
+    readiness = stage(args, "readiness", _cli.codex_ready_report,
         config=args.config,
         provider_id=provider_id,
         expected_base_url=base_url,

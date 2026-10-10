@@ -93,3 +93,23 @@ def parse_provider_config(content: str) -> dict[str, object]:
         "active_model": document.get("model") if isinstance(document.get("model"), str) else "",
         "provider_tables": tables,
     }
+
+
+def merge_profile_config(content: str, *, settings: dict, token_env: str | None, activate: bool) -> str:
+    """Profile-owned provider settings and an environment name, never a secret value."""
+    updated = merge_provider_config(content, model=settings["model"], provider_id=settings["provider"],
+                                    provider_name=settings["provider_name"], base_url=settings["base_url"], activate=activate)
+    document = _parse(updated)
+    expected = deepcopy(document.unwrap())
+    table = document["model_providers"][settings["provider"]]
+    expected_table = expected["model_providers"][settings["provider"]]
+    if token_env is None:
+        table.pop("env_key", None)
+        expected_table.pop("env_key", None)
+    else:
+        table["env_key"] = token_env
+        expected_table["env_key"] = token_env
+    result = tomlkit.dumps(document)
+    if not _same_value(_parse(result).unwrap(), expected):
+        raise ValueError("Profile edit would alter unrelated settings; no changes were written")
+    return result

@@ -529,7 +529,7 @@ class TestGoogleAccountSetup(unittest.TestCase):
                     accounts=3,
                     skip_codex_config=False,
                     skip_doctor=False,
-                    config="/tmp/codex.toml",
+                    config=str(Path(os.environ["HOME"]) / "codex.toml"),
                     model="gemini-3.5-flash-high",
                     provider="antigravity",
                     provider_name="Google Antigravity",
@@ -541,7 +541,7 @@ class TestGoogleAccountSetup(unittest.TestCase):
 
         configure_args = mock_configure.call_args.args[0]
         self.assertTrue(configure_args.write)
-        self.assertEqual(configure_args.config, "/tmp/codex.toml")
+        self.assertEqual(configure_args.config, str(Path(os.environ["HOME"]) / "codex.toml"))
         mock_login.assert_called_once()
         login_args = mock_login.call_args.args[0]
         self.assertEqual(login_args.count, 3)
@@ -559,7 +559,7 @@ class TestGoogleAccountSetup(unittest.TestCase):
                     accounts=1,
                     skip_codex_config=False,
                     skip_doctor=False,
-                    config="/tmp/codex.toml",
+                    config=str(Path(os.environ["HOME"]) / "codex.toml"),
                     model="gemini-3.5-flash-high",
                     provider="antigravity",
                     provider_name="Google Antigravity",
@@ -585,7 +585,7 @@ class TestGoogleAccountSetup(unittest.TestCase):
                         accounts=1,
                         skip_codex_config=False,
                         skip_doctor=False,
-                        config="/tmp/codex.toml",
+                        config=str(Path(os.environ["HOME"]) / "codex.toml"),
                         model="gemini-3.5-flash-high",
                         provider="antigravity",
                         provider_name="Google Antigravity",
@@ -610,7 +610,7 @@ class TestGoogleAccountSetup(unittest.TestCase):
                         accounts=1,
                         skip_codex_config=False,
                         skip_doctor=False,
-                        config="/tmp/codex.toml",
+                        config=str(Path(os.environ["HOME"]) / "codex.toml"),
                         model="gemini-3.5-flash-high",
                         provider="antigravity",
                         provider_name="Google Antigravity",
@@ -635,7 +635,7 @@ class TestGoogleAccountSetup(unittest.TestCase):
                         accounts=1,
                         skip_codex_config=False,
                         skip_doctor=False,
-                        config="/tmp/codex.toml",
+                        config=str(Path(os.environ["HOME"]) / "codex.toml"),
                         model="gemini-3.5-flash-high",
                         provider="antigravity",
                         provider_name="Google Antigravity",
@@ -659,7 +659,7 @@ class TestGoogleAccountSetup(unittest.TestCase):
                         accounts=1,
                         skip_codex_config=False,
                         skip_doctor=False,
-                        config="/tmp/codex.toml",
+                        config=str(Path(os.environ["HOME"]) / "codex.toml"),
                         model="gemini-3.5-flash-high",
                         provider="antigravity",
                         provider_name="Google Antigravity",
@@ -1435,7 +1435,7 @@ class TestV3NativeSetup(unittest.TestCase):
                 return None
             return _inner
 
-        args = self.setup_args(write=True, install_skill=True, start=True, config="/tmp/codex.toml")
+        args = self.setup_args(write=True, install_skill=True, start=True, config=str(Path(os.environ["HOME"]) / "codex.toml"))
         with patch("codex_antigravity_auth.cli.resolve_oauth_credentials", return_value=("client-id", "secret")):
             with patch("codex_antigravity_auth.cli.run_login", side_effect=record("login")):
                 with patch("codex_antigravity_auth.cli.run_configure_codex", side_effect=record("config")):
@@ -1642,12 +1642,12 @@ class TestV3NativeSetup(unittest.TestCase):
                     with patch("codex_antigravity_auth.cli.start_gateway_background", side_effect=SystemExit("boom")):
                         with patch("codex_antigravity_auth.cli.gateway_model_ids") as gateway:
                             with patch("builtins.print") as mock_print:
-                                with self.assertRaisesRegex(SystemExit, "boom"):
+                                with self.assertRaisesRegex(SystemExit, "Next command:"):
                                     run_setup(args)
 
         gateway.assert_not_called()
         printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
-        self.assertIn("codex-antigravity start --background --port 51122", printed_text)
+        self.assertIn("codex-antigravity status --port 51122", printed_text)
 
     def test_setup_write_start_waits_for_gateway_models(self):
         provider_models = iter([RuntimeError("booting"), {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}])
@@ -1689,7 +1689,7 @@ class TestV3NativeSetup(unittest.TestCase):
                                     run_setup(args)
 
         printed_text = "\n".join(call[0][0] for call in mock_print.call_args_list if call[0])
-        self.assertIn("still booting", printed_text)
+        self.assertIn("Setup stage gateway failed", printed_text)
         self.assertIn("codex-antigravity status --port 51122", printed_text)
 
     def test_setup_check_reports_ignored_action_flags(self):
@@ -2557,13 +2557,13 @@ class TestProviderCli(unittest.TestCase):
 class TestVNextPolishCli(unittest.TestCase):
     def test_new_command_parsers_dispatch(self):
         command_cases = [
-            (["codex-antigravity", "service", "status", "--json"], "run_service_command"),
-            (["codex-antigravity", "logs", "--tail", "1", "--json"], "run_logs_command"),
-            (["codex-antigravity", "logs", "summary", "--json"], "run_logs_command"),
+            (["codex-antigravity", "service", "status"], "run_service_command"),
+            (["codex-antigravity", "logs", "--tail", "1"], "run_logs_command"),
+            (["codex-antigravity", "logs", "summary"], "run_logs_command"),
             (["codex-antigravity", "accounts", "list"], "run_accounts_command"),
             (["codex-antigravity", "accounts", "remove", "a@example.com", "--yes"], "run_accounts_command"),
             (["codex-antigravity", "accounts", "reset", "a@example.com"], "run_accounts_command"),
-            (["codex-antigravity", "models", "list", "--json"], "run_models_command"),
+            (["codex-antigravity", "models", "list"], "run_models_command"),
         ]
         for argv, handler_name in command_cases:
             with self.subTest(argv=argv):

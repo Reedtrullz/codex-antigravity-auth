@@ -38,7 +38,7 @@ dev = [
   "pyyaml>=6.0",
   "ruff>=0.16.9",
   "tomli>=2.0.1; python_version < '3.11'",
-  "jsonschema>=4.18",
+  "jsonschema>=4.23",
 ]
 
 quality = ["pip-audit>=2.10.1"]
@@ -68,6 +68,9 @@ codex_antigravity_auth = [
   "design/model-discovery.md",
   "RESOURCE_LIMITS.md",
   "HTTP_CLIENTS.md",
+  "CLI_JSON.md",
+  "schemas/*.json",
+  "SETUP.md",
   "skills/anti/SKILL.md",
   "skills/anti/RUN_CONTROL.md",
   "skills/anti/SPEND_CONTROL.md",
