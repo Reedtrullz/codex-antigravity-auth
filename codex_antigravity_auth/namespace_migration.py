@@ -17,7 +17,7 @@ from .secure_store import SecureStore, file_lock
 STATE_FILES = (
     "antigravity-accounts.json", "antigravity-providers.json",
     "antigravity-credentials.json", "antigravity-storage.key",
-    "antigravity-openai.json", "antigravity-models.toml",
+    "antigravity-openai.json", "antigravity-models.toml", "antigravity-storage-key.json",
 )
 MAX_STATE_FILE_BYTES = 16 * 1024 * 1024
 
@@ -25,6 +25,9 @@ MAX_STATE_FILE_BYTES = 16 * 1024 * 1024
 def _snapshot(source: Path) -> dict[str, bytes]:
     if source.is_symlink() or not source.is_dir():
         raise ValueError("Source must be an existing non-symlink gateway directory")
+    transition = source / "antigravity-storage-transition.json"
+    if transition.exists() or transition.is_symlink():
+        raise ValueError("Recover the pending key transition before copying this namespace")
     result = {}
     for name in STATE_FILES:
         path = source / name

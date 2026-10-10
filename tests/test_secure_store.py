@@ -14,21 +14,28 @@ from codex_antigravity_auth.storage import _get_encryption_key
 
 
 class TestKeyInitialization(unittest.TestCase):
-    def test_pytest_storage_key_bypasses_system_keyring(self):
+    def test_recorded_pytest_storage_key_bypasses_system_keyring(self):
         blocked = AssertionError("tests must not access the system keyring")
-        with patch(
-            "codex_antigravity_auth.storage.keyring.get_password",
-            side_effect=blocked,
-        ) as get_password:
-            with patch(
-                "codex_antigravity_auth.storage.keyring.set_password",
-                side_effect=blocked,
-            ) as set_password:
-                key = _get_encryption_key()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"ANTIGRAVITY_STATE_HOME": str(Path(tmp))}):
+                with patch(
+                    "codex_antigravity_auth.storage.keyring.get_password",
+                    side_effect=blocked,
+                ) as get_password:
+                    with patch(
+                        "codex_antigravity_auth.storage.keyring.set_password",
+                        side_effect=blocked,
+                    ) as set_password:
+                        key = _get_encryption_key()
+                        # First binding checks for existing conflicts through the fake
+                        # unavailable backend. Once recorded, the environment is enough.
+                        get_password.assert_called_once()
+                        get_password.reset_mock()
+                        self.assertEqual(_get_encryption_key(), key)
 
-        Fernet(key.encode("utf-8"))
-        get_password.assert_not_called()
-        set_password.assert_not_called()
+            Fernet(key.encode("utf-8"))
+            get_password.assert_not_called()
+            set_password.assert_not_called()
 
     def test_concurrent_first_initialization_returns_persisted_winner(self):
         stored = {"key": None}
@@ -46,7 +53,7 @@ class TestKeyInitialization(unittest.TestCase):
                 stored["key"] = value
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"ANTIGRAVITY_STORAGE_KEY": ""}):
+            with patch.dict(os.environ, {"ANTIGRAVITY_STORAGE_KEY": "", "ANTIGRAVITY_STATE_HOME": str(Path(tmp))}):
                 with patch("codex_antigravity_auth.storage.get_codex_home", return_value=Path(tmp)):
                     with patch("codex_antigravity_auth.storage.keyring.get_password", side_effect=get_password):
                         with patch("codex_antigravity_auth.storage.keyring.set_password", side_effect=set_password):

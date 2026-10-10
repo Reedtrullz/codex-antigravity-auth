@@ -1,7 +1,7 @@
 import json
 import os
 import threading
-import keyring
+import keyring as keyring
 import base64
 import hashlib
 import time
@@ -86,13 +86,13 @@ def _normalize_fernet_key(secret: str) -> str:
         digest = hashlib.sha256(secret.encode("utf-8")).digest()
         return base64.urlsafe_b64encode(digest).decode("utf-8")
 
-def _get_file_fallback_key() -> str:
+def _get_file_fallback_key(candidate: str | None = None) -> str:
     path = get_codex_home() / FALLBACK_KEY_FILE
     if path.is_file():
         _ensure_private_file(path)
         return path.read_text(encoding="utf-8").strip()
 
-    key = Fernet.generate_key().decode("utf-8")
+    key = candidate or Fernet.generate_key().decode("utf-8")
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
@@ -108,44 +108,18 @@ def _get_file_fallback_key() -> str:
     return key
 
 def _get_encryption_key() -> str:
-    """Retrieve or generate a secure encryption key from the system keyring."""
-    env_key = os.environ.get("ANTIGRAVITY_STORAGE_KEY")
-    if env_key:
-        return _normalize_fernet_key(env_key)
-
-    initialization_lock = get_codex_home() / "antigravity-storage-key-init"
-    with _exclusive_file_lock(initialization_lock):
-        try:
-            key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME)
-            if not key:
-                candidate = Fernet.generate_key().decode("utf-8")
-                keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME, candidate)
-                key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME) or candidate
-            return key
-        except Exception:
-            # Headless systems may not have a usable keyring. Use a generated,
-            # machine-local key instead of a source-known static key.
-            return _get_file_fallback_key()
+    from .storage_keys import get_key
+    return get_key(create=True)
 
 
 def _peek_encryption_key() -> str | None:
-    """Return an already-configured key without creating keyring or fallback state."""
-    env_key = os.environ.get("ANTIGRAVITY_STORAGE_KEY")
-    if env_key:
-        return _normalize_fernet_key(env_key)
-    try:
-        key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_KEY_NAME)
-    except Exception:
-        key = None
-    if key:
-        return key
-    fallback = _codex_home_read_only() / FALLBACK_KEY_FILE
-    if not fallback.is_file() or fallback.is_symlink():
-        return None
-    try:
-        return fallback.read_text(encoding="utf-8").strip() or None
-    except OSError:
-        return None
+    from .storage_keys import get_key
+    return get_key(create=False)
+
+
+def _require_no_key_transition() -> None:
+    from .storage_keys import require_no_transition
+    require_no_transition()
 
 
 def account_store_diagnostics() -> dict[str, Any]:
@@ -161,6 +135,11 @@ def account_store_diagnostics() -> dict[str, Any]:
         "target_account_state_schema_version": SCHEMA_VERSION,
         "account_count": 0,
     }
+    try:
+        _require_no_key_transition()
+    except ValueError as exc:
+        report["error_class"] = getattr(exc, "code", "key_configuration_unavailable")
+        return report
     if not path.exists():
         report["accessible"] = True
         return report
@@ -226,6 +205,11 @@ def provider_store_diagnostics(path: Path) -> dict[str, Any]:
         "migration": "none" if not path.exists() else "blocked",
         "provider_count": 0,
     }
+    try:
+        _require_no_key_transition()
+    except ValueError as exc:
+        report["error_class"] = getattr(exc, "code", "key_configuration_unavailable")
+        return report
     if not path.exists():
         report["accessible"] = True
         return report
@@ -287,6 +271,7 @@ def _load_secure_json_unlocked(
     *,
     strict: bool = False,
 ) -> tuple[dict[str, Any], bool]:
+    _require_no_key_transition()
     if not path.is_file():
         return default_factory(), False
     _ensure_private_file(path)
@@ -342,6 +327,7 @@ def load_secure_json_file_read_only(
     error_label: str,
 ) -> dict[str, Any]:
     """Read a secure store without chmod, migration, key creation, or writes."""
+    _require_no_key_transition()
     if not path.exists():
         return default_factory()
     if path.is_symlink() or not path.is_file():
