@@ -216,7 +216,7 @@ def _native_acl_snapshot(path) -> dict[str, Any]:
         current = sid_text(ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0])
     finally:
         kernel.CloseHandle(token)
-    owner, _group, dacl, _sacl, descriptor = (pointer(),) * 5
+    owner, _group, dacl, _sacl, descriptor = (pointer(), pointer(), pointer(), pointer(), pointer())
     code = advapi.GetNamedSecurityInfoW(str(path), 1, 0x5,
                                         ctypes.byref(owner), None, ctypes.byref(dacl), None, ctypes.byref(descriptor))
     assert not code, ctypes.WinError(code)
