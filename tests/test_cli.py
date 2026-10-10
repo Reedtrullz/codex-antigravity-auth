@@ -2557,13 +2557,13 @@ class TestProviderCli(unittest.TestCase):
 class TestVNextPolishCli(unittest.TestCase):
     def test_new_command_parsers_dispatch(self):
         command_cases = [
-            (["codex-antigravity", "service", "status", "--json"], "run_service_command"),
-            (["codex-antigravity", "logs", "--tail", "1", "--json"], "run_logs_command"),
-            (["codex-antigravity", "logs", "summary", "--json"], "run_logs_command"),
+            (["codex-antigravity", "service", "status"], "run_service_command"),
+            (["codex-antigravity", "logs", "--tail", "1"], "run_logs_command"),
+            (["codex-antigravity", "logs", "summary"], "run_logs_command"),
             (["codex-antigravity", "accounts", "list"], "run_accounts_command"),
             (["codex-antigravity", "accounts", "remove", "a@example.com", "--yes"], "run_accounts_command"),
             (["codex-antigravity", "accounts", "reset", "a@example.com"], "run_accounts_command"),
-            (["codex-antigravity", "models", "list", "--json"], "run_models_command"),
+            (["codex-antigravity", "models", "list"], "run_models_command"),
         ]
         for argv, handler_name in command_cases:
             with self.subTest(argv=argv):

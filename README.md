@@ -483,6 +483,7 @@ migration limits](USAGE.md#namespace-copy) for an explicit dry-run-first copy.
 Protected stores and standalone Anti use descriptor-validated process locks and owner-only file protection. Unsupported locking or Windows ACL facilities fail explicitly; see [private storage and lock files](USAGE.md#private-storage-and-lock-files).
 
 Local finding verdicts and JSON/SARIF/Markdown reports are available through `anti.py runs finding` and `runs export`. They preserve advisory findings and scope gaps without automatic suppression or publication; see the [usage examples](USAGE.md#local-finding-verdicts-and-report-export).
+Protected stores and standalone Anti use descriptor-validated process locks and owner-only file protection. Unsupported locking or Windows ACL facilities fail explicitly; see [private storage and lock files](USAGE.md#private-storage-and-lock-files).
 
 ## Troubleshooting
 
@@ -545,3 +546,5 @@ Setup can now emit a no-write `setup --plan`, apply named non-secret `profiles`,
 
 Developer ownership of route telemetry, request resources, Anti scope rendering
 and immutable run publication is mapped in [the orchestration guide](codex_antigravity_auth/design/orchestration.md).
+
+Setup can now emit a no-write `setup --plan`, apply named non-secret `profiles`, and record explicitly restorable local changes. See [setup plans and restoration](codex_antigravity_auth/SETUP.md).

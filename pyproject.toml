@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-antigravity-auth"
-version = "2.4.2"
+version = "2.4.3"
 description = "Google Antigravity OAuth model access for OpenAI Codex"
 readme = "README.md"
 license = "MIT"
@@ -24,11 +24,11 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-  "httpx>=0.28",
-  "fastapi>=0.115.6",
+  "httpx>=0.28.1",
+  "fastapi>=0.142.2",
   "uvicorn>=0.28",
   "keyring>=25.0.0",
-  "cryptography>=42.0.0",
+  "cryptography>=50.0.2",
   "tomlkit>=0.13.2",
 ]
 
@@ -38,7 +38,7 @@ dev = [
   "pyyaml>=6.0",
   "ruff>=0.16.9",
   "tomli>=2.0.1; python_version < '3.11'",
-  "jsonschema>=4.18",
+  "jsonschema>=4.23",
 ]
 
 quality = ["pip-audit>=2.10.1"]
@@ -69,6 +69,9 @@ codex_antigravity_auth = [
   "design/model-discovery.md",
   "RESOURCE_LIMITS.md",
   "HTTP_CLIENTS.md",
+  "CLI_JSON.md",
+  "schemas/*.json",
+  "SETUP.md",
   "skills/anti/SKILL.md",
   "skills/anti/RUN_CONTROL.md",
   "skills/anti/SPEND_CONTROL.md",
@@ -77,6 +80,9 @@ codex_antigravity_auth = [
   "skills/anti/CONTEXT_PREFLIGHT.md",
   "skills/anti/CHUNK_RESUME.md",
   "skills/anti/ARTIFACTS.md",
+  "skills/anti/WAV_AUDIO.md",
+  "skills/anti/MUSIC_REVIEW.md",
+  "skills/anti/ATTACHMENTS.md",
   "skills/anti/BENCHMARK.md",
   "skills/anti/DATA_POLICY.md",
   "skills/anti/SCOPES.md",

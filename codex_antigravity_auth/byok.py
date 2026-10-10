@@ -7,6 +7,7 @@ from pathlib import Path
 from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory
 
 from .namespaces import gateway_file
+from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory
 from typing import Any
 from urllib.parse import urlparse
 

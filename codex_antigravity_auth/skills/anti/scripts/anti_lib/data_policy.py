@@ -38,6 +38,24 @@ def digest(value: str) -> str:
     return result.hexdigest()
 
 
+def content_digest(prompt, media=None):
+    if not media:
+        return digest(prompt)
+    if isinstance(media,list) and any(isinstance(item,dict) and item.get('mime')=='audio/wav' for item in media):
+        from .wav_audio import valid_identity
+        if not valid_identity(media):raise PolicyError('Invalid captured audio identity')
+        return digest(json.dumps({'version':2,'promptSha256':digest(prompt),'audio':media},sort_keys=True,separators=(',',':')))
+    if (not isinstance(media,list) or len(media)>4 or any(not isinstance(item,dict)
+            or set(item)!={'index','mime','bytes','sha256'} or type(item['index']) is not int or item['index']!=index
+            or not isinstance(item['mime'],str) or item['mime'] not in {'image/png','image/jpeg'} or type(item['bytes']) is not int or not 0<item['bytes']<=2*1024*1024
+            or not isinstance(item['sha256'],str) or not HASH.fullmatch(item['sha256'])
+            for index,item in enumerate(media,1))):
+        raise PolicyError('Invalid captured media identity')
+    if sum(item['bytes'] for item in media)>4*1024*1024:
+        raise PolicyError('Invalid captured media identity')
+    return digest(json.dumps({'version':1,'promptSha256':digest(prompt),'images':media},sort_keys=True,separators=(',',':')))
+
+
 class PolicyError(ValueError):
     pass
 
@@ -59,13 +77,17 @@ def audit_projection(value):
     """Validate, never trust, data from stored/model-created metadata."""
     if not isinstance(value, dict) or set(value) != {"schemaVersion", "policySha256", "decisions", "omittedDecisions"}:
         return None
-    if type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1 or not isinstance(value["policySha256"], str) or not HASH.fullmatch(value["policySha256"]):
+    if type(value["schemaVersion"]) is not int or value["schemaVersion"] not in {1,2} or not isinstance(value["policySha256"], str) or not HASH.fullmatch(value["policySha256"]):
         return None
     rows = value["decisions"]
     if not isinstance(rows, list) or len(rows) > MAX_DECISIONS or type(value["omittedDecisions"]) is not int or not 0 <= value["omittedDecisions"] <= 2**63 - 1:
         return None
     for row in rows:
-        if not isinstance(row, dict) or set(row) != {"promptSha256", "routeSha256", "stage", "reason", "scannedChars", "secretPatternCount"}:
+        required = {"promptSha256", "routeSha256", "stage", "reason", "scannedChars", "secretPatternCount"}
+        allowed = required | ({"unscannedMediaCount"} if value["schemaVersion"] == 2 else set())
+        if not isinstance(row, dict) or not required <= set(row) <= allowed:
+            return None
+        if "unscannedMediaCount" in row and (type(row["unscannedMediaCount"]) is not int or not 1 <= row["unscannedMediaCount"] <= 4):
             return None
         if any(not isinstance(row[key], str) or not HASH.fullmatch(row[key]) for key in ("promptSha256", "routeSha256")):
             return None
@@ -127,31 +149,35 @@ class DataPolicy:
         self.lock = threading.Lock()
         self.decisions = []
         self.omitted = 0
+        self.has_media = False
 
-    def _record(self, prompt, base_url, model, stage, reason, count=0):
-        row = {"promptSha256": digest(prompt), "routeSha256": digest(base_url + "\0" + model),
+    def _record(self, prompt, base_url, model, stage, reason, count=0, media=None):
+        row = {"promptSha256": content_digest(prompt,media), "routeSha256": digest(base_url + "\0" + model),
                "stage": stage, "reason": reason, "scannedChars": len(prompt) if reason in {"allowed", "acknowledged", "secret_detected"} else 0, "secretPatternCount": count}
+        if media:
+            row['unscannedMediaCount'] = len(media)
         with self.lock:
+            self.has_media = self.has_media or bool(media)
             if len(self.decisions) < MAX_DECISIONS:
                 self.decisions.append(row)
             else:
                 self.omitted += 1
         return row
 
-    def check(self, *, prompt: str, base_url: str, model: str, stage: str):
+    def check(self, *, prompt: str, base_url: str, model: str, stage: str, media=None):
         if stage not in STAGES:
             _invalid()
         base = normalize_base_url(base_url)
         if (base, model, stage) not in self.routes:
-            self._record(prompt, base, model, stage, "route_denied")
+            self._record(prompt, base, model, stage, "route_denied", media=media)
             raise PolicyError("Data policy denied this destination/stage; no content was submitted to it")
         if len(prompt) > self.limit:
-            self._record(prompt, base, model, stage, "scan_limit")
+            self._record(prompt, base, model, stage, "scan_limit", media=media)
             raise PolicyError("Data policy scan limit exceeded; narrow scope or explicitly raise the policy limit")
         count = sum(bool(pattern.search(prompt)) for pattern in _SECRET_PATTERNS)
-        acknowledged = count and digest(prompt) in self.acknowledgements
+        acknowledged = count and content_digest(prompt,media) in self.acknowledgements
         reason = "acknowledged" if acknowledged else "secret_detected" if count else "allowed"
-        row = self._record(prompt, base, model, stage, reason, count)
+        row = self._record(prompt, base, model, stage, reason, count, media=media)
         if count and not acknowledged:
             raise PolicyError("Data policy detected possible credentials; remove them or explicitly acknowledge this exact assembled prompt with --acknowledge-secret-hash " + row["promptSha256"])
         return row
@@ -176,4 +202,4 @@ class DataPolicy:
 
     def audit(self):
         with self.lock:
-            return {"schemaVersion": 1, "policySha256": self.identity, "decisions": [dict(row) for row in self.decisions], "omittedDecisions": self.omitted}
+            return {"schemaVersion": 2 if self.has_media else 1, "policySha256": self.identity, "decisions": [dict(row) for row in self.decisions], "omittedDecisions": self.omitted}

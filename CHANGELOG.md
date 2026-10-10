@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.4.3 - Music Evidence Candidate (not published)
+
+- Add an optional compact Gemini music review: one supplied clip and evidence
+  claim, one advisory finding, strict response limits, and one backend attempt.
+- Include music schemas and modules in wheel/sdist installed contract checks.
+- Keep account-only Antigravity access independent of Keyspilli and local DSP.
+  Provider hearing and musical acceptance remain unqualified; no automatic
+  upload, fallback, account rotation, or installed helper adoption is added.
+
 ## v2.4.2 - Anti Hardening (Sep 22, 2026)
 
 ### Fixed

@@ -525,6 +525,31 @@ class RoutingAndCostTests(unittest.TestCase):
         self.assertEqual(sent[0]["model"], "gemini-3.8-flash")
         self.assertEqual(sent[0]["reasoning"], {"effort": "high"})
 
+    def test_exact_advertised_model_wins_over_an_earlier_equivalent_alias(self):
+        for requested, alias in (("gemini-3.1-pro", "gemini-3.1-pro-high"),
+                                 ("gemini-3.8-flash", "gemini-3.8-flash-high")):
+            with self.subTest(requested=requested):
+                # A set has no catalog priority; force the order that exposed the bug.
+                class AliasFirstSet(set):
+                    def __iter__(self):
+                        return iter((alias, requested))
+
+                sent = []
+
+                def fake_request_json(method, url, *, payload=None, **kwargs):
+                    self.assertEqual(method, "POST")
+                    sent.append(payload)
+                    return 200, {"model": requested, "output": [{"type": "message",
+                        "content": [{"type": "output_text", "text": "ok"}]}]}
+
+                with patch.object(anti, "request_json", side_effect=fake_request_json):
+                    anti.post_response(base_url="http://127.0.0.1:51122/v1", model=requested,
+                        prompt="x", max_output_tokens=10, timeout=5, token_env=anti.DEFAULT_TOKEN_ENV,
+                        model_ids=AliasFirstSet({requested, alias}))
+
+                self.assertEqual(sent[0]["model"], requested)
+                self.assertNotIn("reasoning", sent[0])
+
     def test_extract_validation_url_from_403_body(self):
         body = 'HTTP 403: {"error": {"reason": "VALIDATION_REQUIRED", "metadata": {"validation_url": "https://accounts.google.com/signin/continue?sarp=1&plt=abc"}}}'
         url = anti.extract_validation_url(body)

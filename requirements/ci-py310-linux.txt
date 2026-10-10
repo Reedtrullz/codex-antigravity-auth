@@ -99,7 +99,7 @@ pip-audit==2.10.1
     # via codex-antigravity-auth (pyproject.toml)
 pip-requirements-parser==32.0.1
     # via pip-audit
-platformdirs==4.12.2
+platformdirs==4.12.3
     # via pip-audit
 pluggy==1.6.0
     # via pytest
@@ -165,5 +165,5 @@ urllib3==2.8.0
     # via requests
 uvicorn==0.54.0
     # via codex-antigravity-auth (pyproject.toml)
-zipp==4.1.0
+zipp==4.1.1
     # via importlib-metadata

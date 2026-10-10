@@ -77,7 +77,7 @@ def read_json(path):
 
 
 def corpus():
-    raw=read_json(Path(__file__).with_name('review_corpus.json'))
+    raw=read_json(Path(__file__).resolve().with_name('review_corpus.json'))
     object_fields(raw,('schemaVersion','id','labelBasis','holdoutVisibility','cases'))
     require(type(raw['schemaVersion']) is int and raw['schemaVersion']==1)
     identifier(raw['id']);require(isinstance(raw['cases'],list) and 1<=len(raw['cases'])<=32)
