@@ -343,7 +343,9 @@ class SetupJournal:
             self.persist()
             if isinstance(exc, KeyboardInterrupt) or public_outcome:
                 raise
-            raise SetupError(f"Setup stage {stage_id} failed; inspect receipt {self.id}. No automatic rollback was attempted") from None
+            if isinstance(exc, (SystemExit, RuntimeError)):
+                raise SetupError(f"Setup stage {stage_id} failed; inspect receipt {self.id}. No automatic rollback was attempted") from None
+            raise
 
     def finish(self, *, ok):
         self.data["state"] = "completed" if ok else "failed"

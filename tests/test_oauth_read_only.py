@@ -215,7 +215,7 @@ def test_explicit_setup_and_login_still_repair_permissions(monkeypatch, isolated
     monkeypatch.setattr(cli, "authorize_antigravity", capture_credentials)
     monkeypatch.setattr(cli, "run_login", lambda args: cli.run_local_oauth_flow())
     monkeypatch.setattr(sys, "argv", ["codex-antigravity", *command])
-    with pytest.raises(SystemExit if command[0] == "setup" else StopBeforeNetwork):
+    with pytest.raises(StopBeforeNetwork):
         cli.main()
     assert observed == [("env-id", FILE_SECRET)]
     assert credentials.read_bytes() == original
@@ -273,6 +273,6 @@ def test_readiness_warns_about_unsafe_credentials_even_without_codex_config(
     assert "Unsafe OAuth credential permissions" in output
     assert "0600" in output and "setup --write" in output
     if json_output:
-        warning = next(check for check in json.loads(output)["data"]["checks"] if check["name"] == "google_oauth_credentials_file")
+        warning = next(check for check in json.loads(output)["checks"] if check["name"] == "google_oauth_credentials_file")
         assert warning["status"] == "warn"
     assert tree_snapshot(isolated_home) == before

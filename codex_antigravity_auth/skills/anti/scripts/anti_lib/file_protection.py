@@ -161,8 +161,6 @@ def file_lock(path: Path, *, posix_backend=fcntl, windows_backend=msvcrt):
             if posix_backend is not None:
                 posix_backend.flock(descriptor, posix_backend.LOCK_EX)
             else:
-                if os.fstat(descriptor).st_size == 0:
-                    os.write(descriptor, b"\0")
                 os.lseek(descriptor, 0, os.SEEK_SET)
                 windows_backend.locking(descriptor, windows_backend.LK_LOCK, 1)
             acquired = True

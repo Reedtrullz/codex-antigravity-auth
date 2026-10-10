@@ -1645,7 +1645,12 @@ def _main():
     from .setup_profiles import add_parsers
     add_parsers(subparsers)
     args = parser.parse_args()
-    if getattr(args, "json", False) or args.command == "support-bundle":
+    if args.command == "support-bundle" or (
+        getattr(args, "json", False)
+        and (args.command == "status"
+             or (args.command == "accounts" and getattr(args, "accounts_action", None) == "list")
+             or (args.command == "provider" and getattr(args, "provider_command", None) in {"list", "presets"}))
+    ):
         from .cli_json import run as run_json
         raise SystemExit(run_json(args))
     if args.command == "start":

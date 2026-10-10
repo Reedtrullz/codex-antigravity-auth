@@ -12,6 +12,7 @@ import pytest
 
 from codex_antigravity_auth import secure_store
 from codex_antigravity_auth.skills.anti.scripts.anti_lib import file_protection as protection
+from standalone import without_installed_packages
 
 
 @pytest.mark.parametrize("kind", ["symlink", "hardlink", "directory", "fifo"])
@@ -113,7 +114,7 @@ def test_windows_acl_failure_refuses_before_secret_write(tmp_path, monkeypatch):
     fake.protect_descriptor.assert_called_once()
 
 
-def test_windows_backend_sentinel_write_only_after_descriptor_protection(tmp_path, monkeypatch):
+def test_windows_backend_locks_after_descriptor_protection_without_initialization_write(tmp_path, monkeypatch):
     path = tmp_path / "state.json"
     events = []
     original_protect = protection.protect_descriptor
@@ -122,10 +123,13 @@ def test_windows_backend_sentinel_write_only_after_descriptor_protection(tmp_pat
         original_protect(fd, **kwargs)
         events.append("protected")
     monkeypatch.setattr(protection, "protect_descriptor", protect)
+    def forbidden_write(*args):
+        raise AssertionError("lock acquisition must not initialize the file")
+    monkeypatch.setattr(protection.os, "write", forbidden_write)
     backend = Mock(LK_LOCK=1, LK_UNLCK=2)
     def lock(fd, operation, count):
         assert events and events[0] == "protected"
-        assert os.fstat(fd).st_size == 1 and count == 1
+        assert os.fstat(fd).st_size == 0 and count == 1
         events.append(operation)
     backend.locking.side_effect = lock
     with protection.file_lock(path, posix_backend=None, windows_backend=backend):
@@ -147,7 +151,7 @@ with file_lock(Path(sys.argv[2])):
     child = None
     try:
         with secure_store.file_lock(target):
-            child = subprocess.Popen([sys.executable, "-S", "-c", code, str(scripts), str(target), str(started), str(entered)],
+            child = subprocess.Popen([sys.executable, "-c", without_installed_packages(code), str(scripts), str(target), str(started), str(entered)], cwd=str(scripts),
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             deadline = time.monotonic() + 3
             while not started.exists() and child.poll() is None and time.monotonic() < deadline:
