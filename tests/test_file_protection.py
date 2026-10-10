@@ -5,7 +5,7 @@ import stat
 import subprocess
 import sys
 import time
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 from typing import Any
 
 import pytest
@@ -262,15 +262,20 @@ def test_native_windows_file_dacl_is_current_user_only_and_protected(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows child ACL inspection")
-def test_native_windows_directory_protection_preserves_unrelated_child_acl(tmp_path):
+def test_native_windows_directory_protection_shields_existing_child_acl(tmp_path):
     directory = tmp_path / "parent"
     directory.mkdir()
     child = directory / "unrelated-fixture"
     child.write_bytes(b"synthetic unrelated content")
-    before = _native_acl_snapshot(child)
     protection.ensure_private_directory(directory, enforce_existing=True)
-    assert _native_acl_snapshot(child) == before
+    child_acl = _native_acl_snapshot(child)
     assert child.read_bytes() == b"synthetic unrelated content"
+    assert child_acl["Protected"] and child_acl["Owner"] == child_acl["Current"]
+    assert len(child_acl["Entries"]) == 1
+    entry = child_acl["Entries"][0]
+    assert entry["Sid"] == child_acl["Current"] and entry["Rights"] == 0x1F01FF
+    assert entry["Allow"] and not entry["Inherited"]
+    assert _native_acl_snapshot(directory)["Protected"]
 
 
 @pytest.mark.parametrize("failure", ["foreign_owner", "null_dacl", "verification"])
@@ -309,8 +314,9 @@ def test_windows_acl_control_refuses_unsafe_owner_null_acl_or_unverified_result(
     assert security.kernel.LocalFree.call_count == (1 if failure == "foreign_owner" else 2)
 
 
-def test_windows_directory_protection_uses_exclusive_handle_to_prevent_propagation():
+def test_windows_directory_protection_uses_exclusive_handle_for_the_directory(monkeypatch):
     from codex_antigravity_auth.skills.anti.scripts.anti_lib.windows_file_security import WindowsFileSecurity
+    monkeypatch.setattr(os, "scandir", lambda _path: MagicMock(__enter__=MagicMock(return_value=iter([])), __exit__=Mock(return_value=False)))
     security = WindowsFileSecurity.__new__(WindowsFileSecurity)
     security.kernel = Mock()
     security.kernel.CreateFileW.return_value = 123
@@ -327,6 +333,7 @@ def test_windows_directory_protection_retries_transient_sharing_conflict(monkeyp
     security.kernel = Mock()
     busy = OSError("synthetic sharing conflict")
     busy.winerror = 32
+    monkeypatch.setattr(os, "scandir", lambda _path: MagicMock(__enter__=MagicMock(return_value=iter([])), __exit__=Mock(return_value=False)))
     security._handle = Mock(side_effect=[busy, 123])
     security._protect = Mock()
     monkeypatch.setattr(windows.time, "sleep", Mock())
@@ -334,6 +341,29 @@ def test_windows_directory_protection_retries_transient_sharing_conflict(monkeyp
     assert security.kernel.CreateFileW.call_count == 2
     security._protect.assert_called_once_with(123, directory=True)
     security.kernel.CloseHandle.assert_called_once_with(123)
+
+
+def test_windows_directory_protection_shields_existing_file_children(tmp_path, monkeypatch):
+    from unittest.mock import call
+    from codex_antigravity_auth.skills.anti.scripts.anti_lib.windows_file_security import WindowsFileSecurity
+    security = WindowsFileSecurity.__new__(WindowsFileSecurity)
+    security.kernel = Mock()
+    security.kernel.CreateFileW.return_value = 123
+    security._handle = lambda result: result
+    security._protect = Mock()
+    file_entry = Mock(path=str(tmp_path / "state.json"))
+    file_entry.stat = lambda follow_symlinks=False: Mock(st_file_attributes=0x20)
+    directory_entry = Mock(path=str(tmp_path / "nested"))
+    directory_entry.stat = lambda follow_symlinks=False: Mock(st_file_attributes=0x10)
+    reparse_entry = Mock(path=str(tmp_path / "link"))
+    reparse_entry.stat = lambda follow_symlinks=False: Mock(st_file_attributes=0x400)
+    scans = [[file_entry, directory_entry, reparse_entry], []]
+    monkeypatch.setattr(os, "scandir", lambda _path: MagicMock(__enter__=MagicMock(return_value=iter(scans.pop(0))), __exit__=Mock(return_value=False)))
+    security.protect_directory(tmp_path)
+    assert security.kernel.CreateFileW.call_args_list[0].args == (str(tmp_path / "state.json"), 0xE0080, 7, None, 3, 0x02200000, None)
+    assert security._protect.call_args_list == [call(123), call(123, directory=True), call(123, directory=True)]
+    assert security.kernel.CreateFileW.call_count == 3
+    assert security.kernel.CloseHandle.call_count == 3
 
 
 def test_windows_native_identity_mismatch_refuses_before_acl_changes(monkeypatch):
