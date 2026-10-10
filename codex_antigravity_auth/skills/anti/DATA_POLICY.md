@@ -87,3 +87,20 @@ A decision records preflight authorization, not successful provider execution or
 independent verification of the gateway. Retries of an unchanged immutable payload
 reuse its authorization; ordinary generation metadata records attempt counts.
 Saved-file shape/checksum validation does not make these records signed evidence.
+
+Image submissions use audit schema version 2, adding `unscannedMediaCount` to
+image-bearing decision rows. The legacy `promptSha256` field then identifies the
+assembled text-and-image request: SHA-256 of compact sorted JSON containing
+`version: 1`, `promptSha256` (the UTF-8 text digest), and ordered `images`
+(index, MIME, byte count and SHA-256). Text-only audit version 1 and its digest
+remain unchanged. Policy configuration is still version 1. This binds
+acknowledgements to the captured images without scanning pixels or retaining
+paths/base64. See [attachments](ATTACHMENTS.md) for limits and evaluation status.
+
+Consult WAV probes use a version2 content identity containing `promptSha256` and
+ordered typed `audio` descriptors (ordinal index, MIME, bytes, duration, sample
+rate, channels, sample width, frames, SHA-256). The policy file remains version1
+and the content-free decision audit remains version2 with `unscannedMediaCount`.
+Existing text/image digests are unchanged. Audio content is not scanned; explicit
+probe intent never overrides path, route, stage or text-secret decisions. See
+[WAV input](WAV_AUDIO.md) for the exact experimental contract.

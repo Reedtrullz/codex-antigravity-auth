@@ -112,7 +112,11 @@ def control_metadata(source: dict[str, Any]) -> dict[str, Any]:
                 result[key] = None
         return result
 
+    from .media import projection as media_projection
     result = {}
+    media = media_projection(source.get('media_coverage'))
+    if media is not None:
+        result['media_coverage'] = media
     runtime = source.get('run_control')
     if isinstance(runtime, dict):
         projected = numbers(runtime, ('attempts_started','permits_acquired','permits_released','deferred_calls','events_omitted'))

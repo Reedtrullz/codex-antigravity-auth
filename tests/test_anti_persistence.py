@@ -199,6 +199,44 @@ except anti.AntiError:
     assert codes.count(3) == 3
 
 
+@pytest.mark.parametrize("implementation", ["packaged", "standalone"])
+def test_windows_lock_acquires_empty_range_without_initialization_write(monkeypatch, tmp_path, implementation):
+    if implementation == "packaged":
+        from codex_antigravity_auth import secure_store as locking_module
+    else:
+        import builtins
+        original_import = builtins.__import__
+        def standalone_import(name, *args, **kwargs):
+            if name == "codex_antigravity_auth.secure_store":
+                raise ImportError("standalone fixture")
+            return original_import(name, *args, **kwargs)
+        spec = importlib.util.spec_from_file_location("anti_windows_lock_fixture", SCRIPT.parent / "anti_lib/persistence.py")
+        locking_module = importlib.util.module_from_spec(spec)
+        with monkeypatch.context() as imports:
+            imports.setattr(builtins, "__import__", standalone_import)
+            spec.loader.exec_module(locking_module)
+    calls = []
+    class WindowsLock:
+        LK_LOCK = 1
+        LK_UNLCK = 2
+        @staticmethod
+        def locking(descriptor, mode, count):
+            assert os.lseek(descriptor, 0, os.SEEK_CUR) == 0
+            assert os.fstat(descriptor).st_size == 0
+            assert count == 1
+            calls.append(mode)
+    def competing_locked_byte(*args):
+        raise PermissionError("another writer owns the initialization byte")
+    monkeypatch.setattr(locking_module, "fcntl", None)
+    monkeypatch.setattr(locking_module, "msvcrt", WindowsLock)
+    monkeypatch.setattr(locking_module.os, "write", competing_locked_byte)
+    target = tmp_path / "history.json"
+    with locking_module.file_lock(target):
+        assert calls == [WindowsLock.LK_LOCK]
+    assert calls == [WindowsLock.LK_LOCK, WindowsLock.LK_UNLCK]
+    assert target.with_name(".history.json.lock").read_bytes() == b""
+
+
 def test_reflection_cli_reports_corruption_without_traceback_or_replacement(stores, capsys):
     anti, reflections, _, root = stores
     path = reflections._reflection_path(root)

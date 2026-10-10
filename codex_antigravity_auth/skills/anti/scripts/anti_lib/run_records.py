@@ -21,6 +21,7 @@ from .cleanup import RUN_ID_RE, assert_not_deleted
 from .context import coverage_summary
 from .persistence import atomic_write_json, fsync_directory
 from .redaction import redact_sensitive_text, sanitize_json
+from .media import projection as media_projection
 from .retention import lifecycle_metadata, summary_projection, summary_retention, summary_structure
 
 def utc_timestamp() -> str:
@@ -296,6 +297,9 @@ def publish_unlocked(
             },
             "resultPath": str(artifact_path),
     }
+    media_receipt = media_projection(artifact_metadata.get('media_coverage'), hashes=True)
+    if media_receipt is not None:
+        artifact['media_coverage'] = media_receipt
     if output_mode != "summary":
         artifact = sanitize_json(artifact)
         if not isinstance(artifact, dict):
@@ -331,6 +335,8 @@ def publish_unlocked(
         artifact["verification"] = {**artifact.get("verification", {}), **verification_structure}
         artifact["artifacts"] = pointers
         artifact["resultPath"] = str(artifact_path)
+        if media_receipt is not None:
+            artifact['media_coverage'] = media_receipt
         artifact["retention"] = summary_retention()
         artifact = sanitize_json(artifact)
         # Reserve lifecycle/count fields before metadata consumes the preview budget.
@@ -347,6 +353,8 @@ def publish_unlocked(
             "prompt_chars", "output_chars", "omittedFileCount", "omittedChunkCount",
         ))
         essential_metadata = lifecycle_metadata(ordered.get('metadata'))
+        if media_receipt is not None:
+            essential_metadata['media_coverage'] = media_receipt
         record = summary_projection({key: value for key, value in ordered.items() if key not in structure})
         preview_metadata = record.get('metadata')
         record['metadata'] = {**(preview_metadata if isinstance(preview_metadata,dict) else {}), **essential_metadata}

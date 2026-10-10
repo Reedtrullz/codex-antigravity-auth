@@ -1,6 +1,7 @@
 """Version 1 operational result envelope and single-document stdout boundary."""
 from __future__ import annotations
 
+import argparse
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json

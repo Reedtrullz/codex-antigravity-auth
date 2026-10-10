@@ -29,7 +29,6 @@ class WindowsFileSecurity:
         self._bind(self.advapi, "ConvertSidToStringSidW", [pointer, ctypes.POINTER(w.LPWSTR)], w.BOOL)
         self._bind(self.advapi, "GetSecurityInfo", [w.HANDLE, w.DWORD, w.DWORD, pp, pp, pp, pp, pp], w.DWORD)
         self._bind(self.advapi, "SetSecurityInfo", [w.HANDLE, w.DWORD, w.DWORD, pointer, pointer, pointer, pointer], w.DWORD)
-        self._bind(self.advapi, "SetFileSecurityW", [w.LPCWSTR, w.DWORD, pointer], w.BOOL)
         self._bind(self.advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorW", [w.LPCWSTR, w.DWORD, pp, ctypes.POINTER(w.DWORD)], w.BOOL)
         self._bind(self.advapi, "GetSecurityDescriptorDacl", [pointer, ctypes.POINTER(w.BOOL), pp, ctypes.POINTER(w.BOOL)], w.BOOL)
         self._bind(self.advapi, "GetSecurityDescriptorOwner", [pointer, pp, ctypes.POINTER(w.BOOL)], w.BOOL)
@@ -120,16 +119,17 @@ class WindowsFileSecurity:
                 raise OSError("Private DACL must contain exactly one owner ACE")
             ace = ctypes.c_void_p()
             self._ok(self.advapi.GetAce(dacl, 0, ctypes.byref(ace)))
+            if ace.value is None:
+                raise ctypes.WinError(ctypes.get_last_error())
             header = (ctypes.c_ubyte * 4).from_address(ace.value)
             mask = w.DWORD.from_address(ace.value + 4).value
-            expected_flags = 0x03 if directory else 0  # OI|CI for directories; no file inheritance.
-            if (header[0] != 0 or header[1] != expected_flags or mask != 0x1F01FF
+            if (header[0] != 0 or header[1] != 0 or mask != 0x1F01FF
                     or self._sid_text(ctypes.c_void_p(ace.value + 8)) != self.user_sid):
                 raise OSError("Private DACL grants unexpected access")
         finally:
             self.kernel.LocalFree(descriptor)
 
-    def _protect(self, handle, *, directory=False, path=None):
+    def _protect(self, handle, *, directory=False):
         self._check_object(handle, directory)
         owner, _old_dacl, old_descriptor = self._descriptor(handle)
         try:
@@ -138,10 +138,7 @@ class WindowsFileSecurity:
         finally:
             self.kernel.LocalFree(old_descriptor)
         descriptor = ctypes.c_void_p()
-        # Directories grant the owner access inherited by newly created children.
-        # SetFileSecurityW is intentionally path-based: unlike SetSecurityInfo,
-        # it does not propagate a changed directory DACL to existing children.
-        flags = "OICI" if directory else ""
+        flags = ""  # Protect children individually; do not propagate ACL edits.
         sddl = f"O:{self.user_sid}D:P(A;{flags};FA;;;{self.user_sid})"
         self._ok(self.advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None))
         try:
@@ -154,14 +151,9 @@ class WindowsFileSecurity:
             self._ok(self.advapi.GetSecurityDescriptorOwner(descriptor, ctypes.byref(new_owner), ctypes.byref(defaulted)))
             if not new_owner or self._sid_text(new_owner) != self.user_sid:
                 raise OSError("Cannot establish the current user as storage owner")
-            if directory:
-                if path is None:
-                    raise ValueError("A directory path is required for non-propagating ACL protection")
-                self._ok(self.advapi.SetFileSecurityW(str(path), 0x80000005, descriptor))
-            else:
-                code = self.advapi.SetSecurityInfo(handle, 1, 0x80000005, new_owner, None, dacl, None)
-                if code:
-                    raise ctypes.WinError(code)
+            code = self.advapi.SetSecurityInfo(handle, 1, 0x80000005, new_owner, None, dacl, None)
+            if code:
+                raise ctypes.WinError(code)
         finally:
             self.kernel.LocalFree(descriptor)
         self.verify(handle, directory=directory)
@@ -202,21 +194,38 @@ class WindowsFileSecurity:
         finally:
             self.kernel.CloseHandle(handle)
 
+    def _protect_existing_children(self, path):
+        import os
+        with os.scandir(str(path)) as entries:
+            for entry in entries:
+                attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+                if attributes & 0x400:
+                    continue
+                if attributes & 0x10:
+                    self.protect_directory(entry.path)
+                    continue
+                handle = self._handle(self.kernel.CreateFileW(entry.path, 0xE0080, 7, None, 3, 0x02200000, None))
+                try:
+                    self._protect(handle)
+                finally:
+                    self.kernel.CloseHandle(handle)
+
     def protect_directory(self, path):
-        # Pin the target identity and deny delete sharing while allowing the
-        # current-directory and ordinary read/write handles. SetFileSecurityW
-        # updates this same path without converting existing child descriptors.
+        # An exclusive directory handle prevents SetSecurityInfo propagation to
+        # existing children (documented by Microsoft). Children are protected
+        # individually before their own writes; unrelated ACLs stay untouched.
+        self._protect_existing_children(path)
         deadline = time.monotonic() + 2.0
         while True:
             try:
-                handle = self._handle(self.kernel.CreateFileW(str(path), 0x000E0080, 0x3, None, 3, 0x02200000, None))
+                handle = self._handle(self.kernel.CreateFileW(str(path), 0xE0080, 0, None, 3, 0x02200000, None))
                 break
             except OSError as exc:
                 if getattr(exc, "winerror", None) != 32 or time.monotonic() >= deadline:
                     raise
                 time.sleep(0.01)
         try:
-            self._protect(handle, directory=True, path=path)
+            self._protect(handle, directory=True)
         finally:
             self.kernel.CloseHandle(handle)
 

@@ -47,6 +47,7 @@ def invoke(monkeypatch, capsys, argv):
     (["service", "status", "--json"], "run_service_command"),
     (["service", "install", "--json"], "run_service_command"),
     (["service", "uninstall", "--json"], "run_service_command"),
+    (["status", "--json"], "run_gateway_status"),
 ])
 @pytest.mark.parametrize("condition,expected,exit_code", [
     ("ready", "ready", 0), ("warn", "degraded", 0), ("fail", "failed", 1),
@@ -123,6 +124,9 @@ def test_model_json_has_same_catalog_in_versioned_data(monkeypatch, capsys, stat
     monkeypatch.setattr(cli, "load_model_overlays", lambda **kw: [])
     result, _ = invoke(monkeypatch, capsys, ["models", "list", "--json"])
     assert result["data"] == {"models": [{"id": "fixture-model"}], "overlays": []}
+    monkeypatch.setattr(sys, "argv", ["codex-antigravity", "models", "list", "--json"])
+    cli.main()
+    assert json.loads(capsys.readouterr().out) == {"models": [{"id": "fixture-model"}], "overlays": []}
 
 
 def test_support_preview_is_offline_no_auth_reads_and_no_namespace_creation(monkeypatch, capsys, state):

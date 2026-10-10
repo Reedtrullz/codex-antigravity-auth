@@ -114,6 +114,10 @@ def generation_projection(value):
         if isinstance(value.get(key),str) and re.fullmatch(r'[A-Za-z0-9_-]{1,64}',value[key]):result[key] = value[key]
     if isinstance(value.get('gateway_routing_identity'),str) and SHA.fullmatch(value['gateway_routing_identity']):
         result['gateway_routing_identity'] = value['gateway_routing_identity']
+    if isinstance(value.get('request_content_sha256'), str) and SHA.fullmatch(value['request_content_sha256']):
+        result['request_content_sha256'] = value['request_content_sha256']
+    if type(value.get('image_count')) is int and 1 <= value['image_count'] <= 4:
+        result['image_count'] = value['image_count']
     usage = value.get('usage')
     if isinstance(usage,dict):
         result['usage'] = {key:item for key,item in usage.items() if key in {'input_tokens','output_tokens','total_tokens'}

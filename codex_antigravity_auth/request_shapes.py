@@ -128,6 +128,69 @@ def _arguments(value, path):
     _bounded(value, path)
 
 
+def _google_text_format(text):
+    """Reject output constraints we cannot preserve; never sanitize them away."""
+    if text is None:
+        return
+    if not isinstance(text, dict):
+        reject('text', 'expected an object')
+    value = text.get('format')
+    if value is None:
+        return
+    path = 'text.format'
+    if not isinstance(value, dict):
+        reject(path, 'expected a format object')
+    kind = value.get('type')
+    if kind not in ('text', 'json_object', 'json_schema'):
+        reject(path + '.type', 'unsupported output format')
+    allowed = {'type', 'name', 'description', 'strict', 'schema'} if kind == 'json_schema' else {'type'}
+    if set(value) - allowed:
+        reject(path, 'unsupported format fields')
+    if kind != 'json_schema':
+        return
+    for key in ('name', 'description'):
+        if key in value and not isinstance(value[key], str):
+            reject(path + '.' + key, 'expected text')
+    if 'strict' in value and value['strict'] is not False:
+        reject(path + '.strict', 'translation_loss: Google strict-schema guarantees are not implemented; use false')
+    schema = value.get('schema')
+    if not isinstance(schema, dict):
+        reject(path + '.schema', 'expected a schema object')
+    _schema(schema, path + '.schema')
+    # A conservative subset of the native JSON schema contract. In particular,
+    # oneOf exclusivity and references are not lowered to weaker constructs.
+    keywords = {'type', 'properties', 'required', 'additionalProperties', 'items',
+                'enum', 'minimum', 'maximum', 'minItems', 'maxItems', 'anyOf',
+                'description', 'title'}
+    pending = [(schema, path + '.schema')]
+    while pending:
+        node, where = pending.pop()
+        if isinstance(node, bool):
+            if where.endswith('.additionalProperties'):
+                continue
+            reject(where, 'boolean schemas are not supported by this output bridge')
+        for key in node:
+            if key not in keywords:
+                reject(where + '.' + key, 'unsupported native output schema constraint')
+        for key in ('minimum', 'maximum'):
+            if key in node and (isinstance(node[key], bool) or not isinstance(node[key], (int, float))):
+                reject(where + '.' + key, 'expected a finite number')
+        for key in ('minItems', 'maxItems'):
+            if key in node and (type(node[key]) is not int or node[key] < 0):
+                reject(where + '.' + key, 'expected a nonnegative integer')
+        for key in ('description', 'title'):
+            if key in node and not isinstance(node[key], str):
+                reject(where + '.' + key, 'expected text')
+        if 'enum' in node and any(isinstance(v, (dict, list, bool)) or v is None for v in node['enum']):
+            reject(where + '.enum', 'native output enums support strings and numbers only')
+        pending.extend((child, where + '.properties[' + json.dumps(name) + ']')
+                       for name, child in node.get('properties', {}).items())
+        for key in ('items', 'additionalProperties'):
+            if key in node:
+                pending.append((node[key], where + '.' + key))
+        pending.extend((child, where + '.anyOf') for child in node.get('anyOf', []))
+
+
 def validate_request_shapes(request, *, route=None):
     """route=None/native validates common shapes without banning native unions.
 
@@ -137,6 +200,8 @@ def validate_request_shapes(request, *, route=None):
     """
     translated = route in {'google', 'byok'}
     _bounded(request, 'request')
+    if route == 'google':
+        _google_text_format(request.get('text'))
     tools = request.get('tools', [])
     if not isinstance(tools, list):
         reject('tools', 'expected an array of tool definitions')
@@ -277,6 +342,9 @@ def validate_request_shapes(request, *, route=None):
                 if role != 'user':
                     reject(where, 'tool results must appear in a user message')
                 result(part, where, nested=True)
+            elif kind == 'antigravity_audio':
+                if route not in {None,'google'} or role != 'user':
+                    reject(where + '.type','experimental WAV input requires a Google user message')
             elif kind in {'image','input_image'}:
                 pass  # Existing input_fidelity owns media and role capabilities.
             elif translated:

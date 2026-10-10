@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
 from .accounts import AccountManager, AccountRefreshInProgress, classify_backend_status, is_validation_required_error
+from .account_binding import parse_account_binding_header, validate_binding_route
 from .account_state import scoped_cooldown_expiry
 from .byok import (
     PROVIDER_AUTH_MODE_API_KEY,
@@ -201,6 +202,7 @@ REQUEST_BOUNDARY_CAPABILITIES = ProviderCapabilities(
     streaming_usage=True,
     input_modalities=frozenset({"text", "image"}),
     opaque_reasoning_replay=True,
+    pcm_wav_probe=True,  # Common body validation only; route gate precedes auth.
 )
 PACKAGE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}$")
 
@@ -290,18 +292,19 @@ def request_uses_loopback_host(request: Request, client_host: str | None = None)
 
 
 def mutating_json_request_guard(request: Request) -> JSONResponse | None:
-    if request.method.upper() not in {"POST", "PUT", "PATCH"}:
-        return None
-    if request.url.path not in MUTATING_JSON_PATHS:
+    mutating_json = request.method.upper() in {"POST", "PUT", "PATCH"} and request.url.path in MUTATING_JSON_PATHS
+    sensitive_read = request.method.upper() == "GET" and request.url.path == "/v1/account-bindings"
+    if not mutating_json and not sensitive_read:
         return None
 
-    content_type = request.headers.get("content-type", "")
-    media_type = content_type.split(";", 1)[0].strip().lower()
-    if media_type != "application/json":
-        return JSONResponse(
-            status_code=415,
-            content={"detail": "Mutating gateway requests must use Content-Type: application/json."},
-        )
+    if mutating_json:
+        content_type = request.headers.get("content-type", "")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type != "application/json":
+            return JSONResponse(
+                status_code=415,
+                content={"detail": "Mutating gateway requests must use Content-Type: application/json."},
+            )
 
     if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
         return JSONResponse(status_code=403, content={"detail": "Cross-site browser requests are not allowed."})
@@ -366,6 +369,10 @@ async def select_active_account_for_request(model: str) -> dict | None:
 
 async def acquire_active_account_for_request(model: str) -> dict | None:
     return await run_in_threadpool(account_manager.acquire_account, model)
+
+
+async def acquire_bound_account_for_request(model: str, binding) -> dict | None:
+    return await run_in_threadpool(account_manager.acquire_bound_account, model, binding)
 
 
 async def release_account_for_request(email: str | None) -> None:
@@ -1013,6 +1020,12 @@ async def health_runtime(request: Request):
         raise HTTPException(status_code=403, detail="Runtime checks are loopback-only.")
     from .service_manifest import runtime_identity
     return {"ok": True, "service": runtime_identity()}
+@app.get("/v1/account-bindings")
+async def account_bindings(model: str):
+    try:
+        return await run_in_threadpool(account_manager.binding_inventory, model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=safe_error_detail(exc)) from exc
 
 
 @app.get("/health")
@@ -1515,6 +1528,11 @@ async def _create_response(request: Request, budget: RequestBudget):
     request_started = budget.started
     request_run_id: str | None = None
     upstream_observation: dict = {}
+    audio_request = False
+
+    def safe_request_error(value):
+        return ('Audio probe failed; provider payload diagnostics withheld and listening remains unverified'
+                if audio_request else safe_error_detail(value))
 
     async def run_bounded_operation(factory, *, release_late_result=False):
         return await (budget.acquire(factory) if release_late_result else budget.run(factory))
@@ -1526,7 +1544,7 @@ async def _create_response(request: Request, budget: RequestBudget):
         await write_route_lifecycle(
             status, request_id=request_id, request_run_id=request_run_id, request_started=request_started,
             upstream_observation=upstream_observation, budget=budget, writer=write_request_record,
-            sanitize_error=safe_error_detail, clock=time.monotonic, **fields)
+            sanitize_error=safe_request_error, clock=time.monotonic, **fields)
 
     async def best_effort_diagnostic(awaitable, *, deadline: float | None = None) -> None:
         timeout = 0.05
@@ -1571,6 +1589,8 @@ async def _create_response(request: Request, budget: RequestBudget):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     try:
         codex_req = await budget.sync(validate_response_request_body, codex_req)
+        from .skills.anti.scripts.anti_lib.wav_audio import parts as audio_parts
+        audio_request = bool(audio_parts(codex_req))
         request_metadata = codex_req.pop("metadata", None)
         if isinstance(request_metadata, dict) and isinstance(request_metadata.get("run_id"), str):
             request_run_id = request_metadata["run_id"]
@@ -1608,6 +1628,26 @@ async def _create_response(request: Request, budget: RequestBudget):
     unified_enabled = is_unified_mode_enabled()
     unified_route = await budget.sync(classify_route, model, unified_enabled=unified_enabled)
     budget.context.update(model=model, route="openai" if unified_route.startswith("openai") else "google" if unified_route == "antigravity" else unified_route, stream=stream)
+    account_binding = None
+    binding_header = request.headers.get("X-Anti-Account-Binding")
+    if binding_header:
+        try:
+            account_binding = parse_account_binding_header(binding_header)
+        except ValueError as exc:
+            await log_request("failed", model=model, route=unified_route, stream=stream, http_status=400,
+                              error_class="invalid_account_binding", error="Invalid account binding header")
+            raise HTTPException(status_code=400, detail="Invalid account binding header") from exc
+        try:
+            binding_family = await budget.sync(native_model_family, model) if unified_route == "antigravity" else None
+            validate_binding_route(unified_route, binding_family)
+        except ValueError as exc:
+            await log_request("failed", model=model, route=unified_route, stream=stream, http_status=400,
+                              error_class="unsupported_binding_route", error="Account binding requires a native Antigravity Gemini route")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if audio_request and (unified_route!='antigravity' or not native_model_capabilities(model).pcm_wav_probe):
+        await log_request('failed',model=model,route=unified_route,stream=stream,http_status=400,
+                          error_class='unsupported_audio_route',attempt_count=0)
+        raise HTTPException(status_code=400,detail='Experimental WAV input is unsupported on this route; no audio was submitted')
     if budget.local_only and unified_route != 'byok':
         await log_request('failed', model=model, route=unified_route, stream=stream, http_status=403,
                           error_class='local_only_route_forbidden', attempt_count=0)
@@ -1703,12 +1743,12 @@ async def _create_response(request: Request, budget: RequestBudget):
                     )
                     message = (
                         f"OpenAI authentication failed. {hint} "
-                        f"{safe_error_detail(exc.body)[:300]}"
+                        f"{safe_request_error(exc.body)[:300]}"
                     )
                 else:
                     message = (
                         f"OpenAI upstream error HTTP {exc.status_code}. "
-                        f"{safe_error_detail(exc.body)[:300]}"
+                        f"{safe_request_error(exc.body)[:300]}"
                     )
                 await log_request(
                     "failed",
@@ -1731,7 +1771,7 @@ async def _create_response(request: Request, budget: RequestBudget):
             except (ResourceLimitError, RequestDeadlineExceeded, ClientDisconnect):
                 raise
             except Exception as exc:
-                message = f"OpenAI upstream is unreachable: {safe_error_detail(exc)}"
+                message = f"OpenAI upstream is unreachable: {safe_request_error(exc)}"
                 await log_request(
                     "failed",
                     model=model,
@@ -1894,7 +1934,7 @@ async def _create_response(request: Request, budget: RequestBudget):
         try:
             validate_supported_provider_kind(provider)
         except ValueError as exc:
-            detail = safe_error_detail(exc)
+            detail = safe_request_error(exc)
             await log_request(
                 "failed",
                 model=model,
@@ -1920,7 +1960,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                 stream=stream,
                 http_status=400,
                 error_class="unsupported_route_capability",
-                error=safe_error_detail(exc),
+                error=safe_request_error(exc),
             )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         await check_context(providers)
@@ -2053,13 +2093,21 @@ async def _create_response(request: Request, budget: RequestBudget):
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await check_context()
-    schedule_refresh_accounts_ahead()
+    if account_binding is None:
+        schedule_refresh_accounts_ahead()
 
     # 1. Select account automatically from pool
     try:
         account = await run_bounded_operation(
-            lambda: acquire_active_account_for_request(model), release_late_result=True,
+            (lambda: acquire_bound_account_for_request(model, account_binding))
+            if account_binding is not None else
+            (lambda: acquire_active_account_for_request(model)),
+            release_late_result=True,
         )
+    except ValueError as exc:
+        await log_request("failed", model=model, route="google", family=family, stream=stream,
+                          http_status=400, error_class="binding_refused", error="Account binding refused")
+        raise HTTPException(status_code=400, detail=safe_error_detail(exc)) from exc
     except ClientDisconnect:
         await best_effort_diagnostic(log_request(
             "cancelled",
@@ -2175,7 +2223,9 @@ async def _create_response(request: Request, budget: RequestBudget):
         cooldown_category: str | None = None
         try:
             res = await request_backend_with_boundary(response_account)
-            if not res:
+            # Audio is an explicitly bounded upload. Do not silently submit the
+            # same captured recording again through another account.
+            if not res and not audio_request and account_binding is None:
                 new_account = await run_bounded_operation(
                     lambda: acquire_active_account_for_request(model),
                     release_late_result=True,
@@ -2196,6 +2246,9 @@ async def _create_response(request: Request, budget: RequestBudget):
                     res = await request_backend_with_boundary(response_account)
 
             if not res:
+                connection_failure = "Failed to communicate with Antigravity backend" + (
+                    "" if audio_request else " after rotation"
+                )
                 await run_nonstream_diagnostic(
                     record_attempt_outcome,
                     response_account.get("email", ""),
@@ -2213,13 +2266,13 @@ async def _create_response(request: Request, budget: RequestBudget):
                     http_status=502,
                     rotation_attempted=rotation_attempted,
                     error_class="connection_error",
-                    error="Failed to communicate with Antigravity backend after rotation",
+                    error=connection_failure,
                 )
                 raise HTTPException(
                     status_code=502,
                     detail=google_failure_detail(
                         model,
-                        "Failed to communicate with Antigravity backend after rotation",
+                        connection_failure,
                         rotation_attempted=rotation_attempted,
                         attempt_count=len(response_attempts),
                     ),
@@ -2246,11 +2299,13 @@ async def _create_response(request: Request, budget: RequestBudget):
                     status_code=res.status_code,
                     error_class="validation_required" if is_validation else None,
                 )
-                new_account = await run_bounded_operation(
-                    lambda: acquire_active_account_for_request(model),
-                    release_late_result=True,
-                )
-                rotation_attempted = True
+                new_account = None
+                if not audio_request and account_binding is None:
+                    new_account = await run_bounded_operation(
+                        lambda: acquire_active_account_for_request(model),
+                        release_late_result=True,
+                    )
+                    rotation_attempted = True
                 if new_account:
                     response_attempts.append(new_account)
                     response_account = new_account
@@ -2317,14 +2372,14 @@ async def _create_response(request: Request, budget: RequestBudget):
                     rotation_count=max(0, len(response_attempts) - 1),
                 )
                 if is_validation:
-                    safe_text = safe_error_detail(res.text)
+                    safe_text = safe_request_error(res.text)
                     detail_msg = (
                         f"Google account requires verification (VALIDATION_REQUIRED). "
                         f"Run 'codex-antigravity login' to re-authenticate. "
                         f"{safe_text}"
                     )
                 else:
-                    safe_text = safe_error_detail(res.text)
+                    safe_text = safe_request_error(res.text)
                     detail_msg = f"Google Authentication failure: {safe_text}"
                 raise HTTPException(
                     status_code=res.status_code,
@@ -2365,7 +2420,8 @@ async def _create_response(request: Request, budget: RequestBudget):
                     status_code=429,
                     detail=google_failure_detail(
                         model,
-                        "Antigravity account rate limit reached. Auto-switching to next account.",
+                        ("Antigravity account rate limit reached. Audio was not resubmitted."
+                         if audio_request else "Antigravity account rate limit reached. Auto-switching to next account."),
                         retry_after_seconds=retry_after_seconds,
                         retry_after_source=retry_after_source,
                         rotation_attempted=rotation_attempted,
@@ -2391,13 +2447,13 @@ async def _create_response(request: Request, budget: RequestBudget):
                     retry_after_source=retry_after_source_from_response(res),
                     rotation_attempted=rotation_attempted,
                     error_class="backend_http_error",
-                    error=safe_error_detail(res.text),
+                    error=safe_request_error(res.text),
                 )
                 raise HTTPException(
                     status_code=res.status_code,
                     detail=google_failure_detail(
                         model,
-                        f"Google Antigravity API error: {safe_error_detail(res.text)}",
+                        f"Google Antigravity API error: {safe_request_error(res.text)}",
                         retry_after_seconds=retry_after_seconds_from_response(res),
                         retry_after_source=retry_after_source_from_response(res),
                         rotation_attempted=rotation_attempted,
@@ -2434,7 +2490,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                         status_code=status_code_from_backend_error(code, message),
                         detail=google_failure_detail(
                             model,
-                            f"Google Antigravity API error: {safe_error_detail(message)}",
+                            f"Google Antigravity API error: {safe_request_error(message)}",
                             rotation_attempted=rotation_attempted,
                         ),
                     )
@@ -2499,9 +2555,9 @@ async def _create_response(request: Request, budget: RequestBudget):
                     http_status=500,
                     rotation_attempted=rotation_attempted,
                     error_class="translation_error",
-                    error=safe_error_detail(e),
+                    error=safe_request_error(e),
                 )
-                raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_error_detail(e)}")
+                raise HTTPException(status_code=500, detail=f"Response translation failed: {safe_request_error(e)}")
         except AccountRefreshInProgress as exc:
             if cooldown_category is None:
                 await best_effort_diagnostic(record_attempt_outcome(
@@ -2688,7 +2744,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     error_class=exc.code,
                 )
                 error_code = exc.code
-                error_message = safe_error_detail(exc.message)
+                error_message = safe_request_error(exc.message)
                 if adapter.visible_output_started or exc.code == "provider_output_limit":
                     if not adapter.created_emitted:
                         yield serialize_transport_event(adapter.created())
@@ -2741,7 +2797,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     error_class="connection_error",
                 )
                 error_code = "connection_error"
-                error_message = safe_error_detail(exc)
+                error_message = safe_request_error(exc)
             else:
                 if terminal_event is None:
                     error_code = "missing_terminal_signal"
@@ -2804,7 +2860,7 @@ async def _create_response(request: Request, budget: RequestBudget):
                     stream_terminal_logged = True
                     return
 
-            if attempt_num == 0 and not adapter.visible_output_started:
+            if attempt_num == 0 and not adapter.visible_output_started and account_binding is None:
                 try:
                     rotated = await run_bounded_operation(
                         lambda: acquire_active_account_for_request(model),
