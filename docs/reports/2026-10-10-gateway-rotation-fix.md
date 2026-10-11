@@ -111,3 +111,17 @@ recovery, or production admission.
 Persistent 403 after this fix is an account-eligibility problem for the
 account owner to resolve with Google. No rotation-to-evade, no validation
 bypass, no User-Agent spoofing was implemented or used.
+
+## Merge
+
+Merged to `origin/main` as PR #179, merge commit
+`23bc13b3e4988245deeabc67005f8e3bec705654` (2026-10-11T00:42:48Z). CI at
+merge: quality/static, audit, compatibility floors, test matrices (ubuntu
+3.10/3.11/3.12/3.14, windows 3.12, macos 3.12), and package, all green;
+mergeStateStatus CLEAN.
+
+Follow-up on the probe-context note above: the default `~/.codex` state-home
+`key_conflict` was subsequently resolved by the owner (legacy
+`antigravity-storage.key` retired, store re-encrypted under the file fallback
+key, verified with `storage keys` and a bounded gateway probe on 2026-10-10).
+The fail-closed gate behaved as designed and is no longer blocking.
