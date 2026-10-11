@@ -374,6 +374,36 @@ def test_currency_quote_must_cover_gateway_internal_attempts(anti,tmp_path):
         anti.SpendControl(currency_budget='1',pricing_file=path)
 
 
+@pytest.mark.parametrize('retention', ['summary', 'full'])
+def test_consult_publishes_response_before_a_retry_can_fail(anti, monkeypatch, tmp_path, retention):
+    partial = 'Synthetic partial proposal preserved before retry.'
+    snapshots = []
+    attempts = []
+
+    def generated(args, **kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            return partial, 'fixture:model', {'usage': {'input_tokens': 10, 'output_tokens': 512, 'total_tokens': 522},
+                                            'upstream_status': 'incomplete',
+                                            'incomplete_details': {'reason': 'max_output_tokens'}}
+        record = json.loads((tmp_path / 'runs/retain-before-retry.json').read_text())
+        field = 'output_text' if retention == 'full' else 'output_preview'
+        assert record[field] == partial
+        assert record['runStatus'] == 'running' and record['scopeStatus'] == 'partial'
+        snapshots.append(Path(record['resultPath']))
+        raise anti.AntiError('Synthetic retry failure')
+
+    monkeypatch.setattr(anti, 'generate_with_fallback', generated)
+    monkeypatch.setattr(anti, '_install_run_signal_handlers', lambda args: None)
+    code = anti.main(['consult', '--model', 'fixture:model', '--prompt', 'Synthetic retention test.',
+                      '--max-output-tokens', '512', '--run-id', 'retain-before-retry',
+                      '--save-output', retention, '--no-progress', '--no-pre-read', '--json'])
+    assert code == 1 and len(attempts) == 2
+    assert len(snapshots) == 1 and snapshots[0].is_file()
+    artifact = json.loads(snapshots[0].read_text())
+    assert artifact['output_text' if retention == 'full' else 'output_preview'] == partial
+
+
 
 def test_settlement_is_idempotent_and_observed_usage_never_refunds_currency(anti,tmp_path):
     policy=anti.SpendControl(max_calls=2,currency_budget='0.04',pricing_file=profile(tmp_path))

@@ -605,13 +605,15 @@ def run_control(args=None):
             raise AntiError('listen requires explicit --audio and --model without --local-profile')
     local_settings = local_workflow.prepare_args(args)
     if getattr(args, 'command', None) in {'listen', 'review-music'}:
+        extended = getattr(args, 'command', None) == 'review-music' and getattr(args, 'extended_review', False)
+        output_ceiling, time_ceiling = (65536, 600) if extended else (4096, 90)
         limits = ((getattr(args, 'max_calls', None), 1),
-                  (getattr(args, 'max_output_tokens', None), 4096),
-                  (getattr(args, 'run_timeout', None), 90),
-                  (getattr(args, 'timeout', None), 90))
+                  (getattr(args, 'max_output_tokens', None), output_ceiling),
+                  (getattr(args, 'run_timeout', None), time_ceiling),
+                  (getattr(args, 'timeout', None), time_ceiling))
         if any(value is None or not math.isfinite(float(value)) or value < 0 or value > ceiling
                for value, ceiling in limits):
-            raise AntiError('listen limits: at most one attempt, 4096 output tokens and 90 seconds')
+            raise AntiError(f'listen limits: at most one attempt, {output_ceiling} output tokens and {time_ceiling} seconds')
         if (getattr(args, 'retry', None) != 0 or getattr(args, 'fallback_model', None)
                 or getattr(args, 'fallback_policy', None) != 'never'
                 or getattr(args, 'auto_route', False) or not getattr(args, 'no_pre_read', False)):
@@ -7364,7 +7366,7 @@ def capture_response_schema(args):
 @controlled_command
 def command_consult(args: argparse.Namespace) -> int:
     mode = args.command if args.command in {"listen", "review-music"} else "consult"
-    bounded_audio = mode in {"listen", "review-music"}
+    bounded_audio = mode in {"listen", "review-music"} or bool(getattr(args, "audio", None))
     progress(args, f"{mode}: querying model {getattr(args, 'model', 'sonnet')}")
     auto_route_model = None
     auto_route_reason = None
@@ -7441,6 +7443,17 @@ def command_consult(args: argparse.Namespace) -> int:
     attempts_metadata: list[dict[str, Any]] = [generation_metadata]
     usage = generation_metadata.get("usage")
     output_status = lane_output_status(text, usage, args.max_output_tokens, generation_metadata)
+    if output_status == "truncated":
+        write_run_record(
+            args, mode=mode, status="running", models=[model_used],
+            base_url=args.base_url, prompt_text=prompt, output_text=text,
+            caveats=caveats,
+            metadata={**generation_metadata, "result_quality": "incomplete",
+                      "consult_attempts": attempts_metadata,
+                      "usage_totals": sum_usage(attempts_metadata),
+                      "retry_disposition": "disabled" if bounded_audio else "not_started"},
+            force_full_output=False,
+        )
     last_prompt_chars = len(prompt)
     retry_disposition = "disabled" if bounded_audio else "not_applicable"
     last_call_cap = args.max_output_tokens
@@ -7508,14 +7521,24 @@ def command_consult(args: argparse.Namespace) -> int:
     if mode == "review-music":
         metadata["music_evidence_sha256"] = args._music_evidence_sha256
         metadata["music_origin"] = "model-advisory"
-        metadata["music_review_profile"] = "compact-v1" if getattr(args, "compact_review", False) else "standard-v1"
+        metadata["music_review_profile"] = ("compact-v1" if getattr(args, "compact_review", False)
+                                            else "extended-v1" if getattr(args, "extended_review", False) else "standard-v1")
         metadata["musicalAcceptance"] = "not-established"
-        if getattr(args, "compact_review", False):
-            metadata["music_request_configuration"] = {
-                "maxOutputTokens": args.max_output_tokens, "timeoutSeconds": args.timeout,
-                "helperSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                "responseSchemaSha256": hashlib.sha256(args.response_schema.encode('utf-8')).hexdigest(),
-            }
+        metadata["music_request_configuration"] = {
+            "maxOutputTokens": args.max_output_tokens, "timeoutSeconds": args.timeout,
+            "runTimeoutSeconds": args.run_timeout, "reasoningEffort": effort_for_model(model),
+            "helperSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "responseSchemaSha256": hashlib.sha256(args.response_schema.encode('utf-8')).hexdigest(),
+        }
+        observed_usage = attempts_metadata[-1].get("usage") or {}
+        thoughts = (observed_usage.get("output_tokens_details") or {}).get("reasoning_tokens")
+        output_tokens = observed_usage.get("output_tokens")
+        metadata["music_token_usage"] = {
+            "inputTokens": observed_usage.get("input_tokens"), "outputTokensIncludingReasoning": output_tokens,
+            "reasoningTokens": thoughts,
+            "answerTokens": output_tokens - thoughts if thoughts is not None and output_tokens is not None else None,
+            "totalTokens": observed_usage.get("total_tokens"),
+        }
         if output_status == "success":
             try:
                 review, encoding = music_evidence.parse_review_response(
@@ -9208,7 +9231,9 @@ def build_parser() -> argparse.ArgumentParser:
         consult.add_argument('--audio',action='append',help='Explicit local PCM WAV for advisory consult; at most two files,2MiB each,30seconds each')
         consult.add_argument('--probe-unverified-audio',action='store_true',help='Explicitly authorize WAV upload to an advertised experimental Gemini route; does not establish verified listening')
         if command == "review-music":
-            consult.add_argument("--compact-review", action="store_true", help="One clip/claim, at most one bounded advisory finding")
+            profiles = consult.add_mutually_exclusive_group()
+            profiles.add_argument("--compact-review", action="store_true", help="One clip/claim, at most one bounded advisory finding")
+            profiles.add_argument("--extended-review", action="store_true", help="Permit explicitly selected allowances up to 65536 output tokens and 600 seconds; still one advisory attempt")
             consult.add_argument("--evidence-json", help="Portable bounded music evidence; clip hashes must match attached WAVs")
         if command in {"listen", "review-music"}:
             consult.add_argument("--account-binding-json", help="Private instance-scoped account binding JSON; never printed or uploaded")

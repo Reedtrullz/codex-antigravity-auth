@@ -223,6 +223,29 @@ def test_listen_retryable_transport_error_makes_one_post(fixture, monkeypatch):
     assert len(seen) == 1
 
 
+def test_audio_consult_retains_truncation_without_automatic_retry(fixture, monkeypatch, capsys):
+    anti, _, _, first, _ = fixture
+    bridge(monkeypatch, anti)
+    partial = 'Synthetic incomplete music proposal.'
+    payload = {'response': {'candidates': [{'index': 0, 'finishReason': 'MAX_TOKENS',
+                'content': {'parts': [{'text': partial}]}}],
+                'usageMetadata': {'promptTokenCount': 20, 'candidatesTokenCount': 10,
+                                  'thoughtsTokenCount': 65526, 'totalTokenCount': 65556}}}
+    with upstream((200, {'Content-Type': 'application/json'}, json.dumps(payload).encode())) as (base, seen):
+        endpoint(monkeypatch, base)
+        assert anti.main(argv(first, '--max-output-tokens', '65536', '--max-calls', '1',
+                              '--fallback-policy', 'never', '--run-id', 'audio-retained',
+                              '--save-output', 'full')) == 1
+    assert len(seen) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result['output_text'] == partial
+    assert result['metadata']['retry_disposition'] == 'disabled'
+    assert result['metadata']['consult_attempt_count'] == 1
+    record = json.loads((anti.RUNS_DIR / 'audio-retained.json').read_text())
+    assert record['output_text'] == partial and record['runStatus'] == 'partial'
+    assert record['metadata']['usage']['output_tokens_details']['reasoning_tokens'] == 65526
+
+
 @pytest.mark.parametrize('status', [401, 403, 429])
 def test_audio_backend_auth_or_quota_failure_never_rotates(fixture, monkeypatch, status):
     _, manager, _, _, _ = fixture
