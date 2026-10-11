@@ -84,7 +84,9 @@ _OUTCOME_CATEGORIES = frozenset(
 
 # Mirrors is_validation_required_error: curable auth blocks ride the normal
 # cooldown path and must not escalate the terminal-ban strike counter.
-CURABLE_AUTH_ERROR_CLASSES = frozenset({"validation_required", "age_rejection"})
+# age_rejection is removed: age ineligibility is a permanent per-account state,
+# not a curable block. It disables the account immediately via account_state.
+CURABLE_AUTH_ERROR_CLASSES = frozenset({"validation_required"})
 
 
 @dataclass(frozen=True)
