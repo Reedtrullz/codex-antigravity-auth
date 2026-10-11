@@ -185,7 +185,11 @@ class AccountManager:
         references = [row["accountRef"] for row in rows]
         if len(references) != len(set(references)):
             raise ValueError("duplicate account binding reference")
-        payload["inventorySha256"] = canonical_sha256(payload)
+        hash_payload = {key: value for key, value in payload.items() if key != "accounts"}
+        hash_payload["accounts"] = [
+            {key: value for key, value in row.items() if key != "inFlight"} for row in rows
+        ]
+        payload["inventorySha256"] = canonical_sha256(hash_payload)
         return payload
 
     def binding_inventory(self, model: str) -> dict[str, Any]:

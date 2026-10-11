@@ -601,7 +601,7 @@ class SpendAdmissionError(SpendRefused, AntiError):
 
 def run_control(args=None):
     if getattr(args, 'command', None) in {'listen', 'review-music'}:
-        if not getattr(args, 'audio', None) or not getattr(args, 'model', None) or getattr(args, 'local_profile', None):
+        if not (getattr(args, 'audio', None) or getattr(args, 'image', None)) or not getattr(args, 'model', None) or getattr(args, 'local_profile', None):
             raise AntiError('listen requires explicit --audio and --model without --local-profile')
     local_settings = local_workflow.prepare_args(args)
     if getattr(args, 'command', None) in {'listen', 'review-music'}:
@@ -646,12 +646,12 @@ def run_control(args=None):
     if local_settings is not None:
         current.local_policy = local_settings
     audio_paths=getattr(args,'audio',None)
-    if audio_paths:
+    if audio_paths or (getattr(args,'command',None) in {'listen','review-music'} and getattr(args,'image',None)):
         if not getattr(args,'model',None) or getattr(args,'auto_route',False):
             raise AntiError('WAV consult requires an explicit --model; automatic routing is disabled')
-        if getattr(args,'command',None) not in {'consult','ask','listen','review-music'} or getattr(args,'image',None):
+        if audio_paths and (getattr(args,'command',None) not in {'consult','ask','listen','review-music'} or getattr(args,'image',None)):
             raise AntiError('WAV input is consult/ask/listen-only and cannot be combined with images')
-        if not getattr(args,'probe_unverified_audio',False) and not getattr(args,'dry_run',False):
+        if audio_paths and not getattr(args,'probe_unverified_audio',False) and not getattr(args,'dry_run',False):
             raise AntiError('Audio backend acceptance is unverified; --probe-unverified-audio explicitly authorizes the upload')
     elif getattr(args,'probe_unverified_audio',False):
         raise AntiError('--probe-unverified-audio requires --audio')
