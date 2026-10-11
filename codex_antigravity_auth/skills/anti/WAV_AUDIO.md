@@ -83,9 +83,17 @@ The JSON result reuses the consult envelope with `mode: listen`. Musical JSON, i
 timing validation and the aggregate request/resume ledger belong to the calling
 adapter. Anti's receipt records media identity and submission evidence; it does
 not manufacture native AUDIO token counts or turn an empty finding list into
-musical approval. Existing `consult` / `ask` retry behavior is unchanged.
+musical approval. Explicit `consult` / `ask` transport retry settings remain
+available; audio token-cap retries are disabled as described below.
 
 ### Explicit output schema and thinking budget
+
+Audio consult/ask does not automatically retry truncated output. Consult publishes truncated output under the selected retention policy before any permitted text-only retry, so a later retry failure does not lose the earlier response. The intermediate record remains running until the invocation finishes.
+
+An explicitly selected `review-music --extended-review` permits up to65,536
+output tokens and600 seconds with the same single-attempt transport and result
+validation. Its defaults remain unchanged; select the larger caps explicitly.
+See [extended practical review](MUSIC_REVIEW.md#extended-practical-review).
 
 `listen` and `consult` accept `--response-schema` with an explicit JSON schema
 object (at most64KiB). The helper includes canonical schema text in the assembled

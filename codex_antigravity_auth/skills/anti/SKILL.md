@@ -430,3 +430,10 @@ For explicit audio/music review use the standalone `review-music` profile in
 other providers and local music models are not dependencies. Prepare with
 `--dry-run`; only an explicitly authorized `--probe-unverified-audio` run uploads.
 Model observations remain advisory and cannot grant musical acceptance.
+
+For practical evidence-assisted comparisons, explicitly opt into
+`review-music --extended-review` and select the model, allowance and deadline
+described in [extended practical review](MUSIC_REVIEW.md#extended-practical-review).
+Medium reasoning with65,536 allowed output tokens is a useful starting point
+from the Blackbird owner trial; measure actual usage rather than treating the
+allowance or model confidence as quality evidence.

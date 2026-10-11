@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 # File-bound fixture loading also works in the installed importlib-mode suite.
 _wav_spec = importlib.util.spec_from_file_location('anti_music_wav_fixture', Path(__file__).with_name('test_wav_audio.py'))
+assert _wav_spec is not None and _wav_spec.loader is not None
 _wav = importlib.util.module_from_spec(_wav_spec)
 _wav_spec.loader.exec_module(_wav)
 fixture, bridge, endpoint, response, upstream = (_wav.fixture, _wav.bridge, _wav.endpoint, _wav.response, _wav.upstream)
@@ -147,6 +148,68 @@ def test_explicit_larger_music_cap_reaches_google_in_one_attempt(fixture, monkey
     value = json.loads(capsys.readouterr().out)
     assert value['metadata']['retry_disposition'] == 'disabled'
     assert value['metadata']['musicalAcceptance'] == 'not-established'
+
+
+@pytest.mark.parametrize('truncated', [False, True])
+def test_extended_review_forwards_medium_64k_and_retains_actual_usage_once(fixture, monkeypatch, capsys, truncated):
+    anti, _, _, first, second = fixture
+    bridge(monkeypatch, anti)
+    text = '```json\n' + json.dumps(result()) + '\n```'
+    raw = json.loads(response(text)[2])
+    raw['response']['usageMetadata'] = {'promptTokenCount': 8330, 'candidatesTokenCount': 1297,
+                                       'thoughtsTokenCount': 2426, 'totalTokenCount': 12053}
+    if truncated:
+        raw['response']['candidates'][0]['finishReason'] = 'MAX_TOKENS'
+    with upstream((200, {'Content-Type': 'application/json'}, json.dumps(raw).encode())) as (base, seen):
+        endpoint(monkeypatch, base)
+        assert anti.main(arguments(first, '--audio', str(second), '--model', 'gemini-3.8-flash-medium',
+                                   '--extended-review', '--max-output-tokens', '65536',
+                                   '--timeout', '600', '--run-timeout', '600', '--save-output', 'full',
+                                   '--run-id', 'extended-review')) == (1 if truncated else 0)
+        assert len(seen) == 1
+        config = seen[0]['body']['request']['generationConfig']
+        assert config['maxOutputTokens'] == 65536 and config['thinkingConfig']['thinkingLevel'] == 'medium'
+    value = json.loads(capsys.readouterr().out)
+    assert value['output_text'] == text
+    assert value['metadata']['music_review_profile'] == 'extended-v1'
+    assert value['metadata']['retry_disposition'] == 'disabled'
+    assert value['metadata']['music_request_configuration']['reasoningEffort'] == 'medium'
+    assert value['metadata']['music_request_configuration']['runTimeoutSeconds'] == 600
+    assert value['metadata']['music_token_usage'] == {
+        'inputTokens': 8330, 'outputTokensIncludingReasoning': 3723,
+        'reasoningTokens': 2426, 'answerTokens': 1297, 'totalTokens': 12053}
+    record = json.loads((anti.RUNS_DIR / 'extended-review.json').read_text())
+    assert record['output_text'] == text and record['runStatus'] == ('partial' if truncated else 'success')
+    assert ('music_review' in value['metadata']) is not truncated
+    assert value['metadata']['musicalAcceptance'] == 'not-established'
+
+
+@pytest.mark.parametrize('extra', [
+    ['--max-output-tokens', '65537'], ['--timeout', '601'], ['--run-timeout', '601'],
+    ['--retry', '1'], ['--max-calls', '2'], ['--fallback-model', 'flash'],
+    ['--auto-route'], ['--model', 'sonnet'],
+])
+def test_extended_review_refuses_loose_or_ineligible_settings_before_http(fixture, monkeypatch, extra):
+    anti, _, _, first, _ = fixture
+    calls = bridge(monkeypatch, anti)
+    assert anti.main(arguments(first, '--extended-review', *extra)) != 0
+    assert calls == []
+
+
+def test_extended_dry_run_no_dispatch_and_unknown_reasoning_stays_unknown(fixture, monkeypatch, capsys):
+    anti, _, _, first, _ = fixture
+    calls = bridge(monkeypatch, anti)
+    assert anti.main(arguments(first, '--extended-review', '--max-output-tokens', '65536',
+                               '--timeout', '600', '--run-timeout', '600', '--dry-run')) == 0
+    assert calls == []
+    capsys.readouterr()
+    with upstream(response(json.dumps(result()))) as (base, seen):
+        endpoint(monkeypatch, base)
+        assert anti.main(arguments(first, '--extended-review')) == 0
+        assert len(seen) == 1
+    value = json.loads(capsys.readouterr().out)
+    assert value['metadata']['music_token_usage']['reasoningTokens'] is None
+    assert value['metadata']['music_token_usage']['answerTokens'] is None
 
 
 def compact_evidence(first,tmp_path):

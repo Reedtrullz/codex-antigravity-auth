@@ -45,6 +45,59 @@ completed a repeated-note review at 4,096 tokens but reported five attacks on a
 four-attack capture. Neither completion nor format normalization qualifies a
 model for musical approval. Use narrower objectives and retain uncertainty.
 
+## Extended practical review
+
+For an explicitly authorized evidence-assisted comparison, `--extended-review`
+permits up to65,536 output tokens and600 seconds while retaining exactly one
+generation attempt. It is mutually exclusive with `--compact-review`. Select
+the allowance, deadline and Gemini reasoning alias explicitly; the flag alone
+does not raise the standard defaults. `listen`, standard and compact review
+retain their existing caps and defaults, including for frozen qualifications.
+
+```sh
+python scripts/anti.py review-music --extended-review \
+  --model gemini-3.8-flash-medium \
+  --audio original.wav --audio revised.wav --evidence-json evidence.json \
+  --prompt-file objective.txt --account-binding-json binding.json \
+  --max-output-tokens 65536 --max-total-output-tokens 65536 \
+  --timeout 600 --run-timeout 600 --save-output full --json --dry-run
+```
+
+Replace `--dry-run` with `--probe-unverified-audio` only for the authorized
+upload. The private binding must identify a currently eligible idle account;
+neither preparation nor a saved binding proves current eligibility. A bound
+failure never refreshes, rotates, retries or substitutes an account. The fixed
+review schema, exact ordered WAV/evidence hashes and response validation still
+apply. Extended review supplies an assessment, not a music-specific edit plan
+or renderer; those remain the consuming application's responsibility.
+
+Results record `music_review_profile: extended-v1` and the selected allowance,
+deadlines and requested `reasoningEffort` in `music_request_configuration`.
+`music_token_usage` reports observed input, output including reasoning, reasoning,
+answer and total tokens. Unknown counts stay null, including answer tokens when
+reasoning usage is unavailable. These are provider-reported counts, not native
+audio-token classification or a billing guarantee. `metadata.elapsed_ms` records
+generation latency. The same accounting is available for standard/compact music
+reviews. Full retention keeps the returned text and immutable revision, including
+partial or invalid output; truncated JSON never becomes a completed review.
+
+The October11 Blackbird experiment supports medium reasoning with a liberal
+explicit allowance as a practical starting point for this workflow. Medium
+produced complete dynamics proposals and comparisons; high exhausted both32,768
+and65,536 allowances, while low was faster but proposed a smaller local change.
+The owner preferred the final cumulative revision against the untouched Original.
+That is acceptance of one saved29-second preview, not proof that medium is
+universally best, a new qualification, or permission to publish arrangements.
+The large allowance is a ceiling: actual use should be measured per task.
+
+For comparisons, identify the untouched baseline and cumulative candidate
+clearly, omit earlier verdicts and favorable proposal rationales, and evaluate
+the whole arc and local tradeoffs. Permit improved, unchanged, worse and uncertain
+verdicts. Keep measured levels, authored events and subjective observations
+separate; quieter audio alone is not better music, and an excerpt cut is not a
+verified song ending. Targeted repairs must preserve the accepted neighboring
+event values and the original; validate and render them locally before review.
+
 ## Compact one-claim profile
 
 Use `review-music --compact-review --audio CLIP.wav --evidence-json ONE_CLAIM.json`
