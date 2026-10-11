@@ -2,6 +2,11 @@
 
 ## v2.4.3 - Music Evidence Candidate (not published)
 
+- Exclude volatile in-flight lease fields from the account-binding inventory
+  hash so concurrent calls no longer invalidate a binding mid-run.
+- Add hybrid qualification dispatch lanes: per-class JSON response schemas,
+  markdown-fence-tolerant parsing, per-fixture run IDs, a spectrogram image
+  lane, a 16 kHz resampled-audio lane, and audioSource provenance.
 - Add bounded provider error diagnostics: provider rejection bodies are parsed
   into a fixed, redacted field set (http_status, reason, domain, error_number,
   truncated message) with query parameters stripped before parsing.

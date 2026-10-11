@@ -47,6 +47,23 @@ def test_binding_inventory_is_opaque_stable_and_process_scoped():
     assert first["accounts"][0]["accountRef"].startswith("acct_")
 
 
+def test_binding_inventory_hash_excludes_volatile_in_flight_leases():
+    data = account_data()
+    with patch("codex_antigravity_auth.accounts.load_accounts", return_value=data), patch("codex_antigravity_auth.accounts.update_accounts"):
+        manager = AccountManager()
+        binding = binding_for(manager)
+        manager._in_flight["secondary@example.invalid"] = 2
+        busy = manager.binding_inventory("gemini-3.8-flash")
+        busy_row = next(item for item in busy["accounts"] if item["accountRef"] == binding.accountRef)
+        assert busy_row["inFlight"] == 2
+        assert busy["inventorySha256"] == binding.inventorySha256
+        manager._in_flight["secondary@example.invalid"] = 0
+        selected = manager.acquire_bound_account("gemini-3.8-flash", binding)
+        assert selected["email"] == "secondary@example.invalid"
+        with pytest.raises(ValueError, match="eligible"):
+            manager.acquire_bound_account("gemini-3.8-flash", binding)
+
+
 def test_exact_acquisition_preserves_preference_and_prevents_duplicate_lease():
     data = account_data()
     with patch("codex_antigravity_auth.accounts.load_accounts", return_value=data), patch("codex_antigravity_auth.accounts.update_accounts"):

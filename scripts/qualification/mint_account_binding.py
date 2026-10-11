@@ -36,6 +36,7 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--account-ref", default=None)
     args = parser.parse_args()
 
     url = f"{args.base_url.rstrip('/')}/account-bindings?model={urllib.parse.quote(args.model, safe='')}"
@@ -62,6 +63,11 @@ def main() -> int:
     if not eligible:
         fail("no eligible account with inFlight 0")
     chosen = sorted(eligible, key=lambda r: str(r.get("accountRef")))[0]
+    if args.account_ref:
+        pinned = next((r for r in eligible if r.get("accountRef") == args.account_ref), None)
+        if pinned is None:
+            fail("pinned accountRef is not eligible in the current inventory")
+        chosen = pinned
     account_ref = chosen.get("accountRef")
 
     binding = {
