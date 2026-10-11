@@ -488,12 +488,20 @@ Encryption keys have stable backend identities. Use `codex-antigravity storage k
 
 ### HTTP 403 VALIDATION_REQUIRED
 
-If you see "Verify your account to continue" or VALIDATION_REQUIRED errors:
+If you see "Verify your account to continue" or VALIDATION_REQUIRED errors, the
+gateway classifies it as account-level and non-retryable; it is never retried
+as a rate limit and is never reported as age ineligibility. RESTRICTED_AGE
+rejections are a distinct terminal state: that account is ineligible for the
+content, reauthorization cannot fix it, and it never re-enters cooldown churn.
 
 1. Check logs: `codex-antigravity logs --tail 20`
-2. Reset accounts: `codex-antigravity accounts reset --all --yes`
-3. Re-login: `codex-antigravity login --count 4`
-4. The gateway now correctly surfaces 403 auth failures (not misreported as 429 rate limits)
+2. Resolve the verification with Google for that specific account (owner
+   action; see the validation URL surfaced in diagnostics).
+3. `codex-antigravity accounts reset <email> --yes` only clears local
+   cooldown/strike state after the account is actually repaired; it does not
+   clear the provider-side block.
+4. Verify recovery with one bounded generation probe, not `/v1/models` alone;
+   catalog reachability is not generation proof.
 
 ### All Accounts Cooling Down
 

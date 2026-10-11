@@ -2,6 +2,22 @@
 
 ## v2.4.3 - Music Evidence Candidate (not published)
 
+- Add bounded provider error diagnostics: provider rejection bodies are parsed
+  into a fixed, redacted field set (http_status, reason, domain, error_number,
+  truncated message) with query parameters stripped before parsing.
+- Distinguish VALIDATION_REQUIRED, RESTRICTED_AGE, generic permission-denied,
+  project/license errors, and transport errors. Age-ineligible accounts are
+  terminal and non-retryable instead of churning through escalating cooldowns,
+  and reauthorization guidance is no longer shown for provider-declared
+  ineligibility.
+- Record truthful attempt_count and rotation_count on every terminal failure,
+  including final 401/403; a same-account retry no longer counts as rotation.
+- Enforce per-request bounded rotation: each eligible account is tried at most
+  once, with distinct temporary-cooldown, reauth-required, and permanently-
+  ineligible terminal states.
+- Preserve the bound-acquisition no-refresh/no-rotation/no-fallback contract
+  and fail-closed panel behavior; validation URLs are redacted across request
+  logs, run records, exception strings, and panel output.
 - Add an optional compact Gemini music review: one supplied clip and evidence
   claim, one advisory finding, strict response limits, and one backend attempt.
 - Include music schemas and modules in wheel/sdist installed contract checks.
