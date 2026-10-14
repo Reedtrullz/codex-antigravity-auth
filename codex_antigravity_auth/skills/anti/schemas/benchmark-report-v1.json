@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:anti:benchmark-report-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "mode",
+    "corpusId",
+    "corpusSha256",
+    "replaySha256",
+    "adjudicationsSha256",
+    "status",
+    "groundTruthBasis",
+    "holdoutVisibility",
+    "liveExecutionVerified",
+    "localEvidenceIsAttested",
+    "billingObserved",
+    "routingChanged",
+    "arms",
+    "comparisons",
+    "audits",
+    "limitations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "kind": {
+      "const": "anti-benchmark-report"
+    },
+    "mode": {
+      "const": "offline_replay"
+    },
+    "corpusId": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$"
+    },
+    "corpusSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "replaySha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "adjudicationsSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "status": {
+      "enum": [
+        "scored",
+        "invalid",
+        "inconclusive"
+      ]
+    },
+    "groundTruthBasis": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "pattern": "^[^\\u0000-\\u001f\\ud800-\\udfff]+$"
+    },
+    "holdoutVisibility": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "pattern": "^[^\\u0000-\\u001f\\ud800-\\udfff]+$"
+    },
+    "liveExecutionVerified": {
+      "const": false
+    },
+    "localEvidenceIsAttested": {
+      "const": true
+    },
+    "billingObserved": {
+      "const": false
+    },
+    "routingChanged": {
+      "const": false
+    },
+    "arms": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object"
+      }
+    },
+    "comparisons": {
+      "type": "array",
+      "maxItems": 28,
+      "items": {
+        "type": "object"
+      }
+    },
+    "audits": {
+      "type": "array",
+      "maxItems": 16384,
+      "items": {
+        "type": "object"
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2000,
+        "pattern": "^[^\\u0000-\\u001f\\ud800-\\udfff]+$"
+      }
+    }
+  }
+}

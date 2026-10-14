@@ -1,148 +1,56 @@
-# Integration Status — historical baseline 12 July 2026
+# Current source contracts
 
-> **Release verification — 2026-09-22:** v2.4.2 includes the Anti hardening changes from the 2026-09-22 consult incomplete-retry bug report (P0 retry, never-mode heartbeat records, `VALIDATION_REQUIRED` terminal classification, runs list/reflections fixes, test isolation). Release preparation passed the 121-test Anti suite locally with all four skill copies parity-matched; per-PR CI evidence is in the merged PR description. Live credentialed verification (bounded caps) passed for the P0 retry exhausted and succeeded paths, never-mode heartbeat and SIGTERM records, and two-lane flash consensus; no fresh full-scope live generation is claimed here. Earlier release evidence below is historical.
+This is the authoritative status entrypoint for the checked-out source tree.
+It describes source behavior, not the latest public release, deployed gateway or
+live provider availability. Package version comes from `pyproject.toml`; the
+[verification guide](VERIFICATION.md) generates evidence tied to an exact source
+revision, actual runtime and optional distribution artifacts. Unmerged PRs are
+not released features. [Historical snapshots](docs/history/2026-10-01/README.md)
+preserve earlier dates, SHAs, test counts and credentialed observations.
 
-> The Build & Test Health, Core Features, and Known Limitations sections below retain the July 1.7.0 evidence record. Use the v2.3.0 source, changelog, and release PR for present capability/catalog claims.
+## Route boundaries
 
-## Build & Test Health
-- **local pytest**: the `1.7.0` release-hardening worktree passes `577` tests plus `193` subtests on Python 3.10.4 and Python 3.14.5 ✅
-- **compile check**: `python3 -m compileall -q codex_antigravity_auth tests` ✅
-- **diff hygiene**: `git diff --check` ✅
-- **wheel install smoke**: the `1.7.0` wheel/sdist passed Twine, content, clean Python 3.12 install, dependency, CLI, installed Anti, audit, and empty-home running-wheel checks; hashes are recorded in `docs/refactor-release-checklist.md` ✅
-- **CI matrix**: PR #15 passed duplicate CI runs `28988039196` and `28988040461`, including package, Ubuntu Python 3.10/3.11/3.12, and Windows Python 3.12 jobs ✅
-- **v1.6.3 CI/release**: PR #13 passed duplicate CI runs `28835880811` and `28835888260`; merge commit `55e0e79` passed main CI run `28835931271`; tag `v1.6.3` passed tag CI run `28835943159`; Publish workflow `28835943138` uploaded wheel and sdist to PyPI ✅
-- **live backend smoke**: credentialed live Google OAuth/runtime smoke passed on 2026-07-03 for `claude-sonnet-4-6`; live BYOK smokes passed through transient env vars for `deepseek:deepseek-v4-flash` and OpenRouter. Latest release-prep Google smoke on 2026-07-06 used a scratch Codex config, the live gateway on `127.0.0.1:51122`, and `doctor --codex-ready --live --live-model claude-sonnet-4-6`; it passed model catalog, routing, Claude account availability, and real non-streaming generation with preview `ready`. Latest OpenRouter evidence covered direct `/api/v1/auth/key` success, `/v1/models` exposure for `openrouter:openrouter/free`, and exact non-streaming sentinel `anti-openrouter-byok-ok` through `/v1/responses` with the gateway stopped afterward ✅
-- **install command**: `uv tool install codex-antigravity-auth` for normal use, `uv tool install --editable .` for development from a checkout
-- **doctor/connectivity**: redacted scratch-config `codex-antigravity doctor --codex-ready --live` passed after release-prep live Google OAuth smoke
-- **v1.7.0 release candidate**: provider lifecycle events, native Responses validation, route capabilities, account state, secure locking, and read-only catalogs are consolidated locally; the publish workflow now blocks PyPI on both artifact build and the five-lane test matrix
+| Route | Credential / request transport | Source contract |
+| --- | --- | --- |
+| Google Antigravity | Google OAuth account selection and rotation; Google content translation | `google_transport.py`, `transform.py`, `accounts.py` |
+| Native OpenAI | OpenAI auth state; Responses passthrough in unified mode | `openai_native.py`, `unified.py` |
+| BYOK Chat | Provider API key or explicitly local key-optional endpoint; Chat translation | `byok.py`, `openai_transport.py` |
+| BYOK Responses | Explicit provider Responses wire API | `openai_transport.py`, capability declarations |
 
-## Core Features
-| Feature | Status |
-|---|---|
-| OAuth PKCE login | ✅ |
-| Guided multi-account OAuth setup | ✅ |
-| OS keyring token encryption | ✅ |
-| Multi-account rotation | ✅ |
-| Exponential cooldown backoff | ✅ |
-| Auto token refresh | ✅ |
-| Responses API translation | ✅ |
-| SSE streaming | ✅ |
-| Tool/function calling | ✅ |
-| Reasoning/thinking isolation | ✅ |
-| `/v1/models` endpoint | ✅ |
-| Codex CLI model refresh-compatible `/v1/models` catalog metadata | ✅ |
-| Codex Desktop model picker | ✅ |
-| Schema sanitization | ✅ |
-| Device fingerprinting | ✅ |
-| BYOK provider presets | ✅ |
-| OpenAI-compatible provider routing | ✅ |
-| Unknown colon-prefixed BYOK providers rejected before Google routing | ✅ |
-| Reserved slash-style Codex/OpenAI model prefixes protected from BYOK shadowing | ✅ |
-| Encrypted API-key provider config | ✅ |
-| BYOK model exposure requires valid keys or loopback key-optional paths | ✅ |
-| BYOK auth-mode guardrails (`xai` API-key route kept separate from `xai-oauth` SuperGrok OAuth) | ✅ |
-| xAI SuperGrok OAuth browser/device login, encrypted token refresh, and `xai-oauth:*` routing | ✅ |
-| Generic `custom` BYOK preset requires explicit user configuration before routing | ✅ |
-| BYOK/Codex URL validation before config writes | ✅ |
-| Plain HTTP BYOK/gateway URLs limited to loopback/local hosts | ✅ |
-| BYOK managed-header guardrails | ✅ |
-| BYOK transport/hop-by-hop header guardrails | ✅ |
-| BYOK API-key/header value sanitization before config writes | ✅ |
-| BYOK API-key/header values limited to HTTP header-safe ASCII | ✅ |
-| BYOK model-picker field sanitization before config writes | ✅ |
-| BYOK config preflight before streaming | ✅ |
-| BYOK streaming tool-call output waits for complete valid function names | ✅ |
-| BYOK streaming final output order matches emitted output indices | ✅ |
-| BYOK nested and orphan valid tool outputs preserved as Chat Completions tool messages | ✅ |
-| BYOK key-env models stay hidden until the env key exists | ✅ |
-| Google streaming account-scoped error frames rotate before failing when no output was emitted | ✅ |
-| Streaming provider error frames surface as `response.failed` | ✅ |
-| Non-streaming backend error payloads surface as errors instead of empty completions | ✅ |
-| Malformed SSE JSON chunks fail streams instead of completing | ✅ |
-| Streaming completion snapshots include reconstructed output/model metadata | ✅ |
-| Tool-only streaming responses do not synthesize empty assistant messages | ✅ |
-| Responses streaming emits sequence numbers, item IDs, and `response.output_text.done` lifecycle events | ✅ |
-| Internal schema placeholder arguments are stripped from returned function calls | ✅ |
-| JSON Schema `required` values normalized before backend routing | ✅ |
-| Malformed function-tool metadata normalization before routing | ✅ |
-| Malformed function-call names normalized or dropped before routing | ✅ |
-| Malformed generation option and `tool_choice` rejection before routing | ✅ |
-| Google/BYOK `top_p` and stop-sequence generation option forwarding | ✅ |
-| BYOK structured-output `response_format` normalization before routing | ✅ |
-| Malformed provider/backend usage-counter normalization | ✅ |
-| Google `developer` messages preserved as system instructions | ✅ |
-| Malformed Google account fingerprint data ignored before routing | ✅ |
-| Malformed Google project overrides ignored before routing | ✅ |
-| Codex config helper with private atomic symlink-safe backups | ✅ |
-| `setup-google` preflights OAuth credentials before Codex config writes | ✅ |
-| Custom `setup-google --port` derives matching Codex base URL | ✅ |
-| BYOK-only doctor mode | ✅ |
-| Doctor parses active Codex config provider/base URL and supports `--config` | ✅ |
-| Doctor validates the selected BYOK provider/model instead of unrelated local presets | ✅ |
-| Doctor supports custom Codex provider ids via setup and `--provider` | ✅ |
-| Doctor exits non-zero on hard failures | ✅ |
-| OAuth callback port conflicts report actionable CLI errors | ✅ |
-| CLI setup/provider write failures reported without traceback | ✅ |
-| `/v1/responses` request-shape validation | ✅ |
-| Browser-style cross-site/plaintext loopback POST guard for `/v1/responses` | ✅ |
-| Loopback Host validation for browser-style `/v1/responses` requests | ✅ |
-| Remote gateway token strength floor | ✅ |
-| Central redaction for auth/provider errors | ✅ |
-| Finite Retry-After / Google RetryInfo cooldown hints | ✅ |
-| Fail-closed malformed-store write/update guardrails | ✅ |
-| Malformed OAuth `expires_in` fallback handling | ✅ |
-| Bundled `$anti` skill installer with external backup directory and verification mode | ✅ |
-| `setup-v2` readiness checks for sidecar, installed skill, gateway model visibility, and optional BYOK readiness | ✅ |
-| `$anti panel` / MoA / Fusion advisory multi-model review and planning helper | ✅ |
-| `$anti panel` verifiable findings contract with usage/latency reporting | ✅ |
-| `$anti` BYOK repo-context disclosure and large-review panel summarization | ✅ |
-| `$anti workflow` presets for review readiness, deep planning, ship gates, and provider comparison | ✅ |
-| `$anti workflow security-review` and `debug-consensus` presets | ✅ |
-| `$anti` Claude/Grok collaboration profile and workflow preset | ✅ |
-| Sanitized `$anti` run ledger with list/show/clean and dry-run pruning | ✅ |
-| Anti run-id correlation into sanitized gateway request logs | ✅ |
-| `$anti` fallback/progress controls for long model calls and retryable backend drift | ✅ |
-| PyPI Trusted Publishing workflow for `v*` tags | ✅ |
-| Cross-platform per-user gateway service install/status/uninstall | ✅ |
-| 1Password `op run` runtime injection for BYOK gateway env keys | ✅ |
-| Nonblocking Google account selection through Starlette threadpool | ✅ |
-| Refresh-ahead helper for accounts expiring within 5 minutes | ✅ |
-| Sanitized capped request JSONL log with CLI tail/follow/clean | ✅ |
-| Loopback-only `/health` endpoint with anonymous cooldown/request diagnostics | ✅ |
-| Local model catalog overlays via `~/.codex/antigravity-models.toml` | ✅ |
-| Runtime fail-soft fallback for malformed local model overlays | ✅ |
-| Strict model-overlay identifier shadowing checks in `models add` / `models doctor` | ✅ |
-| `setup --repair` Codex config reconciliation without OAuth/skill/gateway mutation | ✅ |
-| Persisted per-account usage/failure/429 counters by model family | ✅ |
-| Claude reasoning-effort audit in `models doctor` | ✅ |
-| `doctor --live` and `setup --check --live` real Google `/v1/responses` smoke probes | ✅ |
-| Interactive OAuth client credential onboarding in primary `setup --write` | ✅ |
-| 1Password CLI presence enforced before gateway/service wrapping | ✅ |
-| Process-local in-flight Google account spreading for concurrent Codex requests | ✅ |
-| Cached PyPI package-version drift warning in doctor/readiness diagnostics | ✅ |
-| Account CLI remove/reset for encrypted Google rotation store | ✅ |
-| `logs summary` request-log aggregation by route/family | ✅ |
-| `doctor --codex-ready` suggests `setup --repair` for existing config drift | ✅ |
-| Safe Codex config activation requiring explicit `--activate` | ✅ |
-| Clear provider-block-only `configure-codex --write` success messaging | ✅ |
-| Less brittle gateway status reachability probe for cold `/v1/models` responses | ✅ |
+`server.py` owns dispatch/retry/lease lifetime. Provider adapters classify response
+terminals through `response_protocol.py`; HTTP 200 alone is not semantic success.
+Only `completed` with usable output is generation readiness. Failed/incomplete
+results and refusal outcomes remain distinct; do not report catalog reachability
+as generation proof. Anti is an optional advisory CLI; Codex remains the actor.
 
-## Known Limitations
-- Live Google Antigravity, DeepSeek V4 Flash BYOK, and OpenRouter BYOK smokes have passed previously with configured credentials/API keys; current BYOK live proof still depends on fresh provider keys. The 1Password OpenRouter/DeepSeek login items inspected during the MoA/Fusion PR did not contain provider API-key-shaped values, so fresh BYOK credential material is still needed for another live provider smoke.
-- `doctor --live` and `setup --check --live` are explicit opt-in checks because they spend a real Google provider request.
-- `previous_response_id` is rejected by design in this stateless gateway; replay the full conversation, including tool calls and outputs, in `input`.
-- `/v1/responses/compact` is not implemented.
-- CI includes unit/compile checks, a release-artifact smoke job, and Windows Python 3.12 coverage. The `1.7.0` Publish workflow repeats the full matrix before PyPI; no `1.7.0` CI/tag/publish result is claimed yet.
-- Live backend availability is covered only by the credentialed smoke runs noted above.
-- Helper-level MoA/Fusion remains advisory; virtual picker models such as `panel:*`, `moa:*`, or `fusion:*` are not implemented.
+## Advertisement, transport and live evidence
 
-## Release State
-- Release package metadata: `2.3.0`; based on `3b34116913969d24c120ed9c3f0e41ff71c551da`.
-- Latest public GitHub release verified on 2026-08-24: [v2.2.0](https://github.com/Reedtrullz/codex-antigravity-auth/releases/tag/v2.2.0), published 2026-08-21; CI run `32522720655` and Publish run `32522720637` passed for the exact release SHA.
-- PyPI `codex-antigravity-auth==2.2.0` was directly verified on 2026-08-24; the published wheel and sdist match the release metadata. No fresh credentialed provider generation was run in this audit.
+1. **Advertised**: `/v1/models` lists configured identities plus catalog coverage
+   diagnostics. A partial catalog does not establish that missing models are
+   unavailable. Aliases and context metadata come from the
+   [capability owner](codex_antigravity_auth/design/capabilities.md).
+2. **Transport-supported**: the adapter can represent a request/output shape.
+   Provider declarations can narrow that set. Unknown capability remains unknown;
+   context declarations are not measurements of current backend limits.
+3. **Live-tested**: an explicit bounded generation observed usable completion for
+   one model/route/configuration at one time. Evidence expires and is not an
+   entitlement or future availability guarantee. See
+   [discovery and readiness](codex_antigravity_auth/design/model-discovery.md).
 
-## Next Priorities
-1. Keep v2.3.0 release evidence synchronized; treat the July 1.7.0 release-hardening artifacts as historical.
-2. Add `/v1/responses/compact` support.
-3. Expand live backend smoke coverage beyond DeepSeek/OpenRouter to additional BYOK providers.
-4. Add a documented credentialed smoke-test profile for 1Password-backed BYOK providers without persisting raw API keys.
+Google OAuth and BYOK API keys are current authentication paths. Dedicated xAI
+OAuth and BluesMinds integrations were removed; configure xAI through its BYOK
+API-key preset. Old migration/release notes do not re-enable removed auth flows.
+
+## Working on this source
+
+- [README](README.md): installation and product map.
+- [USAGE](USAGE.md): command operations and explicit mutation/network options.
+- [Verification](VERIFICATION.md): synthetic checks and source/artifact evidence.
+- [Migration](docs/refactor-migration.md): backup and compatibility boundaries.
+- [Roadmap dispositions](ANTI_IMPROVEMENTS_PLAN.md): implemented source versus
+  pending portfolio work, including unmerged follow-up PRs.
+- [Agent conventions](AGENTS.md): contributor rules; generated model metadata is
+  checked against its owner, rather than copied into a second status table.
+
+No new live, native service-manager, hosted CI or PyPI publication success is
+claimed by this documentation change. Consult exact revision evidence for each.

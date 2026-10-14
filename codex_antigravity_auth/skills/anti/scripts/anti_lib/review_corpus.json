@@ -1,0 +1,201 @@
+{
+  "schemaVersion": 1,
+  "id": "synthetic-review-v1",
+  "labelBasis": "fixed behavioral assertions plus independent code review; not model self-grading",
+  "holdoutVisibility": "public; partition only, not a blind holdout",
+  "cases": [
+    {
+      "id": "expiry-boundary",
+      "split": "development",
+      "contract": "Inputs now and expires are finite Python int/float timestamps: no NaN, infinities or custom comparison types. A session is expired exactly when now is greater than or equal to expires.",
+      "function": "expired",
+      "before": "def expired(now, expires):\n    return now >= expires\n",
+      "after": "def expired(now, expires):\n    return now > expires\n",
+      "defect": {
+        "id": "inclusive-expiry",
+        "severity": "high",
+        "claim": "An equal timestamp remains active."
+      },
+      "probes": [
+        {
+          "args": [
+            10,
+            10
+          ],
+          "expected": true
+        },
+        {
+          "args": [
+            9,
+            10
+          ],
+          "expected": false
+        },
+        {
+          "args": [
+            -1.5,
+            0.5
+          ],
+          "expected": false
+        },
+        {
+          "args": [
+            0.5,
+            0.5
+          ],
+          "expected": true
+        },
+        {
+          "args": [
+            1.5,
+            0.5
+          ],
+          "expected": true
+        }
+      ]
+    },
+    {
+      "id": "utf8-budget",
+      "split": "development",
+      "contract": "Fits means the UTF-8 encoded byte length is no greater than the byte budget.",
+      "function": "fits",
+      "before": "def fits(text, budget):\n    return len(text.encode(\"utf-8\")) <= budget\n",
+      "after": "def fits(text, budget):\n    return len(text) <= budget\n",
+      "defect": {
+        "id": "unicode-under-count",
+        "severity": "medium",
+        "claim": "Multibyte text can exceed the byte budget."
+      },
+      "probes": [
+        {
+          "args": [
+            "é",
+            1
+          ],
+          "expected": false
+        },
+        {
+          "args": [
+            "a",
+            1
+          ],
+          "expected": true
+        }
+      ]
+    },
+    {
+      "id": "false-default",
+      "split": "holdout",
+      "contract": "Use the fallback only when value is None; preserve false, zero and empty values.",
+      "function": "select",
+      "before": "def select(value, fallback):\n    return fallback if value is None else value\n",
+      "after": "def select(value, fallback):\n    return value or fallback\n",
+      "defect": {
+        "id": "false-value-replaced",
+        "severity": "medium",
+        "claim": "A supplied false value is replaced by the fallback."
+      },
+      "probes": [
+        {
+          "args": [
+            false,
+            true
+          ],
+          "expected": false
+        },
+        {
+          "args": [
+            null,
+            true
+          ],
+          "expected": true
+        }
+      ]
+    },
+    {
+      "id": "expiry-equivalent",
+      "split": "development",
+      "contract": "Inputs now and expires are finite Python int/float timestamps: no NaN, infinities or custom comparison types. A session is expired exactly when now is greater than or equal to expires.",
+      "function": "expired",
+      "before": "def expired(now, expires):\n    return now >= expires\n",
+      "after": "def expired(now, expires):\n    return not now < expires\n",
+      "defect": null,
+      "probes": [
+        {
+          "args": [
+            9,
+            10
+          ],
+          "expected": false
+        },
+        {
+          "args": [
+            10,
+            10
+          ],
+          "expected": true
+        },
+        {
+          "args": [
+            11,
+            10
+          ],
+          "expected": true
+        },
+        {
+          "args": [
+            -1.5,
+            0.5
+          ],
+          "expected": false
+        },
+        {
+          "args": [
+            0.5,
+            0.5
+          ],
+          "expected": true
+        },
+        {
+          "args": [
+            1.5,
+            0.5
+          ],
+          "expected": true
+        }
+      ]
+    },
+    {
+      "id": "utf8-equivalent",
+      "split": "holdout",
+      "contract": "Fits means the UTF-8 encoded byte length is no greater than the byte budget.",
+      "function": "fits",
+      "before": "def fits(text, budget):\n    return len(text.encode(\"utf-8\")) <= budget\n",
+      "after": "def fits(text, budget):\n    encoded = text.encode(\"utf-8\")\n    return len(encoded) <= budget\n",
+      "defect": null,
+      "probes": [
+        {
+          "args": [
+            "é",
+            1
+          ],
+          "expected": false
+        },
+        {
+          "args": [
+            "é",
+            2
+          ],
+          "expected": true
+        },
+        {
+          "args": [
+            "",
+            0
+          ],
+          "expected": true
+        }
+      ]
+    }
+  ]
+}

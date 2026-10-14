@@ -13,6 +13,7 @@ from .constants import (
     SCOPES,
 )
 from .redaction import redact_secret_text
+from .endpoint_policy import open_http_request
 
 # In-memory PKCE verifier store
 _pkce_verifier_store: dict[str, dict[str, str]] = {}
@@ -107,7 +108,7 @@ def post_form(url: str, payload: dict[str, Any], timeout: float = OAUTH_HTTP_TIM
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_http_request(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             status = int(getattr(resp, "status", 200))
     except urllib.error.HTTPError as exc:
@@ -144,20 +145,68 @@ def exchange_antigravity(code: str, verifier: str) -> dict:
         raise RuntimeError(f"OAuth exchange failed: {redact_secret_text(str(error))}")
     return payload
 
+class OAuthRefreshError(RuntimeError):
+    """A refresh failure with a classification independent of diagnostic text."""
+
+    def __init__(self, kind: str, message: str, *, status: int | None = None):
+        super().__init__(message)
+        self.kind = kind
+        self.status = status
+
+
 def refresh_access_token(refresh_token: str) -> dict:
-    cid, csec = require_credentials()
-    status, payload = post_form(
-        "https://oauth2.googleapis.com/token",
-        {
-            "client_id": cid,
-            "client_secret": csec,
-            "refresh_token": refresh_token,
-            "grant_type": "refresh_token",
-        },
-    )
-    if status < 200 or status >= 300:
-        error = payload.get("error") or payload.get("error_description") or f"HTTP {status}"
-        raise RuntimeError(f"Token refresh failed: {redact_secret_text(str(error))}")
+    try:
+        cid, csec = require_credentials()
+    except RuntimeError as exc:
+        raise OAuthRefreshError("client_configuration", "OAuth client credentials are not configured; run setup or check the credential configuration") from exc
+    try:
+        status, payload = post_form(
+            "https://oauth2.googleapis.com/token",
+            {
+                "client_id": cid,
+                "client_secret": csec,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+        )
+    except OSError as exc:
+        raise OAuthRefreshError("transport", "Token refresh transport failed; retry after cooldown") from exc
+    if status == 0 or status >= 500 or status == 408:
+        raise OAuthRefreshError("transport", f"Token refresh transport failed (HTTP {status}); retry after cooldown", status=status)
+    if status == 429:
+        raise OAuthRefreshError("throttle", "Token refresh was rate limited; retry after cooldown", status=status)
+    if not isinstance(payload, dict):
+        raise OAuthRefreshError("malformed_response", "Token refresh returned an invalid response", status=status)
+    error = payload.get("error")
+    if not 200 <= status < 300:
+        if status == 400 and error == "invalid_grant":
+            # Google uses invalid_rapt for session-policy reauthentication.
+            # Unknown subtypes also need recovery rather than an account ban.
+            if "error_subtype" in payload:
+                if not isinstance(payload["error_subtype"], str) or not payload["error_subtype"].strip():
+                    raise OAuthRefreshError("malformed_response", "Token refresh returned an invalid error subtype", status=status)
+                raise OAuthRefreshError("reauth_required", "Token refresh requires reauthentication; run login again", status=status)
+            raise OAuthRefreshError("credential_rejected", "Token refresh rejected the refresh token (invalid_grant); run login again", status=status)
+        if isinstance(error, str) and error in {"invalid_client", "unauthorized_client", "invalid_request", "unsupported_grant_type"}:
+            raise OAuthRefreshError("client_configuration", "Token refresh rejected the OAuth client configuration; check setup", status=status)
+        if isinstance(error, str) and error in {"access_denied", "admin_policy_enforced"}:
+            raise OAuthRefreshError("reauth_required", "Token refresh requires authorization recovery; check account policy and log in again", status=status)
+        raise OAuthRefreshError("malformed_response", f"Token refresh failed without a verified credential rejection (HTTP {status})", status=status)
+    token = payload.get("access_token")
+    if error is not None or not isinstance(token, str) or not token or any(ord(char) < 0x21 or ord(char) > 0x7E for char in token):
+        raise OAuthRefreshError("malformed_response", "Token refresh returned no usable access token", status=status)
+    if "refresh_token" in payload:
+        rotated = payload["refresh_token"]
+        if not isinstance(rotated, str) or not rotated or any(ord(char) < 0x21 or ord(char) > 0x7E for char in rotated):
+            raise OAuthRefreshError("malformed_response", "Token refresh returned an invalid replacement refresh token", status=status)
+    if "expires_in" in payload:
+        try:
+            expiry = float(payload["expires_in"])
+            valid_expiry = not isinstance(payload["expires_in"], bool) and math.isfinite(expiry) and expiry > 0
+        except (ValueError, TypeError, OverflowError):
+            valid_expiry = False
+        if not valid_expiry:
+            raise OAuthRefreshError("malformed_response", "Token refresh returned an invalid token lifetime", status=status)
     return payload
 
 
@@ -191,7 +240,7 @@ def load_code_assist(access_token: str) -> str | None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15.0) as resp:
+        with open_http_request(req, timeout=15.0) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except Exception:
         return None
@@ -222,7 +271,7 @@ def onboard_user(access_token: str) -> str | None:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=15.0) as resp:
+            with open_http_request(req, timeout=15.0) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             if exc.code in (429, 500, 502, 503):

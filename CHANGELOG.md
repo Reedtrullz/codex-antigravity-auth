@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.4.3 - Music Evidence Candidate (not published)
+
+- Exclude volatile in-flight lease fields from the account-binding inventory
+  hash so concurrent calls no longer invalidate a binding mid-run.
+- Add hybrid qualification dispatch lanes: per-class JSON response schemas,
+  markdown-fence-tolerant parsing, per-fixture run IDs, a spectrogram image
+  lane, a 16 kHz resampled-audio lane, and audioSource provenance.
+- Add bounded provider error diagnostics: provider rejection bodies are parsed
+  into a fixed, redacted field set (http_status, reason, domain, error_number,
+  truncated message) with query parameters stripped before parsing.
+- Distinguish VALIDATION_REQUIRED, RESTRICTED_AGE, generic permission-denied,
+  project/license errors, and transport errors. Age-ineligible accounts are
+  terminal and non-retryable instead of churning through escalating cooldowns,
+  and reauthorization guidance is no longer shown for provider-declared
+  ineligibility.
+- Record truthful attempt_count and rotation_count on every terminal failure,
+  including final 401/403; a same-account retry no longer counts as rotation.
+- Enforce per-request bounded rotation: each eligible account is tried at most
+  once, with distinct temporary-cooldown, reauth-required, and permanently-
+  ineligible terminal states.
+- Preserve the bound-acquisition no-refresh/no-rotation/no-fallback contract
+  and fail-closed panel behavior; validation URLs are redacted across request
+  logs, run records, exception strings, and panel output.
+- Add an optional compact Gemini music review: one supplied clip and evidence
+  claim, one advisory finding, strict response limits, and one backend attempt.
+- Include music schemas and modules in wheel/sdist installed contract checks.
+- Keep account-only Antigravity access independent of Keyspilli and local DSP.
+  Provider hearing and musical acceptance remain unqualified; no automatic
+  upload, fallback, account rotation, or installed helper adoption is added.
+
 ## v2.4.2 - Anti Hardening (Sep 22, 2026)
 
 ### Fixed

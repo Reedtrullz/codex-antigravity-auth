@@ -12,6 +12,7 @@ import re
 from typing import Any
 from .models import DEFAULT_GEMINI_MODEL_ID, resolve_backend_model
 from .schema import clean_json_schema
+from .resource_limits import ResourceLimitError, current_limits, json_loads_limited
 
 FUNCTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 JSON_SCHEMA_NAME_PATTERN = FUNCTION_NAME_PATTERN
@@ -85,33 +86,29 @@ def _valid_tool_call_id(value: Any) -> bool:
 
 
 def clean_function_call_args(value: Any) -> dict[str, Any]:
-    args = value if isinstance(value, dict) else {}
-    if INTERNAL_PLACEHOLDER_ARGUMENT in args:
-        # The schema layer injects a required _placeholder marker into every
-        # root object tool schema so the model always emits a callable shape;
-        # it must never reach Codex as a real argument, even when the model
-        # also emitted legitimate arguments alongside it.
-        args = {key: item for key, item in args.items() if key != INTERNAL_PLACEHOLDER_ARGUMENT}
-    return args
+    # No request provenance is available here, so user keys must be preserved.
+    from .tool_calls import parse_arguments
+    return parse_arguments(value, object_allowed=True)
 
 
 def function_call_arguments_json(value: Any) -> str:
-    return json.dumps(clean_function_call_args(value))
+    from .tool_calls import dump_arguments
+    return dump_arguments(clean_function_call_args(value))
 
 
 def function_call_arguments_string(value: Any) -> str:
-    if isinstance(value, dict):
-        return function_call_arguments_json(value)
+    from .tool_calls import dump_arguments
     if isinstance(value, str):
+        # Bound the original JSON before the duplicate-key-aware tool parser.
         try:
-            parsed = json.loads(value)
-        except Exception:
-            return value
-        if isinstance(parsed, dict):
-            cleaned = clean_function_call_args(parsed)
-            return function_call_arguments_json(cleaned) if cleaned != parsed else value
-        return value
-    return "{}"
+            json_loads_limited(value)
+        except ResourceLimitError:
+            raise
+        except (ValueError, RecursionError):
+            # Let the strict tool parser report malformed JSON consistently.
+            pass
+    validated = clean_function_call_args(value)
+    return value if isinstance(value, str) else dump_arguments(validated)
 
 
 def safe_project_id(value: Any) -> str | None:
@@ -130,7 +127,9 @@ def _function_call_args(value: Any) -> dict[str, Any]:
         return value
     if isinstance(value, str):
         try:
-            parsed = json.loads(value)
+            parsed = json_loads_limited(value)
+        except ResourceLimitError:
+            raise
         except Exception:
             return {"arguments": value}
         return parsed if isinstance(parsed, dict) else {}
@@ -144,7 +143,9 @@ def _function_response_payload(value: Any) -> dict[str, Any]:
         stripped = value.strip()
         if stripped:
             try:
-                parsed = json.loads(stripped)
+                parsed = json_loads_limited(stripped)
+            except ResourceLimitError:
+                raise
             except Exception:
                 parsed = None
             if isinstance(parsed, dict):
@@ -190,9 +191,11 @@ def _is_gemini_thinking_level_model(backend_model: str) -> bool:
     return "gemini-3.7" in lower or "gemini-3.8" in lower
 
 
-def thinking_level_for_request(codex_req: dict[str, Any], backend_model: str) -> str | None:
+def thinking_level_for_request(codex_req: dict[str, Any], backend_model: str, *, mapping: str | None = None) -> str | None:
     """Return the thinkingLevel string for Gemini 3.7+ models, or None."""
-    if not _is_gemini_thinking_level_model(backend_model):
+    if mapping not in (None, "thinking_level"):
+        return None
+    if mapping != "thinking_level" and not _is_gemini_thinking_level_model(backend_model):
         return None
     reasoning = codex_req.get("reasoning")
     valid_levels = {"low", "medium", "high"}
@@ -206,10 +209,10 @@ def thinking_level_for_request(codex_req: dict[str, Any], backend_model: str) ->
     return effort if effort in valid_levels else "medium"
 
 
-def thinking_budget_for_request(codex_req: dict[str, Any], backend_model: str) -> int | None:
-    if _is_gemini_thinking_level_model(backend_model):
+def thinking_budget_for_request(codex_req: dict[str, Any], backend_model: str, *, mapping: str | None = None) -> int | None:
+    if mapping == "thinking_level" or (mapping is None and _is_gemini_thinking_level_model(backend_model)):
         return None  # Gemini 3.7+ uses thinkingLevel, not thinking_budget
-    if "thinking" not in backend_model.lower() and "claude" not in backend_model.lower():
+    if mapping != "thinking_budget" and "thinking" not in backend_model.lower() and "claude" not in backend_model.lower():
         return None
     reasoning = codex_req.get("reasoning")
     effort = reasoning.get("effort", "high") if isinstance(reasoning, dict) else "high"
@@ -278,7 +281,14 @@ def normalize_chat_response_format(value: Any) -> dict[str, Any]:
 
 def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     """Translate standard Codex Responses API request body to Antigravity format."""
+    from .request_shapes import validate_request_shapes
+    validate_request_shapes(codex_req, route="google")
     model = codex_req.get("model", DEFAULT_GEMINI_MODEL_ID)
+    from .models import native_model_capabilities
+    from .input_fidelity import image_source
+    from .response_protocol import validate_capabilities
+    capabilities = native_model_capabilities(model)
+    validate_capabilities(codex_req, capabilities)
     backend_model = resolve_backend_model(model)
     
     # 1. Parse Codex input.
@@ -304,35 +314,13 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
         if part_type in ("input_text", "text", "output_text"):
             text = _stream_text(part.get("text"))
             return [{"text": text}] if text is not None else []
+        if part_type == "antigravity_audio":
+            return [{"inlineData":{"mimeType":"audio/wav","data":part["data"]}}]
         if part_type in ("input_image", "image"):
-            image_url = part.get("image_url") or part.get("url")
-            if isinstance(image_url, dict):
-                image_url = image_url.get("url")
-            if isinstance(image_url, str) and image_url.startswith("data:"):
-                header, _, payload = image_url.partition(",")
-                payload = "".join(payload.split())
-                if payload:
-                    mime_type = header[5:].split(";", 1)[0] or "application/octet-stream"
-                    try:
-                        base64.b64decode(payload, validate=True)
-                        return [{"inlineData": {"mimeType": mime_type, "data": payload}}]
-                    except Exception:
-                        pass
-            if isinstance(image_url, str) and image_url and not image_url.startswith("data:"):
-                return [{"fileData": {"mimeType": part.get("mime_type", "image/*"), "fileUri": image_url}}]
-            if part.get("filename") or part.get("file_id"):
-                # Some Responses clients send image parts with only a file_id
-                # reference (no URL we can fetch). Mirror the input_file
-                # fallback so the part is not silently dropped.
-                return [{"text": json.dumps({k: v for k, v in part.items() if k != "type"})}]
-        if part_type in ("input_file", "file"):
-            file_url = part.get("file_url") or part.get("url")
-            if isinstance(file_url, dict):
-                file_url = file_url.get("url")
-            if isinstance(file_url, str) and file_url:
-                return [{"fileData": {"mimeType": part.get("mime_type", "application/octet-stream"), "fileUri": file_url}}]
-            if part.get("filename") or part.get("file_id"):
-                return [{"text": json.dumps({k: v for k, v in part.items() if k != "type"})}]
+            image_url, mime_type, payload = image_source(part, "input.image")
+            if payload is not None:
+                return [{"inlineData": {"mimeType": mime_type, "data": payload}}]
+            return [{"fileData": {"mimeType": part.get("mime_type", "image/*"), "fileUri": image_url}}]
         if part_type == "tool_use":
             call_id = part.get("id") or part.get("call_id")
             name = part.get("name")
@@ -454,12 +442,14 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     gemini_tools = []
     codex_tools = codex_req.get("tools")
     if isinstance(codex_tools, list) and codex_tools:
+        limits = current_limits()
+        schema_budget = [limits.json_nodes, limits.body_bytes]
         declarations = []
         for tool in codex_tools:
             fn = response_function_tool(tool)
             if not fn:
                 continue
-            params = clean_json_schema(fn.get("parameters", {}))
+            params = clean_json_schema(fn.get("parameters", {}), _budget=schema_budget)
             declarations.append({
                 "name": fn.get("name"),
                 "description": fn.get("description", ""),
@@ -505,6 +495,13 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
         request_payload["toolConfig"] = tool_config
         
     generation_config = {}
+    text_format = (codex_req.get('text') or {}).get('format') or {}
+    if text_format.get('type') in ('json_object', 'json_schema'):
+        generation_config['responseMimeType'] = 'application/json'
+        if text_format['type'] == 'json_schema':
+            # Output schemas have their own lossless validation. The function
+            # parameter sanitizer would silently weaken these constraints.
+            generation_config['responseJsonSchema'] = text_format['schema']
     if "temperature" in codex_req:
         generation_config["temperature"] = codex_req["temperature"]
     if "top_p" in codex_req:
@@ -520,8 +517,8 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     # thinking_budget (int).  Claude rejects requests where max output tokens
     # do not exceed the thinking budget, so cap the budget to stay below
     # explicit Codex limits.
-    thinking_level = thinking_level_for_request(codex_req, backend_model)
-    budget = thinking_budget_for_request(codex_req, backend_model)
+    thinking_level = thinking_level_for_request(codex_req, backend_model, mapping=capabilities.reasoning_effort_parameter)
+    budget = thinking_budget_for_request(codex_req, backend_model, mapping=capabilities.reasoning_effort_parameter)
     if thinking_level is not None:
         generation_config["thinkingConfig"] = {
             "thinkingLevel": thinking_level,
@@ -553,7 +550,7 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
     
     return envelope
 
-def transform_gemini_candidate(candidate: dict) -> dict:
+def transform_gemini_candidate(candidate: dict, *, tool_validator=None) -> dict:
     """Extract standard Codex message / content parts from a Gemini candidate."""
     if not isinstance(candidate, dict):
         candidate = {}
@@ -569,7 +566,8 @@ def transform_gemini_candidate(candidate: dict) -> dict:
     if not isinstance(content, dict):
         content = {}
     parts = content.get("parts", [])
-    if not isinstance(parts, list):
+    malformed_parts = not isinstance(parts, list)
+    if malformed_parts:
         parts = []
     role = content.get("role", "assistant")
     if not isinstance(role, str):
@@ -577,52 +575,27 @@ def transform_gemini_candidate(candidate: dict) -> dict:
     if role == "model":
         role = "assistant"
     
+    from .tool_calls import FunctionCallValidator
+    from .google_parts import normalize_google_part, merge_output_error
+    tool_validator = tool_validator or FunctionCallValidator()
+    tool_error = None
+    output_error = 'malformed_output_part' if malformed_parts else None
+    partial_ids, partial_names = set(), set()
     output_parts = []
     function_calls = []
     reasoning_text = ""
-    
+
     for part in parts:
-        if not isinstance(part, dict):
-            continue
-            
-        # 1. Handle thoughts / thinking blocks
-        if part.get("thought") is True or part.get("type") == "thinking":
-            thought_text = _stream_text(part.get("text")) or _stream_text(part.get("thinking"))
-            if thought_text:
-                reasoning_text += thought_text
-            continue
+        normalized = normalize_google_part(part, tool_validator)
+        if normalized.text:
+            output_parts.append({"type":"output_text", "text":normalized.text, "annotations":[]})
+        reasoning_text += normalized.reasoning
+        if normalized.function is not None: function_calls.append(normalized.function)
+        tool_error = tool_error or normalized.tool_error
+        output_error = merge_output_error(output_error, normalized.output_error)
+        if normalized.partial_id: partial_ids.add(normalized.partial_id)
+        if normalized.partial_name: partial_names.add(normalized.partial_name)
 
-        # 2. Handle standard text
-        if "text" in part:
-            text = _stream_text(part.get("text"))
-            if text is None:
-                continue
-            output_parts.append({
-                "type": "output_text",
-                "text": text,
-                "annotations": []
-            })
-
-        # 3. Handle tool calls (independent of the text branch: a part may
-        # carry both text and a function call, and the call must not be
-        # dropped just because the text was emitted first).
-        if "functionCall" in part:
-            fc = part["functionCall"]
-            if not isinstance(fc, dict):
-                continue
-            name = _stream_text(fc.get("name"))
-            if not valid_function_name(name):
-                continue
-            # Auto-generate a call ID if missing so Codex can execute it
-            call_id = _stream_text(fc.get("id")) or f"call_{uuid.uuid4().hex[:8]}"
-            function_calls.append({
-                "type": "function_call",
-                "id": f"fc_{uuid.uuid4().hex[:8]}",
-                "call_id": call_id,
-                "name": name,
-                "arguments": function_call_arguments_string(fc.get("args", {})),
-            })
-            
     # Assemble structured Responses API message output
     message_item = {
         "type": "message",
@@ -635,19 +608,34 @@ def transform_gemini_candidate(candidate: dict) -> dict:
     result = {
         "message": message_item
     }
+    if tool_error:
+        result["tool_error"] = tool_error
+    if output_error:
+        result["output_error"] = output_error
+    if partial_ids: result["partial_call_ids"] = sorted(partial_ids)
+    if partial_names: result["partial_call_names"] = sorted(partial_names)
+    function_calls = [item for item in function_calls if item["call_id"] not in partial_ids and item["name"] not in partial_names]
     if function_calls:
         result["function_calls"] = function_calls
     if reasoning_text:
         result["reasoning"] = {
             "type": "reasoning",
             "id": f"rs_{uuid.uuid4().hex[:8]}",
-            "encrypted_content": "", # dummy
             "step_by_step_summary": reasoning_text
         }
     return result
 
-def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
+def transform_request_to_chat(codex_req: dict, provider_model: str, *, capabilities=None) -> dict:
     """Translate Responses API input into OpenAI-compatible Chat Completions."""
+    from .request_shapes import validate_request_shapes
+    validate_request_shapes(codex_req, route="byok")
+    from .input_fidelity import validate_input, image_source
+    validate_input(codex_req, {"text", "image"})
+    if capabilities is not None:
+        from .response_protocol import validate_capabilities
+        validate_capabilities(codex_req, capabilities)
+    elif codex_req.get("reasoning") is not None:
+        raise ValueError("reasoning requires an explicit provider/model mapping")
     messages = []
     system_texts = []
     function_names_by_call_id = {}
@@ -663,19 +651,16 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
         if part_type in ("input_text", "text", "output_text"):
             text = _stream_text(part.get("text"))
             return [{"type": "text", "text": text}] if text is not None else []
+        if part_type == "antigravity_audio":
+            return [{"inlineData":{"mimeType":"audio/wav","data":part["data"]}}]
         if part_type in ("input_image", "image"):
-            image_url = part.get("image_url") or part.get("url")
-            if isinstance(image_url, dict):
-                image_url = image_url.get("url")
-            if isinstance(image_url, str) and image_url:
-                return [{"type": "image_url", "image_url": {"url": image_url}}]
-        if part_type in ("input_file", "file"):
-            file_url = part.get("file_url") or part.get("url")
-            if isinstance(file_url, dict):
-                file_url = file_url.get("url")
-            if isinstance(file_url, str) and file_url:
-                return [{"type": "text", "text": f"[file] {file_url}"}]
-            return [{"type": "text", "text": json.dumps({k: v for k, v in part.items() if k != "type"})}]
+            image_url, _, _ = image_source(part, "input.image")
+            image = {"url": image_url}
+            nested = part.get("image_url")
+            detail = part.get("detail", nested.get("detail") if isinstance(nested, dict) else None)
+            if detail is not None:
+                image["detail"] = detail
+            return [{"type": "image_url", "image_url": image}]
         return []
 
     def tool_output_part_to_chat_message(part: dict) -> dict | None:
@@ -837,6 +822,10 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
     if codex_req.get("stream"):
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
+    if capabilities is not None and capabilities.reasoning_effort_parameter and isinstance(codex_req.get("reasoning"), dict):
+        effort = codex_req["reasoning"].get("effort")
+        if effort is not None:
+            payload["reasoning"] = {"effort": effort}
     if "temperature" in codex_req:
         payload["temperature"] = codex_req["temperature"]
     if "max_output_tokens" in codex_req:
@@ -871,13 +860,13 @@ def transform_request_to_chat(codex_req: dict, provider_model: str) -> dict:
     return payload
 
 
-def transform_chat_response(chat_resp: dict, model: str) -> dict:
+def transform_chat_response(chat_resp: dict, model: str, *, request=None) -> dict:
     """Compatibility wrapper around the shared OpenAI terminal contract."""
     from .openai_transport import OpenAICompatibleTransport
     from .response_protocol import response_from_result
 
     payload = chat_resp if isinstance(chat_resp, dict) else {}
-    result = OpenAICompatibleTransport(timeout=0).parse_chat_response(payload)
+    result = OpenAICompatibleTransport(timeout=0).parse_chat_response(payload, request=request)
     return response_from_result(
         result,
         response_id=result.provider_response_id or f"resp_{uuid.uuid4().hex[:12]}",

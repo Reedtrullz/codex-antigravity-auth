@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "kind": {
+      "const": "anti-music-evidence"
+    },
+    "clips": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "durationSeconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 30,
+            "exclusiveMinimum": 0
+          }
+        },
+        "required": [
+          "id",
+          "sha256",
+          "durationSeconds"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "claims": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "clipId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "startSeconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 30
+          },
+          "endSeconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 30
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "origin": {
+            "enum": [
+              "measurement",
+              "authored",
+              "human-observation",
+              "model-estimate",
+              "unknown"
+            ]
+          },
+          "uncertainty": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "id",
+          "clipId",
+          "startSeconds",
+          "endSeconds",
+          "text",
+          "origin",
+          "uncertainty"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "sourceAuthority": {
+          "enum": [
+            "unknown",
+            "self-authored",
+            "human-validated"
+          ]
+        },
+        "allowedDifferences": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        }
+      },
+      "required": [
+        "sourceAuthority",
+        "allowedDifferences"
+      ],
+      "additionalProperties": false
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      }
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "kind",
+    "clips",
+    "claims",
+    "context",
+    "limitations"
+  ],
+  "additionalProperties": false
+}

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -22,43 +21,14 @@ try:
 except ImportError:  # pragma: no cover - only available on Windows.
     msvcrt = None
 
-_file_lock_registry_guard = threading.Lock()
-_file_lock_thread_locks: dict[str, threading.RLock] = {}
+from .skills.anti.scripts.anti_lib.file_protection import (
+    ensure_private_directory, protect_descriptor, file_lock as _protected_file_lock,
+)
 
 
-
-
-
-@contextmanager
 def file_lock(path: Path):
-    lock_key = os.path.abspath(os.path.expanduser(str(path)))
-    with _file_lock_registry_guard:
-        thread_lock = _file_lock_thread_locks.setdefault(lock_key, threading.RLock())
-    with thread_lock:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = path.with_name(f".{path.name}.lock")
-        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-        acquired = False
-        try:
-            os.chmod(lock_path, 0o600)
-            if fcntl is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
-            elif msvcrt is not None:
-                if os.fstat(descriptor).st_size == 0:
-                    os.write(descriptor, b"\0")
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
-            acquired = True
-            yield
-        finally:
-            try:
-                if acquired and fcntl is not None:
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
-                elif acquired and msvcrt is not None:
-                    os.lseek(descriptor, 0, os.SEEK_SET)
-                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
-            finally:
-                os.close(descriptor)
+    # Keep the established injection seams while sharing the checked primitive.
+    return _protected_file_lock(path, posix_backend=fcntl, windows_backend=msvcrt)
 
 
 class SecureStore:
@@ -90,17 +60,17 @@ class SecureStore:
 
     def _atomic_write_bytes_unlocked(self, path: Path, content: bytes, *, mode: int = 0o600) -> None:
         self._reject_symlink(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(path.parent)
         temp_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
                 "wb", delete=False, dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
             ) as handle:
                 temp_path = Path(handle.name)
+                protect_descriptor(handle.fileno(), mode=mode, path=temp_path)
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.chmod(temp_path, mode)
             os.replace(temp_path, path)
             self._fsync_directory(path.parent)
         except Exception:

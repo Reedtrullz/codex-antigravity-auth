@@ -1,6 +1,7 @@
 """Gateway process, service, status, and log commands (split from cli.py)."""
 
 from __future__ import annotations
+from .console import console_print as print
 
 import json
 import os
@@ -11,14 +12,18 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from .namespaces import gateway_home
 
 from . import cli as _cli
+from .process_logs import process_log_info, prepare_log
+from .service import service_log_info
+from .service_drift import observe as observe_service
 
 
 def _codex_home_read_only() -> Path:
     if _cli.get_codex_home is not _cli._DEFAULT_GET_CODEX_HOME:
         return _cli.get_codex_home()
-    return Path(os.path.expanduser("~/.codex"))
+    return gateway_home()
 
 
 def gateway_model_ids(
@@ -27,14 +32,18 @@ def gateway_model_ids(
     timeout: float = 2.0,
     token_env: str = "ANTIGRAVITY_GATEWAY_TOKEN",
 ) -> set[str]:
-    url = base_url.rstrip("/") + "/models"
+    try:
+        base_url = _cli.validate_http_base_url(base_url, label="gateway base URL")
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    url = base_url + "/models"
     headers = {"Accept": "application/json"}
     token = os.environ.get(token_env, "").strip() if token_env else ""
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        with _cli.open_http_request(req, timeout=timeout) as response:
             raw = response.read()
     except urllib.error.HTTPError as exc:
         hint = ""
@@ -100,7 +109,8 @@ def gateway_runtime_paths(port: int) -> tuple[Path, Path]:
 
 
 def local_gateway_base_url(host: str, port: int) -> str:
-    return f"http://{host}:{port}/v1"
+    authority = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"http://{authority}:{port}/v1"
 
 
 def add_gateway_reachability(info: dict, *, host: str = "127.0.0.1", timeout: float = 5.0) -> dict:
@@ -201,7 +211,8 @@ def gateway_pid_matches(pid: int) -> bool | None:
         return None
     if not command:
         return False
-    return "codex_antigravity_auth.server:app" in command and "uvicorn" in command
+    return (("codex_antigravity_auth.server:app" in command and "uvicorn" in command)
+            or ("codex_antigravity_auth.cli" in command and "start" in command and "--port" in command))
 
 
 def read_pid_file(path: Path) -> int | None:
@@ -244,19 +255,19 @@ def gateway_status_info(port: int) -> dict:
 def run_gateway_status(args) -> dict:
     info = _cli.reachable_gateway_status_info(args.port, wait=True, timeout=5.0)
     raw_service = _cli.service_status(args.port)
-    info["service"] = {
-        **raw_service,
-        **_cli.observed_service_result(
-            action="status",
-            installed=bool(raw_service.get("installed")),
-            active=bool(raw_service.get("active")),
-            reachable=bool(info.get("reachable")),
-            changed=False,
-            commands=tuple(raw_service.get("commands", ())) if isinstance(raw_service.get("commands", ()), (list, tuple)) else (),
-            error=raw_service.get("error"),
-        ).to_dict(),
-    }
+    observed = _cli.observed_service_result(
+        action="status",
+        installed=bool(raw_service.get("installed")),
+        active=bool(raw_service.get("active")),
+        reachable=bool(info.get("reachable")),
+        changed=False,
+        commands=tuple(raw_service.get("commands", ())) if isinstance(raw_service.get("commands", ()), (list, tuple)) else (),
+        error=raw_service.get("error"),
+    ).to_dict()
+    info["service"] = observe_service({**raw_service, **observed}, info)
     info["request_log"] = _cli.request_log_info()
+    info["namespaces"] = _cli.namespace_diagnostics()
+    info["process_log"] = process_log_info(_codex_home_read_only(), args.port)
     if getattr(args, "json", False):
         print(json.dumps(info, indent=2))
     else:
@@ -279,6 +290,7 @@ def run_gateway_status(args) -> dict:
         if service_path:
             print(f"  service_ref: {service_path}")
         print(f"  request_log: {info['request_log']['path']}")
+        print(f"  process_log: {info['process_log']['path']} (2 MiB x 3 files; legacy logs preserved)")
     return info
 
 
@@ -304,6 +316,14 @@ def run_service_command(args) -> dict:
                 unified_model_picker=bool(getattr(args, "unified_model_picker", False)),
             )
             action = "installed"
+        elif args.service_command in {'repair', 'restart'}:
+            operation = _cli.repair_service if args.service_command == 'repair' else _cli.restart_service
+            options = {'write': bool(getattr(args, 'write', False))}
+            if args.service_command == 'repair':
+                options.update({name: getattr(args, name, None) for name in
+                                ('host', 'op_env_file', 'op_environment', 'unified_model_picker', 'clear_secret_runtime')})
+            info = operation(args.port, **options)
+            action = args.service_command
         elif args.service_command == "uninstall":
             info = _cli.uninstall_service(args.port)
             action = "uninstalled"
@@ -311,7 +331,7 @@ def run_service_command(args) -> dict:
             info = _cli.service_status(args.port)
             action = "status"
         else:
-            raise SystemExit("service requires install, uninstall, or status")
+            raise SystemExit("service requires install, uninstall, status, repair, or restart")
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(_cli.redact_secret_text(str(exc))) from exc
     if action == "installed" and (
@@ -326,9 +346,9 @@ def run_service_command(args) -> dict:
         raise SystemExit(_cli.redact_secret_text(str(detail)))
     gateway = _cli.reachable_gateway_status_info(
         args.port,
-        wait=action == "installed" and bool(info.get("installed")) and bool(info.get("active")),
+        wait=(action == "installed" or (action in {"repair", "restart"} and info.get("changed"))) and bool(info.get("active")),
     )
-    result_action = {"installed": "install", "uninstalled": "uninstall"}.get(action, "status")
+    result_action = {"installed": "install", "uninstalled": "uninstall"}.get(action, action)
     observed = _cli.observed_service_result(
         action=result_action,
         installed=bool(info.get("installed")),
@@ -339,7 +359,10 @@ def run_service_command(args) -> dict:
         error=info.get("error"),
     ).to_dict()
     info = {**info, **observed}
-    result = {"service": info, "gateway": gateway}
+    info = observe_service(info, gateway)
+    if action in {'installed', 'repair', 'restart'} and info.get('changed', action == 'installed') and not info.get('owned_ready'):
+        info.update(state='failed', error=info.get('error') or 'Service did not reach verified owned readiness')
+    result = {"service": info, "gateway": gateway, "namespaces": _cli.namespace_diagnostics(), **service_log_info(args.port)}
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2))
     else:
@@ -349,7 +372,8 @@ def run_service_command(args) -> dict:
                 f"{'active' if info.get('active') else 'inactive'}"
             )
         else:
-            print(f"[+] Gateway service {action} for port {args.port}")
+            outcome = 'FAIL' if info.get('state') == 'failed' else ('PLAN' if info.get('plan') else '+')
+            print(f"[{outcome}] Gateway service {action} for port {args.port}")
             if action == "installed":
                 try:
                     onepassword_description = _cli.onepassword_runtime_description(
@@ -370,7 +394,9 @@ def run_service_command(args) -> dict:
                 f"reachable ({gateway.get('reachable_model_count', 0)} model(s) at {gateway.get('reachable_base_url')})"
             )
         else:
-            print(f"    Gateway process: {gateway['status']}")
+            print(f"    Gateway process: {gateway.get('status', 'unknown')}")
+    if not getattr(args, 'json', False) and info.get('state') == 'failed':
+        raise SystemExit(_cli.redact_secret_text(str(info.get('error') or 'Service operation failed')))
     return result
 
 
@@ -395,12 +421,14 @@ def run_logs_command(args) -> None:
         else:
             print(f"[*] Request log summary ({summary['since']})")
             for group in summary["groups"].values():
-                success_pct = group["success_rate"] * 100
+                success_pct = f"{group['success_rate'] * 100:.1f}%" if group["success_rate"] is not None else "n/a"
                 p50 = group["p50_latency_ms"] if group["p50_latency_ms"] is not None else "n/a"
                 p95 = group["p95_latency_ms"] if group["p95_latency_ms"] is not None else "n/a"
                 print(
                     f"- {group['route']}/{group['family']}: {group['request_count']} request(s), "
-                    f"{success_pct:.1f}% success, p50={p50}ms, p95={p95}ms, "
+                    f"{group.get('open_count', 0)} open, {group.get('incomplete_count', 0)} incomplete, "
+                    f"{group.get('cancellation_count', 0)} cancelled, "
+                    f"{success_pct} closed-request success, p50={p50}ms, p95={p95}ms, "
                     f"429s={group['rate_limit_count']}, rotations={group['rotation_attempted_count']}"
                 )
                 if group["top_error_classes"]:
@@ -408,6 +436,10 @@ def run_logs_command(args) -> None:
                         f"{item['error_class']} ({item['count']})" for item in group["top_error_classes"]
                     )
                     print(f"  errors: {errors}")
+        if summary.get("requested_window_incomplete"):
+            print(f"[WARN] Retained logs do not establish the full requested window; earliest retained timestamp: {summary.get('earliest_retained_timestamp')}")
+        if summary.get("omitted_records"):
+            print(f"[WARN] {summary['omitted_records']} oversized request-log record(s) were omitted.")
         if summary["malformed_records"]:
             print(f"[WARN] Ignored {summary['malformed_records']} malformed request-log entry/entries.")
         return
@@ -447,6 +479,7 @@ def run_logs_command(args) -> None:
 
 
 def start_gateway_background(args) -> dict:
+    _cli.configure_local_gateway_environment(args)
     _cli.require_safe_gateway_host(args.host, args.allow_remote)
     _cli.ensure_unified_env_for_gateway(args)
     pid_path, log_path = _cli.gateway_runtime_paths(args.port)
@@ -476,15 +509,18 @@ def start_gateway_background(args) -> dict:
     cmd = [
         sys.executable,
         "-m",
-        "uvicorn",
-        "codex_antigravity_auth.server:app",
+        "codex_antigravity_auth.cli",
+        "start",
         "--host",
         args.host,
         "--port",
         str(args.port),
-        "--log-level",
-        "info",
+        "--process-log",
+        str(log_path),
+        "--quiet-runtime-console",
     ]
+    if args.allow_remote:
+        cmd.append("--allow-remote")
     try:
         onepassword_description = _cli.onepassword_runtime_description(
             op_env_file=getattr(args, "op_env_file", None),
@@ -497,37 +533,23 @@ def start_gateway_background(args) -> dict:
         )
     except ValueError as exc:
         raise SystemExit(_cli.redact_secret_text(str(exc))) from exc
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-    if hasattr(os, "O_NOFOLLOW"):
-        log_flags |= os.O_NOFOLLOW
     try:
-        log_fd = os.open(log_path, log_flags, 0o600)
-    except OSError as exc:
-        raise SystemExit(f"Could not open gateway log file {log_path}: {_cli.redact_secret_text(str(exc))}") from exc
+        prepare_log(log_path)
+    except (OSError, ValueError) as exc:
+        raise SystemExit("Could not initialize private process logging; inspect the process-log directory") from exc
     try:
-        if hasattr(os, "fchmod"):
-            os.fchmod(log_fd, 0o600)
-        else:
-            os.chmod(log_path, 0o600)
-        log_file = os.fdopen(log_fd, "ab")
-    except Exception:
-        os.close(log_fd)
-        raise
-    with log_file:
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except FileNotFoundError as exc:
-            raise SystemExit(
-                "Could not start gateway through 1Password because `op` was not found. "
-                "Install 1Password CLI or start without --op-env-file/--op-environment."
-            ) from exc
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            "Could not start gateway through 1Password because `op` was not found. "
+            "Install 1Password CLI or start without --op-env-file/--op-environment."
+        ) from exc
     time.sleep(0.25)
     if proc.poll() is not None:
         raise SystemExit(f"Gateway exited during startup with code {proc.returncode}. See log: {log_path}")

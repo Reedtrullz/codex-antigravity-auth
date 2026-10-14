@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "archivedAt": "2026-10-01",
+  "files": [
+    {
+      "originalPath": "STATUS.md",
+      "archivePath": "docs/history/2026-10-01/STATUS.md",
+      "sourceCommit": "fbed33cced3481c94e12937d461dc5706e684523",
+      "sha256": "e98ad63ccc4292d9e91de067b285da69504cab904462d0fde82cab884627dc95"
+    },
+    {
+      "originalPath": "VERIFICATION.md",
+      "archivePath": "docs/history/2026-10-01/VERIFICATION.md",
+      "sourceCommit": "fbed33cced3481c94e12937d461dc5706e684523",
+      "sha256": "a5b55a2a1aaa0c91cb4a8326e36f239d1ed5fd727714f7077905ecf70144577f"
+    },
+    {
+      "originalPath": "ANTI_IMPROVEMENTS_PLAN.md",
+      "archivePath": "docs/history/2026-10-01/ANTI_IMPROVEMENTS_PLAN.md",
+      "sourceCommit": "fbed33cced3481c94e12937d461dc5706e684523",
+      "sha256": "474c05edc06ce7e008827213904007f19c26114de219fd200075c24f2e33fb42"
+    },
+    {
+      "originalPath": "ANTI_REVIEW_FIX_PLAN.md",
+      "archivePath": "docs/history/2026-10-01/ANTI_REVIEW_FIX_PLAN.md",
+      "sourceCommit": "fbed33cced3481c94e12937d461dc5706e684523",
+      "sha256": "1a058ac35e11e4046491c6c8dd8c45f278d3dbd70e04ac20c4f852849e1bdde1"
+    },
+    {
+      "originalPath": "AGENTS.md",
+      "archivePath": "docs/history/2026-10-01/AGENTS.md",
+      "sourceCommit": "fbed33cced3481c94e12937d461dc5706e684523",
+      "sha256": "1816ad6157d112154f2bcf0d4201e0c1d1f031bcd142c3e411df707166dfbdb7"
+    },
+    {
+      "originalPath": "docs/refactor-migration.md",
+      "archivePath": "docs/history/2026-10-01/docs/refactor-migration.md",
+      "sourceCommit": "fbed33cced3481c94e12937d461dc5706e684523",
+      "sha256": "cb263f56701a9f4056b26a1e5c2e93811649061c4b9d5f214d1e444a89a24490"
+    },
+    {
+      "originalPath": "docs/refactor-release-checklist.md",
+      "archivePath": "docs/history/2026-10-01/docs/refactor-release-checklist.md",
+      "sourceCommit": "fbed33cced3481c94e12937d461dc5706e684523",
+      "sha256": "b3cba8012f63f33a295d3d9bdfdcf2aeae7136ffbb1790fc6b07302aeb750fba"
+    }
+  ]
+}

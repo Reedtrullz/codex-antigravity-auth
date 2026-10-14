@@ -1,6 +1,6 @@
+from tests.conftest import byte_chunks
 import json
 import os
-import io
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -505,7 +505,7 @@ class TestBYOKProviders(unittest.TestCase):
         deepseek = normalized["providers"]["deepseek"]
         self.assertEqual(deepseek["kind"], "openai_chat")
         self.assertEqual(deepseek["displayName"], "DeepSeek Custom")
-        self.assertNotIn("baseUrl", deepseek)
+        self.assertIsNone(deepseek["baseUrl"])
         self.assertEqual(deepseek["models"], ["deepseek-chat"])
         self.assertNotIn("headers", deepseek)
         self.assertEqual(deepseek["apiKeyEnvAliases"], ["DEEPSEEK_ALT_KEY"])
@@ -513,7 +513,7 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertNotIn("apiKeyOptional", deepseek)
 
         custom = normalized["providers"]["custom-one"]
-        self.assertNotIn("kind", custom)
+        self.assertIsNone(custom["kind"])
         self.assertNotIn("displayName", custom)
         self.assertEqual(custom["baseUrl"], "http://localhost:9999/v1")
         self.assertEqual(
@@ -529,7 +529,7 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertNotIn("timeout", custom)
 
         custom_two = normalized["providers"]["custom-two"]
-        self.assertNotIn("kind", custom_two)
+        self.assertEqual(custom_two["kind"], "unknown")
         self.assertNotIn("displayName", custom_two)
         self.assertEqual(custom_two["models"], [{"id": "ok"}])
         self.assertNotIn("apiKeyEnv", custom_two)
@@ -537,21 +537,20 @@ class TestBYOKProviders(unittest.TestCase):
 
         for index, api_key in enumerate(("secret\nbad", "secret\u00e9bad")):
             with self.subTest(api_key=repr(api_key)):
-                captured_stderr = io.StringIO()
-                with patch("sys.stderr", captured_stderr):
+                with self.assertLogs("codex_antigravity_auth.byok", level="WARNING") as logs:
                     malformed_key = normalize_provider_entry(
                         {"apiKey": api_key, "displayName": f"Broken Provider {index}"}
                     )
                 self.assertNotIn("apiKey", malformed_key)
-                self.assertIn(f"Broken Provider {index}", captured_stderr.getvalue())
-                self.assertIn("failed validation", captured_stderr.getvalue())
-                self.assertNotIn(api_key, captured_stderr.getvalue())
+                output = "\n".join(logs.output)
+                self.assertNotIn(f"Broken Provider {index}", output)
+                self.assertIn("failed validation", output)
+                self.assertNotIn(api_key, output)
         # The warning is emitted once per provider label, not on every load.
-        captured_stderr = io.StringIO()
-        with patch("sys.stderr", captured_stderr):
+        with self.assertLogs("codex_antigravity_auth.byok", level="WARNING") as logs:
             normalize_provider_entry({"apiKey": "bad\x01key", "displayName": "Repeat Warning Provider"})
             normalize_provider_entry({"apiKey": "bad\x01key", "displayName": "Repeat Warning Provider"})
-        self.assertEqual(captured_stderr.getvalue().count("failed validation"), 1)
+        self.assertEqual("\n".join(logs.output).count("failed validation"), 1)
 
         reserved = normalize_provider_entry(
             {
@@ -569,9 +568,9 @@ class TestBYOKProviders(unittest.TestCase):
 
         with patch("codex_antigravity_auth.byok.load_provider_config", return_value=normalized):
             providers = all_provider_configs(include_env_enabled=False)
-            self.assertEqual(providers["deepseek"]["baseUrl"], PROVIDER_PRESETS["deepseek"]["baseUrl"])
+            self.assertIsNone(providers["deepseek"]["baseUrl"])
             self.assertEqual(providers["deepseek"]["models"], ["deepseek-chat"])
-            self.assertEqual(providers["custom-one"]["kind"], "openai_chat")
+            self.assertIsNone(providers["custom-one"]["kind"])
 
     def test_single_string_legacy_models_are_not_split_into_characters(self):
         normalized = normalize_provider_entry({"models": "abc"})
@@ -627,7 +626,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch(
                 "codex_antigravity_auth.server.all_provider_configs_read_only",
                 return_value=all_provider_configs(),
-            ):
+            ), patch("codex_antigravity_auth.server.routing_identity", return_value={"version":1,"sha256":"bad" + "0" * 61}):
                 response = TestClient(app).get("/v1/models")
 
         self.assertEqual(response.status_code, 200)
@@ -635,7 +634,10 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertEqual([model["id"] for model in byok_models], ["deepseek:ok", "deepseek:good"])
         rendered = json.dumps(byok_models)
         self.assertNotIn("\\n", rendered)
-        self.assertNotIn("bad", rendered)
+        picker_fields = [{key: model[key] for key in ("id", "slug", "display_name", "description")}
+                         for model in byok_models]
+        self.assertNotIn("bad", json.dumps(picker_fields).lower())
+        self.assertEqual(byok_models[0]["capabilities"]["routing_identity"]["sha256"], "bad" + "0" * 61)
 
     def test_transform_responses_to_chat_completions(self):
         payload = transform_request_to_chat(
@@ -689,6 +691,7 @@ class TestBYOKProviders(unittest.TestCase):
             {
                 "model": "deepseek:deepseek-chat",
                 "input": [
+                    {"type":"function_call", "call_id":"call_1", "name":"lookup", "arguments":"{}"},
                     {
                         "type": "message",
                         "role": "user",
@@ -706,20 +709,16 @@ class TestBYOKProviders(unittest.TestCase):
             "deepseek-chat",
         )
 
-        self.assertEqual(payload["messages"], [
+        self.assertEqual(payload["messages"][1:], [
             {"role": "tool", "tool_call_id": "call_1", "content": '{"ok": true}', "name": "lookup"}
         ])
 
-    def test_byok_top_level_orphan_tool_output_is_preserved_when_call_id_is_valid(self):
-        payload = transform_request_to_chat(
-            {
+    def test_byok_top_level_orphan_tool_output_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"input\[0\].call_id: orphan"):
+            transform_request_to_chat({
                 "model": "deepseek:deepseek-chat",
                 "input": [{"type": "function_call_output", "call_id": "call_1", "output": "result"}],
-            },
-            "deepseek-chat",
-        )
-
-        self.assertEqual(payload["messages"], [{"role": "tool", "tool_call_id": "call_1", "content": "result"}])
+            }, "deepseek-chat")
 
     def test_flat_responses_function_tools_transform_for_google_and_byok(self):
         flat_tool = {
@@ -734,7 +733,9 @@ class TestBYOKProviders(unittest.TestCase):
             "strict": True,
         }
 
-        google = transform_request({"model": "gemini-3.5-flash-high", "input": "hi", "tools": [flat_tool]})
+        with self.assertRaisesRegex(ValueError, "strict: translation_loss"):
+            transform_request({"model": "gemini-3.5-flash-high", "input": "hi", "tools": [flat_tool]})
+        google = transform_request({"model": "gemini-3.5-flash-high", "input": "hi", "tools": [{**flat_tool, "strict": False}]})
         declaration = google["request"]["tools"][0]["functionDeclarations"][0]
         self.assertEqual(declaration["name"], "lookup")
         self.assertEqual(declaration["parameters"]["required"], ["q"])
@@ -1171,7 +1172,7 @@ class TestBYOKProviders(unittest.TestCase):
             self.assertEqual(model["default_verbosity"], "medium")
             self.assertEqual(model["truncation_policy"], {"mode": "tokens", "limit": 10000})
             self.assertEqual(model["experimental_supported_tools"], [])
-            self.assertIsInstance(model["supported_reasoning_levels"][0], dict)
+            self.assertTrue(all(isinstance(level, dict) for level in model["supported_reasoning_levels"]))
 
     def test_env_enabled_providers_require_valid_env_key_before_advertising(self):
         self.assertEqual(
@@ -1302,7 +1303,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1328,7 +1329,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = []
@@ -1394,7 +1395,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1420,7 +1421,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ") and line != "data: [DONE]"]
@@ -1460,7 +1461,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1486,7 +1487,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'first'}, {'type': 'function', 'name': 'second'}]},
                 )
 
         events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ") and line != "data: [DONE]"]
@@ -1525,7 +1526,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1583,7 +1584,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(['data: {"choices": [}\n', "data: [DONE]\n"]))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(['data: {"choices": [}\n', "data: [DONE]\n"])))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1616,7 +1617,7 @@ class TestBYOKProviders(unittest.TestCase):
         self.assertIn("invalid_stream_chunk", response.text)
         self.assertNotIn("response.completed", response.text)
 
-    def test_streaming_byok_ignores_malformed_tool_call_deltas(self):
+    def test_streaming_byok_reports_malformed_tool_call_deltas(self):
         provider = {
             "id": "xai",
             "displayName": "xAI",
@@ -1627,7 +1628,7 @@ class TestBYOKProviders(unittest.TestCase):
         }
 
         chunks = [
-            'data: {"choices":"bad"}\n',
+            'data: {"choices":[]}\n',
             'data: {"choices":[{"delta":"bad"}]}\n',
             'data: {"choices":[{"delta":{"reasoning_content":["bad"],"content":["bad"]}}]}\n',
             'data: {"choices":[{"delta":{"tool_calls":[{"index":"bad","id":"bad","function":{"name":"ignored","arguments":"{}"}}]}}]}\n',
@@ -1654,7 +1655,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1688,15 +1689,15 @@ class TestBYOKProviders(unittest.TestCase):
             if line.startswith("data: ") and line != "data: [DONE]":
                 events.append(json.loads(line[6:]))
 
-        self.assertFalse([e for e in events if e.get("type") == "error"])
+        self.assertTrue([e for e in events if e.get("type") == "error"])
         deltas = [e["delta"] for e in events if e.get("type") == "response.output_text.delta"]
         arg_done = [e for e in events if e.get("type") == "response.function_call_arguments.done"]
         tool_done = [e["item"] for e in events if e.get("type") == "response.output_item.done" and e["item"]["type"] == "function_call"]
-        completed = [e for e in events if e.get("type") == "response.completed"]
+        completed = [e for e in events if e.get("type") == "response.failed"]
 
         self.assertEqual("".join(deltas), "ok")
-        self.assertEqual([e["arguments"] for e in arg_done], ["{}"])
-        self.assertEqual(tool_done[0]["name"], "lookup")
+        self.assertEqual(arg_done, [])
+        self.assertEqual(tool_done, [])
         self.assertTrue(completed)
         self.assertEqual(completed[0]["response"]["usage"], {"input_tokens": 0, "output_tokens": 5, "total_tokens": 5})
 
@@ -1732,7 +1733,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1758,7 +1759,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = []
@@ -1813,7 +1814,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1839,7 +1840,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = []
@@ -1889,7 +1890,7 @@ class TestBYOKProviders(unittest.TestCase):
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.aiter_text = MagicMock(return_value=AsyncAiterText(chunks))
+        mock_response.aiter_bytes = MagicMock(return_value=byte_chunks(AsyncAiterText(chunks)))
 
         class StreamContext:
             async def __aenter__(self):
@@ -1915,7 +1916,7 @@ class TestBYOKProviders(unittest.TestCase):
             with patch("codex_antigravity_auth.server.httpx.AsyncClient", MockClient):
                 response = TestClient(app).post(
                     "/v1/responses",
-                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True},
+                    json={"model": "xai:grok-code-fast-1", "input": "hello", "stream": True, "tools": [{'type': 'function', 'name': 'lookup'}]},
                 )
 
         events = []

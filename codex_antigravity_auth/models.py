@@ -8,6 +8,7 @@ import re
 import threading
 import warnings
 from pathlib import Path
+from .namespaces import gateway_file
 from typing import Any
 from .response_protocol import ProviderCapabilities
 from .secure_store import SecureStore
@@ -28,6 +29,9 @@ class NativeModel:
     default_reasoning_level: str = "high"
     supports_parallel_tool_calls: bool = True
     aliases: tuple[str, ...] = ()
+    input_modalities: tuple[str, ...] = ("text",)
+    reasoning_mapping: str | None = None
+    output_bridge_required: str | None = None
 
 
 DEFAULT_CLAUDE_MODEL_ID = "claude-sonnet-4-6"
@@ -45,6 +49,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         backend_id="gemini-4-argon-high",
         display_name="Gemini 4 Argon",
         context_window=1_048_576,
+        input_modalities=("text", "image"),
         family="gemini",
         aliases=("gemini-4-argon-high", "gemini-4-argon-medium", "argon"),
     ),
@@ -53,9 +58,11 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
     # thinkingConfig.thinkingLevel rather than suffixed wire ids.
     NativeModel(
         id="gemini-3.8-flash",
+        reasoning_mapping="thinking_level",
         backend_id="gemini-3.8-flash-tiered",
         display_name="Gemini 3.8 Flash",
         context_window=1_048_576,
+        input_modalities=("text", "image"),
         family="gemini",
         default_reasoning_level="medium",
         aliases=("gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"),
@@ -64,9 +71,11 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
     # 3.7 Flash uses the same tiered request shape as 3.8.
     NativeModel(
         id="gemini-3.7-flash",
+        reasoning_mapping="thinking_level",
         backend_id="gemini-3.7-flash-tiered",
         display_name="Gemini 3.7 Flash",
         context_window=1_048_576,
+        input_modalities=("text", "image"),
         family="gemini",
         aliases=("gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low"),
     ),
@@ -77,6 +86,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         backend_id="gemini-3.1-pro-low",
         display_name="Gemini 3.1 Pro",
         context_window=1_048_576,
+        input_modalities=("text", "image"),
         family="gemini",
         aliases=("gemini-3.1-pro-high", "gemini-pro-agent", "gemini-3.1-pro-preview"),
     ),
@@ -84,41 +94,51 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
     NativeModel(
         id="gemini-3.1-flash-image",
         backend_id="gemini-3.1-flash-image",
+        output_bridge_required="image",
         display_name="Gemini 3.1 Flash Image",
         context_window=1_048_576,
+        input_modalities=("text", "image"),
         family="gemini",
     ),
     # ── Claude (via Google Antigravity) ──
     NativeModel(
         id="claude-sonnet-5-5",
+        reasoning_mapping="thinking_budget",
         backend_id="claude-sonnet-5-5",
         display_name="Claude Sonnet 5.5 (Google)",
         context_window=250_000,
+        input_modalities=("text", "image"),
         family="claude",
         aliases=("claude-sonnet-5.5", "sonnet-5.5"),
     ),
     NativeModel(
         id="claude-opus-5-5-thinking",
+        reasoning_mapping="thinking_budget",
         backend_id="claude-opus-5-5-thinking",
         display_name="Claude Opus 5.5 (Google)",
         context_window=250_000,
+        input_modalities=("text", "image"),
         family="claude",
         default_reasoning_level="xhigh",
         aliases=("claude-opus-5-5", "claude-opus-5.5", "opus-5.5"),
     ),
     NativeModel(
         id="claude-sonnet-4-6",
+        reasoning_mapping="thinking_budget",
         backend_id="claude-sonnet-4-6",
         display_name="Claude Sonnet 4.6 (Google)",
         context_window=250_000,
+        input_modalities=("text", "image"),
         family="claude",
         aliases=("sonnet", "claude-sonnet", "claude-3.5-sonnet", "claude-3-5-sonnet"),
     ),
     NativeModel(
         id="claude-opus-4-6-thinking",
+        reasoning_mapping="thinking_budget",
         backend_id="claude-opus-4-6-thinking",
         display_name="Claude Opus 4.6 (Google)",
         context_window=250_000,
+        input_modalities=("text", "image"),
         family="claude",
         default_reasoning_level="xhigh",
         aliases=("opus", "claude-opus", "claude-opus-4-6"),
@@ -129,15 +149,18 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         backend_id="gpt-oss-120b-medium",
         display_name="GPT-OSS 120B (Medium)",
         context_window=131_072,
+        input_modalities=("text",),
         family="gemini",
     ),
     # ── Compatibility Flash generations ──
     # Keep saved configs working while the current catalog moves forward.
     NativeModel(
         id="gemini-3.6-flash-high",
+        reasoning_mapping="thinking_level",
         backend_id="gemini-3.7-flash-tiered",
         display_name="Gemini 3.6 Flash (High)",
         context_window=1_048_576,
+        input_modalities=("text", "image"),
         family="gemini",
         aliases=("gemini-3.6-flash", "gemini-3.6-flash-medium", "gemini-3.6-flash-low"),
     ),
@@ -146,6 +169,7 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         backend_id="gemini-3-flash-agent",
         display_name="Gemini 3.5 Flash (High)",
         context_window=1_048_576,
+        input_modalities=("text", "image"),
         family="gemini",
         aliases=("gemini-3.5-flash", "gemini-3.5-flash-medium", "gemini-3.5-flash-low", "gemini-3.5-flash-extra-low"),
     ),
@@ -243,7 +267,7 @@ def _slug_variants(value: str) -> set[str]:
 
 
 def model_overlay_path() -> Path:
-    return Path(os.path.expanduser(MODEL_OVERLAY_FILE))
+    return gateway_file(MODEL_OVERLAY_FILE, "antigravity-models.toml")
 
 
 def _validate_model_text(value: Any, label: str) -> str:
@@ -296,7 +320,13 @@ def validate_overlay_model(data: dict[str, Any]) -> NativeModel:
         supports_parallel_tool_calls = data.get("supportsParallelToolCalls", True)
     if not isinstance(supports_parallel_tool_calls, bool):
         raise ValueError("supports_parallel_tool_calls must be a boolean")
+    mapping = data.get("reasoning_mapping")
+    if mapping is not None and mapping not in ("thinking_level", "thinking_budget"):
+        raise ValueError("reasoning_mapping must be thinking_level or thinking_budget")
     aliases = validate_model_aliases(data.get("aliases"))
+    modalities = data.get("input_modalities", ["text"])
+    if not isinstance(modalities, list) or "text" not in modalities or any(not isinstance(value, str) or value not in {"text", "image"} for value in modalities):
+        raise ValueError("input_modalities must contain text and optionally image")
     return NativeModel(
         id=model_id,
         backend_id=backend_id,
@@ -306,6 +336,8 @@ def validate_overlay_model(data: dict[str, Any]) -> NativeModel:
         default_reasoning_level=default_reasoning_level,
         supports_parallel_tool_calls=supports_parallel_tool_calls,
         aliases=aliases,
+        input_modalities=tuple(dict.fromkeys(modalities)),
+        reasoning_mapping=mapping,
     )
 
 
@@ -403,12 +435,15 @@ def render_model_overlay_toml(models: list[NativeModel]) -> str:
                 f"display_name = {json.dumps(model.display_name)}",
                 f"family = {json.dumps(model.family)}",
                 f"context_window = {model.context_window}",
+                "input_modalities = " + json.dumps(list(model.input_modalities)),
                 f"default_reasoning_level = {json.dumps(model.default_reasoning_level)}",
                 f"supports_parallel_tool_calls = {'true' if model.supports_parallel_tool_calls else 'false'}",
                 "aliases = [" + ", ".join(json.dumps(alias) for alias in model.aliases) + "]",
                 "",
             ]
         )
+        if model.reasoning_mapping:
+            lines.insert(len(lines) - 1, "reasoning_mapping = " + json.dumps(model.reasoning_mapping))
     return "\n".join(lines)
 
 
@@ -455,14 +490,18 @@ def all_native_models(*, include_overlays: bool = True, strict_overlays: bool = 
     return tuple(models_by_id[model_id] for model_id in model_order)
 
 
-def _alias_map(*, include_overlays: bool = True, strict_overlays: bool = False) -> dict[str, str]:
-    alias_map: dict[str, str] = {}
-    for native_model in all_native_models(include_overlays=include_overlays, strict_overlays=strict_overlays):
-        alias_map.setdefault(native_model.id.lower(), native_model.id)
-        alias_map.setdefault(native_model.backend_id.lower(), native_model.id)
-        for alias in native_model.aliases:
-            alias_map.setdefault(alias.lower(), native_model.id)
+def alias_map_for_models(models) -> dict[str, str]:
+    # Canonical identities win over aliases regardless of declaration order.
+    alias_map = {model.id.lower(): model.id for model in models}
+    for model in models:
+        alias_map.setdefault(model.backend_id.lower(), model.id)
+        for alias in model.aliases:
+            alias_map.setdefault(alias.lower(), model.id)
     return alias_map
+
+
+def _alias_map(*, include_overlays: bool = True, strict_overlays: bool = False) -> dict[str, str]:
+    return alias_map_for_models(all_native_models(include_overlays=include_overlays, strict_overlays=strict_overlays))
 
 
 def canonical_model_id(model: str) -> str:
@@ -498,16 +537,42 @@ def native_model_family(model: str) -> str:
 
 
 def native_model_capabilities(model: str) -> ProviderCapabilities:
-    definition = native_model_definition(model)
+    return capabilities_for_native_definition(native_model_definition(model))
+
+
+def required_output_bridge(definition: NativeModel | None) -> str | None:
+    """Known backend requirements cannot be bypassed by adding an overlay alias."""
+    if definition is None:
+        return None
+    if definition.output_bridge_required:
+        return definition.output_bridge_required
+    return next((model.output_bridge_required for model in NATIVE_MODELS
+                 if model.backend_id == definition.backend_id and model.output_bridge_required), None)
+
+
+def capabilities_for_native_definition(definition: NativeModel | None) -> ProviderCapabilities:
+    """Pure capability owner, also used to generate the standalone snapshot."""
     return ProviderCapabilities(
         native_responses=False,
         parallel_tool_calls=(
             definition.supports_parallel_tool_calls if definition is not None else True
         ),
-        structured_output=True,
+        structured_output=bool(definition and definition.family == 'gemini'
+                               and not required_output_bridge(definition)
+                               and any(known.family == 'gemini'
+                                       and known.backend_id.startswith('gemini-')
+                                       and known.backend_id == definition.backend_id
+                                       and not known.output_bridge_required
+                                       for known in NATIVE_MODELS)),
         stop_sequences=True,
-        reasoning=True,
+        reasoning=bool(definition and definition.reasoning_mapping),
         streaming_usage=True,
+        input_modalities=frozenset(definition.input_modalities if definition else {"text"}),
+        image_detail=False,
+        pcm_wav_probe=bool(definition and definition.family=="gemini" and definition.backend_id.startswith("gemini-") and not required_output_bridge(definition)),
+        reasoning_replay=False,
+        reasoning_effort_levels=(("low", "medium", "high", "xhigh") if definition.reasoning_mapping == "thinking_budget" else ("low", "medium", "high")) if definition and definition.reasoning_mapping else (),
+        reasoning_effort_parameter=definition.reasoning_mapping if definition else None,
     )
 
 
@@ -515,6 +580,8 @@ def native_model_catalog(*, strict_overlays: bool = False) -> list[dict[str, Any
     entries: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for model in all_native_models(strict_overlays=strict_overlays):
+        if required_output_bridge(model):
+            continue
         entries.append(
             {
                 "id": model.id,
@@ -525,6 +592,7 @@ def native_model_catalog(*, strict_overlays: bool = False) -> list[dict[str, Any
                 "default_reasoning_level": model.default_reasoning_level,
                 "supports_parallel_tool_calls": model.supports_parallel_tool_calls,
                 "aliases": list(model.aliases),
+                "input_modalities": list(model.input_modalities),
             }
         )
         seen_ids.add(model.id.lower())

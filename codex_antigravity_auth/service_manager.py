@@ -20,7 +20,7 @@ class ServiceState(str, Enum):
 
 @dataclass(frozen=True)
 class ServiceResult:
-    action: Literal["install", "uninstall", "status"]
+    action: Literal["install", "uninstall", "status", "repair", "restart"]
     state: ServiceState
     installed: bool
     active: bool
@@ -44,7 +44,7 @@ class ServiceResult:
 
 def observed_service_result(
     *,
-    action: Literal["install", "uninstall", "status"],
+    action: Literal["install", "uninstall", "status", "repair", "restart"],
     installed: bool,
     active: bool,
     reachable: bool,
