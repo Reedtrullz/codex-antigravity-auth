@@ -36,6 +36,18 @@ DEFAULT_CODEX_MODEL_ID = DEFAULT_CLAUDE_MODEL_ID
 
 
 NATIVE_MODELS: tuple[NativeModel, ...] = (
+    # ── Gemini 4 Argon (Ultra / Enterprise) ──
+    # Wire ids follow the documented Antigravity CLI slugs (-high / -medium).
+    # Not yet visible to every account; override via the models overlay if the
+    # backend id differs for your plan.
+    NativeModel(
+        id="gemini-4-argon",
+        backend_id="gemini-4-argon-high",
+        display_name="Gemini 4 Argon",
+        context_window=1_048_576,
+        family="gemini",
+        aliases=("gemini-4-argon-high", "gemini-4-argon-medium", "argon"),
+    ),
     # ── Gemini Flash (current generation: 3.8) ──
     # CCA serves 3.8 Flash as a single "tiered" wire id; effort is carried via
     # thinkingConfig.thinkingLevel rather than suffixed wire ids.
@@ -77,6 +89,23 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
         family="gemini",
     ),
     # ── Claude (via Google Antigravity) ──
+    NativeModel(
+        id="claude-sonnet-5-5",
+        backend_id="claude-sonnet-5-5",
+        display_name="Claude Sonnet 5.5 (Google)",
+        context_window=250_000,
+        family="claude",
+        aliases=("claude-sonnet-5.5", "sonnet-5.5"),
+    ),
+    NativeModel(
+        id="claude-opus-5-5-thinking",
+        backend_id="claude-opus-5-5-thinking",
+        display_name="Claude Opus 5.5 (Google)",
+        context_window=250_000,
+        family="claude",
+        default_reasoning_level="xhigh",
+        aliases=("claude-opus-5-5", "claude-opus-5.5", "opus-5.5"),
+    ),
     NativeModel(
         id="claude-sonnet-4-6",
         backend_id="claude-sonnet-4-6",
@@ -125,6 +154,8 @@ NATIVE_MODELS: tuple[NativeModel, ...] = (
 
 RESERVED_GOOGLE_MODEL_PREFIXES = {"openai", "openai-responses"}
 LEGACY_BACKEND_ALIASES = {
+    "gemini-4-argon-medium": "gemini-4-argon-medium",
+    "gemini-4-argon-high": "gemini-4-argon-high",
     "gemini-3.1-pro": "gemini-3.1-pro-low",
     "gemini-3.1-pro-low": "gemini-3.1-pro-low",
     "gemini-3.1-pro-high": "gemini-pro-agent",
@@ -206,6 +237,8 @@ def _slug_variants(value: str) -> set[str]:
         value.replace("-3-1-", "-3.1-"),
         value.replace("-4-6", "-4.6"),
         value.replace("-4.6", "-4-6"),
+        value.replace("-5-5", "-5.5"),
+        value.replace("-5.5", "-5-5"),
     }
 
 
