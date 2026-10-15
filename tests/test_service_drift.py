@@ -150,21 +150,46 @@ def test_macos_install_timeout_keeps_prepared_intent_and_stops_polling(host, mon
     assert sum(command[1] == 'bootstrap' for command in host.calls) == 1
 
 
-def test_json_install_failure_preserves_structured_recovery(host, monkeypatch, capsys):
-    monkeypatch.setattr(service, 'service_platform', lambda: 'macos')
+@pytest.mark.parametrize('failure,installed', [('/Create', False), ('/Run', True)])
+def test_windows_failed_activation_reports_observed_installation(host, failure, installed):
+    host.fail = failure
+    result = service.install_service(51122, '127.0.0.1', platform_name='windows')
+    assert (host.windows_raw is not None) is installed
+    assert result['installed'] is installed
+    assert result['state'] == 'failed' and not result['active']
+    assert not result.get('owned_ready')
+    assert result['registration_phase'] == 'activate'
+    assert result['recovery_paths']
+    assert json.loads(drift.manifest_path(51122).read_text())['state'] == 'prepared'
+    assert sum('/Create' in command for command in host.calls) == 1
+    assert sum('/Run' in command for command in host.calls) == int(installed)
+    assert any(failure in command['command'] and command['returncode'] == 1
+               for command in result['commands'])
+    assert 'synthetic manager failure' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('platform,failure,installed', [
+    ('macos', 'bootstrap', True), ('windows', '/Create', False), ('windows', '/Run', True),
+])
+def test_json_install_failure_preserves_structured_recovery(host, monkeypatch, capsys, platform, failure, installed):
+    monkeypatch.setattr(service, 'service_platform', lambda: platform)
     monkeypatch.setattr(cli, 'reachable_gateway_status_info', lambda *a, **kw: {
         'port': 51122, 'reachable': False, 'status': 'stopped'})
-    host.fail = 'bootstrap'
+    host.fail = failure
     monkeypatch.setattr(sys, 'argv', ['codex-antigravity', 'service', 'install', '--json'])
     with pytest.raises(SystemExit) as caught:
         cli.main()
     assert caught.value.code == 1
     result = json.loads(capsys.readouterr().out)
     assert result['status'] == 'failed' and result['errors'] == ['service_failed']
+    assert result['data']['service']['installed'] is installed
+    assert not result['data']['service']['active']
+    assert not result['data']['service']['owned_ready']
+    assert json.loads(drift.manifest_path(51122).read_text())['state'] == 'prepared'
     assert result['data']['service']['recovery_paths']
     assert result['data']['service']['registration_phase'] == 'activate'
     commands = result['data']['service']['commands']
-    assert any('bootstrap' in command['command'] and command['returncode'] == 1 for command in commands)
+    assert any(failure in command['command'] and command['returncode'] == 1 for command in commands)
     assert 'synthetic manager failure' not in json.dumps(result)
 
 

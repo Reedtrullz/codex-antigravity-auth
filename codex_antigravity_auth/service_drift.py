@@ -273,6 +273,7 @@ def install(port, host, *, platform_name=None, op_env_file=None, op_environment=
             registration_phase = 'activate'
             evidence, success = _activate(port, platform, target, raw.decode(), replace_existing=before_definition is not None)
             if not success:
+                observed = service._platform_status(port, platform_name=platform)
                 raise RuntimeError('Service manager activation failed')
             registration_phase = 'observe'
             deadline = time.monotonic() + 5.0
