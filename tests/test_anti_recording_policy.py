@@ -160,7 +160,7 @@ def test_never_signal_handler_retains_lifecycle_without_error_body(isolated_anti
 @pytest.mark.parametrize("retention", ["never", "summary", "full"])
 def test_panel_command_propagates_mode_to_every_store(isolated_anti, monkeypatch, capsys, retention):
     anti, reflections, root = isolated_anti
-    monkeypatch.setattr(anti, "fetch_model_ids", lambda *a, **kw: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"})
+    monkeypatch.setattr(anti, "fetch_model_ids", lambda *a, **kw: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL})
     answer = json.dumps({"summary": LONG, "findings": [{"id": "F1", "claim": LONG, "evidence": LONG, "severity": "low"}]})
     monkeypatch.setattr(anti, "post_response", lambda **kw: answer)
     rc = anti.main(["panel", "--mode", "ask", "--prompt", LONG, "--json", "--no-progress", "--save-output", retention])

@@ -255,7 +255,7 @@ def test_passive_reflection_failure_warns_without_losing_completed_result(stores
     path.parent.mkdir()
     path.write_bytes(b"synthetic corrupt history")
     monkeypatch.chdir(root)
-    monkeypatch.setattr(anti, "fetch_model_ids", lambda *a, **kw: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"})
+    monkeypatch.setattr(anti, "fetch_model_ids", lambda *a, **kw: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL})
     monkeypatch.setattr(anti, "post_response", lambda **kw: '{"summary":"synthetic answer","findings":[]}')
     rc = anti.main(["panel", "--mode", "ask", "--prompt", "synthetic question", "--save-output", "summary", "--no-progress", "--json"])
     captured = capsys.readouterr()

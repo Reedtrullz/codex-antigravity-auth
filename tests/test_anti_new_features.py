@@ -622,9 +622,9 @@ class RoutingAndCostTests(unittest.TestCase):
     def test_resolve_auto_model_thresholds_high_risk_and_no_diff(self):
         self.assertEqual(anti.resolve_auto_model(diff_lines=1)[0], "flash-3.8")
         self.assertEqual(anti.resolve_auto_model(diff_lines=200)[0], "flash-3.8")
-        self.assertEqual(anti.resolve_auto_model(diff_lines=201)[0], "sonnet")
-        self.assertEqual(anti.resolve_auto_model(diff_lines=1001)[0], "opus")
-        self.assertEqual(anti.resolve_auto_model(diff_lines=1, file_paths=["src/oauth.py"])[0], "opus")
+        self.assertEqual(anti.resolve_auto_model(diff_lines=201)[0], anti.DEFAULT_FAST_MODEL)
+        self.assertEqual(anti.resolve_auto_model(diff_lines=1001)[0], anti.DEFAULT_DEEP_MODEL)
+        self.assertEqual(anti.resolve_auto_model(diff_lines=1, file_paths=["src/oauth.py"])[0], anti.DEFAULT_DEEP_MODEL)
         self.assertEqual(anti.resolve_auto_model(scope="working-tree", diff_lines=0, default="opus")[0], "opus")
 
     def test_estimate_cost_reports_tokens_and_tier(self):
