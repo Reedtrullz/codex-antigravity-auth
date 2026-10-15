@@ -1,16 +1,19 @@
 """Bounded classic PCM WAV transport; forwarding is not verified listening."""
 from __future__ import annotations
 
+import array
 import base64
 import binascii
 from dataclasses import dataclass, field
 import hashlib
 import io
 import json
+import math
 from types import MappingProxyType
 from pathlib import Path
 import re
 import struct
+import sys
 import wave
 
 from .media import MediaError, Session as MediaSession
@@ -25,6 +28,12 @@ RATES={8000,16000,22050,24000,32000,44100,48000}
 PART_TYPE='antigravity_audio'
 SHA=re.compile(r'[0-9a-f]{64}')
 FIELDS={'index','mime','bytes','duration_ms','sample_rate','channels','sample_width_bits','frames','sha256'}
+WINDOW_MS=100
+QUIET_PEAK_DBFS=-60.0
+MAX_SEGMENTS=256
+MEASUREMENT_BASIS='local_deterministic_pcm16'
+SILENCE_POLICIES=('sent','skipped','sent_by_explicit_request')
+WINDOW_STATES=('zero','quiet','sound')
 
 
 class AudioError(MediaError, ValueError):
@@ -70,6 +79,34 @@ def inspect_wav(raw):
     return {'mime':'audio/wav','bytes':len(raw),'duration_ms':(frames*1000+rate-1)//rate,
             'sample_rate':rate,'channels':channels,'sample_width_bits':16,'frames':frames,
             'sha256':hashlib.sha256(raw).hexdigest()}
+
+
+def _dbfs(level):
+    return round(20*math.log10(level/32768),2) if level>0 else None
+
+
+def measure_pcm(raw):
+    with wave.open(io.BytesIO(raw),'rb') as source:
+        channels,rate,frames=source.getnchannels(),source.getframerate(),source.getnframes()
+        require(source.getsampwidth()==2,'Silence measurement requires 16-bit PCM')
+        require(frames>0,'Silence measurement requires nonempty frames')
+        samples=array.array('h',source.readframes(frames))
+    if sys.byteorder=='big':samples.byteswap()
+    window=max(1,rate*WINDOW_MS//1000)
+    quiet=32768*10**(QUIET_PEAK_DBFS/20)
+    counts=dict.fromkeys(WINDOW_STATES,0);segments=[];peak=0;energy=0
+    for first in range(0,frames,window):
+        last=min(frames,first+window)
+        chunk=samples[first*channels:last*channels]
+        top=max(max(chunk),-min(chunk))
+        peak=max(peak,top);energy+=sum(value*value for value in chunk)
+        state='zero' if top==0 else 'quiet' if top<quiet else 'sound'
+        counts[state]+=1
+        if segments and segments[-1][2]==state:segments[-1][1]=last*1000//rate
+        else:segments.append([first*1000//rate,last*1000//rate,state])
+    return {'window_ms':WINDOW_MS,'quiet_peak_dbfs':QUIET_PEAK_DBFS,'wholly_digital_silence':peak==0,
+            'peak_dbfs':_dbfs(peak),'rms_dbfs':_dbfs(math.sqrt(energy/len(samples))),'windows':counts,
+            'segments':segments[:MAX_SEGMENTS],'segments_omitted':max(0,len(segments)-MAX_SEGMENTS)}
 
 
 def decode_part(part):
@@ -145,13 +182,18 @@ class Audio:
     @property
     def size(self):return self.descriptor['bytes']
 
+    @property
+    def is_digital_silence(self):
+        with wave.open(io.BytesIO(base64.b64decode(self.encoded, validate=True)), 'rb') as source:
+            return not any(source.readframes(source.getnframes()))
+
     def identity(self):return dict(self.descriptor)
 
     def part(self):
         return {'type':PART_TYPE,'mime_type':'audio/wav','data':self.encoded,'probe_unverified':True}
 
 
-def capture(paths, *, policy=None, probe=False, single_backend_attempt=False):
+def capture(paths, *, policy=None, probe=False, single_backend_attempt=False, silence_policy='sent'):
     require(isinstance(paths,(list,tuple)) and 1<=len(paths)<=MAX_FILES,'Select one or two explicit local WAV files')
     selected=[]
     for value in paths:
@@ -169,16 +211,26 @@ def capture(paths, *, policy=None, probe=False, single_backend_attempt=False):
         require(raw is not None and reason is None,'Audio capture refused; use regular no-follow files within2MiB each/4MiB total')
         descriptor={'index':index,**inspect_wav(raw)};remaining-=len(raw)
         attachments.append(Audio(descriptor,base64.b64encode(raw).decode('ascii')))
-    return Session(tuple(attachments),probe=probe,single_backend_attempt=single_backend_attempt)
+    return Session(tuple(attachments),probe=probe,single_backend_attempt=single_backend_attempt,
+                   silence_policy=silence_policy)
 
 
 class Session(MediaSession):
     kind='audio'
 
-    def __init__(self,attachments,*,probe,single_backend_attempt=False):
+    def __init__(self,attachments,*,probe,single_backend_attempt=False,silence_policy='sent'):
         super().__init__(attachments)
+        require(silence_policy in SILENCE_POLICIES,'Unknown digital-silence policy')
         self.probe=probe is True
         self.single_backend_attempt=single_backend_attempt is True
+        self.silence_policy=silence_policy
+        self.measurements=tuple(measure_pcm(base64.b64decode(item.encoded,validate=True)) for item in attachments)
+        self.sent=tuple(silence_policy!='skipped' or not value['wholly_digital_silence'] for value in self.measurements)
+        self.upload_items=tuple(item for item,sent in zip(attachments,self.sent) if sent)
+
+    @property
+    def all_skipped(self):
+        return bool(self.images) and not self.upload_items
 
     def supports(self,registry,model):
         caps=registry.entries.get(str(model).lower()) or registry.entries.get(registry.canonical(str(model))) or {}
@@ -189,9 +241,11 @@ class Session(MediaSession):
                 and audio.get('content_type')==PART_TYPE and audio.get('streaming') is False
                 and audio.get('backend_acceptance')=='unverified' and audio.get('requires_probe_opt_in') is True):
             return False
-        requirements={'max_files':len(self.images),'max_file_bytes':max(item.size for item in self.images),
-                      'max_total_bytes':sum(item.size for item in self.images),
-                      'max_duration_seconds':max((item.descriptor['duration_ms']+999)//1000 for item in self.images)}
+        selected=self.upload_items
+        if not selected:return True
+        requirements={'max_files':len(selected),'max_file_bytes':max(item.size for item in selected),
+                      'max_total_bytes':sum(item.size for item in selected),
+                      'max_duration_seconds':max((item.descriptor['duration_ms']+999)//1000 for item in selected)}
         return all(type(audio.get(key)) is int and audio[key]>=required for key,required in requirements.items())
 
     def require(self,registry,model,stage):
@@ -206,10 +260,17 @@ class Session(MediaSession):
 
     def input(self,prompt):
         require(self.probe,'Explicit unverified-audio probe upload intent is required')
-        return [{'role':'user','content':[{'type':'input_text','text':prompt},*[item.part() for item in self.images]]}]
+        content = [{'type':'input_text','text':prompt}]
+        for index, (item, sent) in enumerate(zip(self.images, self.sent)):
+            label = f'Audio clip {chr(65 + index)} (attachment {index + 1} of {len(self.images)})'
+            if sent:
+                content.extend([{'type':'input_text','text':label + ':'}, item.part()])
+            else:
+                content.append({'type':'input_text','text':label + ' was not sent: Anti measured every sample as zero (exact digital silence).'})
+        return [{'role':'user','content':content}]
 
     def verify_payload(self,payload):
-        require(parts(payload)==[item.part() for item in self.images],'Audio bytes/order or probe intent changed before submission')
+        require(parts(payload)==[item.part() for item in self.upload_items],'Audio bytes/order or probe intent changed before submission')
 
     def report(self):
         value=super().report();audio=value.pop('images')
@@ -217,7 +278,63 @@ class Session(MediaSession):
         value.update(kind='audio',audio=audio,format_validation='classic_pcm_wav',audio_secret_scan='not_performed',
             captured_duration_ms=sum(item['duration_ms'] for item in audio),probe_upload_intent=self.probe,
             provider_audio_acceptance='unverified',listening_verification='not_run')
+        labels=[chr(65+index) for index in range(len(self.images))]
+        value.update(submitted_count=sum(self.sent),measured_silent_skipped_count=self.sent.count(False))
+        measurement={'schemaVersion':1,'basis':MEASUREMENT_BASIS,'digital_silence_policy':self.silence_policy,
+            'clips':[{'index':index+1,'label':labels[index],'sha256':item.descriptor['sha256'],
+                      **json.loads(json.dumps(measured)),
+                      'measured_result':'exact_digital_silence' if measured['wholly_digital_silence'] else None,
+                      'submitted_to_model':sent}
+                     for index,(item,measured,sent) in enumerate(zip(self.images,self.measurements,self.sent))]}
+        observation={'basis':'provider_model_output','status':'requested' if any(self.sent) else 'not_requested',
+            'clips':[label for label,sent in zip(labels,self.sent) if sent],
+            'provider_audio_acceptance':'unverified','listening_verification':'not_run'}
+        value.update(measurement=measurement,model_observation=observation)
         return value
+
+
+CLIP_FIELDS={'index','label','sha256','window_ms','quiet_peak_dbfs','wholly_digital_silence','peak_dbfs','rms_dbfs',
+             'windows','segments','segments_omitted','measured_result','submitted_to_model'}
+OBSERVATION_FIELDS={'basis','status','clips','provider_audio_acceptance','listening_verification'}
+
+
+def _level(value):
+    return value is None or (type(value) in (int,float) and math.isfinite(value) and -200<=value<=0)
+
+
+def _segments_valid(segments,duration_ms):
+    return isinstance(segments,list) and len(segments)<=MAX_SEGMENTS and all(
+        isinstance(row,list) and len(row)==3 and type(row[0]) is int and type(row[1]) is int
+        and 0<=row[0]<=row[1]<=duration_ms and row[2] in WINDOW_STATES for row in segments)
+
+
+def _clip_valid(clip,index,item):
+    windows=clip.get('windows') if isinstance(clip,dict) else None
+    return (isinstance(clip,dict) and set(clip)==CLIP_FIELDS and type(clip['index']) is int and clip['index']==index
+            and clip['label']==chr(64+index) and clip['sha256']==item['sha256'] and clip['window_ms']==WINDOW_MS
+            and clip['quiet_peak_dbfs']==QUIET_PEAK_DBFS and type(clip['wholly_digital_silence']) is bool
+            and type(clip['submitted_to_model']) is bool and _level(clip['peak_dbfs']) and _level(clip['rms_dbfs'])
+            and clip['measured_result']==('exact_digital_silence' if clip['wholly_digital_silence'] else None)
+            and isinstance(windows,dict) and set(windows)==set(WINDOW_STATES)
+            and all(type(count) is int and count>=0 for count in windows.values())
+            and type(clip['segments_omitted']) is int and clip['segments_omitted']>=0
+            and _segments_valid(clip['segments'],item['duration_ms']))
+
+
+def _measurement_receipt(measurement,observation,items):
+    if (not isinstance(measurement,dict) or set(measurement)!={'schemaVersion','basis','digital_silence_policy','clips'}
+            or measurement['schemaVersion']!=1 or measurement['basis']!=MEASUREMENT_BASIS
+            or measurement['digital_silence_policy'] not in SILENCE_POLICIES
+            or not isinstance(measurement['clips'],list) or len(measurement['clips'])!=len(items)
+            or not all(_clip_valid(clip,index,item) for index,(clip,item) in enumerate(zip(measurement['clips'],items),1))):
+        return None
+    labels=[clip['label'] for clip in measurement['clips'] if clip['submitted_to_model']]
+    if (not isinstance(observation,dict) or set(observation)!=OBSERVATION_FIELDS
+            or observation['basis']!='provider_model_output' or observation['clips']!=labels
+            or observation['status']!=('requested' if labels else 'not_requested')
+            or observation['provider_audio_acceptance']!='unverified' or observation['listening_verification']!='not_run'):
+        return None
+    return {'measurement':json.loads(json.dumps(measurement)),'model_observation':{**observation,'clips':list(labels)}}
 
 
 def projection(value,*,hashes=False):
@@ -229,9 +346,17 @@ def projection(value,*,hashes=False):
     result.update(status='attempted' if value['gateway_attempts'] else 'not_sent',coverage_basis='captured_bytes_in_each_attempt',
         format_validation='classic_pcm_wav',audio_secret_scan='not_performed',provider_audio_acceptance='unverified',
         listening_verification='not_run',real_media_evaluation='not_run',trace_retained=False,audio_hashes_retained=False)
+    for key in ('submitted_count','measured_silent_skipped_count'):
+        if key in value:
+            if type(value[key]) is not int or not 0<=value[key]<=value['captured_count']:return None
+            result[key]=value[key]
     if hashes:
         items=value.get('audio')
         if (not valid_identity(items) or len(items)!=value['captured_count'] or sum(item['bytes'] for item in items)!=value['captured_bytes']
                 or sum(item['duration_ms'] for item in items)!=value['captured_duration_ms']):return None
         result.update(audio=[dict(item) for item in items],audio_hashes_retained=True)
+        if 'measurement' in value or 'model_observation' in value:
+            receipt=_measurement_receipt(value.get('measurement'),value.get('model_observation'),items)
+            if receipt is None:return None
+            result.update(receipt)
     return result

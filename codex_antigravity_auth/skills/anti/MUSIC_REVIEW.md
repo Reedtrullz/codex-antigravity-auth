@@ -32,6 +32,26 @@ automatic retry. All findings are `model-advisory`. Empty findings, ratings,
 completion and model confidence cannot establish provider listening or musical
 acceptance. `musicalAcceptance` always remains `not-established`.
 
+Before upload, `review-music` refuses any attachment whose decoded PCM samples
+are all exactly zero, identifying its attachment letter. This is a deterministic
+digital-silence check, not model hearing, a loudness threshold or a music detector.
+Quiet nonzero recordings and recordings with internal rests remain eligible.
+Use `listen` for an explicitly authorized blind silence probe; it retains silent
+audio unchanged. Every WAV is preceded by its attachment letter and ordinal in
+the upstream message so comparison IDs have explicit boundaries. Those labels
+contain no filename, source claim or expected answer.
+
+An explicitly advertised alias with a distinct configured Google backend keeps
+that backend selection through gateway normalization. In particular,
+`gemini-3.1-pro-high` selects `gemini-pro-agent`; selecting the base
+`gemini-3.1-pro` uses its separately configured backend. Availability and measured
+listening results for either route do not transfer to the other.
+
+A fixed advertised model ID may contain an effort word without accepting a
+separate reasoning parameter. Anti does not synthesize that parameter when the
+exact catalog entry declares reasoning unsupported; the selected model ID is
+unchanged. Explicit effort aliases on supported routes still carry their level.
+
 Transport support, observed backend acceptance, measured perceptual qualification
 and suitability for a musical task are separate claims. This feature implements
 transport and validation; qualification requires fresh controlled listening

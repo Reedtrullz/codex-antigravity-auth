@@ -47,6 +47,7 @@ from .models import (
     DEFAULT_GEMINI_MODEL_ID,
     NATIVE_MODELS,
     canonical_model_id,
+    resolve_backend_model,
     native_model_capabilities,
     required_output_bridge,
     native_model_catalog,
@@ -1259,8 +1260,34 @@ def response_model_id(codex_req: dict) -> str:
     if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in model):
         raise HTTPException(status_code=400, detail="model must not contain whitespace or control characters")
     if ":" not in model:
-        return canonical_model_id(model)
+        canonical = canonical_model_id(model)
+        if resolve_backend_model(model) != resolve_backend_model(canonical):
+            return model
+        return canonical
     return model
+
+
+def implied_reasoning(codex_req: dict) -> dict | None:
+    model = codex_req.get("model")
+    if not isinstance(model, str) or ":" in model.strip():
+        return None
+    model = model.strip()
+    canonical = canonical_model_id(model)
+    if resolve_backend_model(model) != resolve_backend_model(canonical):
+        return None
+    implied = next((level for level in ("low", "medium", "high")
+                    if model.lower() == f"{canonical.lower()}-{level}"), None)
+    reasoning = codex_req.get("reasoning")
+    if implied and not (isinstance(reasoning, dict) and "effort" in reasoning):
+        return {**(reasoning if isinstance(reasoning, dict) else {}), "effort": implied}
+    return None
+
+
+def apply_response_model(codex_req: dict) -> None:
+    reasoning = implied_reasoning(codex_req)
+    codex_req["model"] = response_model_id(codex_req)
+    if reasoning is not None:
+        codex_req["reasoning"] = reasoning
 
 
 def validate_provider_model_id(provider_id: str | None, provider_model: str) -> None:
@@ -1449,7 +1476,7 @@ async def context_preflight(request: Request):
             raw = await budget.run(lambda: read_request_json(request, budget.limits))
             budget.body_read = True
             value = await budget.sync(validate_response_request_body, raw)
-            value['model'] = response_model_id(value)
+            apply_response_model(value)
             providers = await budget.sync(all_provider_configs_read_only)
             return await budget.sync(inspect, value, providers)
     except ResourceLimitError as exc:
@@ -1606,8 +1633,11 @@ async def _create_response(request: Request, budget: RequestBudget):
             budget.deadline = min(budget.deadline, budget.started + budget.stream_total)
         budget.check_deadline()
 
+        reasoning = implied_reasoning(codex_req)
         model = await budget.sync(response_model_id, codex_req)
         codex_req["model"] = model
+        if reasoning is not None:
+            codex_req["reasoning"] = reasoning
     except HTTPException as exc:
         await log_request("failed", http_status=exc.status_code, error_class="invalid_request", error=exc.detail, attempt_count=0)
         raise

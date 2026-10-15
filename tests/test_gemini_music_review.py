@@ -18,17 +18,40 @@ def result():
     return {'schemaVersion':1,'kind':'anti-music-review','comparisonStatus':'uncertain','findings':[], 'limitations':['Synthetic fixture, no listening'], 'musicalAcceptance':'not-established'}
 
 
-def test_standalone_single_google_account_one_post(fixture, monkeypatch, capsys):
+@pytest.mark.parametrize('model', ['gemini-3.8-flash', 'gemini-3.5-flash-high'])
+def test_standalone_single_google_account_one_post(fixture, monkeypatch, capsys, model):
     anti,_,_,first,_=fixture
     bridge(monkeypatch,anti)
     with upstream(response(json.dumps(result()))) as (base,seen):
         endpoint(monkeypatch,base)
-        assert anti.main(arguments(first)) == 0
+        assert anti.main(arguments(first, '--model', model)) == 0
         assert len(seen) == 1
     value=json.loads(capsys.readouterr().out)
     assert value['mode']=='review-music'
     assert value['metadata']['music_review']==result()
     assert value['metadata']['retry_disposition']=='disabled'
+
+
+@pytest.mark.parametrize('silent_index', [0, 1])
+def test_digital_silence_refuses_music_review_before_upload(fixture, monkeypatch, capsys, silent_index):
+    anti, _, _, first, second = fixture
+    [first, second][silent_index].write_bytes(_wav.wav(amplitude=0))
+    calls = bridge(monkeypatch, anti)
+    monkeypatch.setattr(_wav.server, 'acquire_active_account_for_request',
+                        _wav.AsyncMock(side_effect=AssertionError('no account acquisition')))
+    assert anti.main(arguments(first, '--audio', str(second))) == 1
+    assert not any(method == 'POST' for method, _ in calls)
+    assert f'clip {chr(65 + silent_index)} contains only zero PCM samples' in capsys.readouterr().err
+
+
+def test_quiet_nonzero_pcm_is_not_rejected_as_digital_silence(fixture, monkeypatch, capsys):
+    anti, _, _, first, _ = fixture
+    first.write_bytes(_wav.wav(amplitude=1))
+    bridge(monkeypatch, anti)
+    with upstream(response(json.dumps(result()))) as (base, seen):
+        endpoint(monkeypatch, base)
+        assert anti.main(arguments(first)) == 0
+        assert len(seen) == 1
 
 
 def test_dry_run_has_no_gateway(fixture,monkeypatch,capsys):

@@ -48,7 +48,12 @@ jobs:
         run: python -m compileall -q codex_antigravity_auth tests
 
       - name: Run tests
+        if: runner.os != 'Windows'
         run: python scripts/run_tests.py -q
+
+      - name: Run tests (Windows diagnostics)
+        if: runner.os == 'Windows'
+        run: python scripts/run_tests.py -vv -o faulthandler_timeout=60
 
   package:
     runs-on: ubuntu-latest
