@@ -340,7 +340,9 @@ def run_service_command(args) -> dict:
         or not bool(info.get("active"))
     ):
         detail = info.get("error") or "service installation was not observed as installed and active"
-        raise SystemExit(_cli.redact_secret_text(str(detail)))
+        if not getattr(args, 'json', False):
+            raise SystemExit(_cli.redact_secret_text(str(detail)))
+        info = {**info, 'state': 'failed', 'error': detail}
     if action == "uninstalled" and bool(info.get("installed")):
         detail = info.get("error") or "service uninstall was not observed"
         raise SystemExit(_cli.redact_secret_text(str(detail)))

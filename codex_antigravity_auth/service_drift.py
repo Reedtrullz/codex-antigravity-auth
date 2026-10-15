@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import time
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
@@ -179,7 +180,8 @@ def observe(info, gateway, *, identity=None):
                and type(identity.get('pid')) is int and identity['pid'] > 0)
     owned = bool(matched and info.get('installed') and info.get('active')
                  and gateway.get('reachable') and not info.get('drift') and not info.get('error'))
-    base = _service()._service_result(info, action=info.get('action', 'status'), changed=bool(info.get('changed')), error=info.get('error'))
+    base = _service()._service_result(info, action=info.get('action', 'status'), changed=bool(info.get('changed')),
+                                     error=info.get('error'), commands=tuple(info.get('commands', ())))
     result = {**base, 'owned_ready': owned, 'reachable': bool(gateway.get('reachable')),
               'identity_status': 'matched' if matched else ('foreign_or_unverified' if gateway.get('reachable') else 'unreachable')}
     if info.get('error') or info.get('state') == 'failed':
@@ -259,6 +261,7 @@ def install(port, host, *, platform_name=None, op_env_file=None, op_environment=
         backups = path.parent / 'backups' / record['backupId']
         evidence = []
         observed = {'platform': platform, 'installed': before_definition is not None, 'active': False, 'reachable': False}
+        registration_phase = 'prepare'
         try:
             for name, content in (('intent.json', before_manifest), ('service-definition', before_definition)):
                 if content is not None:
@@ -267,18 +270,30 @@ def install(port, host, *, platform_name=None, op_env_file=None, op_environment=
             if target is not None:
                 SecureStore().atomic_write_bytes(target, raw)
                 observed['installed'] = True
+            registration_phase = 'activate'
             evidence, success = _activate(port, platform, target, raw.decode(), replace_existing=before_definition is not None)
-            observed = service._platform_status(port, platform_name=platform)
-            success = success and observed.get('installed') and observed.get('active')
             if not success:
+                raise RuntimeError('Service manager activation failed')
+            registration_phase = 'observe'
+            deadline = time.monotonic() + 5.0
+            observed = service._platform_status(port, platform_name=platform)
+            while platform == 'macos' and observed.get('installed') and not observed.get('active'):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.25, remaining))
+                observed = service._platform_status(port, platform_name=platform)
+            if not observed.get('installed') or not observed.get('active'):
                 raise RuntimeError('Service registration was not observed as active')
+            registration_phase = 'commit'
             record['state'] = 'applied'
             manifest.write_json(path, record)
         except (OSError, ValueError, RuntimeError) as exc:
             return service._service_result(
                 {**observed,
+                 'registration_phase': registration_phase,
                  'recovery_paths': [str(backups), str(path), *([str(target)] if target else [])]},
-                action='install', changed=True, error=f'Service registration incomplete ({type(exc).__name__}); preserve recovery paths',
+                action='install', changed=True, error=f'Service registration incomplete during {registration_phase} ({type(exc).__name__}); preserve recovery paths',
                 commands=tuple(service._command_evidence(item) for item in evidence))
         result = status(port, platform_name=platform)
         return {**result, 'action': 'install', 'changed': True,
