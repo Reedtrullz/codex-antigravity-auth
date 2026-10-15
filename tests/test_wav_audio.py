@@ -158,6 +158,58 @@ def test_listen_dry_run_never_contacts_catalog_and_has_no_retry(fixture, monkeyp
     assert result['stages'][0]['possible_retries'] == 0
 
 
+@pytest.mark.parametrize('clip_count', [1, 2])
+@pytest.mark.parametrize('output_json', [True, False])
+def test_listen_all_silent_dry_run_plans_no_calls_or_cost(fixture, monkeypatch, capsys, tmp_path, clip_count, output_json):
+    anti, _, _, _, _ = fixture
+    silent = tmp_path / 'room.wav';silent.write_bytes(wav(amplitude=0))
+    monkeypatch.setattr(anti, 'open_gateway_request', lambda *a, **k: pytest.fail('no dry-run HTTP'))
+    args = listen_argv(silent, '--dry-run')
+    args.remove('--probe-unverified-audio')
+    if clip_count == 2:
+        args.extend(['--audio', str(silent)])
+    if not output_json:
+        args.remove('--json')
+    assert anti.main(args) == 0
+    output = capsys.readouterr().out
+    if output_json:
+        result, _ = json.JSONDecoder().raw_decode(output)
+        stages = result['stages']
+        assert result['estimated_cost_total'] == 0
+        assert result['token_ceilings']['listen'] == 0
+        assert result['estimates'][0]['estimated_total_tokens'] == 0
+        media = result['media_coverage']
+        assert media['submitted_count'] == 0 and media['measured_silent_skipped_count'] == clip_count
+        assert media['model_observation']['status'] == 'not_requested'
+    else:
+        stages = json.loads(next(line.split('stages: ', 1)[1] for line in output.splitlines() if 'stages: ' in line))
+        assert '~0 total tokens' in output
+    assert len(stages) == 1
+    stage = stages[0]
+    assert stage['calls'] == stage['planned_calls'] == stage['max_attempts'] == 0
+    assert stage['possible_retries'] == stage['estimated_cost'] == stage['max_output_tokens'] == 0
+
+
+@pytest.mark.parametrize('kind', ['mixed', 'quiet', 'send_silence', 'consult'])
+def test_audio_dry_run_keeps_call_when_audio_will_be_sent(fixture, monkeypatch, capsys, tmp_path, kind):
+    anti, _, _, first, _ = fixture
+    silent = tmp_path / 'room.wav';silent.write_bytes(wav(amplitude=0))
+    quiet = tmp_path / 'quiet.wav';quiet.write_bytes(wav(amplitude=1))
+    monkeypatch.setattr(anti, 'open_gateway_request', lambda *a, **k: pytest.fail('no dry-run HTTP'))
+    args = listen_argv(quiet if kind == 'quiet' else silent, '--dry-run')
+    if kind == 'mixed':
+        args.extend(['--audio', str(first)])
+    elif kind == 'send_silence':
+        args.append('--send-digital-silence')
+    elif kind == 'consult':
+        args[0] = 'consult'
+    assert anti.main(args) == 0
+    result, _ = json.JSONDecoder().raw_decode(capsys.readouterr().out)
+    assert result['stages'][0]['calls'] == result['stages'][0]['planned_calls'] == 1
+    assert result['estimated_cost_total'] > 0 and result['estimates'][0]['estimated_total_tokens'] > 0
+    assert result['media_coverage']['submitted_count'] == 1
+
+
 def test_listen_complete_output_pins_both_clips_without_pre_read(fixture, monkeypatch, capsys):
     anti, _, _, first, second = fixture
     bridge(monkeypatch, anti)

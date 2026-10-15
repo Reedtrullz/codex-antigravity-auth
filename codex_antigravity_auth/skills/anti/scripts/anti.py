@@ -7450,10 +7450,12 @@ def command_consult(args: argparse.Namespace) -> int:
         binding_dry_run = None
         if binding_path:
             binding_dry_run = {"configured": True, "accountRef": "[redacted]", "inventorySha256": "[redacted]"}
+        planned_calls = 0 if mode == "listen" and listen_media is not None and listen_media.all_skipped else 1
+        planned_output_tokens = args.max_output_tokens if planned_calls else 0
         print(format_dry_run(mode=mode, model=model,
-            prompt_chars=len(prompt), max_output_tokens=args.max_output_tokens,
+            prompt_chars=len(prompt) if planned_calls else 0, max_output_tokens=planned_output_tokens,
             output_json=args.json, stage_plan=[
-                {"name": mode, "calls": 1, "max_output_tokens": args.max_output_tokens, "possible_retries": 0 if bounded_audio else 1, **({"accountBinding": binding_dry_run} if binding_dry_run else {})},
+                {"name": mode, "calls": planned_calls, "max_output_tokens": planned_output_tokens, "possible_retries": 0 if bounded_audio else 1, **({"accountBinding": binding_dry_run} if binding_dry_run else {})},
             ], budget_limit=args.budget))
         if not read_files:
             print()
