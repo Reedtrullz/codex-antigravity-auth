@@ -224,7 +224,7 @@ def test_panel_checks_are_deduplicated_and_claims_stay_unverified(checks, monkey
     monkeypatch.chdir(root)
     source = root / "fixture.py"
     source.write_text("value = 1\n")
-    monkeypatch.setattr(anti, "fetch_model_ids", lambda *a, **kw: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"})
+    monkeypatch.setattr(anti, "fetch_model_ids", lambda *a, **kw: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL})
     response = json.dumps({"summary": "synthetic review", "findings": [
         {"id": "F1", "file": "fixture.py", "line": 1, "severity": "low", "claim": "First semantic claim", "verify": "touch malicious-file"},
         {"id": "F2", "file": "fixture.py", "line": 1, "severity": "medium", "claim": "Second semantic claim", "verify": "run arbitrary command"},

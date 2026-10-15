@@ -1524,7 +1524,7 @@ class AntiHelperTests(unittest.TestCase):
             self.assertEqual(record["metadata"]["request_log_correlation_id"], "deterministic-run-7")
             self.assertNotIn("prompt_text", record)
 
-    def test_default_claude_plan_auto_chunks_before_large_single_call(self) -> None:
+    def test_claude_plan_auto_chunks_before_large_single_call(self) -> None:
         anti = load_anti()
         chunk_prompts: list[str] = []
 
@@ -1542,6 +1542,8 @@ class AntiHelperTests(unittest.TestCase):
             rc = anti.main(
                 [
                     "plan",
+                    "--model",
+                    "opus",
                     "--scope",
                     "none",
                     "--prompt",
@@ -1569,7 +1571,7 @@ class AntiHelperTests(unittest.TestCase):
         self.assertFalse(hasattr(args, "_effective_prompt_budget"))
         self.assertTrue(anti.should_chunk_plan(args, "x" * 45_000, max_prompt_chars=budget))
 
-    def test_default_claude_review_auto_chunks_before_large_single_call(self) -> None:
+    def test_claude_review_auto_chunks_before_large_single_call(self) -> None:
         anti = load_anti()
         calls: list[str] = []
 
@@ -1586,7 +1588,7 @@ class AntiHelperTests(unittest.TestCase):
             try:
                 os.chdir(root)
                 with contextlib.redirect_stdout(output):
-                    rc = anti.main(["review", "--scope", "files", "--file", "big.py", "--json"])
+                    rc = anti.main(["review", "--model", "opus", "--scope", "files", "--file", "big.py", "--json"])
             finally:
                 os.chdir(old_cwd)
 
@@ -1641,8 +1643,8 @@ class AntiHelperTests(unittest.TestCase):
         parser = anti.build_parser()
         args = parser.parse_args(["panel", "--mode", "ask", "--prompt", "x"])
 
-        self.assertEqual(anti.resolve_panel_models(args.model), ["claude-sonnet-4-6", "claude-opus-4-6-thinking"])
-        self.assertEqual(anti.resolve_model(args.judge, default=anti.DEFAULT_PANEL_JUDGE_MODEL), "claude-opus-4-6-thinking")
+        self.assertEqual(anti.resolve_panel_models(args.model), ["claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL])
+        self.assertEqual(anti.resolve_model(args.judge, default=anti.DEFAULT_PANEL_JUDGE_MODEL), anti.DEFAULT_DEEP_MODEL)
 
     def test_panel_review_prompt_reuses_secret_exclusion(self) -> None:
         anti = load_anti()
@@ -1924,7 +1926,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_successful_two_model_run_calls_judge_once(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
         judge_prompts: list[str] = []
 
         def fake_post_response(**kwargs):
@@ -1951,7 +1953,7 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(rc, 0, output.getvalue())
         self.assertEqual(len(judge_prompts), 1)
         self.assertIn("panel-output-claude-sonnet-4-6", judge_prompts[0])
-        self.assertIn("panel-output-claude-opus-4-6-thinking", judge_prompts[0])
+        self.assertIn(f"panel-output-{anti.DEFAULT_DEEP_MODEL}", judge_prompts[0])
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["metadata"]["findings_status"], "parsed")
         self.assertEqual(parsed["metadata"]["judge_retried"], False)
@@ -1959,7 +1961,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_usage_latency_and_findings_are_reported(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
         calls: list[dict] = []
         finding_payload = {
             "summary": "Disagreements first.",
@@ -1969,7 +1971,7 @@ class AntiHelperTests(unittest.TestCase):
                     "id": "F1",
                     "claim": "A branch needs local verification.",
                     "severity": "medium",
-                    "lanes": ["claude-sonnet-4-6", "claude-opus-4-6-thinking"],
+                    "lanes": ["claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL],
                     "verify": "Run python3 -m pytest -q.",
                 }
             ],
@@ -2010,7 +2012,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_output_findings_emits_sanitized_json_contract(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
         secret = "sk-testsecret1234567890"
 
         def fake_post_response(**kwargs):
@@ -2050,7 +2052,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_malformed_findings_falls_back_to_markdown_with_caveat(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
         anti.post_response = lambda **kwargs: "judge-output" if "You are synthesizing" in kwargs["prompt"] else "lane"
         output = io.StringIO()
 
@@ -2067,7 +2069,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_truncated_lane_is_retried_and_recorded(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
         judge_prompts: list[str] = []
 
         def fake_post_response(**kwargs):
@@ -2119,7 +2121,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_non_answer_lane_retries_with_directive_and_recovers(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
         judge_prompts: list[str] = []
 
         def fake_post_response(**kwargs):
@@ -2135,7 +2137,7 @@ class AntiHelperTests(unittest.TestCase):
                         "caveats": [],
                     }
                 )
-            if kwargs["model"] == "claude-opus-4-6-thinking" and "Produce the requested output directly now" not in kwargs["prompt"]:
+            if kwargs["model"] == anti.DEFAULT_DEEP_MODEL and "Produce the requested output directly now" not in kwargs["prompt"]:
                 return "What would you like me to do with it?"
             return f"output-{kwargs['model']}"
 
@@ -2150,9 +2152,9 @@ class AntiHelperTests(unittest.TestCase):
         self.assertEqual(rc, 0, output.getvalue())
         parsed = json.loads(output.getvalue())
         self.assertEqual([item["status"] for item in parsed["panel_results"]], ["success", "success"])
-        self.assertEqual(parsed["metadata"]["retried_models"], ["claude-opus-4-6-thinking"])
+        self.assertEqual(parsed["metadata"]["retried_models"], [anti.DEFAULT_DEEP_MODEL])
         self.assertEqual(parsed["metadata"]["failed_models"], [])
-        self.assertIn("output-claude-opus-4-6-thinking", judge_prompts[0])
+        self.assertIn(f"output-{anti.DEFAULT_DEEP_MODEL}", judge_prompts[0])
         lane_plan = next(
             stage for stage in parsed["metadata"]["execution_plan"]
             if stage["name"] == "panel_lane_2"
@@ -2568,10 +2570,10 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_non_answer_lane_counts_as_failure_below_min_successes(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
 
         def fake_post_response(**kwargs):
-            if kwargs["model"] == "claude-opus-4-6-thinking" and "You are synthesizing" not in kwargs["prompt"]:
+            if kwargs["model"] == anti.DEFAULT_DEEP_MODEL and "You are synthesizing" not in kwargs["prompt"]:
                 return "What would you like me to do with it?"
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
                 return "judge-output"
@@ -2607,7 +2609,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_long_non_answer_lane_is_excluded_and_recorded(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
         judge_prompts: list[str] = []
         non_answer = (
             "I've read the full bounded review summary. It covers 13 confirmed defects and a cross-chunk checklist.\n\n"
@@ -2630,7 +2632,7 @@ class AntiHelperTests(unittest.TestCase):
                         "caveats": [],
                     }
                 )
-            if kwargs["model"] == "claude-opus-4-6-thinking":
+            if kwargs["model"] == anti.DEFAULT_DEEP_MODEL:
                 return non_answer
             return "sonnet output"
 
@@ -2647,8 +2649,8 @@ class AntiHelperTests(unittest.TestCase):
         opus = parsed["panel_results"][1]
         self.assertEqual(opus["status"], "non_answer")
         self.assertEqual(len(opus["attempts"]), 2)
-        self.assertEqual(parsed["metadata"]["failed_models"], ["claude-opus-4-6-thinking"])
-        self.assertEqual(parsed["metadata"]["retried_models"], ["claude-opus-4-6-thinking"])
+        self.assertEqual(parsed["metadata"]["failed_models"], [anti.DEFAULT_DEEP_MODEL])
+        self.assertEqual(parsed["metadata"]["retried_models"], [anti.DEFAULT_DEEP_MODEL])
         self.assertNotIn("Which direction", judge_prompts[0])
         self.assertIn("asked for direction", judge_prompts[0])
         self.assertTrue(any("asked for direction" in caveat for caveat in parsed["caveats"]))
@@ -2699,7 +2701,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_judge_truncated_json_is_repaired_without_retry(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
         calls: list[str] = []
         truncated = (
             '{"summary": "partial", "disagreements": [], "findings": ['
@@ -2732,7 +2734,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_judge_malformed_json_retries_once_with_strict_instruction(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
         judge_calls: list[str] = []
 
         def fake_post_response(**kwargs):
@@ -2748,7 +2750,7 @@ class AntiHelperTests(unittest.TestCase):
                                     "id": "F1",
                                     "claim": "fixed after retry",
                                     "severity": "high",
-                                    "lanes": ["claude-opus-4-6-thinking"],
+                                    "lanes": [anti.DEFAULT_DEEP_MODEL],
                                     "verify": "run the test",
                                 }
                             ],
@@ -2776,7 +2778,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_judge_fallback_never_embeds_broken_json_in_summary(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
 
         def fake_post_response(**kwargs):
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
@@ -2819,7 +2821,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_output_findings_json_keeps_stable_top_level_schema(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
 
         def fake_post_response(**kwargs):
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
@@ -2861,7 +2863,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_errors_are_redacted_in_json_output(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
 
         def fake_post_response(**kwargs):
             if kwargs["model"] == "claude-sonnet-4-6":
@@ -3201,7 +3203,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_model_failure_is_metadata_when_min_successes_met(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
 
         def fake_post_response(**kwargs):
             if kwargs["model"] == "claude-sonnet-4-6":
@@ -3224,7 +3226,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_fails_when_successes_below_minimum(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
 
         def fake_post_response(**kwargs):
             if kwargs["model"] == "claude-sonnet-4-6":
@@ -3390,7 +3392,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_below_min_successes_writes_single_failed_record_with_partial_results(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
 
         def fake_post_response(**kwargs):
             if kwargs["model"] == "claude-sonnet-4-6":
@@ -3415,7 +3417,7 @@ class AntiHelperTests(unittest.TestCase):
             self.assertEqual(len(panel_results), 2)
             statuses = {item["model"]: item["status"] for item in panel_results}
             self.assertEqual(statuses["claude-sonnet-4-6"], "error")
-            self.assertEqual(statuses["claude-opus-4-6-thinking"], "success")
+            self.assertEqual(statuses[anti.DEFAULT_DEEP_MODEL], "success")
             success_entry = next(item for item in panel_results if item["status"] == "success")
             self.assertNotIn("output_text", success_entry)
             self.assertIn("opus-panel-output", success_entry["output_preview"])
@@ -3453,7 +3455,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_panel_large_review_summarizes_before_fanout(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
         panel_prompts: list[str] = []
 
         def fake_post_response(**kwargs):
@@ -3509,7 +3511,7 @@ class AntiHelperTests(unittest.TestCase):
 
     def test_default_claude_panel_review_summarizes_before_large_fanout(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
         panel_prompts: list[str] = []
 
         def fake_post_response(**kwargs):
@@ -5333,7 +5335,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
         anti = load_anti()
         anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {
             "claude-sonnet-4-6",
-            "claude-opus-4-6-thinking",
+            anti.DEFAULT_DEEP_MODEL,
         }
 
         def fake_post_response(**kwargs):
@@ -5712,7 +5714,7 @@ class AntiHardeningTests(unittest.TestCase):
 
     def test_panel_estimated_total_accumulates_per_lane(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
 
         def fake_post_response(**kwargs):
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
@@ -5729,7 +5731,7 @@ class AntiHardeningTests(unittest.TestCase):
 
     def test_panel_respects_provider_parallel_cap(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
         lock = threading.Lock()
         state = {"current": 0, "peak": 0}
 
@@ -5753,7 +5755,7 @@ class AntiHardeningTests(unittest.TestCase):
 
     def test_panel_judge_truncated_via_metadata_makes_run_partial(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
 
         def fake_post_response(**kwargs):
             if "You are synthesizing an Antigravity multi-model advisory panel" in kwargs["prompt"]:
@@ -5891,7 +5893,7 @@ class AntiHardeningTests(unittest.TestCase):
 
     def test_reflection_verdict_round_trip(self) -> None:
         anti = load_anti()
-        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+        anti.fetch_model_ids = lambda base_url, *, timeout, token_env: {"claude-sonnet-4-6", anti.DEFAULT_DEEP_MODEL}
         anti_lib_dir = str(Path(SCRIPT).resolve().parent)
         if anti_lib_dir not in sys.path:
             sys.path.insert(0, anti_lib_dir)

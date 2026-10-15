@@ -73,11 +73,12 @@ results. See [local setup, exportable settings and policy limits](LOCAL_ONLY.md)
 - Use `gemma-4` for `openrouter:google/gemma-4-31b-it:free` (30.7B dense, 262K ctx, vision). A candidate for simple consults; image tasks require an explicit gateway capability.
 - Use `gpt-oss` for `ollama:gpt-oss:20b`. Locality requires an actual loopback endpoint and explicit local-only policy.
 - Use `qwen3` for `ollama:qwen3:8b`. Locality requires an actual loopback endpoint and explicit local-only policy.
-- Default review model: `opus`.
-- Default plan model: `opus`.
-- Default consult/ask model: `sonnet`, unless the user asks for deep review.
-- Default panel models: `sonnet` and `opus`.
-- Default panel judge: `opus`.
+- Default review model: `gemini-3.8-flash-high`.
+- Default plan model: `gemini-3.8-flash-high`.
+- Default consult/ask model: `gemini-3.8-flash-medium`, unless the user asks for deep review.
+- Default panel models: `claude-sonnet-4-6` and `gemini-3.8-flash-high` (a panel needs two distinct model families).
+- Default panel judge: `gemini-3.8-flash-high`.
+- Claude 4.6 (`opus`, `sonnet`) and GPT-OSS are third-party models: Antigravity ends access to them on non-paid plans (for example a free partner Google AI Pro plan) on 2026-11-02. The defaults above avoid them; `opus` and `sonnet` still work when requested explicitly while the plan allows them. After that date the Claude lane of the default panel fails, so pass `--model` with models you can reach.
 - **Gateway advertisement is required.** Every model below (including DeepSeek,
 Nemotron, Poolside, and Gemma routes) must be advertised by the
 gateway's `/v1/models` before a call can succeed. `smoke --check-documented`
@@ -164,7 +165,7 @@ quality ranks and cost tiers are selection heuristics, not capability evidence.
 - Poolside is coding-focused; use it for code generation, refactoring suggestions, and implementation alternatives.
 - Gemma 4 is lightweight and fast; use it for simple consults where latency matters more than depth.
 - Ollama models run locally; use them when you need privacy or offline inference, but expect lower quality than cloud models.
-Repository context leaves the Google Antigravity lane only after explicit selection and the existing BYOK disclosure. Opus remains the default judge; native Codex remains the acting agent and must verify advisory output locally.
+Repository context leaves the Google Antigravity lane only after explicit selection and the existing BYOK disclosure. Gemini 3.8 Flash (high) is the default judge; native Codex remains the acting agent and must verify advisory output locally.
 
 ## Helper
 
@@ -268,7 +269,7 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 - `panel --output findings` and `panel --json` keep a stable schema: the findings contract always includes `summary`, `disagreements`, `findings`, `unverifiable`, `recommended_next_actions`, `caveats`, `parse_warning`, `findings_total`, and `findings_dropped`. When judge JSON is malformed or truncated, the helper repairs it, retries once with a stricter JSON-only instruction, and only then falls back to prose with a `parse_warning`; it never embeds a broken JSON blob inside `summary`.
 - Broad `panel --mode review` runs summarize oversized review scopes before fan-out instead of silently truncating raw context for every lane. Treat the summary caveat as a scope limitation.
 - `review` with an empty scope (for example `--scope staged` with nothing staged, or a clean working tree) fails with an actionable error before any model call instead of asking the model to explain "no content".
-- Use `--fallback-model sonnet --fallback-policy on-retryable` for long Opus planning/review calls when backend `502`/timeout drift would otherwise block the workflow.
+- Use `--fallback-model sonnet --fallback-policy on-retryable` for long Opus planning/review calls (the default fallback is `gemini-3.8-flash-medium`) when backend `502`/timeout drift would otherwise block the workflow.
 - A provider fallback is always explicit. For example, `--fallback-model deepseek-v4-flash --fallback-policy on-retryable` may send the same prompt/context to DeepSeek; use it only when that disclosure and trust boundary are acceptable.
 - `/v1/models` is a catalog/readiness hint, not proof that a model can generate. Generation failures remain attached to the requested lane; use the bounded panel generation call (or an explicit smoke/probe workflow when available) to establish live readiness. After retryable generation failures, the helper probes `/v1/models`; if that probe also times out, treat the gateway as wedged and restart it before retrying the same Opus job.
 - `--progress` is enabled by default for all `workflow`, `plan`, `review`, `consult`, `panel`, `moa`, and `fusion` runs, streaming real-time `[anti]` step milestones (model call starts, completed prompt/output char counts, elapsed time, chunk progress, and judge synthesis) directly to stderr for live visibility in Codex. Use `--no-progress` to suppress stderr progress logging if quiet output is explicitly required.
@@ -289,7 +290,7 @@ python3 -m unittest discover -s ~/.codex/skills/anti/tests
 ## New Flags
 
 - `--model-free` — Expand the explicit free-lane preset (`nemotron-ultra`, `poolside`, `gemma-4`, `nemotron-super`) as the panel/workflow lane list. Shell convenience only: requested identities stay visible in logs and run manifests, no automatic routing, and combining it with `--model` fails closed.
-- `--auto-route` — Automatically pick the cheapest adequate model based on diff size and file risk. Small diffs use flash-3.8, medium use sonnet, large or high-risk files use opus. Only activates when `--model` is not explicitly passed.
+- `--auto-route` — Automatically pick the cheapest adequate model based on diff size and file risk. Small diffs use flash-3.8, medium use gemini-3.8-flash-medium, large or high-risk files use gemini-3.8-flash-high. Only activates when `--model` is not explicitly passed.
 - `--budget <units>` — Compatibility heuristic-unit allowance, never USD or provider billing. Unknown heuristic tiers refuse this mode. Admission happens before each chunk/synthesis/lane/judge call; refused work is marked not-sent, and estimated ceilings, observed usage, and unknown-usage markers remain separate.
 - Independent `--max-calls`, `--max-total-input-tokens` (estimated) and `--max-total-output-tokens` allowances cover retries/fallback/judge calls. Currency admission requires `--currency-budget` plus explicit dated complete-attempt bounds in `--pricing-file`; static free labels and observed tokens never become currency prices. See [spend-control assumptions, units and schema](SPEND_CONTROL.md).
 - `--no-verify` — Skip all finding file checks. Default checks parse Python bytes to AST without execution/bytecode and scan supported text for credential patterns; source input is capped at 512 KiB. A finding's `verify` string is never executed.

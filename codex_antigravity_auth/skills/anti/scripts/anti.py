@@ -350,12 +350,18 @@ MODEL_QUALITY_RANK: dict[str, int] = {
 }
 
 
+# Gemini 3.8 Flash stays on every plan; Claude 4.6 and GPT-OSS end on non-paid plans 2026-11-02.
+DEFAULT_DEEP_MODEL = "gemini-3.8-flash-high"
+DEFAULT_FAST_MODEL = "gemini-3.8-flash-medium"
+DEFAULT_SETUP_MODEL = "gemini-3.8-flash"
+
+
 def resolve_auto_model(
     *,
     scope: str | None = None,
     diff_lines: int = 0,
     file_paths: list[str] | None = None,
-    default: str = "sonnet",
+    default: str = DEFAULT_FAST_MODEL,
 ) -> tuple[str, str]:
     """Pick the cheapest adequate model from diff size and file risk."""
     high_risk_patterns = [
@@ -369,18 +375,19 @@ def resolve_auto_model(
             break
 
     if diff_lines > 1000 or risk_level == "high":
-        return ("opus", f"large diff ({diff_lines} lines) or high-risk files")
+        return (DEFAULT_DEEP_MODEL, f"large diff ({diff_lines} lines) or high-risk files")
     if diff_lines > 200:
-        return ("sonnet", f"medium diff ({diff_lines} lines)")
+        return (DEFAULT_FAST_MODEL, f"medium diff ({diff_lines} lines)")
     if diff_lines > 0:
         return ("flash-3.8", f"small diff ({diff_lines} lines), low risk")
     return (default, "no diff context, using default")
 
-DEFAULT_REVIEW_MODEL = "claude-opus-4-6-thinking"
-DEFAULT_CONSULT_MODEL = "claude-sonnet-4-6"
-DEFAULT_PLAN_MODEL = "claude-opus-4-6-thinking"
-DEFAULT_PANEL_MODELS = ["claude-sonnet-4-6", "claude-opus-4-6-thinking"]
-DEFAULT_PANEL_JUDGE_MODEL = "claude-opus-4-6-thinking"
+DEFAULT_REVIEW_MODEL = DEFAULT_DEEP_MODEL
+DEFAULT_CONSULT_MODEL = DEFAULT_FAST_MODEL
+DEFAULT_PLAN_MODEL = DEFAULT_DEEP_MODEL
+# A panel needs two distinct model families; the Claude lane works until 2026-11-02, then pass --model.
+DEFAULT_PANEL_MODELS = ["claude-sonnet-4-6", DEFAULT_DEEP_MODEL]
+DEFAULT_PANEL_JUDGE_MODEL = DEFAULT_DEEP_MODEL
 FREE_LANE_PRESET_MODELS = ["nemotron-ultra", "poolside", "gemma-4", "nemotron-super"]
 COLLAB_PROFILES = {"none"}
 
@@ -6599,7 +6606,7 @@ def command_panel(args: argparse.Namespace) -> int:
             scope=getattr(args, "scope", None),
             diff_lines=diff_lines,
             file_paths=file_paths,
-            default="sonnet",
+            default=DEFAULT_FAST_MODEL,
         )
         args.model = [auto_route_model]
     panel_models = resolve_panel_models(args.model, collab_profile=collab_profile)
@@ -7396,7 +7403,7 @@ def command_consult(args: argparse.Namespace) -> int:
     auto_route_model = None
     auto_route_reason = None
     if getattr(args, "auto_route", False) and args.model is None:
-        auto_route_model, auto_route_reason = resolve_auto_model(default="sonnet")
+        auto_route_model, auto_route_reason = resolve_auto_model(default=DEFAULT_FAST_MODEL)
         model = resolve_model(auto_route_model, default=DEFAULT_CONSULT_MODEL)
     else:
         model = resolve_model(args.model, default=DEFAULT_CONSULT_MODEL)
@@ -7630,7 +7637,7 @@ def command_review(args: argparse.Namespace) -> int:
             scope=args.scope,
             diff_lines=len(context["diff"].splitlines()),
             file_paths=list(context["paths"]),
-            default="sonnet",
+            default=DEFAULT_FAST_MODEL,
         )
         model = resolve_model(auto_route_model, default=DEFAULT_REVIEW_MODEL)
     else:
@@ -8664,7 +8671,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         argv = [
             "plan",
             "--model",
-            args.model[0] if args.model else "opus",
+            args.model[0] if args.model else DEFAULT_PLAN_MODEL,
             "--scope",
             scope,
             "--chunked",
@@ -8680,7 +8687,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         if args.allow_partial:
             argv.append("--allow-partial")
         if not args.fallback_model and args.fallback_policy != "never":
-            argv.extend(["--fallback-model", "sonnet"])
+            argv.extend(["--fallback-model", DEFAULT_FAST_MODEL])
     elif args.name == "ship-gate":
         scope = workflow_scope(args, default="staged")
         argv = _panel_argv(
@@ -8712,7 +8719,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
         argv = _panel_argv(
             mode="ask", scope=None, common=common, args=args,
             roles=args.role or [],
-            models=args.model or ["sonnet", "opus"],
+            models=args.model or list(DEFAULT_PANEL_MODELS),
         )
     elif args.name == "debug-consensus":
         if (
@@ -8755,7 +8762,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
             raise AntiError("workflow debug-consensus is prompt-only; omit --required-file")
         for role in args.role or ["root-cause", "regression-risk", "discriminating-tests"]:
             argv.extend(["--role", role])
-        for model in args.model or ["sonnet", "opus"]:
+        for model in args.model or list(DEFAULT_PANEL_MODELS):
             argv.extend(["--model", model])
     elif args.name == "quick-check":
         scope = workflow_scope(args, default="staged")
@@ -8787,7 +8794,7 @@ def workflow_expansion(args: argparse.Namespace) -> list[str]:
     elif args.name == "consensus":
         scope = workflow_scope(args, default="staged")
         # H-5: consensus requires at least 2 models to detect disagreements
-        consensus_models = args.model or ["sonnet", "opus", "flash-3.8"]
+        consensus_models = args.model or list(DEFAULT_PANEL_MODELS)
         # Don't pass prompt here; let post-expansion handle user prompt or default
         argv = _panel_argv(
             mode="review", scope=scope, common=common, args=args,
@@ -9176,7 +9183,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use the explicit free-lane preset: nemotron-ultra, poolside, gemma-4, nemotron-super",
     )
-    panel.add_argument("--judge", default="opus", help="Judge model alias/id; defaults to opus")
+    panel.add_argument("--judge", default=DEFAULT_PANEL_JUDGE_MODEL, help=f"Judge model alias/id; defaults to {DEFAULT_PANEL_JUDGE_MODEL}")
     panel.add_argument("--role", action="append", help="Review/planning lens such as security, correctness, tests, ux")
     panel.add_argument("--scope", choices=["none", "working-tree", "staged", "files", "diff", "repository"], default="working-tree")
     add_inventory_args(panel)
@@ -9287,7 +9294,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_gateway_args(plan, default_timeout=120.0)
     add_generation_control_args(plan)
-    plan.add_argument("--model", default="opus", help="opus, sonnet, or full model id")
+    plan.add_argument("--model", default=DEFAULT_PLAN_MODEL, help=f"Model alias/id; defaults to {DEFAULT_PLAN_MODEL}")
     plan.add_argument("--prompt", help="Planning goal text")
     plan.add_argument("--prompt-file", help="Read planning goal from file")
     plan.add_argument("--scope", choices=["none", "working-tree", "staged", "files"], default="none")
@@ -9381,7 +9388,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use the explicit free-lane preset: nemotron-ultra, poolside, gemma-4, nemotron-super",
     )
-    workflow.add_argument("--judge", default="opus")
+    workflow.add_argument("--judge", default=DEFAULT_PANEL_JUDGE_MODEL)
     workflow.add_argument("--role", action="append")
     workflow.add_argument("--scope", choices=["auto", "none", "working-tree", "staged", "files", "diff", "repository"], default="auto")
     add_inventory_args(workflow)
@@ -9509,7 +9516,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     setup = sub.add_parser("setup-google", help="Run guided Google Antigravity setup")
     setup.add_argument("--accounts", type=int, default=1)
-    setup.add_argument("--model", default="sonnet")
+    setup.add_argument("--model", default=DEFAULT_SETUP_MODEL)
     setup.add_argument("--port", type=int, default=51122)
     setup.add_argument("--base-url")
     setup.add_argument("--skip-codex-config", action="store_true")
@@ -9518,7 +9525,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup.set_defaults(func=command_setup_google)
 
     configure = sub.add_parser("configure-codex", help="Write Codex provider config for Antigravity")
-    configure.add_argument("--model", default="sonnet")
+    configure.add_argument("--model", default=DEFAULT_SETUP_MODEL)
     add_gateway_args(configure)
     add_codex_config_args(configure)
     configure.set_defaults(func=command_configure_codex)

@@ -116,7 +116,7 @@ def test_secret_acknowledgement_is_cli_only_and_bound_to_exact_prompt(anti, tmp_
     path = policy(tmp_path)
     prompt = "review " + SECRET
     sha = hashlib.sha256(prompt.encode()).hexdigest()
-    assert anti.main(["consult", "--data-policy", str(path), "--no-pre-read", "--prompt", prompt, "--dry-run"]) == 1
+    assert anti.main(["consult", "--model", MODEL, "--data-policy", str(path), "--no-pre-read", "--prompt", prompt, "--dry-run"]) == 1
     output = capsys.readouterr()
     assert SECRET not in output.out + output.err and sha in output.err
     assert not (tmp_path / "runs").exists()
@@ -144,9 +144,9 @@ def test_high_confidence_secret_forms_are_rejected_without_echo(anti, tmp_path, 
 
 def test_scan_limit_fails_closed_and_policy_dry_run_is_content_free(anti, tmp_path, capsys):
     path = policy(tmp_path, limit=10)
-    assert anti.main(["consult", "--data-policy", str(path), "--no-pre-read", "--prompt", "x" * 11, "--dry-run"]) == 1
+    assert anti.main(["consult", "--model", MODEL, "--data-policy", str(path), "--no-pre-read", "--prompt", "x" * 11, "--dry-run"]) == 1
     assert "scan limit" in capsys.readouterr().err
-    assert anti.main(["consult", "--data-policy", str(path), "--no-pre-read", "--prompt", "safe", "--dry-run"]) == 0
+    assert anti.main(["consult", "--model", MODEL, "--data-policy", str(path), "--no-pre-read", "--prompt", "safe", "--dry-run"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["noContentSubmitted"] is True
     assert "safe" not in json.dumps(result) and not (tmp_path / "runs").exists()
@@ -250,7 +250,7 @@ def test_summary_and_judge_stage_context_reset_without_copying_budget_or_run_sta
 def test_unquoted_credential_and_denied_live_preflight_get_content_free_record(anti, tmp_path, capsys):
     path = policy(tmp_path)
     prompt = "api_key=fixture-unquoted-credential"
-    assert anti.main(["consult", "--data-policy", str(path), "--no-pre-read", "--prompt", prompt, "--no-progress"]) == 1
+    assert anti.main(["consult", "--model", MODEL, "--data-policy", str(path), "--no-pre-read", "--prompt", prompt, "--no-progress"]) == 1
     outputs = capsys.readouterr()
     assert "fixture-unquoted-credential" not in outputs.out + outputs.err
     records = list((tmp_path / "runs").glob("*.json"))

@@ -176,7 +176,7 @@ def test_workflow_expansion_shares_existing_deadline(anti, monkeypatch):
 
 
 def test_panel_judge_expiry_preserves_partial_lane_record_without_raw_never_data(anti, monkeypatch, tmp_path):
-    models={'claude-sonnet-4-6','claude-opus-4-6-thinking'}
+    models={'claude-sonnet-4-6',anti.DEFAULT_DEEP_MODEL}
     monkeypatch.setattr(anti,'fetch_model_ids',lambda *a,**k:models)
     monkeypatch.setattr(anti,'_install_run_signal_handlers',lambda args:None)
     clock=[0.0]
@@ -262,7 +262,7 @@ def test_owned_http_response_is_read_with_deadline_and_no_credential_dependency(
 
 
 def test_queue_deadline_records_deferred_rows_and_never_claims_complete_scope(anti, monkeypatch, tmp_path):
-    models={'claude-sonnet-4-6','claude-opus-4-6-thinking'}
+    models={'claude-sonnet-4-6',anti.DEFAULT_DEEP_MODEL}
     monkeypatch.setattr(anti,'fetch_model_ids',lambda *a,**k:models)
     monkeypatch.setattr(anti,'_install_run_signal_handlers',lambda args:None)
     clock=[0.0]
@@ -372,7 +372,7 @@ def test_transport_timeout_is_rechecked_after_preparation(anti,monkeypatch):
 
 @pytest.mark.parametrize('retention', ['full','summary','never'])
 def test_deferred_judge_retry_retains_first_judge_evidence_per_policy(anti,monkeypatch,tmp_path,retention):
-    models={'claude-sonnet-4-6','claude-opus-4-6-thinking'}
+    models={'claude-sonnet-4-6',anti.DEFAULT_DEEP_MODEL}
     monkeypatch.setattr(anti,'fetch_model_ids',lambda *a,**k:models)
     monkeypatch.setattr(anti,'_install_run_signal_handlers',lambda args:None)
     clock=[0.0]
