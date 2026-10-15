@@ -209,6 +209,10 @@ def thinking_level_for_request(codex_req: dict[str, Any], backend_model: str, *,
     return effort if effort in valid_levels else "medium"
 
 
+# Output room kept above the thinking budget when the caller sets no cap; Claude rejects max_tokens <= budget.
+THINKING_OUTPUT_HEADROOM = 8192
+
+
 def thinking_budget_for_request(codex_req: dict[str, Any], backend_model: str, *, mapping: str | None = None) -> int | None:
     if mapping == "thinking_level" or (mapping is None and _is_gemini_thinking_level_model(backend_model)):
         return None  # Gemini 3.7+ uses thinkingLevel, not thinking_budget
@@ -528,6 +532,8 @@ def transform_request(codex_req: dict, project_id: str | None = None) -> dict:
             "thinking_budget": budget,
             "include_thoughts": True
         }
+        if "maxOutputTokens" not in generation_config:
+            generation_config["maxOutputTokens"] = budget + THINKING_OUTPUT_HEADROOM
         
     if generation_config:
         request_payload["generationConfig"] = generation_config

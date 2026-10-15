@@ -71,6 +71,20 @@ class TestTransform(unittest.TestCase):
         self.assertEqual(generation_config["maxOutputTokens"], 4096)
         self.assertEqual(generation_config["thinkingConfig"]["thinking_budget"], 4095)
 
+    def test_claude_without_max_output_tokens_gets_cap_above_thinking_budget(self):
+        for effort, budget in (("low", 4000), ("high", 16000), ("xhigh", 32000)):
+            with self.subTest(effort=effort):
+                res = transform_request(
+                    {"model": "claude-sonnet-4-6", "input": "Hello", "reasoning": {"effort": effort}}
+                )
+                config = res["request"]["generationConfig"]
+                self.assertEqual(config["thinkingConfig"]["thinking_budget"], budget)
+                self.assertGreater(config["maxOutputTokens"], budget)
+
+    def test_explicit_max_output_tokens_is_not_overridden_by_default_cap(self):
+        res = transform_request({"model": "claude-sonnet-4-6", "input": "Hello", "max_output_tokens": 20000})
+        self.assertEqual(res["request"]["generationConfig"]["maxOutputTokens"], 20000)
+
     def test_gemini_38_flash_uses_thinking_level(self):
         res = transform_request(
             {"model": "gemini-3.8-flash", "input": "Hello", "reasoning": {"effort": "high"}}
