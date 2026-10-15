@@ -813,23 +813,48 @@ def test_total_expiry_after_preparation_handoff_sends_504_without_sse_headers(mo
 
 @pytest.mark.parametrize("route", ["google", "openai", "openai_oauth"])
 def test_short_total_during_owned_preparation_releases_resources(monkeypatch, setup_route, route):
-    state = setup_route(route, timeout=0.3)
-    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 0.04)
+    google = route == "google"
+    state = setup_route(route, timeout=5 if google else 0.3)
+    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 5 if google else 0.04)
     clients, contexts = stream_clients(monkeypatch, route)
     unblock = threading.Event()
-    if route == "google":
-        monkeypatch.setattr(server, "get_platform", lambda: (unblock.wait(1), "fixture")[1])
-    else:
-        monkeypatch.setattr(server, "write_request_record", lambda row: unblock.wait(1))
-    started = time.monotonic()
-    try:
-        with pytest.raises(HTTPException) as caught:
-            asyncio.run(server.create_response(Request(route, stream=True)))
-        assert caught.value.status_code == 504 and time.monotonic() - started < 0.25
-    finally: unblock.set()
+    entered = []
+    async def scenario():
+        if google:
+            arm_deadline = deadline_on_phase_entry(monkeypatch, timeout=0.04)
+            loop = asyncio.get_running_loop()
+            def platform():
+                entered.append(time.monotonic())
+                # This preparation step runs in a worker after lease acquisition.
+                loop.call_soon_threadsafe(arm_deadline)
+                unblock.wait(1)
+                return "fixture"
+            monkeypatch.setattr(server, "get_platform", platform)
+        else:
+            monkeypatch.setattr(server, "write_request_record", lambda row: unblock.wait(1))
+        started = time.monotonic()
+        try:
+            with pytest.raises(HTTPException) as caught:
+                await asyncio.wait_for(server.create_response(Request(route, stream=True)), 2)
+            if google:
+                assert len(entered) == state.acquire.await_count == 1
+            assert caught.value.status_code == 504
+            assert time.monotonic() - (entered[0] if google else started) < 0.25
+        finally:
+            unblock.set()
+    asyncio.run(scenario())
     assert all(client.closed == 1 for client in clients)
     assert all(context.closed == 1 for context in contexts)
     assert state.release.await_count == (1 if route == "google" else 0)
+
+
+def test_owned_preparation_fault_survives_slow_body_read(monkeypatch, setup_route):
+    read_json = Request.json
+    async def delayed_json(request):
+        await asyncio.sleep(0.12)
+        return await read_json(request)
+    monkeypatch.setattr(Request, "json", delayed_json)
+    test_short_total_during_owned_preparation_releases_resources(monkeypatch, setup_route, "google")
 
 
 def test_stream_handoff_never_extends_an_expired_preparation_budget():
