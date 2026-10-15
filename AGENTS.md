@@ -2,11 +2,15 @@
 
 > Start at [STATUS.md](STATUS.md) for current source contracts and evidence boundaries. Historical release claims are preserved in [the dated archive](docs/history/2026-10-01/AGENTS.md); they are not proof for this checkout.
 
+> **Current state snapshot:** See [CURRENT_STATE.md](CURRENT_STATE.md) for the 2026-10-04 refresh and retained September source analysis. See [VALIDATION_COPIES.md](VALIDATION_COPIES.md) for newer hidden source copies; equal package versions do not establish equal source.
+
 Guidance for AI coding agents (Codex, Claude Code, OpenCode, etc.) working on this project.
 
 ## Overview
 
 Local gateway server that allows OpenAI Codex (CLI and Desktop) to use Google Antigravity models (Gemini 3.8/3.7/3.1, Claude Sonnet/Opus 4.6) via Google OAuth PKCE and multi-account rotation, plus BYOK OpenAI-compatible providers such as OpenRouter, DeepSeek, xAI, Kimi/Moonshot, Ollama, and OpenCode-compatible endpoints.
+
+Newer models are registered but plan-gated: Gemini 4 Argon (Ultra/Enterprise; the docs list it as not available in Antigravity IDE, which is the client identity this gateway presents) and Claude Sonnet/Opus 5.5 (paid, non-trial Pro or Ultra plans). Their backend wire ids are unverified and they were not offered to the Jio-provided Google AI Pro accounts checked on 2026-10-15. Per Google's in-API notice, third-party model access (Claude 4.6, GPT-OSS) ends on non-paid plans on 2026-11-02, so the anti skill defaults to Gemini 3.8 Flash.
 
 ## Architecture
 
