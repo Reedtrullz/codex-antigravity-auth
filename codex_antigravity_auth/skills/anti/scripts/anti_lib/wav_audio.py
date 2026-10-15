@@ -88,7 +88,8 @@ def _dbfs(level):
 def measure_pcm(raw):
     with wave.open(io.BytesIO(raw),'rb') as source:
         channels,rate,frames=source.getnchannels(),source.getframerate(),source.getnframes()
-        require(source.getsampwidth()==2 and frames>0,'Silence measurement requires nonempty 16-bit PCM frames')
+        require(source.getsampwidth()==2,'Silence measurement requires 16-bit PCM')
+        require(frames>0,'Silence measurement requires nonempty frames')
         samples=array.array('h',source.readframes(frames))
     if sys.byteorder=='big':samples.byteswap()
     window=max(1,rate*WINDOW_MS//1000)
@@ -240,7 +241,8 @@ class Session(MediaSession):
                 and audio.get('content_type')==PART_TYPE and audio.get('streaming') is False
                 and audio.get('backend_acceptance')=='unverified' and audio.get('requires_probe_opt_in') is True):
             return False
-        selected=self.upload_items or self.images
+        selected=self.upload_items
+        if not selected:return True
         requirements={'max_files':len(selected),'max_file_bytes':max(item.size for item in selected),
                       'max_total_bytes':sum(item.size for item in selected),
                       'max_duration_seconds':max((item.descriptor['duration_ms']+999)//1000 for item in selected)}

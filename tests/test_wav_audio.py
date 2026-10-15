@@ -316,11 +316,33 @@ def test_silence_map_measures_zero_quiet_and_sound_windows():
     assert audio.measure_pcm(wav(channels=2, amplitude=0))['wholly_digital_silence'] is True
 
 
-def test_silence_map_refuses_non_pcm16_or_empty_frames():
-    with pytest.raises(audio.AudioError):
-        audio.measure_pcm(wav(width=1))
-    with pytest.raises(audio.AudioError):
+@pytest.mark.parametrize('width', [1, 3, 4])
+def test_silence_map_refuses_non_pcm16_widths(width):
+    with pytest.raises(audio.AudioError, match='requires 16-bit PCM'):
+        audio.measure_pcm(wav(width=width))
+
+
+def test_silence_map_refuses_empty_frames():
+    with pytest.raises(audio.AudioError, match='requires nonempty frames'):
         audio.measure_pcm(mono_pcm([]))
+
+
+def test_response_model_id_does_not_mutate_the_request():
+    request = {'model': 'gemini-3.8-flash-high', 'input': 'x'}
+    assert server.response_model_id(request) == 'gemini-3.8-flash'
+    assert request == {'model': 'gemini-3.8-flash-high', 'input': 'x'}
+    server.apply_response_model(request)
+    assert request['model'] == 'gemini-3.8-flash' and request['reasoning'] == {'effort': 'high'}
+
+
+def test_all_skipped_session_needs_no_upload_capacity(fixture, tmp_path):
+    anti, _, _, _, _ = fixture;catalog_for_helper(anti)
+    silent = tmp_path / 'room.wav';silent.write_bytes(wav(amplitude=0))
+    session = audio.capture([str(silent)], probe=True, silence_policy='skipped')
+    anti.CAPABILITY_REGISTRY.entries['gemini-3.8-flash']['audio_input']['max_files'] = 0
+    assert session.all_skipped and session.supports(anti.CAPABILITY_REGISTRY, 'gemini-3.8-flash') is True
+    sent = audio.capture([str(silent)], probe=True, silence_policy='sent')
+    assert sent.supports(anti.CAPABILITY_REGISTRY, 'gemini-3.8-flash') is False
 
 
 def test_consult_audio_still_uploads_wholly_silent_clip(fixture, monkeypatch, capsys, tmp_path):
