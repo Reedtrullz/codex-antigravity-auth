@@ -1263,6 +1263,11 @@ def response_model_id(codex_req: dict) -> str:
         canonical = canonical_model_id(model)
         if resolve_backend_model(model) != resolve_backend_model(canonical):
             return model
+        implied = next((level for level in ("low", "medium", "high")
+                        if model.lower() == f"{canonical.lower()}-{level}"), None)
+        reasoning = codex_req.get("reasoning")
+        if implied and not (isinstance(reasoning, dict) and "effort" in reasoning):
+            codex_req["reasoning"] = {**(reasoning if isinstance(reasoning, dict) else {}), "effort": implied}
         return canonical
     return model
 

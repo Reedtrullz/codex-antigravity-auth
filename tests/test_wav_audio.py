@@ -371,6 +371,21 @@ def test_explicit_pro_high_audio_route_reaches_its_backend(fixture, monkeypatch)
     assert seen[0]['body']['model'] == 'gemini-pro-agent'
 
 
+@pytest.mark.parametrize('model,reasoning,level', [
+    ('gemini-3.8-flash-high', None, 'high'), ('gemini-3.8-flash-low', None, 'low'),
+    ('gemini-3.7-flash-high', None, 'high'), ('gemini-3.8-flash-high', {'effort': 'low'}, 'low')])
+def test_effort_suffixed_alias_keeps_its_thinking_level_through_gateway(fixture, monkeypatch, model, reasoning, level):
+    request = body(model)
+    if reasoning is not None:
+        request['reasoning'] = reasoning
+    with upstream(response()) as (base, seen):
+        endpoint(monkeypatch, base)
+        result = TestClient(server.app).post('/v1/responses', json=request)
+    assert result.status_code == 200
+    assert len(seen) == 1
+    assert seen[0]['body']['request']['generationConfig']['thinkingConfig'] == {'thinkingLevel': level}
+
+
 def test_fixed_model_id_does_not_infer_an_unsupported_reasoning_parameter(fixture, monkeypatch):
     anti, _, _, _, _ = fixture
     bridge(monkeypatch, anti)
