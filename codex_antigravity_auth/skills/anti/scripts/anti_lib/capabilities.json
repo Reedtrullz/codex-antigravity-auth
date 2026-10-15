@@ -4,6 +4,107 @@
     {
       "capabilities": {
         "aliases": [
+          "argon",
+          "gemini-4-argon-high",
+          "gemini-4-argon-medium"
+        ],
+        "audio_input": {
+          "backend_acceptance": "unverified",
+          "backend_attempt_limit": 1,
+          "content_type": "antigravity_audio",
+          "format": "pcm_wav",
+          "listening_verification": "not_run",
+          "max_duration_seconds": 30,
+          "max_file_bytes": 2097152,
+          "max_files": 2,
+          "max_total_bytes": 4194304,
+          "requires_probe_opt_in": true,
+          "streaming": false,
+          "transport_supported": true,
+          "version": 1
+        },
+        "availability": "unknown",
+        "backend_id": "gemini-4-argon-high",
+        "canonical_id": "gemini-4-argon",
+        "context_limit": {
+          "basis": "declared",
+          "known": true,
+          "tokens": 1048576
+        },
+        "declaration_source": "builtin",
+        "declared_backend": {
+          "availability": "unknown",
+          "context_limit": {
+            "basis": "declared",
+            "known": true,
+            "tokens": 1048576
+          },
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "effective": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call"
+          ],
+          "parallel_tool_calls": true,
+          "reasoning_efforts": [],
+          "reasoning_mapping": null,
+          "reasoning_replay": false,
+          "streaming": true,
+          "structured_output": true,
+          "tools": true
+        },
+        "family": "gemini",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
+        "route": "antigravity",
+        "transport": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "opaque_reasoning_replay": false,
+          "output_types": [
+            "text",
+            "reasoning",
+            "function_call",
+            "refusal"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "version": 1
+      },
+      "id": "gemini-4-argon"
+    },
+    {
+      "capabilities": {
+        "aliases": [
           "gemini-3.8-flash-high",
           "gemini-3.8-flash-low",
           "gemini-3.8-flash-medium",
@@ -318,6 +419,221 @@
         "version": 1
       },
       "id": "gemini-3.1-pro"
+    },
+    {
+      "capabilities": {
+        "aliases": [
+          "claude-sonnet-5.5",
+          "sonnet-5.5"
+        ],
+        "audio_input": {
+          "backend_acceptance": "unsupported",
+          "backend_attempt_limit": 1,
+          "content_type": "antigravity_audio",
+          "format": "pcm_wav",
+          "listening_verification": "not_run",
+          "max_duration_seconds": 30,
+          "max_file_bytes": 2097152,
+          "max_files": 2,
+          "max_total_bytes": 4194304,
+          "requires_probe_opt_in": true,
+          "streaming": false,
+          "transport_supported": false,
+          "version": 1
+        },
+        "availability": "unknown",
+        "backend_id": "claude-sonnet-5-5",
+        "canonical_id": "claude-sonnet-5-5",
+        "context_limit": {
+          "basis": "declared",
+          "known": true,
+          "tokens": 250000
+        },
+        "declaration_source": "builtin",
+        "declared_backend": {
+          "availability": "unknown",
+          "context_limit": {
+            "basis": "declared",
+            "known": true,
+            "tokens": 250000
+          },
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "structured_output": false,
+          "tools": true
+        },
+        "effective": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "parallel_tool_calls": true,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "reasoning_mapping": "thinking_budget",
+          "reasoning_replay": false,
+          "streaming": true,
+          "structured_output": false,
+          "tools": true
+        },
+        "family": "claude",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
+        "route": "antigravity",
+        "transport": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "opaque_reasoning_replay": false,
+          "output_types": [
+            "text",
+            "reasoning",
+            "function_call",
+            "refusal"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "version": 1
+      },
+      "id": "claude-sonnet-5-5"
+    },
+    {
+      "capabilities": {
+        "aliases": [
+          "claude-opus-5-5",
+          "claude-opus-5.5",
+          "opus-5.5"
+        ],
+        "audio_input": {
+          "backend_acceptance": "unsupported",
+          "backend_attempt_limit": 1,
+          "content_type": "antigravity_audio",
+          "format": "pcm_wav",
+          "listening_verification": "not_run",
+          "max_duration_seconds": 30,
+          "max_file_bytes": 2097152,
+          "max_files": 2,
+          "max_total_bytes": 4194304,
+          "requires_probe_opt_in": true,
+          "streaming": false,
+          "transport_supported": false,
+          "version": 1
+        },
+        "availability": "unknown",
+        "backend_id": "claude-opus-5-5-thinking",
+        "canonical_id": "claude-opus-5-5-thinking",
+        "context_limit": {
+          "basis": "declared",
+          "known": true,
+          "tokens": 250000
+        },
+        "declaration_source": "builtin",
+        "declared_backend": {
+          "availability": "unknown",
+          "context_limit": {
+            "basis": "declared",
+            "known": true,
+            "tokens": 250000
+          },
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "structured_output": false,
+          "tools": true
+        },
+        "effective": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "image",
+            "text"
+          ],
+          "output_types": [
+            "text",
+            "refusal",
+            "function_call",
+            "reasoning"
+          ],
+          "parallel_tool_calls": true,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "reasoning_mapping": "thinking_budget",
+          "reasoning_replay": false,
+          "streaming": true,
+          "structured_output": false,
+          "tools": true
+        },
+        "family": "claude",
+        "gateway_generation": {
+          "required_output_bridge": null,
+          "supported": true
+        },
+        "route": "antigravity",
+        "transport": {
+          "image_forms": [
+            "data_url",
+            "url"
+          ],
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "opaque_reasoning_replay": false,
+          "output_types": [
+            "text",
+            "reasoning",
+            "function_call",
+            "refusal"
+          ],
+          "structured_output": true,
+          "tools": true
+        },
+        "version": 1
+      },
+      "id": "claude-opus-5-5-thinking"
     },
     {
       "capabilities": {

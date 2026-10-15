@@ -5985,3 +5985,14 @@ class AntiHardeningTests(unittest.TestCase):
                     os.chdir(original_cwd)
             finally:
                 reflections_module.REFLECTIONS_DIR = original_reflections_dir
+
+
+class AntiNewModelTableTests(unittest.TestCase):
+    def test_argon_and_claude_5_5_are_resolvable_and_ranked(self):
+        anti = load_anti()
+        self.assertEqual(anti.resolve_model("argon-medium", default="x"), "gemini-4-argon-medium")
+        self.assertEqual(anti.resolve_model("sonnet-5.5", default="x"), "claude-sonnet-5-5")
+        self.assertEqual(anti.resolve_model("opus-5.5", default="x"), "claude-opus-5-5-thinking")
+        for model in ("gemini-4-argon", "claude-sonnet-5-5", "claude-opus-5-5-thinking"):
+            self.assertEqual(anti.MODEL_COST_TIER[model], "quota")
+            self.assertGreater(anti.MODEL_QUALITY_RANK[model], 0)
