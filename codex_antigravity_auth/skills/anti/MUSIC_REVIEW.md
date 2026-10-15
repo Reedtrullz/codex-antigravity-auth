@@ -47,6 +47,11 @@ that backend selection through gateway normalization. In particular,
 `gemini-3.1-pro` uses its separately configured backend. Availability and measured
 listening results for either route do not transfer to the other.
 
+A fixed advertised model ID may contain an effort word without accepting a
+separate reasoning parameter. Anti does not synthesize that parameter when the
+exact catalog entry declares reasoning unsupported; the selected model ID is
+unchanged. Explicit effort aliases on supported routes still carry their level.
+
 Transport support, observed backend acceptance, measured perceptual qualification
 and suitability for a musical task are separate claims. This feature implements
 transport and validation; qualification requires fresh controlled listening

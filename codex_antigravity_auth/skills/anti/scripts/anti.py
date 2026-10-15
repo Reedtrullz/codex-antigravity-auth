@@ -1253,6 +1253,9 @@ def base_model_id(model_id: str) -> str:
 
 def effort_for_model(model_id: str) -> str | None:
     model = str(model_id).strip().lower()
+    caps = CAPABILITY_REGISTRY.entries.get(model, {})
+    if caps.get('effective', {}).get('reasoning_efforts') == []:
+        return None
     match = GEMINI_FLASH_EFFORT_RE.fullmatch(model) or LEGACY_GEMINI_FLASH_RE.fullmatch(model)
     effort = match.group(2) if match else None
     return effort if effort in {"low", "medium", "high"} else None

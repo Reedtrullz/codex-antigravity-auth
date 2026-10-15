@@ -18,12 +18,13 @@ def result():
     return {'schemaVersion':1,'kind':'anti-music-review','comparisonStatus':'uncertain','findings':[], 'limitations':['Synthetic fixture, no listening'], 'musicalAcceptance':'not-established'}
 
 
-def test_standalone_single_google_account_one_post(fixture, monkeypatch, capsys):
+@pytest.mark.parametrize('model', ['gemini-3.8-flash', 'gemini-3.5-flash-high'])
+def test_standalone_single_google_account_one_post(fixture, monkeypatch, capsys, model):
     anti,_,_,first,_=fixture
     bridge(monkeypatch,anti)
     with upstream(response(json.dumps(result()))) as (base,seen):
         endpoint(monkeypatch,base)
-        assert anti.main(arguments(first)) == 0
+        assert anti.main(arguments(first, '--model', model)) == 0
         assert len(seen) == 1
     value=json.loads(capsys.readouterr().out)
     assert value['mode']=='review-music'

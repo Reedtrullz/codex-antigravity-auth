@@ -371,6 +371,24 @@ def test_explicit_pro_high_audio_route_reaches_its_backend(fixture, monkeypatch)
     assert seen[0]['body']['model'] == 'gemini-pro-agent'
 
 
+def test_fixed_model_id_does_not_infer_an_unsupported_reasoning_parameter(fixture, monkeypatch):
+    anti, _, _, _, _ = fixture
+    bridge(monkeypatch, anti)
+    request_json = anti.request_json
+    sent = []
+    def capture(method, url, **kwargs):
+        if method != 'POST':
+            return request_json(method, url, **kwargs)
+        sent.append(kwargs['payload'])
+        return 200, {'status': 'completed', 'model': 'gemini-3.5-flash-high',
+                     'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': 'fixture'}]}]}
+    monkeypatch.setattr(anti, 'request_json', capture)
+    anti.post_response(base_url='http://127.0.0.1:51123/v1', model='gemini-3.5-flash-high',
+                       prompt='fixture', max_output_tokens=32, timeout=5, token_env=anti.DEFAULT_TOKEN_ENV)
+    assert len(sent) == 1 and sent[0]['model'] == 'gemini-3.5-flash-high'
+    assert 'reasoning' not in sent[0]
+
+
 @pytest.mark.parametrize('mode',['never','summary','full'])
 def test_helper_gateway_fake_upstream_preserve_order_and_omit_payloads_from_records(fixture,monkeypatch,capsys,mode):
     anti,manager,records,first,second=fixture;bridge(monkeypatch,anti)
