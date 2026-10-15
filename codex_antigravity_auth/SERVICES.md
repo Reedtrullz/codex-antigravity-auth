@@ -78,6 +78,18 @@ cannot form one atomic transaction: failed reload/start/registration or interrup
 publication leaves explicit incomplete state and recovery paths. It does not
 pretend to roll a running service back.
 
+After a successful macOS activation command, installation polls pending launchd
+status for up to five seconds before committing `applied`. It does not bootstrap
+or restart again. Each manager probe retains its existing five-second subprocess
+limit, so an in-progress probe may finish after the polling deadline. Permanent
+inactivity still leaves `prepared` and cannot satisfy owned readiness.
+
+An installation failure with `--json` retains structured service evidence instead
+of returning null data: `registration_phase` (`prepare`, `activate`, `observe` or
+`commit`), recovery paths and redacted manager commands with return codes. Raw
+manager stderr and arbitrary exception bodies are not exported. A reachable or
+identity-matched process cannot override a failed registration.
+
 On failure, preserve the reported intent, backup directory and service definition.
 Inspect the retained bytes and platform service status before restoring or
 reinstalling. A failure before definition replacement may leave an old definition

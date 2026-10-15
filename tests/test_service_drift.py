@@ -1,13 +1,11 @@
 """Temporary service-manager fixtures and synthetic runtime identity only."""
 from argparse import Namespace
-from copy import deepcopy
 import json
 import os
-from pathlib import Path
-import plistlib
 import socket
 import subprocess
 import sys
+from types import SimpleNamespace
 from unittest.mock import Mock
 from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
@@ -101,6 +99,98 @@ def test_install_records_nonsecret_intent_and_requires_matching_runtime(host, pl
     assert 'fixture-secret-value' not in path.read_text()
     assert '--service-id' in manifest.command_for(saved['settings'], saved['serviceId'])
     if os.name != 'nt': assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize('pending', ['waiting', 'spawn scheduled'])
+def test_macos_install_waits_for_pending_registration_before_committing(host, monkeypatch, pending):
+    clock = [0.0]
+    monkeypatch.setattr(drift, 'time', SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=lambda delay: clock.__setitem__(0, clock[0] + delay)), raising=False)
+    original = host.run
+    observations = []
+
+    def run(command, **kwargs):
+        result = original(command, **kwargs)
+        if command[:2] == ['launchctl', 'print']:
+            saved = json.loads(drift.manifest_path(51122).read_text())
+            observations.append(saved['state'])
+            state = pending if len(observations) == 1 else 'running'
+            return subprocess.CompletedProcess(command, 0, f'state = {state}\n', '')
+        return result
+
+    monkeypatch.setattr(service, '_run', run)
+    result = service.install_service(51122, '127.0.0.1', platform_name='macos')
+    assert result['state'] != 'failed'
+    assert result['active'] and result['drift'] == []
+    assert observations[:2] == ['prepared', 'prepared']
+    assert json.loads(drift.manifest_path(51122).read_text())['state'] == 'applied'
+    assert 0 < clock[0] <= 5.0
+    assert sum(command[1] == 'bootstrap' for command in host.calls) == 1
+
+
+def test_macos_install_timeout_keeps_prepared_intent_and_stops_polling(host, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(drift, 'time', SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=lambda delay: clock.__setitem__(0, clock[0] + delay)), raising=False)
+    original = host.run
+
+    def run(command, **kwargs):
+        result = original(command, **kwargs)
+        if command[:2] == ['launchctl', 'print']:
+            return subprocess.CompletedProcess(command, 0, 'state = waiting\n', '')
+        return result
+
+    monkeypatch.setattr(service, '_run', run)
+    result = service.install_service(51122, '127.0.0.1', platform_name='macos')
+    assert result['state'] == 'failed' and not result.get('owned_ready')
+    assert result['registration_phase'] == 'observe'
+    assert json.loads(drift.manifest_path(51122).read_text())['state'] == 'prepared'
+    assert clock[0] == 5.0
+    assert result['recovery_paths']
+    assert sum(command[1] == 'bootstrap' for command in host.calls) == 1
+
+
+@pytest.mark.parametrize('failure,installed', [('/Create', False), ('/Run', True)])
+def test_windows_failed_activation_reports_observed_installation(host, failure, installed):
+    host.fail = failure
+    result = service.install_service(51122, '127.0.0.1', platform_name='windows')
+    assert (host.windows_raw is not None) is installed
+    assert result['installed'] is installed
+    assert result['state'] == 'failed' and not result['active']
+    assert not result.get('owned_ready')
+    assert result['registration_phase'] == 'activate'
+    assert result['recovery_paths']
+    assert json.loads(drift.manifest_path(51122).read_text())['state'] == 'prepared'
+    assert sum('/Create' in command for command in host.calls) == 1
+    assert sum('/Run' in command for command in host.calls) == int(installed)
+    assert any(failure in command['command'] and command['returncode'] == 1
+               for command in result['commands'])
+    assert 'synthetic manager failure' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('platform,failure,installed', [
+    ('macos', 'bootstrap', True), ('windows', '/Create', False), ('windows', '/Run', True),
+])
+def test_json_install_failure_preserves_structured_recovery(host, monkeypatch, capsys, platform, failure, installed):
+    monkeypatch.setattr(service, 'service_platform', lambda: platform)
+    monkeypatch.setattr(cli, 'reachable_gateway_status_info', lambda *a, **kw: {
+        'port': 51122, 'reachable': False, 'status': 'stopped'})
+    host.fail = failure
+    monkeypatch.setattr(sys, 'argv', ['codex-antigravity', 'service', 'install', '--json'])
+    with pytest.raises(SystemExit) as caught:
+        cli.main()
+    assert caught.value.code == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result['status'] == 'failed' and result['errors'] == ['service_failed']
+    assert result['data']['service']['installed'] is installed
+    assert not result['data']['service']['active']
+    assert not result['data']['service']['owned_ready']
+    assert json.loads(drift.manifest_path(51122).read_text())['state'] == 'prepared'
+    assert result['data']['service']['recovery_paths']
+    assert result['data']['service']['registration_phase'] == 'activate'
+    commands = result['data']['service']['commands']
+    assert any(failure in command['command'] and command['returncode'] == 1 for command in commands)
+    assert 'synthetic manager failure' not in json.dumps(result)
 
 
 @pytest.mark.parametrize('platform', ['macos', 'linux', 'windows'])
