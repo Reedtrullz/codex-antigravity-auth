@@ -69,19 +69,38 @@ def success_response(route):
     return httpx.Response(200, json=NATIVE)
 
 
+def deadline_on_phase_entry(monkeypatch, timeout=0.08):
+    armed = asyncio.Event()
+    async def timer(delay):
+        await armed.wait()
+        await asyncio.sleep(min(delay, timeout))
+    phase_asyncio = SimpleNamespace(**vars(asyncio))
+    phase_asyncio.sleep = timer
+    monkeypatch.setattr(budgets, "asyncio", phase_asyncio)
+    def arm():
+        budget = budgets.CURRENT_BUDGET.get()
+        assert budget is not None
+        budget.deadline = time.monotonic() + timeout
+        armed.set()
+    return arm
+
+
 @pytest.mark.parametrize("route", ROUTES)
 @pytest.mark.parametrize("reason", ["deadline", "disconnect"])
 def test_nonstream_http_body_is_bounded_and_client_and_lease_close_once(monkeypatch, setup_route, route, reason):
-    state = setup_route(route)
+    state = setup_route(route, timeout=5)
     clients = []
     async def scenario():
         entered = asyncio.Event()
+        arm_deadline = deadline_on_phase_entry(monkeypatch) if reason == "deadline" else None
         class Client:
             def __init__(self, **kw):
                 self.closed = 0; clients.append(self)
             async def __aenter__(self): return self
             async def __aexit__(self, *args): self.closed += 1
             async def post(self, *args, **kwargs):
+                if arm_deadline is not None:
+                    arm_deadline()
                 entered.set()
                 await asyncio.Future()
         monkeypatch.setattr(server.httpx, "AsyncClient", Client)
@@ -140,6 +159,20 @@ def test_nonstream_deadline_scenario_cannot_hang_before_provider_entry(monkeypat
         with pytest.raises(expected, match="provider entry"):
             test_nonstream_http_body_is_bounded_and_client_and_lease_close_once(monkeypatch, setup_route, "google", "deadline")
     assert cleaned == [True]
+
+
+@pytest.mark.parametrize("phase", ["body", "bound_acquisition"])
+@pytest.mark.parametrize("reason", ["deadline", "disconnect"])
+def test_phase_fault_survives_preparation_longer_than_fault_budget(monkeypatch, setup_route, phase, reason):
+    read_json = Request.json
+    async def delayed_json(request):
+        await asyncio.sleep(0.12)
+        return await read_json(request)
+    monkeypatch.setattr(Request, "json", delayed_json)
+    if phase == "body":
+        test_nonstream_http_body_is_bounded_and_client_and_lease_close_once(monkeypatch, setup_route, "google", reason)
+    else:
+        test_late_bound_account_acquisition_is_released_without_dispatch(monkeypatch, setup_route, reason)
 
 
 @pytest.mark.parametrize("route,preparation", [("openai", "resolve_openai_auth"), ("byok", "all_provider_configs"),
@@ -219,7 +252,7 @@ def test_late_account_acquisition_is_released_without_dispatch(monkeypatch, setu
 
 @pytest.mark.parametrize("reason", ["deadline", "disconnect"])
 def test_late_bound_account_acquisition_is_released_without_dispatch(monkeypatch, setup_route, reason):
-    state = setup_route("google")
+    state = setup_route("google", timeout=5)
     monkeypatch.setattr(
         server,
         "classify_route",
@@ -229,8 +262,11 @@ def test_late_bound_account_acquisition_is_released_without_dispatch(monkeypatch
     async def scenario():
         finish = asyncio.Event()
         started = asyncio.Event()
+        arm_deadline = deadline_on_phase_entry(monkeypatch) if reason == "deadline" else None
 
         async def acquire(*args):
+            if arm_deadline is not None:
+                arm_deadline()
             started.set()
             await finish.wait()
             return {"email": "late-bound@example.invalid", "accessToken": "synthetic-only"}
@@ -244,14 +280,19 @@ def test_late_bound_account_acquisition_is_released_without_dispatch(monkeypatch
             "inventorySha256": "c" * 64,
         })
         task = asyncio.create_task(server.create_response(request))
-        await asyncio.wait_for(started.wait(), 2)
-        if reason == "disconnect":
-            request.disconnected = True
         try:
-            with pytest.raises(HTTPException if reason == "deadline" else ClientDisconnect):
+            await asyncio.wait_for(started.wait(), 2)
+            if reason == "disconnect":
+                request.disconnected = True
+            with pytest.raises(HTTPException if reason == "deadline" else ClientDisconnect) as caught:
                 await asyncio.wait_for(task, 2)
+            if reason == "deadline":
+                assert isinstance(caught.value, HTTPException)
+                assert caught.value.status_code == 504
         finally:
             finish.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         for _ in range(40):
             if state.release.await_count:
                 break
