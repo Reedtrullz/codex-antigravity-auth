@@ -163,6 +163,10 @@ def prepare(args, objective, attachments, registry, model):
     caps = registry.entries.get(model.lower()) or registry.entries.get(registry.canonical(model)) or {}
     require(caps.get('route') == 'antigravity' and caps.get('family') == 'gemini', 'review-music requires an eligible Antigravity Gemini route')
     require(not getattr(args, 'response_schema', None), 'review-music owns its response schema')
+    for index, attachment in enumerate(attachments):
+        require(not attachment.is_digital_silence,
+                f'clip {chr(65 + index)} contains only zero PCM samples; music review refused. '
+                'Use listen for an explicit silence probe.')
     actual = [{'id':chr(65+i), 'sha256':item.identity()['sha256'],
                'durationSeconds':item.identity()['frames']/item.identity()['sample_rate']} for i,item in enumerate(attachments)]
     bundle = {'schemaVersion':1,'kind':'anti-music-evidence','clips':actual,'claims':[],

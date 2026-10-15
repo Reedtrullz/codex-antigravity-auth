@@ -145,6 +145,11 @@ class Audio:
     @property
     def size(self):return self.descriptor['bytes']
 
+    @property
+    def is_digital_silence(self):
+        with wave.open(io.BytesIO(base64.b64decode(self.encoded, validate=True)), 'rb') as source:
+            return not any(source.readframes(source.getnframes()))
+
     def identity(self):return dict(self.descriptor)
 
     def part(self):
@@ -206,7 +211,12 @@ class Session(MediaSession):
 
     def input(self,prompt):
         require(self.probe,'Explicit unverified-audio probe upload intent is required')
-        return [{'role':'user','content':[{'type':'input_text','text':prompt},*[item.part() for item in self.images]]}]
+        content = [{'type':'input_text','text':prompt}]
+        for index, item in enumerate(self.images):
+            content.extend([{'type':'input_text',
+                             'text':f'Audio clip {chr(65 + index)} (attachment {index + 1} of {len(self.images)}):'},
+                            item.part()])
+        return [{'role':'user','content':content}]
 
     def verify_payload(self,payload):
         require(parts(payload)==[item.part() for item in self.images],'Audio bytes/order or probe intent changed before submission')

@@ -4,6 +4,7 @@ import base64
 import importlib.util
 import io
 import json
+import re
 from pathlib import Path
 import struct
 import time
@@ -361,6 +362,15 @@ def test_catalog_separates_encoder_from_backend_listening_acceptance(fixture):
     assert claude['audio_input']['transport_supported'] is False
 
 
+def test_explicit_pro_high_audio_route_reaches_its_backend(fixture, monkeypatch):
+    with upstream(response()) as (base, seen):
+        endpoint(monkeypatch, base)
+        result = TestClient(server.app).post('/v1/responses', json=body('gemini-3.1-pro-high'))
+    assert result.status_code == 200
+    assert len(seen) == 1
+    assert seen[0]['body']['model'] == 'gemini-pro-agent'
+
+
 @pytest.mark.parametrize('mode',['never','summary','full'])
 def test_helper_gateway_fake_upstream_preserve_order_and_omit_payloads_from_records(fixture,monkeypatch,capsys,mode):
     anti,manager,records,first,second=fixture;bridge(monkeypatch,anti)
@@ -373,6 +383,11 @@ def test_helper_gateway_fake_upstream_preserve_order_and_omit_payloads_from_reco
     media=[p['inlineData'] for p in sent if 'inlineData' in p]
     assert [base64.b64decode(p['data']) for p in media]==originals
     assert [p['mimeType'] for p in media]==['audio/wav','audio/wav']
+    for index, label in enumerate(('A', 'B')):
+        position = next(i for i, p in enumerate(sent) if p.get('inlineData', {}).get('data') == media[index]['data'])
+        boundary = sent[position - 1]['text']
+        assert re.findall(r'\b[A-B]\b', boundary) == [label]
+        assert re.findall(r'\d+', boundary) == [str(index + 1), str(len(media))]
     assert 'sensitive-source-name' not in json.dumps(seen[0]['body']) and 'sensitive-render-name' not in json.dumps(seen[0]['body'])
     receipt=result['metadata']['media_coverage']
     assert receipt['kind']=='audio' and receipt['gateway_attempts']==1 and receipt['captured_duration_ms']==2000

@@ -47,6 +47,7 @@ from .models import (
     DEFAULT_GEMINI_MODEL_ID,
     NATIVE_MODELS,
     canonical_model_id,
+    resolve_backend_model,
     native_model_capabilities,
     required_output_bridge,
     native_model_catalog,
@@ -1259,7 +1260,10 @@ def response_model_id(codex_req: dict) -> str:
     if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in model):
         raise HTTPException(status_code=400, detail="model must not contain whitespace or control characters")
     if ":" not in model:
-        return canonical_model_id(model)
+        canonical = canonical_model_id(model)
+        if resolve_backend_model(model) != resolve_backend_model(canonical):
+            return model
+        return canonical
     return model
 
 
