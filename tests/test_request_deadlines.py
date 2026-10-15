@@ -87,17 +87,59 @@ def test_nonstream_http_body_is_bounded_and_client_and_lease_close_once(monkeypa
         monkeypatch.setattr(server.httpx, "AsyncClient", Client)
         request = Request(route)
         task = asyncio.create_task(server.create_response(request))
-        await entered.wait()
-        if reason == "disconnect": request.disconnected = True
-        with pytest.raises(HTTPException if reason == "deadline" else ClientDisconnect) as caught:
-            await asyncio.wait_for(task, 0.8)
-        if reason == "deadline": assert caught.value.status_code == 504
+        entry = asyncio.create_task(entered.wait())
+        try:
+            await asyncio.wait({entry, task}, timeout=0.8, return_when=asyncio.FIRST_COMPLETED)
+            if not entered.is_set():
+                if task.done():
+                    await task
+                    raise AssertionError("request completed before provider entry")
+                raise TimeoutError("timed out waiting for provider entry")
+            if reason == "disconnect": request.disconnected = True
+            with pytest.raises(HTTPException if reason == "deadline" else ClientDisconnect) as caught:
+                await asyncio.wait_for(task, 0.8)
+            if reason == "deadline": assert caught.value.status_code == 504
+        finally:
+            entry.cancel()
+            task.cancel()
+            await asyncio.gather(entry, task, return_exceptions=True)
     asyncio.run(scenario())
     assert clients and all(client.closed == 1 for client in clients)
     assert state.release.await_count == (1 if route == "google" else 0)
     terminals = [row for row in state.records if row["lifecycle_phase"] == "terminal"]
     assert len(terminals) == 1
     assert terminals[0]["error_class"] == ("request_deadline_exceeded" if reason == "deadline" else "cancelled")
+
+
+@pytest.mark.parametrize("outcome", ["deadline", "completed", "never_entered"])
+def test_nonstream_deadline_scenario_cannot_hang_before_provider_entry(monkeypatch, setup_route, outcome):
+    original_run = asyncio.run
+    failure = HTTPException(504, "synthetic pre-provider deadline")
+    cleaned = []
+    async def before_provider(request):
+        try:
+            if outcome == "deadline":
+                raise failure
+            if outcome == "completed":
+                return object()
+            await asyncio.Future()
+        finally:
+            cleaned.append(True)
+    def bounded_run(coro):
+        async def bounded():
+            return await asyncio.wait_for(coro, 1.5)
+        return original_run(bounded())
+    monkeypatch.setattr(server, "create_response", before_provider)
+    monkeypatch.setattr(asyncio, "run", bounded_run)
+    if outcome == "deadline":
+        with pytest.raises(HTTPException) as caught:
+            test_nonstream_http_body_is_bounded_and_client_and_lease_close_once(monkeypatch, setup_route, "google", "deadline")
+        assert caught.value is failure
+    else:
+        expected = AssertionError if outcome == "completed" else TimeoutError
+        with pytest.raises(expected, match="provider entry"):
+            test_nonstream_http_body_is_bounded_and_client_and_lease_close_once(monkeypatch, setup_route, "google", "deadline")
+    assert cleaned == [True]
 
 
 @pytest.mark.parametrize("route,preparation", [("openai", "resolve_openai_auth"), ("byok", "all_provider_configs"),
