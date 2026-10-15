@@ -4,6 +4,7 @@ import base64
 import importlib.util
 import io
 import json
+import math
 import re
 from pathlib import Path
 import struct
@@ -288,6 +289,109 @@ def test_listen_refuses_gateway_without_exact_backend_attempt_bound(fixture, mon
     anti.run_control(args)
     with pytest.raises(anti.wav_audio.AudioError, match='single backend attempt'):
         anti.captured_media(args).require(anti.CAPABILITY_REGISTRY, args.model, 'primary')
+
+
+def mono_pcm(samples, rate=8000, channels=1):
+    stream = io.BytesIO()
+    with wave.open(stream, 'wb') as handle:
+        handle.setnchannels(channels);handle.setsampwidth(2);handle.setframerate(rate)
+        handle.writeframes(struct.pack('<%dh' % len(samples), *samples))
+    return stream.getvalue()
+
+
+def test_silence_map_measures_zero_quiet_and_sound_windows():
+    window = 800
+    measured = audio.measure_pcm(mono_pcm([1000] * (2 * window) + [0] * (3 * window) + [10] * window + [-1000] * window))
+    assert measured['wholly_digital_silence'] is False
+    assert measured['window_ms'] == 100 and measured['quiet_peak_dbfs'] == -60.0
+    assert measured['windows'] == {'zero': 3, 'quiet': 1, 'sound': 3}
+    assert measured['segments'] == [[0, 200, 'sound'], [200, 500, 'zero'], [500, 600, 'quiet'], [600, 700, 'sound']]
+    assert measured['segments_omitted'] == 0
+    assert measured['peak_dbfs'] == round(20 * math.log10(1000 / 32768), 2)
+    silent = audio.measure_pcm(mono_pcm([0] * 8000))
+    assert silent['wholly_digital_silence'] is True and silent['peak_dbfs'] is None and silent['rms_dbfs'] is None
+    assert silent['segments'] == [[0, 1000, 'zero']]
+    stereo = audio.measure_pcm(mono_pcm([0, 0] * 800 + [0, 500] * 800, channels=2))
+    assert stereo['segments'] == [[0, 100, 'zero'], [100, 200, 'sound']]
+    assert audio.measure_pcm(wav(channels=2, amplitude=0))['wholly_digital_silence'] is True
+
+
+def test_listen_wholly_silent_clip_returns_measured_result_without_gateway_contact(fixture, monkeypatch, capsys, tmp_path):
+    anti, _, _, _, _ = fixture
+    silent = tmp_path / 'room.wav';silent.write_bytes(wav(amplitude=0))
+    monkeypatch.setattr(anti, 'open_gateway_request', lambda *a, **k: pytest.fail('no gateway contact for measured silence'))
+    assert anti.main(listen_argv(silent, '--save-output', 'full', '--run-id', 'silence-measured')) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['output_text'] == '' and result['runStatus'] == 'success'
+    assert any('not a model observation' in caveat for caveat in result['caveats'])
+    media = result['metadata']['media_coverage']
+    assert media['gateway_attempts'] == 0 and media['status'] == 'not_sent'
+    assert media['measurement']['basis'] == 'local_deterministic_pcm16'
+    assert media['measurement']['digital_silence_policy'] == 'skipped'
+    clip = media['measurement']['clips'][0]
+    assert clip['label'] == 'A' and clip['wholly_digital_silence'] is True
+    assert clip['submitted_to_model'] is False and clip['measured_result'] == 'exact_digital_silence'
+    assert media['model_observation']['status'] == 'not_requested' and media['model_observation']['clips'] == []
+    stored = json.loads((anti.RUNS_DIR / 'silence-measured.json').read_text())['metadata']['media_coverage']
+    assert stored['measurement']['clips'][0]['measured_result'] == 'exact_digital_silence'
+    assert stored['model_observation']['status'] == 'not_requested'
+
+
+def test_listen_never_retention_keeps_only_measurement_counts(fixture, monkeypatch, capsys, tmp_path):
+    anti, _, _, _, _ = fixture
+    silent = tmp_path / 'room.wav';silent.write_bytes(wav(amplitude=0))
+    monkeypatch.setattr(anti, 'open_gateway_request', lambda *a, **k: pytest.fail('no gateway contact'))
+    assert anti.main(listen_argv(silent, '--save-output', 'never', '--run-id', 'silence-never')) == 0
+    capsys.readouterr()
+    stored = json.loads((anti.RUNS_DIR / 'silence-never.json').read_text())['metadata']['media_coverage']
+    assert stored['measured_silent_skipped_count'] == 1 and stored['submitted_count'] == 0
+    assert 'measurement' not in stored and 'audio' not in stored
+
+
+def test_listen_sends_only_sounding_clip_and_preserves_identity(fixture, monkeypatch, capsys, tmp_path):
+    anti, _, _, first, _ = fixture
+    silent = tmp_path / 'room.wav';silent.write_bytes(wav(amplitude=0))
+    bridge(monkeypatch, anti)
+    with upstream(response('{"clips":[]}')) as (base, seen):
+        endpoint(monkeypatch, base)
+        assert anti.main(listen_argv(silent, '--audio', str(first))) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert len(seen) == 1
+    parts = seen[0]['body']['request']['contents'][0]['parts']
+    sent = [base64.b64decode(p['inlineData']['data']) for p in parts if 'inlineData' in p]
+    assert sent == [first.read_bytes()]
+    texts = [p['text'] for p in parts if 'text' in p]
+    assert texts[1:] == ['Audio clip A (attachment 1 of 2) was not sent: Anti measured every sample as zero (exact digital silence).',
+                         'Audio clip B (attachment 2 of 2):']
+    assert 'inlineData' in parts[-1]
+    media = result['metadata']['media_coverage']
+    assert media['gateway_attempts'] == 1 and media['submitted_count'] == 1 and media['measured_silent_skipped_count'] == 1
+    assert [c['submitted_to_model'] for c in media['measurement']['clips']] == [False, True]
+    assert [c['measured_result'] for c in media['measurement']['clips']] == ['exact_digital_silence', None]
+    assert media['model_observation']['status'] == 'requested' and media['model_observation']['clips'] == ['B']
+
+
+def test_listen_send_digital_silence_uploads_silent_clip_for_perception_probes(fixture, monkeypatch, capsys, tmp_path):
+    anti, _, _, _, _ = fixture
+    silent = tmp_path / 'room.wav';silent.write_bytes(wav(amplitude=0))
+    bridge(monkeypatch, anti)
+    with upstream(response('{"clips":[]}')) as (base, seen):
+        endpoint(monkeypatch, base)
+        assert anti.main(listen_argv(silent, '--send-digital-silence')) == 0
+    result = json.loads(capsys.readouterr().out)
+    parts = seen[0]['body']['request']['contents'][0]['parts']
+    assert [base64.b64decode(p['inlineData']['data']) for p in parts if 'inlineData' in p] == [silent.read_bytes()]
+    media = result['metadata']['media_coverage']
+    assert media['measurement']['digital_silence_policy'] == 'sent_by_explicit_request'
+    assert media['measurement']['clips'][0]['submitted_to_model'] is True
+    assert media['measurement']['clips'][0]['measured_result'] == 'exact_digital_silence'
+    assert media['model_observation']['clips'] == ['A']
+
+
+def test_send_digital_silence_is_listen_only(fixture):
+    anti, _, _, first, _ = fixture
+    with pytest.raises(SystemExit):
+        anti.build_parser().parse_args(argv(first, '--send-digital-silence'))
 
 
 def endpoint(monkeypatch,base):

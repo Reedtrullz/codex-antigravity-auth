@@ -166,7 +166,7 @@ def prepare(args, objective, attachments, registry, model):
     for index, attachment in enumerate(attachments):
         require(not attachment.is_digital_silence,
                 f'clip {chr(65 + index)} contains only zero PCM samples; music review refused. '
-                'Use listen for an explicit silence probe.')
+                'Use listen --send-digital-silence for an explicit silence probe.')
     actual = [{'id':chr(65+i), 'sha256':item.identity()['sha256'],
                'durationSeconds':item.identity()['frames']/item.identity()['sample_rate']} for i,item in enumerate(attachments)]
     bundle = {'schemaVersion':1,'kind':'anti-music-evidence','clips':actual,'claims':[],

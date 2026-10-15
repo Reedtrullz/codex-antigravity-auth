@@ -660,8 +660,12 @@ def run_control(args=None):
     if args is not None and (audio_paths or getattr(args, 'image', None) or getattr(args, '_media_session', None)):
         with _BUDGET_STATE_INIT_LOCK:
             if not hasattr(args, '_media_session'):
+                command=getattr(args,'command',None)
+                silence_policy=(('sent_by_explicit_request' if getattr(args,'send_digital_silence',False) else 'skipped')
+                                if command=='listen' else 'sent')
                 args._media_session = (wav_audio.capture(audio_paths,policy=data_policy(args),probe=getattr(args,'probe_unverified_audio',False),
-                                                        single_backend_attempt=getattr(args,'command',None) in {'listen','review-music'})
+                                                        single_backend_attempt=command in {'listen','review-music'},
+                                                        silence_policy=silence_policy)
                                        if audio_paths else image_attachments.capture(args.image,policy=data_policy(args)))
             previous = getattr(current, 'media', None)
             if previous is not None and previous is not args._media_session:
@@ -7366,6 +7370,25 @@ def capture_response_schema(args):
     return json.dumps(schema, sort_keys=True, separators=(',', ':'))
 
 
+def measured_silence_result(args: argparse.Namespace, *, model: str, prompt: str, caveats: list[str]) -> int:
+    caveats = [*caveats, "No audio was uploaded: every attached clip measured as exact digital silence. "
+               "This result is a deterministic local measurement, not a model observation."]
+    metadata: dict[str, Any] = {
+        "result_quality": "complete", "retry_disposition": "not_applicable",
+        "audio_result_basis": "local_measurement_only", "consult_attempts": [],
+        "verification": {"status": "not_run", "requiredChecks": VERIFICATION_REQUIRED_CHECKS,
+                         "performedBy": None, "evidence": []},
+    }
+    if getattr(args, "run_id", None):
+        metadata["run_id"] = args.run_id
+        metadata["request_log_correlation_id"] = args.run_id
+    write_run_record(args, mode="listen", status="success", models=[], base_url=args.base_url,
+                     prompt_text=prompt, output_text="", caveats=caveats, metadata=metadata, force_full_output=False)
+    print_result(mode="listen", model=model, base_url=args.base_url, text="", caveats=caveats,
+                 output_json=args.json, metadata=metadata)
+    return 0
+
+
 @controlled_command
 def command_consult(args: argparse.Namespace) -> int:
     mode = args.command if args.command in {"listen", "review-music"} else "consult"
@@ -7400,6 +7423,10 @@ def command_consult(args: argparse.Namespace) -> int:
     if read_files:
         progress(args, f"consult: pre-read {len(read_files)} file(s) for context")
     
+    listen_media = captured_media(args)
+    if mode == "listen" and listen_media is not None and listen_media.all_skipped and not args.dry_run:
+        capture_response_schema(args)
+        return measured_silence_result(args, model=model, prompt=prompt, caveats=caveats)
     binding_path = getattr(args, "account_binding_json", None)
     if binding_path:
         args._account_binding_header = load_account_binding_file(binding_path)
@@ -9240,6 +9267,9 @@ def build_parser() -> argparse.ArgumentParser:
             consult.add_argument("--evidence-json", help="Portable bounded music evidence; clip hashes must match attached WAVs")
         if command in {"listen", "review-music"}:
             consult.add_argument("--account-binding-json", help="Private instance-scoped account binding JSON; never printed or uploaded")
+        if command == "listen":
+            consult.add_argument("--send-digital-silence", action="store_true",
+                                 help="Upload clips measured as exact digital silence (perception probes); by default they are skipped with a measured result")
         consult.set_defaults(func=command_consult)
         if listening:
             consult.set_defaults(max_calls=1, retry=0, max_output_tokens=2048,

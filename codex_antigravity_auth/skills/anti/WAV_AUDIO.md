@@ -79,6 +79,39 @@ most once to Google.
 `listen` requires the catalog's exact integer `backend_attempt_limit: 1`; older
 gateways with an unbounded audio contract are refused before generation.
 
+### Measured silence map
+
+Before any upload, Anti measures every captured clip locally from its PCM16
+samples in 100 ms windows: `zero` (every sample is zero), `quiet` (nonzero, peak
+below -60 dBFS) or `sound`. Adjacent windows merge into `[start_ms, end_ms, state]`
+segments (at most 256 per clip), with peak and RMS dBFS (`null` for exact zero).
+
+`listen` does not upload a clip measured as wholly exact digital silence. With
+two clips, the skipped clip keeps its A/B identity and the model receives the
+text "Audio clip A (attachment 1 of 2) was not sent: Anti measured every sample as
+zero (exact digital silence)." in its place. When every clip is silent, Anti makes
+no catalog, binding or generation request: `output_text` is empty, the run
+succeeds, and a caveat states that the result is a measurement, not a model
+observation. Quiet nonzero clips and clips with internal rests are always sent.
+`--send-digital-silence` (listen only) uploads exact-zero clips anyway for explicit
+perception probes. `consult --audio` keeps sending every clip, and `review-music`
+still refuses exact-zero clips.
+
+The receipt keeps the two sources apart inside `metadata.media_coverage`:
+
+- `measurement` (`basis: local_deterministic_pcm16`): per clip, the label, SHA-256,
+  windows, segments, levels, `measured_result` (`exact_digital_silence` or `null`)
+  and `submitted_to_model`, plus the run's `digital_silence_policy` (`skipped`,
+  `sent_by_explicit_request` or `sent`).
+- `model_observation` (`basis: provider_model_output`): which clip labels the model
+  received; `output_text` is only ever model output.
+
+Never-mode records keep only `submitted_count` and `measured_silent_skipped_count`;
+summary and full records also keep the validated measurement and observation
+blocks. Background: across three bounded High-effort studies on 15 October 2026,
+Gemini 3.8 Flash on this route described 7 of 10 exact-zero clips as music or
+other sound, so silence is measured rather than asked about.
+
 The JSON result reuses the consult envelope with `mode: listen`. Musical JSON, its
 timing validation and the aggregate request/resume ledger belong to the calling
 adapter. Anti's receipt records media identity and submission evidence; it does
