@@ -333,7 +333,7 @@ def test_refresh_in_progress_is_retryable_and_logged_without_a_lease(monkeypatch
 def test_sync_decode_and_translation_failures_keep_outer_deadline_or_disconnect(
     monkeypatch, setup_route, seam, route, failure_type, reason,
 ):
-    state = setup_route(route, timeout=0.2)
+    state = setup_route(route, timeout=5)
     response = success_response(route)
     clients = []
 
@@ -384,6 +384,20 @@ def test_sync_decode_and_translation_failures_keep_outer_deadline_or_disconnect(
         assert terminal[0]["http_status"] == 504
     else:
         assert terminal[0]["cancelled"] is True
+
+
+@pytest.mark.parametrize("failure_type,reason", [
+    (budgets.RequestDeadlineExceeded, "deadline"), (ClientDisconnect, "disconnect"),
+])
+def test_injected_decoder_failure_survives_slow_preparation(monkeypatch, setup_route, failure_type, reason):
+    read_json = Request.json
+    async def delayed_json(request):
+        await asyncio.sleep(0.25)
+        return await read_json(request)
+    monkeypatch.setattr(Request, "json", delayed_json)
+    test_sync_decode_and_translation_failures_keep_outer_deadline_or_disconnect(
+        monkeypatch, setup_route, "openai_oauth_sse", "openai_oauth", failure_type, reason,
+    )
 
 
 @pytest.mark.parametrize("phase", ["idle", "total"])
@@ -704,13 +718,23 @@ def test_preparation_failure_after_account_acquisition_releases_lease(monkeypatc
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_already_disconnected_request_never_acquires_or_resolves_auth(monkeypatch, setup_route, route):
-    state = setup_route(route)
+    state = setup_route(route, timeout=5)
     auth = []
     monkeypatch.setattr(server, "resolve_openai_auth", lambda: auth.append(True))
     request = Request(route); request.disconnected = True
     with pytest.raises(ClientDisconnect):
         asyncio.run(server.create_response(request))
     assert not state.acquire.called and not auth
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_already_disconnected_request_survives_slow_body_read(monkeypatch, setup_route, route):
+    read_json = Request.json
+    async def delayed_json(request):
+        await asyncio.sleep(0.12)
+        return await read_json(request)
+    monkeypatch.setattr(Request, "json", delayed_json)
+    test_already_disconnected_request_never_acquires_or_resolves_auth(monkeypatch, setup_route, route)
 
 
 def test_late_native_connect_result_is_closed_without_being_transferred(monkeypatch, setup_route):
