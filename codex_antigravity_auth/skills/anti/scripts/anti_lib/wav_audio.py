@@ -88,6 +88,7 @@ def _dbfs(level):
 def measure_pcm(raw):
     with wave.open(io.BytesIO(raw),'rb') as source:
         channels,rate,frames=source.getnchannels(),source.getframerate(),source.getnframes()
+        require(source.getsampwidth()==2 and frames>0,'Silence measurement requires nonempty 16-bit PCM frames')
         samples=array.array('h',source.readframes(frames))
     if sys.byteorder=='big':samples.byteswap()
     window=max(1,rate*WINDOW_MS//1000)

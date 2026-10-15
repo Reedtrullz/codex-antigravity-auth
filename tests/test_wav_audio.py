@@ -316,6 +316,29 @@ def test_silence_map_measures_zero_quiet_and_sound_windows():
     assert audio.measure_pcm(wav(channels=2, amplitude=0))['wholly_digital_silence'] is True
 
 
+def test_silence_map_refuses_non_pcm16_or_empty_frames():
+    with pytest.raises(audio.AudioError):
+        audio.measure_pcm(wav(width=1))
+    with pytest.raises(audio.AudioError):
+        audio.measure_pcm(mono_pcm([]))
+
+
+def test_consult_audio_still_uploads_wholly_silent_clip(fixture, monkeypatch, capsys, tmp_path):
+    anti, _, _, _, _ = fixture
+    silent = tmp_path / 'room.wav';silent.write_bytes(wav(amplitude=0))
+    bridge(monkeypatch, anti)
+    with upstream(response()) as (base, seen):
+        endpoint(monkeypatch, base)
+        assert anti.main(argv(silent)) == 0
+    result = json.loads(capsys.readouterr().out)
+    parts = seen[0]['body']['request']['contents'][0]['parts']
+    assert [base64.b64decode(p['inlineData']['data']) for p in parts if 'inlineData' in p] == [silent.read_bytes()]
+    media = result['metadata']['media_coverage']
+    assert media['measurement']['digital_silence_policy'] == 'sent'
+    assert media['measurement']['clips'][0]['measured_result'] == 'exact_digital_silence'
+    assert media['measurement']['clips'][0]['submitted_to_model'] is True
+
+
 def test_listen_wholly_silent_clip_returns_measured_result_without_gateway_contact(fixture, monkeypatch, capsys, tmp_path):
     anti, _, _, _, _ = fixture
     silent = tmp_path / 'room.wav';silent.write_bytes(wav(amplitude=0))
