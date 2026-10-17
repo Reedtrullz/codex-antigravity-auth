@@ -120,7 +120,7 @@ def post_form(url: str, payload: dict[str, Any], timeout: float = OAUTH_HTTP_TIM
     try:
         parsed = json.loads(raw) if raw else {}
     except json.JSONDecodeError:
-        parsed = {"error": "invalid_json", "error_description": raw[:500]}
+        parsed = {"error": "invalid_json", "error_description": redact_secret_text(raw[:500])}
     if not isinstance(parsed, dict):
         parsed = {"error": "invalid_response", "value": parsed}
     return status, parsed
