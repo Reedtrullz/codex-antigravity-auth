@@ -210,8 +210,19 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         self.server.auth_state = state
         self._page(200, "Authorization received", "Return to the terminal. Sign-in completes after token exchange and account setup.")
 
+def callback_allows_address_reuse(os_name=None):
+    """Whether the fixed OAuth callback port may set SO_REUSEADDR.
+
+    On Windows SO_REUSEADDR lets another local process bind the same port and
+    race us for the authorization-code redirect, so it stays off there. On POSIX
+    it only permits rebinding over TIME_WAIT connections from a previous login,
+    which never shares an actively listening port.
+    """
+    return (os.name if os_name is None else os_name) != "nt"
+
+
 class OAuthServer(socketserver.TCPServer):
-    allow_reuse_address = True
+    allow_reuse_address = callback_allows_address_reuse()
     auth_code = None
     auth_state = None
     auth_error = None

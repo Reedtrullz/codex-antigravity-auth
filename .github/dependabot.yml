@@ -10,3 +10,18 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # pyproject.toml lower bounds and requirements/minimum-runtime.txt are the
+    # declared supported floors (see requirements/README.md). Raising them is a
+    # reviewed policy change, not a routine bump: leave in-range requirements
+    # alone and never edit the floor file. The CI snapshot
+    # (requirements/ci-py310-linux.txt) still receives updates.
+    versioning-strategy: increase-if-necessary
+    exclude-paths:
+      - requirements/minimum-runtime.txt
+    groups:
+      # pydantic pins an exact pydantic-core release; bumping one without the
+      # other produces an unresolvable snapshot.
+      pydantic:
+        patterns:
+          - pydantic
+          - pydantic-core

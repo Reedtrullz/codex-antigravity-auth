@@ -134,7 +134,9 @@ secretstorage==3.5.0
 sortedcontainers==2.4.0
     # via cyclonedx-python-lib
 starlette==1.7.0
-    # via fastapi
+    # via
+    #   codex-antigravity-auth (pyproject.toml)
+    #   fastapi
 tomli==2.4.1
     # via
     #   codex-antigravity-auth (pyproject.toml)
