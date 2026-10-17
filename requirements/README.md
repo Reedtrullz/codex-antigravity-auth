@@ -4,10 +4,18 @@
 keeps those direct runtime dependencies at their declared floors on Python 3.10;
 transitive and test dependencies resolve normally. This is a compatibility test,
 not a secure deployment recommendation. The initial minimum run exposed the
-FastAPI 0.110 / Starlette TestClient incompatibility with HTTPX 0.28. The tested
-FastAPI floor is now 0.115.6. The peer-address security tests inject the ASGI
-client scope directly so older supported TestClient constructor signatures keep
-the same security assertions.
+FastAPI 0.110 / Starlette TestClient incompatibility with HTTPX 0.28. The
+declared floors in `pyproject.toml` are the tested floors; at the time of writing
+they include FastAPI 0.142.2 and cryptography 50.0.2, raised from 0.115.6 and
+42.0.0 when Dependabot PRs #175 and #173 were merged. The peer-address security
+tests inject the ASGI client scope directly so older supported TestClient
+constructor signatures keep the same security assertions.
+
+Dependabot must not move these floors. `.github/dependabot.yml` uses
+`versioning-strategy: increase-if-necessary` so in-range `>=` requirements in
+`pyproject.toml` stay unchanged, and excludes `minimum-runtime.txt` from scans.
+Lowering or raising a floor is a reviewed policy change: edit `pyproject.toml`
+and `minimum-runtime.txt` together in one PR, then run the minimum lane.
 
 `ci-py310-linux.txt` is the complete compatible Python 3.10/Linux runtime, test,
 and audit-tool snapshot, resolved on 2026-10-01. It constrains one reproducible
@@ -42,7 +50,9 @@ advisory-service timeouts also fail. The gate does not automatically upgrade
 packages or imply that a clean advisory result proves software safe.
 
 All external workflow actions are pinned to 40-character commits resolved from
-the annotated release refs on 2026-10-01. Dependabot proposes weekly updates;
+the annotated release refs on 2026-10-01. Dependabot proposes weekly updates
+(pip updates target the CI snapshot; `pydantic` and `pydantic-core` are grouped
+into one PR because pydantic pins an exact core release);
 a maintainer reviews the upstream release and commit diff, confirms the commit
 belongs to the intended upstream action, and updates the SHA and release comment
 together. Do not auto-merge action or dependency updates. The CI default token
