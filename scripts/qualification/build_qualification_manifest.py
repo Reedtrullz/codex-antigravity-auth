@@ -25,7 +25,9 @@ import json
 from collections import Counter
 from pathlib import Path
 
-MANIFEST_SCHEMA_VERSION = 1
+from manifest_paths import ManifestPathError, portable_root, relative_evidence_path
+
+MANIFEST_SCHEMA_VERSION = 2
 CLASSES = ("core", "quiet", "repeat")
 REFUSAL_CONTROLS = [
     {"controlId": "malformed-payload", "expected": "refused"},
@@ -84,7 +86,17 @@ def main():
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--quiet-threshold", type=float, default=0.15)
     parser.add_argument("--clip-ids", default="")
+    parser.add_argument("--evidence-root", required=True, type=Path,
+                        help="Evidence tree root; clip and receipt paths are recorded relative to it")
     args = parser.parse_args()
+    root = args.evidence_root.expanduser().resolve()
+    receipts_dir = args.receipts_dir.expanduser().resolve()
+    media_dir = args.media_dir.expanduser().resolve()
+    try:
+        relative_evidence_path(receipts_dir, root)
+        relative_evidence_path(media_dir, root)
+    except ManifestPathError as exc:
+        parser.error(str(exc))
 
     rows = json.loads(args.rows.read_text())
     selected = {c.strip() for c in args.clip_ids.split(",") if c.strip()}
@@ -99,8 +111,8 @@ def main():
         if summary is None:
             exclusions.append({"clipId": clip_id, "reason": "no fitted events"})
             continue
-        receipt_path = args.receipts_dir / (clip_id + ".json")
-        clip_path = args.media_dir / (clip_id + ".wav")
+        receipt_path = receipts_dir / (clip_id + ".json")
+        clip_path = media_dir / (clip_id + ".wav")
         if not receipt_path.is_file() or not clip_path.is_file():
             exclusions.append({"clipId": clip_id, "reason": "missing receipt or clip for accepted capture"})
             continue
@@ -113,10 +125,10 @@ def main():
         base = {
             "clipId": clip_id,
             "split": row.get("split"),
-            "clipPath": str(clip_path),
+            "clipPath": relative_evidence_path(clip_path, root),
             "clipSha256": clip_hash,
             "fitBasisSha256": row.get("audioSha256"),
-            "captureReceiptPath": str(receipt_path),
+            "captureReceiptPath": relative_evidence_path(receipt_path, root),
             "quietThreshold": args.quiet_threshold,
         }
         base.update(summary)
@@ -130,6 +142,7 @@ def main():
     fixtures.sort(key=lambda f: (class_order[f["clipClass"]], f["clipId"]))
     manifest = {
         "schemaVersion": MANIFEST_SCHEMA_VERSION,
+        "evidenceRoot": portable_root(root),
         "quietThreshold": args.quiet_threshold,
         "fixtures": fixtures,
         "refusalControls": REFUSAL_CONTROLS,
@@ -141,9 +154,10 @@ def main():
     }
     payload = json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(payload)
+    # Write bytes so the pinned digest matches on every platform (no CRLF translation).
+    args.out.write_bytes(payload.encode())
     digest = hashlib.sha256(payload.encode()).hexdigest()
-    args.out.with_suffix(args.out.suffix + ".sha256").write_text(digest + "  " + args.out.name + "\n")
+    args.out.with_suffix(args.out.suffix + ".sha256").write_bytes((digest + "  " + args.out.name + "\n").encode())
     counts = Counter(f["clipClass"] for f in fixtures)
     print(json.dumps({"manifest": str(args.out), "sha256": digest, "fixtures": dict(counts), "exclusions": len(exclusions)}, sort_keys=True))
     return 0

@@ -234,7 +234,7 @@ def run_local_oauth_flow(*, select_account: bool = False, no_browser: bool = Fal
         from .oauth import discover_project_id
         project_id = discover_project_id(tokens["access_token"])
     except Exception as exc:
-        print(f"[!] Project discovery failed: {exc}")
+        print(f"[!] Project discovery failed: {_cli.redact_secret_text(str(exc))}")
     if project_id:
         print(f"[+] Discovered project: {project_id}")
     else:

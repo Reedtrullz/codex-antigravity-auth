@@ -132,6 +132,18 @@ def test_declared_runtime_minimums_match_compatibility_constraints():
     assert {name: Version(value) for name, value in pinned.items()} == {name: Version(value) for name, value in expected.items()}
 
 
+def test_dependabot_preserves_declared_floors_and_groups_coupled_pins():
+    config = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))
+    pip = [entry for entry in config["updates"] if entry["package-ecosystem"] == "pip"]
+    assert len(pip) == 1
+    pip = pip[0]
+    # Floors are policy: in-range ">=" requirements and the floor file stay untouched.
+    assert pip["versioning-strategy"] == "increase-if-necessary"
+    assert "requirements/minimum-runtime.txt" in pip["exclude-paths"]
+    grouped = [set(group["patterns"]) for group in pip["groups"].values()]
+    assert any({"pydantic", "pydantic-core"} <= patterns for patterns in grouped)
+
+
 def test_workflow_permissions_pins_and_publish_dependencies():
     for path in (ROOT / ".github/workflows").glob("*.yml"):
         workflow = yaml.safe_load(path.read_text(encoding="utf-8"))

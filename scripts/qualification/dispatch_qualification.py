@@ -30,6 +30,8 @@ from PIL import Image
 from typing import Any, NoReturn
 from pathlib import Path
 
+from manifest_paths import ManifestPathError, resolve_fixture_path
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ANTI = REPO_ROOT / "codex_antigravity_auth" / "skills" / "anti" / "scripts" / "anti.py"
 
@@ -198,6 +200,8 @@ def main() -> int:
                         help="Hybrid mode: only these clip classes use spectrograms; the rest use audio")
     parser.add_argument("--resampled16-dir", type=Path, default=None,
                         help="Resample audio-lane quiet clips to 16 kHz mono into this directory before dispatch")
+    parser.add_argument("--evidence-root", type=Path, default=None,
+                        help="Override the manifest's evidenceRoot (the directory holding capture-retry/)")
     args = parser.parse_args()
 
     if not args.manifest.is_absolute() or not args.manifest.is_file():
@@ -290,7 +294,10 @@ def main() -> int:
         schema = RESPONSE_SCHEMAS.get(fixture["clipClass"])
         if schema is None:
             fail(f"no response schema defined for class {fixture['clipClass']}")
-        clip = Path(fixture["clipPath"])
+        try:
+            clip = resolve_fixture_path(manifest, args.manifest, fixture.get("clipPath"), args.evidence_root)
+        except ManifestPathError as exc:
+            fail(f"{fixture.get('clipId')}: {exc}")
         if not clip.is_file():
             fail("clip missing on disk: " + fixture["clipId"])
         actual = sha256_file(clip)

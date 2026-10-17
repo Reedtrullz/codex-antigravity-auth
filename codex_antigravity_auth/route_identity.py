@@ -33,7 +33,7 @@ def identity(route, model, *, provider=None, auth=None, backend=None, endpoint=N
     from .models import native_model_definition
     from .byok import normalize_byok_model_id
     from .unified import openai_responses_url, strip_reserved_openai_prefix
-    from .constants import ANTIGRAVITY_ENDPOINT_PROD
+    from .constants import antigravity_endpoint
     if ADAPTER_REVISION is None:
         return None
     value = {'version':VERSION,'route':route,'adapter':ADAPTER_REVISION}
@@ -41,7 +41,7 @@ def identity(route, model, *, provider=None, auth=None, backend=None, endpoint=N
         definition = native_model_definition(model)
         if definition is None:return None
         value.update(canonical=definition.id, backend=backend or definition.backend_id,
-                     definition=vars(definition),endpoint=endpoint or ANTIGRAVITY_ENDPOINT_PROD)
+                     definition=vars(definition),endpoint=endpoint or antigravity_endpoint())
     elif route == 'openai':
         if auth is None:return None
         try:url = openai_responses_url(auth)

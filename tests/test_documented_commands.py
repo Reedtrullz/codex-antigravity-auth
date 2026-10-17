@@ -60,15 +60,19 @@ def test_current_documented_commands_parse_without_dispatch(document, kind, args
 
 
 def test_historical_snapshots_retain_exact_bytes():
-    manifest = json.loads((ROOT / 'docs/history/2026-10-01/manifest.json').read_text())
-    assert manifest['files']
-    for entry in manifest['files']:
-        assert hashlib.sha256((ROOT / entry['archivePath']).read_bytes()).hexdigest() == entry['sha256']
-        assert len(entry['sourceCommit']) == 40
+    manifests = sorted((ROOT / 'docs/history').glob('*/manifest.json'))
+    assert ROOT / 'docs/history/2026-10-01/manifest.json' in manifests
+    for path in manifests:
+        manifest = json.loads(path.read_text())
+        assert manifest['files'], path
+        for entry in manifest['files']:
+            assert hashlib.sha256((ROOT / entry['archivePath']).read_bytes()).hexdigest() == entry['sha256']
+            assert len(entry['sourceCommit']) == 40
 
 
 def test_current_docs_link_one_status_owner_and_retire_auth_claims():
     for name in ('README.md', 'USAGE.md', 'VERIFICATION.md', 'AGENTS.md'):
         assert '(STATUS.md)' in (ROOT / name).read_text()
+        assert '(CURRENT_STATE.md)' not in (ROOT / name).read_text()
     assert 'Account, provider, xAI OAuth' not in (ROOT / 'docs/refactor-migration.md').read_text()
     assert len(list(documented_commands())) > 60
