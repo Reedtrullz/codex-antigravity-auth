@@ -2,7 +2,7 @@
 
 ## T0 baseline
 
-- Worktree: `/Users/reidar/.codex/worktrees/dfb9/codex-antigravity-auth`
+- Worktree: `~/.codex/worktrees/dfb9/codex-antigravity-auth`
 - Branch: `codex/anti-gateway-remediation`
 - Starting SHA: `117b496db568a7c222dd1698912224c36f8264da`
 - Primary checkout was not edited.
@@ -28,7 +28,7 @@ the complete answer remains in `result.json`.
 
 Baseline evidence (2026-09-14):
 
-- `.venv/bin/python` is `/Users/reidar/.codex/worktrees/dfb9/codex-antigravity-auth/.venv/bin/python`.
+- `.venv/bin/python` is `~/.codex/worktrees/dfb9/codex-antigravity-auth/.venv/bin/python`.
 - `codex_antigravity_auth.__file__` resolves inside this worktree, not the primary checkout.
 - `git merge-base --is-ancestor 117b496db568a7c222dd1698912224c36f8264da HEAD`: pass.
 - `uv pip check --python .venv/bin/python`: 31 packages compatible.
@@ -144,7 +144,7 @@ live provider health, full-repository review coverage, or release acceptance.
 One final authorized live check used the synthetic, non-sensitive
 `scratch/t15-small-fixture.md` fixture (24 lines) and the corrected worktree
 helper at
-`/Users/reidar/.codex/worktrees/dfb9/codex-antigravity-auth/codex_antigravity_auth/skills/anti/scripts/anti.py`.
+`~/.codex/worktrees/dfb9/codex-antigravity-auth/codex_antigravity_auth/skills/anti/scripts/anti.py`.
 The dry-run passed exact-source fit with `--chunked off`: no review-chunk or
 synthesis stages were planned; Sonnet and Opus lanes were each 2,013 prompt
 characters, followed by the Opus judge. Fallback was disabled, parallelism was
@@ -155,7 +155,7 @@ t15-small-fixture-20260914 --json`, exited `1`, and stopped after both requested
 lanes timed out once at 90 seconds. The persisted record reports
 `runStatus=failed`, `scopeStatus=complete`, `panelStatus=failed`, no actual
 models/providers, and no judge execution. Sanitized evidence is retained at
-[`result.json`](/Users/reidar/.codex/anti-runs/t15-small-fixture-20260914/result.json);
+`result.json` (`~/.codex/anti-runs/t15-small-fixture-20260914/result.json`, outside this repository);
 the run record's `resultPath` points to that file. Its helper identity is the
 worktree path above with matching bundled/worktree tree hashes; the gateway was
 the already-running localhost service, and no installed skill, provider,
@@ -219,7 +219,7 @@ coverage, and plan-derived unsent counts. The authoritative suite after these
 corrections is `816 passed, 220 subtests, 2 warnings`.
 
 Retained build artifacts for the candidate are in
-`/Users/reidar/.codex/antigravity-builds/anti-gateway-remediation-bea624e/`:
+`~/.codex/antigravity-builds/anti-gateway-remediation-bea624e/`:
 
 - wheel SHA256 `c7199ab919437c6b049b1b925d1601014fdc7d87e13cd6f1aff92d8a0bdb5b60`;
 - source distribution SHA256 `551c50fb1aebf47819cc9c7ffc7d5ea21ea6709854141056eaf4ca3bedcd9ddf`.
@@ -234,11 +234,11 @@ package). The coordinator account-module rerun was `42 passed, 4 subtests` in
 subtests, 2 warnings`.
 
 The retained candidate was rebuilt from the e01e118 source into
-`/Users/reidar/.codex/antigravity-builds/anti-gateway-remediation-e01e118/`:
+`~/.codex/antigravity-builds/anti-gateway-remediation-e01e118/`:
 
 - wheel SHA256 `3f8a70e790763a2e1a05c83af8db6601486e956dfcff92663a2679930c2e3889`;
 - source distribution SHA256 `2829610aecf2a10005c2483bc7a84a44d5ce4034293f39d04e1dfd5de9e06160`;
-- artifact import identity: Python `/Users/reidar/.codex/worktrees/dfb9/codex-antigravity-auth/.venv/bin/python`, package version `2.2.0`, imported package/server/Anti helper from the extracted retained wheel;
+- artifact import identity: Python `~/.codex/worktrees/dfb9/codex-antigravity-auth/.venv/bin/python`, package version `2.2.0`, imported package/server/Anti helper from the extracted retained wheel;
 - extracted `server.py` SHA256 `c3567ba9806ebece827274c71f74006cb9ae06b946af40abd6d81592447c4fcc`;
 - extracted Anti helper SHA256 `c7e0eb32d8e81c86726d9253e3c941e55cb341762522fe9ca139b77374f3af6c`.
 
@@ -262,8 +262,8 @@ overhead. The cap-3000 run failed closed on chunks 2/5, 4/5, and 5/5; its
 saved failure artifact had `chunksExpected=4`, `completed2`, `failed2`, and an
 empty saved chunk list. These are preserved artifacts, not acceptance evidence:
 
-- `/Users/reidar/.codex/anti-runs/t15-remediation-e01e118-multichunk-512/result.json`
-- `/Users/reidar/.codex/anti-runs/t15-remediation-e01e118-multichunk-3000/result.json`
+- `~/.codex/anti-runs/t15-remediation-e01e118-multichunk-512/result.json`
+- `~/.codex/anti-runs/t15-remediation-e01e118-multichunk-3000/result.json`
 
 The source-level root cause was then fixed in `9b44c73` and strengthened in
 `08d5735`/`7b24b27`: chunk budgeting now probes the complete prompt scaffolding,
@@ -291,7 +291,7 @@ Runtime posture after rollback: candidate PID 12227 is stopped; launchd
 `127.0.0.1:51122`, PID 35501, state `running`, using
 `/Library/Frameworks/Python.framework/Versions/3.10/bin/python3.10`, with
 process cwd `/`. The launchd editable finder maps imports to the primary
-checkout `/Users/reidar/Projectos/codex-antigravity-auth` at
+checkout `~/Projectos/codex-antigravity-auth` at
 `117b496db568a7c222dd1698912224c36f8264da`; the worktree helper was not the
 live process. `/v1/models` returned HTTP 200. Current canonical encrypted-state
 hashes are accounts
@@ -331,13 +331,13 @@ the gateway's 90-second total deadline (`prompt_chars=12099`), before panel
 lanes or judge execution. The result is therefore `runStatus=failed`,
 `scopeStatus=partial`, with no summary non-loss acceptance:
 
-- `/Users/reidar/.codex/anti-runs/t15-remediation-7b24b27-multichunk/result.json`
+- `~/.codex/anti-runs/t15-remediation-7b24b27-multichunk/result.json`
 
 The candidate process PID 26237 was stopped. The original launchd plist was
 bootstrapped again; final rollback posture is launchd PID 53238, Python 3.10,
 sole listener on `127.0.0.1:51122`, `/v1/models` HTTP 200. The launchd editable
 mapping remains the primary checkout at
-`/Users/reidar/Projectos/codex-antigravity-auth` (primary SHA
+`~/Projectos/codex-antigravity-auth` (primary SHA
 `117b496db568a7c222dd1698912224c36f8264da`), not the candidate worktree.
 Providers remained unchanged at SHA256
 `1959f85e8a68235ab04bb885ccb904f1eaa41c116cf81d2b193214873e416b94`.
@@ -415,8 +415,8 @@ request: its exact input was 46,741 characters against the configured
 artifact is `runStatus=failed`, `scopeStatus=complete`,
 `panelStatus=partial_multi_model`, with truthful complete chunk coverage:
 
-- `/Users/reidar/.codex/anti-runs/t15-remediation-af47e6c-multichunk180/result.json`
-- `/Users/reidar/.codex/anti-runs/t15-remediation-af47e6c-multichunk180.json`
+- `~/.codex/anti-runs/t15-remediation-af47e6c-multichunk180/result.json`
+- `~/.codex/anti-runs/t15-remediation-af47e6c-multichunk180.json`
 
 This live gate is failed on final panel-synthesis budget fit, not source
 coverage, chunk identity, provider HTTP failure, or the 180-second timeout
@@ -425,7 +425,7 @@ mapping. Per authorization, no repeat was attempted.
 The candidate was stopped and the old launchd service restored. Final rollback
 state is PID 16780, Python 3.10, sole listener on `127.0.0.1:51122`, and
 `/v1/models` HTTP 200. The editable launchd mapping remains the primary
-checkout `/Users/reidar/Projectos/codex-antigravity-auth` at
+checkout `~/Projectos/codex-antigravity-auth` at
 `117b496db568a7c222dd1698912224c36f8264da`, not this worktree. Providers remain
 SHA256 `1959f85e8a68235ab04bb885ccb904f1eaa41c116cf81d2b193214873e416b94`.
 The post-trial canonical accounts SHA256 is
@@ -481,8 +481,8 @@ attempt will be made.
 
 Evidence:
 
-- `/Users/reidar/.codex/anti-runs/t15-remediation-ea23c7c-multichunk64000/result.json`
-- `/Users/reidar/.codex/anti-runs/t15-remediation-ea23c7c-multichunk64000.json`
+- `~/.codex/anti-runs/t15-remediation-ea23c7c-multichunk64000/result.json`
+- `~/.codex/anti-runs/t15-remediation-ea23c7c-multichunk64000.json`
 
 The candidate was stopped and old launchd restored. Final state is PID 25153,
 Python 3.10, sole listener on `127.0.0.1:51122`, and `/v1/models` HTTP 200.
@@ -516,7 +516,7 @@ The exact planner produced three required chunks with prompt sizes 19,882,
 Offline synthesis/judge probes fit: chunk synthesis 26,182 characters and
 worst-case judge input 62,977/128,000, leaving 65,023 characters. The exact
 current-head candidate was retained at
-`/Users/reidar/.codex/antigravity-builds/anti-gateway-remediation-372687a/`:
+`~/.codex/antigravity-builds/anti-gateway-remediation-372687a/`:
 wheel SHA256 `d62bb73bef23856f48e6133823b493d072e7e2ab2d73918e617c401e8f45b7a3`,
 sdist SHA256 `a3519d8f7f6d18d865334ac1df01e6b657399e4f1370fcc33c7e12a74f07a606`,
 Anti helper source/extracted SHA256
@@ -540,9 +540,9 @@ requests, four underlying attempts, zero rotations, and zero fallback calls:
 three Sonnet chunks succeeded with 1,102/1,546/1,446 output tokens, and
 synthesis returned 4,096 output tokens after 72.041 seconds. Sanitized artifacts:
 
-- `/Users/reidar/.codex/anti-runs/t15-remediation-372687a-3chunk-4096-largefixture/result.json`
-- `/Users/reidar/.codex/anti-runs/t15-remediation-372687a-3chunk-4096-largefixture.json`
-- correlated rows in `/Users/reidar/.codex/antigravity-requests.jsonl`
+- `~/.codex/anti-runs/t15-remediation-372687a-3chunk-4096-largefixture/result.json`
+- `~/.codex/anti-runs/t15-remediation-372687a-3chunk-4096-largefixture.json`
+- correlated rows in `~/.codex/antigravity-requests.jsonl`
 
 Because synthesis terminated incomplete, no full summary, panel-lane, or judge
 body exists to validate; only complete source/chunk coverage and terminal
@@ -580,7 +580,7 @@ review-synthesis/lane output `4096`, judge output `8192`, source/fanout budget
 timeout `180` (`170` gateway), retry `0`, fallback `never`, max parallel `2`,
 three required fixture files, and a 20-minute external watchdog. The candidate
 was built and retained at
-`/Users/reidar/.codex/antigravity-builds/anti-gateway-remediation-0b6768b/`:
+`~/.codex/antigravity-builds/anti-gateway-remediation-0b6768b/`:
 wheel SHA256 `275fa865ae9a3a119b2614fad5398a96341d9dc3be45ddcb9728fa2731589098`,
 sdist SHA256 `e205a0495e9dac88071f60ade6c1ea6c84dc14f6eca8d76ba296081660b73a43`,
 Anti helper source/extracted SHA256
@@ -767,7 +767,7 @@ or provider request has been made.
 
 Parent released exactly one live trial using the retained candidate built from
 source head `e058f06` in
-`/Users/reidar/.codex/antigravity-builds/anti-gateway-remediation-e058f06/`.
+`~/.codex/antigravity-builds/anti-gateway-remediation-e058f06/`.
 The retained candidate wheel SHA256 is
 `340bf88e4dfd7f4d6d9ae5b6d421dfb96e276a86b0e81365b182506ebf6a18fe`; sdist
 SHA256 is `fd9bd8c1c0a79782eb0603bec19b9ba4c5e7e9b42ecbea5d4e2fcad129d8ed20`.
@@ -797,9 +797,9 @@ rotations, and zero fallback calls:
 
 The sanitized artifacts are preserved at:
 
-- `/Users/reidar/.codex/anti-runs/t15-remediation-e058f06-3chunk-full/result.json`
-- `/Users/reidar/.codex/anti-runs/t15-remediation-e058f06-3chunk-full.json`
-- `/Users/reidar/.codex/antigravity-requests.jsonl` (correlated request rows)
+- `~/.codex/anti-runs/t15-remediation-e058f06-3chunk-full/result.json`
+- `~/.codex/anti-runs/t15-remediation-e058f06-3chunk-full.json`
+- `~/.codex/antigravity-requests.jsonl` (correlated request rows)
 
 All three files have complete coverage: 17,358/17,358 bytes, 3/3 chunks,
 zero failed/not-sent chunks, and matching per-file hashes. No lane or judge
@@ -853,7 +853,7 @@ fences. Actual identities were Sonnet and Opus, both served by
 `google-antigravity`, so the result is `same_provider_multi_model`, not
 independent-provider consensus. The result is `runStatus=success` and
 `scopeStatus=complete`; artifacts are retained under
-`/Users/reidar/.codex/anti-runs/t15-remediation-2d30025-3chunk-bounded-contract-v6/`.
+`~/.codex/anti-runs/t15-remediation-2d30025-3chunk-bounded-contract-v6/`.
 
 The delegation follow-up found a sibling regression in the retry helper:
 commit `1025f69` scopes the no-code review contract to `args.mode == "review"`
@@ -861,7 +861,7 @@ and adds plan/ask retry regressions. Final local evidence is `832 passed, 220
 subtests, 2 warnings`; current PR #27 CI run `34905693479` and push run
 `34905688723` passed package plus Ubuntu Python 3.10/3.11/3.12/3.14 and
 Windows Python 3.12. The final retained candidate is
-`/Users/reidar/.codex/antigravity-builds/anti-gateway-remediation-1025f69/`;
+`~/.codex/antigravity-builds/anti-gateway-remediation-1025f69/`;
 source and wheel Anti trees match at
 `973ceb041c9f6d59e948f383d938a8cf1e93ddd1b6d1a79a77225d018bb063f4`, and the
 corrected dry-run plans 3 chunks, 1 synthesis, 2 lanes, and 1 judge.
@@ -905,7 +905,7 @@ lane, and one successful Opus judge; no retries or fallbacks. It reports
 `google-antigravity`; provider-independent consensus is not claimed. The
 structured lane-contract warning remains explicit in the saved metadata.
 
-Artifacts: `/Users/reidar/.codex/anti-runs/anti-output-contract-fix-candidate-live-v1/`.
+Artifacts: `~/.codex/anti-runs/anti-output-contract-fix-candidate-live-v1/`.
 The candidate helper/bundle parity harness matched at
 `22be374eb0016e31ad3d399e9616d7199feb80868bdac8e40c1fd05b3ad6e5e4`; no new
 package install or live runtime/config mutation was performed.

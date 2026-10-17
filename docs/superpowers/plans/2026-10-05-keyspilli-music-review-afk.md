@@ -8,7 +8,7 @@
 
 **Tech Stack:** Existing npm workspaces, Node 22.22.3, TypeScript/Vitest, Playwright/Chromium, Python 3.11 audio environment, NumPy/SoundFile and optional pinned transcription/model runtimes; existing Anti Python helper and JSON schemas. No new gateway DSP dependency or general agent framework.
 
-**Spec:** [Execution specification](/Users/reidar/.codex/worktrees/stream-integration/codex-antigravity-auth/docs/superpowers/specs/2026-10-05-keyspilli-music-review-afk.md). Read it with [the research report](</Users/reidar/Obsidian/Hermes/Hermes/Personal/Projects/Codex Antigravity Auth/Music review solution and qualification plan - 05-10-2026.md>).
+**Spec:** [Execution specification](../specs/2026-10-05-keyspilli-music-review-afk.md). Read it with the research report (`~/Obsidian/Hermes/Hermes/Personal/Projects/Codex Antigravity Auth/Music review solution and qualification plan - 05-10-2026.md`, outside this repository).
 
 ## Global Constraints
 
@@ -16,8 +16,8 @@ All specification boundaries apply, including 30 GiB disk floor, bounded new foo
 
 Implementation source roots inspected for this plan:
 
-- Keyspilli: `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli`, HEAD `b75067169a1959c31199f277c4fec3ba4f96f47d`, existing untracked `.superpowers/`.
-- Anti: `/Users/reidar/.codex/worktrees/stream-integration/codex-antigravity-auth`, HEAD `56ade46237c6e57efbd7aed37e57e1e3c0b2f6d6`, existing untracked `.superpowers/`.
+- Keyspilli: `~/.codex/worktrees/keyspilli-listening-review/Keyspilli`, HEAD `b75067169a1959c31199f277c4fec3ba4f96f47d`, existing untracked `.superpowers/`.
+- Anti: `~/.codex/worktrees/stream-integration/codex-antigravity-auth`, HEAD `56ade46237c6e57efbd7aed37e57e1e3c0b2f6d6`, existing untracked `.superpowers/`.
 
 Task file inventories below are anchored to those full roots; at execution, map their unchanged suffixes into the isolated roots recorded by Task 0. Existing paths are inspected files; new paths are proposed. Do not edit the research/source checkouts during implementation.
 
@@ -49,7 +49,7 @@ Execution order: Task 0 -> **Task 8A first** (portable Anti feature) -> Tasks 1â
 
 - [x] Snapshot status and tracked/untracked file hashes in both source checkouts, primary checkouts and the old outcome; inspect worktree inventory and applicable AGENTS before edits.
 - [x] Read using-git-worktrees at execution. Prefer an attached suitable worktree; otherwise create an Anti managed worktree at the pinned base and a separate registered Keyspilli Git worktree at its pinned base. Use `codex/music-review-afk` branches with a unique suffix if occupied. Record exact roots; never reset an existing branch.
-- [x] Pin the Node executable explicitly via the task PATH; the current default shell Node is 20.20.2 but `/Users/reidar/.local/bin/node` reports 22.22.3. Create isolated dependency environments, using lockfiles rather than shared dependency mutation. Record disk before/after. Check Python import paths resolve to the worktree.
+- [x] Pin the Node executable explicitly via the task PATH; the current default shell Node is 20.20.2 but `~/.local/bin/node` reports 22.22.3. Create isolated dependency environments, using lockfiles rather than shared dependency mutation. Record disk before/after. Check Python import paths resolve to the worktree.
 - [x] Create the ledger, resource/candidate register and final decision queue. An interrupted run must be resumable from identities and terminal receipts without rerunning completed matching cases.
 - [x] Establish focused baseline results for the modules being changed; classify unrelated failures with evidence. Commit the plan/spec into the execution branch, leaving private ledgers ignored.
 
@@ -57,7 +57,7 @@ Execution order: Task 0 -> **Task 8A first** (portable Anti feature) -> Tasks 1â
 
 ## Task 1 â€” Raw acoustic receipt and compatibility boundary
 
-**Files:** create `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/packages/catalog/src/acoustic-receipt.ts`, `acoustic-receipt-v1.schema.json`, and `packages/catalog/test/acoustic-receipt.test.ts`. Modify `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/services/transcribe/src/piano-transcriber.ts` and its existing test only to add explicit receipt/provenance compatibility.
+**Files:** create `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/packages/catalog/src/acoustic-receipt.ts`, `acoustic-receipt-v1.schema.json`, and `packages/catalog/test/acoustic-receipt.test.ts`. Modify `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/services/transcribe/src/piano-transcriber.ts` and its existing test only to add explicit receipt/provenance compatibility.
 
 **Interfaces:** use the existing shared catalog package for pure receipt types/validation, imported by service and web through `@keyspilli/catalog/src/acoustic-receipt.js` without a service-to-web dependency. `parseAcousticReceipt(value: unknown): AcousticReceipt`; `acousticCacheKey(identity: AnalyzerIdentity): string`. `AcousticReceipt` is `{schemaVersion:1, kind:"keyspilli-acoustic-receipt", status, audio, analyzer, notes, rejectedRows, metadata, resources, limitations}`. `status` is `ok|unavailable|failed`; notes are `{id,midi,onsetSeconds,keyOffsetSeconds:null|number,soundingOffsetSeconds:null|number,confidence:null|number}`. Analyzer identity includes checkpoint, code, frontend and config digests, runtime/device/precision. Define/export these exact types here for later tasks.
 
@@ -70,7 +70,7 @@ Execution order: Task 0 -> **Task 8A first** (portable Anti feature) -> Tasks 1â
 
 ## Task 2 â€” Optional worker and admissible model acquisition
 
-**Files:** create `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/services/transcribe/src/music_analyzer.py`, `services/transcribe/src/acoustic-analyzer.ts`, `services/transcribe/test/acoustic-analyzer.test.ts`, `services/transcribe/test/test_music_analyzer.py`, and `services/transcribe/requirements-music-review.txt`.
+**Files:** create `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/services/transcribe/src/music_analyzer.py`, `services/transcribe/src/acoustic-analyzer.ts`, `services/transcribe/test/acoustic-analyzer.test.ts`, `services/transcribe/test/test_music_analyzer.py`, and `services/transcribe/requirements-music-review.txt`.
 
 **Interfaces:** worker command `music_analyzer.py --request REQUEST.json --output NEW_RECEIPT.json`; request `{audioPin, analyzerIdentity, model: basic-pitch|transkun|hft, timeoutSeconds:120}`. TS `runAcousticAnalyzer(request: AnalyzerRequest, options: AnalyzerOptions): Promise<AcousticReceipt>`; options inject runner and enable flag. `AnalyzerRequest` and `AnalyzerOptions` are exported here. No output overwrite, shell command string, auto-download on inference, or implicit model fallback.
 
@@ -84,7 +84,7 @@ Execution order: Task 0 -> **Task 8A first** (portable Anti feature) -> Tasks 1â
 
 ## Task 3 â€” Reproducible corpus and actual Player capture
 
-**Files:** create `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/scripts/build-music-review-corpus.mts`, `apps/web/src/lib/music-review-corpus.test.ts`, `apps/web/e2e/music-review-capture.spec.ts`, and `apps/web/playwright.music-review.config.ts`. Reuse `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/e2e/player-audio-capture.ts`; extend it only if scoped fixtures expose a need. Add the new scripts to `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/tsconfig.song-tools.json`.
+**Files:** create `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/scripts/build-music-review-corpus.mts`, `apps/web/src/lib/music-review-corpus.test.ts`, `apps/web/e2e/music-review-capture.spec.ts`, and `apps/web/playwright.music-review.config.ts`. Reuse `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/e2e/player-audio-capture.ts`; extend it only if scoped fixtures expose a need. Add the new scripts to `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/tsconfig.song-tools.json`.
 
 **Interfaces:** corpus CLI `--output NEW_DIR --seed N`; artifacts include `manifest.json`, private `evaluator-key.json`, `capture-fixtures/bundle.json`, pinned event/tempo/intent files and newly captured WAVs. A case records family/split/content lineage, media/event IDs, supported domain and expected offset/attack definitions; analyzer input excludes truth and answer-bearing filenames.
 
@@ -98,7 +98,7 @@ Execution order: Task 0 -> **Task 8A first** (portable Anti feature) -> Tasks 1â
 
 ## Task 4 â€” Benchmark ledger, grading and candidate selection
 
-**Files:** create `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/packages/catalog/src/music-benchmark.ts`, `packages/catalog/test/music-benchmark.test.ts`, and `apps/web/scripts/benchmark-music-review.mts`.
+**Files:** create `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/packages/catalog/src/music-benchmark.ts`, `packages/catalog/test/music-benchmark.test.ts`, and `apps/web/scripts/benchmark-music-review.mts`.
 
 **Interfaces:** `gradeAcousticCase(truth: CaseTruth, receipt: AcousticReceipt, policy: MatchPolicy): CaseGrade`; `summarizeCandidate(grades: readonly CaseGrade[]): CandidateSummary`. Define/export `CaseTruth`, `CaseGrade`, `CandidateSummary`, and `MatchPolicy` here in the shared catalog package. Freeze `attackGroupWindowSeconds:0.02`, grouped against the first onset rather than transitive chaining, and separate 0.05/0.10-second note tolerances. Benchmark CLI `--manifest PATH --candidate ID --split development|heldout --output NEW_DIR`; resume requires a pinned prior ledger and an unchanged experiment fingerprint.
 
@@ -112,7 +112,7 @@ Execution order: Task 0 -> **Task 8A first** (portable Anti feature) -> Tasks 1â
 
 ## Task 5 â€” Playback clock and renderer-informed fault comparison
 
-**Files:** create `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/music-event-comparison.ts` and its test; create `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/services/transcribe/src/renderer_verification.py` and `services/transcribe/test/test_renderer_verification.py`. Reuse playback resolution in `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/packages/player-core/src/timeline.ts`.
+**Files:** create `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/music-event-comparison.ts` and its test; create `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/services/transcribe/src/renderer_verification.py` and `services/transcribe/test/test_renderer_verification.py`. Reuse playback resolution in `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/packages/player-core/src/timeline.ts`.
 
 **Interfaces:** `comparePlaybackEvents(expected: readonly ExpectedPlaybackEvent[], receipt: AcousticReceipt, clock: CaptureClock, policy: MatchPolicy): EventComparison`. Define/export expected event/clock/comparison types here; require occurrence IDs and separate capture offset, tempo-map and speed identity. Renderer worker emits a separate channel receipt with matched activity, residual candidates and template-bank hash.
 
@@ -125,7 +125,7 @@ Execution order: Task 0 -> **Task 8A first** (portable Anti feature) -> Tasks 1â
 
 ## Task 6 â€” Source correspondence, learner intent and uncertainty
 
-**Files:** create `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/music-correspondence.ts` and its test. Reuse existing symbolic/playability helpers and `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/packages/catalog/src/musical-review.ts` as the human-only attestation boundary.
+**Files:** create `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/music-correspondence.ts` and its test. Reuse existing symbolic/playability helpers and `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/packages/catalog/src/musical-review.ts` as the human-only attestation boundary.
 
 **Interfaces:** `compareMusicalIntent(source: SourceAnchors, replay: ReplaySnapshot, intent: ArrangementIntent): MusicalComparison`. Define/export source/replay/intent types here; intent includes `mode: original|chords`, difficulty, approved transformations and anchor authority. Output separates preserved, changed-permitted, violated and unknown landmarks.
 
@@ -138,7 +138,7 @@ Execution order: Task 0 -> **Task 8A first** (portable Anti feature) -> Tasks 1â
 
 ## Task 7 â€” Unified local report and playable review pack
 
-**Files:** create `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/music-review.ts`, its test, `apps/web/scripts/report-music-review.mts`, `apps/web/src/lib/music-review-cli.test.ts`, and `docs/ops/music-review.md`. Reuse `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/local-audio-evidence.ts` and existing bounded file/pin validation.
+**Files:** create `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/music-review.ts`, its test, `apps/web/scripts/report-music-review.mts`, `apps/web/src/lib/music-review-cli.test.ts`, and `docs/ops/music-review.md`. Reuse `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/local-audio-evidence.ts` and existing bounded file/pin validation.
 
 **Interfaces:** `buildMusicReview(input: MusicReviewInput): MusicReviewReport`; `MusicReviewInput` joins pinned legacy manifest, acoustic/renderer receipts, playback comparison and source-intent result. `MusicReviewReport` uses kind `keyspilli-music-review`, schemaVersion 1, per-channel statuses, interval findings, coverage, `providerCalls:0`, `musicalAcceptance:"not-established"`. CLI consumes a manifest and writes a new output directory; it never invokes inference implicitly.
 
@@ -152,7 +152,7 @@ Execution order: Task 0 -> **Task 8A first** (portable Anti feature) -> Tasks 1â
 
 ## Task 8A â€” Standalone Gemini music review in Anti (execute immediately after Task 0)
 
-**Files:** create `/Users/reidar/.codex/worktrees/stream-integration/codex-antigravity-auth/codex_antigravity_auth/skills/anti/scripts/anti_lib/music_evidence.py`, `schemas/music-evidence-v1.json` and `schemas/music-review-v1.json` under the same skill root; create `/Users/reidar/.codex/worktrees/stream-integration/codex-antigravity-auth/tests/test_music_evidence.py` and `tests/test_gemini_music_review.py`. Modify the existing helper `scripts/anti.py`, WAV/skill docs, `/Users/reidar/.codex/worktrees/stream-integration/codex-antigravity-auth/codex_antigravity_auth/skill_assets.json`, and package manifest only for these owned additions.
+**Files:** create `~/.codex/worktrees/stream-integration/codex-antigravity-auth/codex_antigravity_auth/skills/anti/scripts/anti_lib/music_evidence.py`, `schemas/music-evidence-v1.json` and `schemas/music-review-v1.json` under the same skill root; create `~/.codex/worktrees/stream-integration/codex-antigravity-auth/tests/test_music_evidence.py` and `tests/test_gemini_music_review.py`. Modify the existing helper `scripts/anti.py`, WAV/skill docs, `~/.codex/worktrees/stream-integration/codex-antigravity-auth/codex_antigravity_auth/skill_assets.json`, and package manifest only for these owned additions.
 
 **Interfaces:** `parse_music_evidence(value: object) -> dict`, `build_music_prompt(evidence: dict | None, objective: str) -> str`, `validate_music_review(value: object, clips: list[dict]) -> dict`. Portable evidence is `{schemaVersion:1,kind:"anti-music-evidence",clips,claims,context,limitations}`: clips have IDs/audio hashes and intervals; claims have IDs, clip interval, origin and uncertainty; context has objective, source authority and allowed differences. No Keyspilli receipt, catalogue, Original/Chords enum or absolute project path is required. Review output has generic clip/time findings classified as model-advisory, uncertainty, comparison status and limitations; source claims are not measurements.
 
@@ -169,7 +169,7 @@ CLI: `anti.py review-music --model GEMINI --audio WAV [--audio WAV] --prompt-fil
 
 ## Task 8B â€” Keyspilli experimental models and optional Anti bridge
 
-**Files:** create `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/services/transcribe/src/music_critic.py`, `services/transcribe/test/test_music_critic.py`, `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/anti-music-evidence.ts` and its test, `apps/web/scripts/prepare-music-model-experiments.mts`.
+**Files:** create `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/services/transcribe/src/music_critic.py`, `services/transcribe/test/test_music_critic.py`, `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/anti-music-evidence.ts` and its test, `apps/web/scripts/prepare-music-model-experiments.mts`.
 
 **Interfaces:** define/export TypeScript `AntiMusicEvidence` in `anti-music-evidence.ts` to mirror Task 8A's schema and pin the schema version/digest in contract fixtures. `exportAntiMusicEvidence(report: MusicReviewReport): AntiMusicEvidence` converts the host report to Task 8A's generic schema. Local worker request `{backend,audioPins,promptPin,evidencePin|null,modelIdentity,limits}` emits a tagged critic/source result or unavailable receipt. Optional backends: `moss-hf`, `moss-native`, `muscriptor`, `qwen-modelstudio`; network backend defaults preparation-only and is never configured implicitly. All non-Antigravity dependencies and accounts are owned by Keyspilli.
 
@@ -184,7 +184,7 @@ CLI: `anti.py review-music --model GEMINI --audio WAV [--audio WAV] --prompt-fil
 
 ## Task 9 â€” Bounded repair proposals and fresh A/B previews
 
-**Files:** create `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/music-repair-preview.ts` and its test, `apps/web/scripts/preview-music-repair.mts`; reuse existing `/Users/reidar/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/audio-review.ts` repair queue and Task 3 capture.
+**Files:** create `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/music-repair-preview.ts` and its test, `apps/web/scripts/preview-music-repair.mts`; reuse existing `~/.codex/worktrees/keyspilli-listening-review/Keyspilli/apps/web/src/lib/audio-review.ts` repair queue and Task 3 capture.
 
 **Interfaces:** `previewMusicRepair(snapshot: ReplaySnapshot, proposal: RepairProposal): RepairPreview`. Proposal specifies source hash, finding ID, target event IDs, bounded operations, evidence refs and required preserved invariants. Supported preview operations: replace pitch, shift onset, insert/delete event; at most eight event edits in one declared phrase. `RepairPreview` contains changed snapshot, exact diff and required rechecks; it is not a catalogue mutation.
 
@@ -197,7 +197,7 @@ CLI: `anti.py review-music --model GEMINI --audio WAV [--audio WAV] --prompt-fil
 
 ## Task 9B â€” Deliver host support through the Keyspilli plugin
 
-**Files:** canonical source `/Users/reidar/plugins/keyspilli/skills/keyspilli-song/SKILL.md`, `scripts/check_checkout.py`, `references/audio-listening-review.md`, `references/musical-quality-gate.md`, `references/evaluation-and-repair.md`; create `references/music-review-workflow.md`. Inspect `/Users/reidar/plugins/keyspilli/.codex-plugin/plugin.json` for its release/version workflow. This directory is not a Git repository; stage an exact owned-file patch with before/after manifests rather than invent a Git commit there.
+**Files:** canonical source `~/plugins/keyspilli/skills/keyspilli-song/SKILL.md`, `scripts/check_checkout.py`, `references/audio-listening-review.md`, `references/musical-quality-gate.md`, `references/evaluation-and-repair.md`; create `references/music-review-workflow.md`. Inspect `~/plugins/keyspilli/.codex-plugin/plugin.json` for its release/version workflow. This directory is not a Git repository; stage an exact owned-file patch with before/after manifests rather than invent a Git commit there.
 
 **Interfaces:** extend checkout preflight with an optional `music_review` capability inventory for the new report/benchmark/preview scripts and schemas; each backend reports `compatible|absent|incompatible|unchecked`. Capability probing is read-only and never invokes a model, download or gateway. The skill routes music support through those host commands, with optional Gemini bridge and separate local/non-Google models.
 
@@ -243,7 +243,7 @@ The plan covers the research's measurement, alignment, source intent, criticism,
 
 ## Execution record â€” 2026-10-05
 
-Execution Anti root: `/Users/reidar/Projectos/.worktrees/anti-music-review-afk`; Keyspilli root: `/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli`. Original checkouts and frozen failed outcome were hash-verified unchanged. The earlier Keyspilli research checkout was removed externally; twelve research pins match the adopted base.
+Execution Anti root: `~/Projectos/.worktrees/anti-music-review-afk`; Keyspilli root: `~/.codex/worktrees/keyspilli-music-review-afk/Keyspilli`. Original checkouts and frozen failed outcome were hash-verified unchanged. The earlier Keyspilli research checkout was removed externally; twelve research pins match the adopted base.
 
 Local regression: Anti 3,667 passed, 1 skipped and 245 subtests; installed ordinary-dependency contract 2 passed, installed music profile 20 passed, actual bridge dry run 1 passed with zero HTTP. Keyspilli 2,601 passed, full typecheck/build passed, optional worker/critic Python 14 tests and renderer 5 tests passed. Recorder, Player capture and review-pack controls passed browser proof; automated playback was muted.
 

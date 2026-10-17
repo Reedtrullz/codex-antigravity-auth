@@ -8,11 +8,11 @@
 
 **Tech Stack:** Python 3.10+, existing FastAPI/httpx gateway and Anti helper; Keyspilli TypeScript/Node 22, FFmpeg and existing sampled-piano renderer. No new provider/account or large model installation.
 
-**Spec:** [Music listening research and design](/Users/reidar/.codex/worktrees/pr-integration/codex-antigravity-auth/.superpowers/sdd/2026-10-02-pr-integration-and-issue-closure/music-listening-research-20261003.md).
+**Spec:** Music listening research and design (`~/.codex/worktrees/pr-integration/codex-antigravity-auth/.superpowers/sdd/2026-10-02-pr-integration-and-issue-closure/music-listening-research-20261003.md`, outside this repository).
 
 ## Global constraints
 
-- Preserve primary WIP and other tasks. Anti work uses `/Users/reidar/.codex/worktrees/stream-integration/codex-antigravity-auth`, starting at `3dce6f4b0a540223d1d868cf0198c75b82714000`.
+- Preserve primary WIP and other tasks. Anti work uses `~/.codex/worktrees/stream-integration/codex-antigravity-auth`, starting at `3dce6f4b0a540223d1d868cf0198c75b82714000`.
 - Audio: one/two explicitly selected PCM16 WAVs, ≤2MiB each, ≤4MiB total, ≤30s each. Use 20–22s sampled piano clips when suitable.
 - Explicit model and experimental audio opt-in remain required. No Claude/text-only audio fallback. Catalog claims remain conservative.
 - Every `listen` invocation allows at most one provider POST, ≤2,048 output tokens and ≤90s total. No automatic retry, judge, fallback or source pre-read. Smaller limits are allowed; attempts to loosen these limits fail before network.
@@ -30,7 +30,7 @@
 
 ## Shared interface and ownership
 
-Keyspilli chat: `01a101bf-7d8c-74c2-b0f8-553c2e712c33` (Keyspilli music listening integration). Parent is explicitly authorized to inspect and steer this chat. Child owns its repository and canonical `/Users/reidar/plugins/keyspilli` skill changes; parent owns Anti code and the shared live-attempt ledger. Child performs no live inference until allocated by the parent.
+Keyspilli chat: `01a101bf-7d8c-74c2-b0f8-553c2e712c33` (Keyspilli music listening integration). Parent is explicitly authorized to inspect and steer this chat. Child owns its repository and canonical `~/plugins/keyspilli` skill changes; parent owns Anti code and the shared live-attempt ledger. Child performs no live inference until allocated by the parent.
 
 Command: explicit Python and pinned `anti.py`, `listen --base-url URL --model MODEL --audio REF.wav --audio CANDIDATE.wav --probe-unverified-audio --prompt-file PROMPT --json`. Optional limits may tighten defaults. `--dry-run` performs no HTTP. Result keeps the established `schemaVersion`, `runStatus`, `mode`, `model`, `metadata`, `output_text` envelope; `mode` identifies listening. `metadata.media_coverage` pins captured audio identities and records attempts while preserving unverified/not-run listening claims. Keyspilli parses/validates musical JSON in `output_text` and checks result completeness separately.
 

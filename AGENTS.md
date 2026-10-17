@@ -2,7 +2,7 @@
 
 > Start at [STATUS.md](STATUS.md) for current source contracts and evidence boundaries. Historical release claims are preserved in [the dated archive](docs/history/2026-10-01/AGENTS.md); they are not proof for this checkout.
 
-> **Current state snapshot:** See [CURRENT_STATE.md](CURRENT_STATE.md) for the 2026-10-04 refresh and retained September source analysis. See [VALIDATION_COPIES.md](VALIDATION_COPIES.md) for newer hidden source copies; equal package versions do not establish equal source.
+> **Dated review snapshot:** The 2026-10-04 source review and its validation-copy inventory are archived in [docs/history/2026-10-04](docs/history/2026-10-04/README.md). They describe an older checkout (`027fd313b1f6`, package 2.4.2); equal package versions do not establish equal source.
 
 Guidance for AI coding agents (Codex, Claude Code, OpenCode, etc.) working on this project.
 

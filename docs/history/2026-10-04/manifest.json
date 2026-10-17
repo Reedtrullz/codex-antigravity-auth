@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "archivedAt": "2026-10-17",
+  "files": [
+    {
+      "originalPath": "CURRENT_STATE.md",
+      "archivePath": "docs/history/2026-10-04/CURRENT_STATE.md",
+      "sourceCommit": "33159aff1ddcde1c9c5d4a83b3142b78681a6490",
+      "sha256": "0b1a4d0d765badbc8dbe55cc06b30a3add6cdfae0a66bf8d5d9a78c7251dbabf"
+    },
+    {
+      "originalPath": "VALIDATION_COPIES.md",
+      "archivePath": "docs/history/2026-10-04/VALIDATION_COPIES.md",
+      "sourceCommit": "33159aff1ddcde1c9c5d4a83b3142b78681a6490",
+      "sha256": "ae6642f02b0d22e19de580071fa1d257bd869e7982896217084a2b9ab8fcb34b"
+    }
+  ]
+}

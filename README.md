@@ -1,6 +1,6 @@
 # Codex Antigravity Auth
 
-> Source-based review (2026-09-25): [CURRENT_STATE.md](CURRENT_STATE.md). It distinguishes current local code from historical test/deployment claims.
+> Dated source reviews and release snapshots are archived under [docs/history](docs/history/2026-10-04/README.md); they describe older checkouts, not this source.
 
 [![PyPI](https://img.shields.io/pypi/v/codex-antigravity-auth.svg)](https://pypi.org/project/codex-antigravity-auth/)
 [![CI](https://github.com/Reedtrullz/codex-antigravity-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/Reedtrullz/codex-antigravity-auth/actions/workflows/ci.yml)

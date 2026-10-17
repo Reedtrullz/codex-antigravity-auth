@@ -5,7 +5,7 @@
 **Date:** 2026-10-09
 **Protocol:** `docs/superpowers/specs/2026-10-09-bounded-gemini-listening-qualification-protocol.md` (merged via PR #171)
 **Artifacts:**
-- Manifest: `docs/qualification/fixture-manifest.json` — SHA-256 `7e0d0822e622407de43fb016dd84c927b063a9bd6c1e2e2b6933a74fc1ba05c9`
+- Manifest: `docs/qualification/fixture-manifest.json` — SHA-256 `e05e2d27d597d3041210fac6786289e8389b2b62396f5de9f86ef2d945c05ab6` (re-pinned 2026-10-17 from `7e0d0822e622407de43fb016dd84c927b063a9bd6c1e2e2b6933a74fc1ba05c9` for portable schema-2 paths only; see the arming runbook)
 - Generator: `scripts/qualification/build_qualification_manifest.py`
 - Scorer: `scripts/qualification/score_qualification_run.py` (self-test 10/10 pass; frozen 2026-10-09 after owner confirmation, final SHA-256 `c0450a0d38874513fe1d1441f17ec44532d343d1f9881fec8be55b697f1dc3fa`)
 
