@@ -598,8 +598,24 @@ def test_timeout_failure_uses_observed_native_response_id_without_created(monkey
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_downstream_backpressure_is_bounded_and_releases_ownership(monkeypatch, setup_route, route):
-    state = setup_route(route, timeout=0.2)
-    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 0.06)
+    # Preparation gets generous budgets so a slow runner cannot expire the
+    # request before the stream is handed off. Previously the 60ms total-stream
+    # cap also covered preparation and flaked on macOS CI with a 504 from
+    # create_response. The short cap under test is armed at stream handoff.
+    state = setup_route(route, timeout=5)
+    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 5.0)
+    new_budget = server._new_request_budget
+    def short_stream_budget(request):
+        budget = new_budget(request)
+        start_stream = budget.start_stream
+        def start_short_stream():
+            start_stream()
+            now = time.monotonic()
+            budget.stream_total = now - budget.started + 0.06
+            budget.deadline = now + 0.06
+        budget.start_stream = start_short_stream
+        return budget
+    monkeypatch.setattr(server, "_new_request_budget", short_stream_budget)
     clients, contexts = stream_clients(monkeypatch, route, repeated=True)
     async def scenario():
         response = await server.create_response(Request(route, stream=True))
