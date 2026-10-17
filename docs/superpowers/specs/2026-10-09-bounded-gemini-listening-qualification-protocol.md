@@ -5,8 +5,8 @@
 **Date:** 2026-10-09
 **Branch:** `codex/music-evidence-account-binding` at `25a47ceedbf5a07a1f7b4ac884e53abf591060b1` (PR #171)
 **Companion worktrees:**
-- Anti: `/Users/reidar/Projectos/.worktrees/anti-music-review-afk`
-- Keyspilli: `/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli` (code candidate `ebb77a52174583e1fe6a947b56b3df5818c68192`)
+- Anti: `~/Projectos/.worktrees/anti-music-review-afk`
+- Keyspilli: `~/.codex/worktrees/keyspilli-music-review-afk/Keyspilli` (code candidate `ebb77a52174583e1fe6a947b56b3df5818c68192`)
 
 ---
 
@@ -38,7 +38,7 @@ Only T1-T4 are automatable. T5 remains permanently outside this protocol's scope
 
 Ground truth comes exclusively from Keyspilli's capture/evaluation pipeline in the Keyspilli worktree. The canonical fixture source is:
 
-    /Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/
+    ~/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/
 
 within which `evaluation/rows.json` and `capture-retry/media/*.wav` define paired fixtures. Each fixture has:
 

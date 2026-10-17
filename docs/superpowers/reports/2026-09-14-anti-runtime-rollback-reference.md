@@ -4,11 +4,11 @@ Captured read-only before any candidate runtime update on 2026-09-14.
 
 ## Code and service references
 
-- Primary checkout: `/Users/reidar/Projectos/codex-antigravity-auth`, SHA `117b496db568a7c222dd1698912224c36f8264da`.
-- Candidate worktree: `/Users/reidar/.codex/worktrees/dfb9/codex-antigravity-auth`, SHA `6f717279de5ce1de8c1235bb4d51cc4e4a92b834` before the liveness remediation commit.
+- Primary checkout: `~/Projectos/codex-antigravity-auth`, SHA `117b496db568a7c222dd1698912224c36f8264da`.
+- Candidate worktree: `~/.codex/worktrees/dfb9/codex-antigravity-auth`, SHA `6f717279de5ce1de8c1235bb4d51cc4e4a92b834` before the liveness remediation commit.
 - Launchd job: `com.codex-antigravity.gateway.51122`.
-- Launchd plist: `/Users/reidar/Library/LaunchAgents/com.codex-antigravity.gateway.51122.plist`, size `939`, mtime `2026-07-27T19:29:37+0200`, SHA256 `391297d7fa13990a69e2ff29453957779956e6da11e9b1af29a074cfc9b7db09`.
-- Installed Anti helper: `/Users/reidar/.codex/skills/anti/scripts/anti.py`, size `324249`, mtime `2026-09-14T12:43:56+0200`, SHA256 `33bcf6ff076e48d237af6ef7151f80b6be0794a5d816739f393aebbf456e73f7`.
+- Launchd plist: `~/Library/LaunchAgents/com.codex-antigravity.gateway.51122.plist`, size `939`, mtime `2026-07-27T19:29:37+0200`, SHA256 `391297d7fa13990a69e2ff29453957779956e6da11e9b1af29a074cfc9b7db09`.
+- Installed Anti helper: `~/.codex/skills/anti/scripts/anti.py`, size `324249`, mtime `2026-09-14T12:43:56+0200`, SHA256 `33bcf6ff076e48d237af6ef7151f80b6be0794a5d816739f393aebbf456e73f7`.
 - Existing service process: PID `16078`, `127.0.0.1:51122`, importing the primary checkout.
 
 ## Encrypted state references

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10+, argparse, FastAPI/Starlette, httpx, existing AnyIO runtime, pytest/unittest, encrypted transactional JSON persistence, Git and the existing Anti helper.
 
-**Spec:** /Users/reidar/.codex/anti-audits/2026-09-14-pr26/REVIEW.md. Read it fully, together with /Users/reidar/.codex/attachments/d642aacf-1dc1-48ff-8203-2bb4112d523f/pasted-text.txt. Reproductions are in the audit directory, not the repository.
+**Spec:** ~/.codex/anti-audits/2026-09-14-pr26/REVIEW.md. Read it fully, together with ~/.codex/attachments/d642aacf-1dc1-48ff-8203-2bb4112d523f/pasted-text.txt. Reproductions are in the audit directory, not the repository.
 
 ## Global Constraints
 

@@ -6,7 +6,7 @@ Baseline identity captured before documentation edits: `codex-antigravity-auth`:
 
 The visible Python 2.4.2 checkout remains unchanged. Seven newer hidden source/validation copies also declare 2.4.2 but differ materially in implementation; see [validation copies](VALIDATION_COPIES.md). A version string, saved test log or routing receipt does not establish installed source or provider availability.
 
-This repeat review used source/configuration fingerprints, local Git metadata and targeted boundary reads. Earlier structural counts, test statements and dirty-file totals below retain their September observation date; they are not fresh runtime results. See [portfolio coverage](../REVIEW_COVERAGE.md) and [checkout inventory](../WORKTREES.md) for current scope and limits.
+This repeat review used source/configuration fingerprints, local Git metadata and targeted boundary reads. Earlier structural counts, test statements and dirty-file totals below retain their September observation date; they are not fresh runtime results. See the portfolio coverage (`REVIEW_COVERAGE.md`) and checkout inventory (`WORKTREES.md`) in the local Projectos workspace, outside this repository, for scope and limits.
 
 ## Source analysis retained from 2026-09-25
 
@@ -28,6 +28,6 @@ Reviewed 2026-09-25. Baseline: `main`, `027fd313b1f6`, zero tracked changes befo
 
 ## Working and validation
 
-Read [package guide](codex_antigravity_auth/AGENTS.md) and the existing root guide. `pyproject.toml` defines pytest and package data; `.github/workflows/ci.yml` includes multi-version/platform tests plus build/install/content checks. `.github/workflows/publish.yml` defines publication. Those jobs were inspected, **not run**; no installed-wheel or PyPI state was checked.
+Read the root [contributor guide](../../../AGENTS.md); a separate package guide under `codex_antigravity_auth/` does not exist in this repository. `pyproject.toml` defines pytest and package data; `.github/workflows/ci.yml` includes multi-version/platform tests plus build/install/content checks. `.github/workflows/publish.yml` defines publication. Those jobs were inspected, **not run**; no installed-wheel or PyPI state was checked.
 
 Do not run login/setup/service commands as read-only diagnostics: they can alter account stores, Codex configuration, installed skills and running services. No credentials, provider calls, installs or live gateway checks were used here. Existing root AGENTS model/test statements should be treated as dated snapshots unless freshly verified.

@@ -3577,11 +3577,11 @@ class ConsultFileContextTests(unittest.TestCase):
 
     def test_extract_file_paths_from_prompt_absolute_paths(self) -> None:
         anti = load_anti()
-        prompt = 'Review /Users/reidar/Documents/RSHelper/src/rshelper/ (api.py, models.py)'
+        prompt = 'Review /Users/example/Documents/RSHelper/src/rshelper/ (api.py, models.py)'
         paths = anti.extract_file_paths_from_prompt(prompt)
         self.assertEqual(paths, [
-            '/Users/reidar/Documents/RSHelper/src/rshelper/api.py',
-            '/Users/reidar/Documents/RSHelper/src/rshelper/models.py',
+            '/Users/example/Documents/RSHelper/src/rshelper/api.py',
+            '/Users/example/Documents/RSHelper/src/rshelper/models.py',
         ])
 
     def test_extract_file_paths_from_prompt_no_paths(self) -> None:
