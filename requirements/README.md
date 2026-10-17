@@ -5,9 +5,24 @@ keeps those direct runtime dependencies at their declared floors on Python 3.10;
 transitive and test dependencies resolve normally. This is a compatibility test,
 not a secure deployment recommendation. The initial minimum run exposed the
 FastAPI 0.110 / Starlette TestClient incompatibility with HTTPX 0.28. The
-declared floors in `pyproject.toml` are the tested floors; at the time of writing
-they include FastAPI 0.142.2 and cryptography 50.0.2, raised from 0.115.6 and
-42.0.0 when Dependabot PRs #175 and #173 were merged. The peer-address security
+declared floors in `pyproject.toml` are the tested floors:
+
+- FastAPI 0.133.0 is the first release that allows Starlette 1.x (0.132.x
+  required `starlette<1.0.0`). The floor is set by that, not by the newest
+  FastAPI, so a pinned downstream is not forced onto every FastAPI release.
+- Starlette is a direct dependency with floor 1.3.1 so the security floor does
+  not depend on FastAPI's loose `starlette>=0.40.0` bound. It keeps the Host
+  header validation fix from 1.0.1
+  ([GHSA-86qp-5c8j-p5mr](https://github.com/advisories/GHSA-86qp-5c8j-p5mr))
+  and the request-path/authority fix from 1.3.0
+  ([GHSA-jp82-jpqv-5vv3](https://github.com/advisories/GHSA-jp82-jpqv-5vv3)).
+- cryptography stays at 50.0.2, the only security-supported release line; its
+  wheels bundle OpenSSL 4.0.3.
+
+Earlier Dependabot merges (#175, #173) had raised FastAPI to 0.142.2 and
+cryptography from 42.0.0 to 50.0.2 as a side effect of lockfile bumps; the
+FastAPI floor was lowered back to 0.133.0 deliberately with the Starlette floor
+above. The peer-address security
 tests inject the ASGI client scope directly so older supported TestClient
 constructor signatures keep the same security assertions.
 
