@@ -1,6 +1,84 @@
 # Changelog
 
-## v2.4.3 - Music Evidence Candidate (not published)
+## v2.4.3 - Gateway Hardening & Music Evidence (unreleased)
+
+Release candidate: `pyproject.toml` already declares 2.4.3. The release date is
+set when the `v2.4.3` tag is pushed; tagging and PyPI publication are separate
+maintainer steps.
+
+### Changed
+
+- Runtime dependency floors are `cryptography>=50.0.2` (#173), `fastapi>=0.133.0`
+  and a new direct `starlette>=1.3.1` (#196). FastAPI was lowered from the
+  accidental 0.142.2 floor (#175), and Starlette 1.3.1 keeps its Host-header and
+  path-poisoning fixes. Environments pinned below these floors must upgrade.
+- Dependabot no longer edits the declared floors in
+  `requirements/minimum-runtime.txt`, and `pydantic`/`pydantic-core` updates
+  arrive together (#196).
+- The Cloud Code Assist host is one shared endpoint for generation, onboarding,
+  project discovery and `doctor`, which previously probed a different host
+  (#199).
+- Stale root review snapshots moved to `docs/history/2026-10-04/`, local
+  absolute paths were removed from the docs, and the qualification fixture
+  manifest stores paths relative to a portable evidence root (#200).
+- Anti defaults to Gemini 3.8 Flash instead of Claude 4.6 ahead of the
+  2026-11-02 end of third-party model access on non-paid plans (#185, #187).
+- Claude requests without an explicit output cap now send one above the
+  thinking budget (#186).
+
+### Added
+
+- `ANTIGRAVITY_ENDPOINT` and `ANTIGRAVITY_IDE_VERSION` environment overrides
+  for the Cloud Code Assist host and the advertised IDE version; invalid values
+  fail closed (#199).
+- Gemini 4 Argon and Claude Sonnet/Opus 5.5 catalog entries; their backend wire
+  IDs are unverified and access is plan-gated (#183).
+- Explicit model discovery with expiring readiness observations, and generation
+  readiness that requires completed assistant output (#103, #148).
+- Setup plans, non-secret profiles and drift-checked local restoration (#137);
+  service configuration drift detection (#143); versioned operational JSON and
+  bounded local support bundles (#139).
+- Encryption-key identity binding with backup-first recovery (#134).
+- Anti: image attachments, bounded PCM WAV listening, local HTML run reports,
+  offline review-quality replay, chunk-review resume, run-time/attempt and
+  currency budgets, local-only workflows, repository data policies and
+  context estimates (#151, #152, #154-#160, #136).
+
+### Hardened
+
+- Gateway request deadlines, payload/resource limits, generation admission and
+  provider HTTP connection reuse across every route (#140-#142).
+- Incremental SSE decoding, single-commit native stream outcomes, preserved
+  refusals/partial outcomes, Google output parts and validated function calls
+  (#118-#120, #138, #145, #149).
+- Request-shape validation and translated schema-loss reporting before
+  dispatch; lossy attachments and unsupported BYOK transports are rejected
+  (#101, #104, #144).
+- Endpoint policy that blocks credential-bearing redirects, explicit proxy and
+  remote-authentication boundaries (#121, #122).
+- OAuth: read-only diagnostics, denial/headless/stalled-callback handling,
+  refresh failures separated from credential rejection, refresh outside
+  selection locks (#105, #110, #111, #129).
+- Storage: private file protection with validated lock descriptors, protected
+  unsupported account-state versions, separate client/gateway namespaces
+  (#106, #131, #133).
+- Shared bounded credential redaction, terminal-control escaping, bounded and
+  sanitized process logs, serialized request-log rotation (#109, #116, #117, #135).
+- Semantic, transactional Codex TOML edits and staged/rolled-back skill
+  replacement (#113, #128).
+- macOS service install waits for launchd activation and keeps failure
+  evidence (#188).
+- OAuth token-endpoint and project-discovery errors are redacted, and the
+  login callback port no longer allows address reuse on Windows (#202).
+- Ruff's Pyflakes gate covers the whole tree; this fixed two `server.py`
+  callbacks that referenced a deleted exception variable, shadowed duplicate
+  tests and unused code (#201).
+- The downstream backpressure test arms its stream cap at handoff, removing a
+  macOS timing flake (#198).
+- CI gates on focused lint, dependency compatibility and an advisory policy;
+  test state is isolated and installed artifacts are verified (#100, #130).
+
+### Music evidence and provider diagnostics
 
 - Exclude volatile in-flight lease fields from the account-binding inventory
   hash so concurrent calls no longer invalidate a binding mid-run.
