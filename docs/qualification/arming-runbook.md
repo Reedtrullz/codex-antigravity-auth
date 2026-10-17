@@ -8,9 +8,11 @@
 
 **Frozen artifacts (verify before any step):**
 
-- Manifest: docs/qualification/fixture-manifest.json — SHA-256 7e0d0822e622407de43fb016dd84c927b063a9bd6c1e2e2b6933a74fc1ba05c9
+- Manifest: docs/qualification/fixture-manifest.json — SHA-256 e05e2d27d597d3041210fac6786289e8389b2b62396f5de9f86ef2d945c05ab6
 - Scorer: scripts/qualification/score_qualification_run.py — SHA-256 c0450a0d38874513fe1d1441f17ec44532d343d1f9881fec8be55b697f1dc3fa
-- Generator: scripts/qualification/build_qualification_manifest.py — SHA-256 f12063e7c49a2eb285c97e49f27d27feaed24ff6ca2ae166560ac03f993e43a5
+- Generator: scripts/qualification/build_qualification_manifest.py — SHA-256 3eb0991565848509e4b33339aef3974c45076aed82ac18e849e9c9ca63ddcb2c
+
+**2026-10-17 portable-path re-pin (no run ID existed):** the manifest moved to schema 2. `clipPath` and `captureReceiptPath` are now relative to a `~`-based `evidenceRoot` instead of absolute `/Users/<name>/...` paths, and the generator records paths that way (`--evidence-root`). Every other field (43 fixtures, events, clip hashes, questions, controls, exclusions) is byte-for-byte equivalent to the frozen manifest `7e0d0822e622407de43fb016dd84c927b063a9bd6c1e2e2b6933a74fc1ba05c9` (generator `f12063e7c49a2eb285c97e49f27d27feaed24ff6ca2ae166560ac03f993e43a5`); the scorer is unchanged. The dispatcher resolves the relative paths through `scripts/qualification/manifest_paths.py` and still verifies each clip's SHA-256.
 
 All commands below run from the branch worktree with .venv/bin on PATH (the venv is an editable install of this worktree).
 
@@ -111,6 +113,8 @@ Capture gateway RSS during dispatch (for the scorer's gateway.rssPeakBytes), the
       --run-record <absolute-new-run-record-path> \
       --controls-file <absolute-controls-results-path> \
       --gateway-metrics <absolute-json-path-with-rssPeakBytes>
+
+Clip paths resolve against the manifest's `evidenceRoot` (`~` expands to the operator's home). If the Keyspilli evidence tree lives elsewhere, add `--evidence-root <absolute-path-to-fresh>`; the clip hashes still have to match.
 
 The dispatcher re-verifies every clip SHA-256 and the PCM16/mono/44100 Hz/<=30 s/<=2 MiB transport profile client-side, refuses an existing run record, refuses if model != authorized model, requires the controls file to show all 12 manifest controls as refused, appends each attempt immediately, and never retries or falls back. --stop-after exists only for bounded dev self-checks.
 
