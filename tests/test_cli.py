@@ -187,6 +187,34 @@ class TestCliDoctor(unittest.TestCase):
         self.assertEqual(len(requests), 1)
         payload = json.loads(requests[0].data.decode("utf-8"))
         self.assertEqual(payload["model"], "gemini-3.8-flash-tiered")
+        # Doctor probes the same host the gateway generates against.
+        self.assertTrue(requests[0].full_url.startswith("https://daily-cloudcode-pa.googleapis.com/v1internal:"))
+
+    @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
+    @patch("codex_antigravity_auth.cli.load_accounts")
+    @patch("codex_antigravity_auth.cli.open_http_request")
+    def test_run_doctor_google_probe_honours_endpoint_override(self, mock_urlopen, mock_load, mock_creds):
+        mock_creds.return_value = ("client_id_val", "client_secret_val")
+        mock_load.return_value = {"accounts": [{"email": "test@example.com", "expiresAt": 9_999_999_999}]}
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            write_ready_codex_config(config_path)
+            with patch.dict(os.environ, {"ANTIGRAVITY_ENDPOINT": "https://override.example.test/"}):
+                with patch("codex_antigravity_auth.cli.all_provider_configs", return_value={}):
+                    with patch("builtins.print"):
+                        run_doctor(config=str(config_path))
+
+        urls = [
+            call.args[0].full_url
+            for call in mock_urlopen.call_args_list
+            if call.args and isinstance(call.args[0], urllib.request.Request)
+        ]
+        self.assertIn("https://override.example.test/v1internal:generateContent", urls)
+        self.assertFalse(any("cloudcode-pa.googleapis.com" in url for url in urls))
 
     @patch("codex_antigravity_auth.cli.resolve_oauth_credentials")
     @patch("codex_antigravity_auth.cli.load_accounts")

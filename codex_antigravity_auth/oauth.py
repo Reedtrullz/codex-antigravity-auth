@@ -227,9 +227,10 @@ def _extract_project_id(data: dict | None) -> str | None:
 
 def load_code_assist(access_token: str) -> str | None:
     """Call loadCodeAssist to discover the CCA project for an account."""
+    from .constants import antigravity_endpoint
     from .google_transport import ide_user_agent
     req = urllib.request.Request(
-        "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+        f"{antigravity_endpoint()}/v1internal:loadCodeAssist",
         data=json.dumps({"metadata": {"ideType": "ANTIGRAVITY"}}).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {access_token}",
@@ -249,17 +250,20 @@ def load_code_assist(access_token: str) -> str | None:
 
 def onboard_user(access_token: str) -> str | None:
     """Call onboardUser (with retry) to create and discover the CCA project."""
-    from .google_transport import ide_user_agent, ANTIGRAVITY_IDE_VERSION
+    from .constants import antigravity_endpoint
+    from .google_transport import antigravity_ide_version, ide_user_agent
     import time as _time
+    endpoint = antigravity_endpoint()
+    ide_version = antigravity_ide_version()
     for _attempt in range(5):
         req = urllib.request.Request(
-            "https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser",
+            f"{endpoint}/v1internal:onboardUser",
             data=json.dumps({
                 "tier_id": "free-tier",
                 "metadata": {
                     "ide_type": "ANTIGRAVITY",
                     "ide_name": "antigravity",
-                    "ide_version": ANTIGRAVITY_IDE_VERSION,
+                    "ide_version": ide_version,
                 },
             }).encode("utf-8"),
             headers={
