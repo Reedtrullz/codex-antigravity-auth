@@ -127,7 +127,7 @@ requests==2.34.2
     #   pip-audit
 rich==15.0.0
     # via pip-audit
-ruff==0.16.9
+ruff==0.17.0
     # via codex-antigravity-auth (pyproject.toml)
 secretstorage==3.5.0
     # via keyring
