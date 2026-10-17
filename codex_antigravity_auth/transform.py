@@ -5,7 +5,6 @@ import uuid
 import json
 import time
 import math
-import base64
 import os
 import copy
 import re

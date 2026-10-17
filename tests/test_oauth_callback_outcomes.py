@@ -1,6 +1,5 @@
 """Synthetic callback/flow fixtures; no real OAuth/browser/provider access."""
 
-import json
 import sys
 import threading
 import time

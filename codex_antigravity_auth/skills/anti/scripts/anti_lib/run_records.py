@@ -16,7 +16,7 @@ import uuid
 
 from .errors import AntiError
 from .artifacts import (ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION,
-                        LANE_SCHEMA_VERSION, file_reference, read_record, validate_record, coverage_has_loss)
+                        LANE_SCHEMA_VERSION, file_reference, validate_record, coverage_has_loss)
 from .cleanup import RUN_ID_RE, assert_not_deleted
 from .context import coverage_summary
 from .persistence import atomic_write_json, fsync_directory

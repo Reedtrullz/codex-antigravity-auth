@@ -4,7 +4,6 @@ import json
 import os
 import stat
 import sys
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest

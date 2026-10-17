@@ -1,11 +1,10 @@
-from .console import console_print as print
+from .console import console_print as print  # noqa: F401 - terminal-safe print for any future output
 import logging
 import json
 import asyncio
 import math
 import os
 import secrets
-import sys
 import time
 import threading
 import httpx
@@ -14,7 +13,7 @@ from .endpoint_policy import httpx_client_options
 import anyio
 import email.utils
 import re
-from contextlib import aclosing, asynccontextmanager, suppress
+from contextlib import aclosing, asynccontextmanager
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
 from urllib.parse import urlparse
@@ -23,7 +22,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
-from .accounts import AccountManager, AccountRefreshInProgress, classify_backend_status, is_validation_required_error
+from .accounts import AccountManager, AccountRefreshInProgress, classify_backend_status
 from .provider_diagnostics import parse_provider_error, provider_error_class
 from .account_binding import parse_account_binding_header, validate_binding_route
 from .account_state import scoped_cooldown_expiry
@@ -93,7 +92,7 @@ from .response_protocol import (
     validate_capabilities,
 )
 from .provider_clients import ProviderClientPool
-from .storage import load_accounts, load_accounts_read_only
+from .storage import load_accounts, load_accounts_read_only  # noqa: F401 - load_accounts is a test patch target
 from .unified import (
     OPENAI_UPSTREAM_TIMEOUT_SECONDS,
     classify_route,
@@ -1534,7 +1533,7 @@ async def create_response(request: Request):
     except ResourceLimitError as exc:
         report = getattr(budget, "report_limit", None)
         if report is not None:
-            await shielded_cleanup(lambda: report(exc), timeout=0.05)
+            await shielded_cleanup(lambda exc=exc: report(exc), timeout=0.05)
         raise _resource_limit_http_exception(exc) from exc
     except (RequestDeadlineExceeded, ClientDisconnect, asyncio.CancelledError) as exc:
         if not isinstance(exc, RequestDeadlineExceeded) and not budget.terminal_observed:
@@ -1542,7 +1541,7 @@ async def create_response(request: Request):
         if budget.abort is not None and not budget.abort_reported:
             # Diagnostics are best effort; essential resource cleanup is owned
             # separately, so a stalled writer cannot retain a lease or client.
-            await shielded_cleanup(lambda: budget.abort(isinstance(exc, RequestDeadlineExceeded)), timeout=0.05)
+            await shielded_cleanup(lambda exc=exc: budget.abort(isinstance(exc, RequestDeadlineExceeded)), timeout=0.05)
         if isinstance(exc, RequestDeadlineExceeded):
             raise HTTPException(status_code=504, detail="Gateway request deadline exceeded") from exc
         raise
@@ -2315,7 +2314,6 @@ async def _create_response(request: Request, budget: RequestBudget):
                 # Use explicit VALIDATION_REQUIRED detection to avoid misclassifying
                 # 403 auth failures as rate limits.
                 error_category = classify_backend_status(res.status_code, res.text)
-                is_validation = is_validation_required_error(res.status_code, res.text)
                 cooldown_scope = "family" if error_category == "rate_limit" else "account"
                 cooldown_category = error_category
                 retry_diagnostics = parse_provider_error(res.status_code, res.text)
@@ -2382,7 +2380,6 @@ async def _create_response(request: Request, budget: RequestBudget):
             if res.status_code in (401, 403):
                 retry_after_seconds = retry_after_seconds_from_response(res)
                 retry_after_source = retry_after_source_from_response(res)
-                is_validation = is_validation_required_error(res.status_code, res.text)
                 diagnostics = parse_provider_error(res.status_code, res.text)
                 error_class = (
                     provider_error_class(diagnostics) if diagnostics.reason else "auth"

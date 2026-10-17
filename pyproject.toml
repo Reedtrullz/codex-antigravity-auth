@@ -103,19 +103,27 @@ codex_antigravity_auth = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 
-# Start with correctness checks in the state/storage/protocol owners and CI
-# helpers. Broaden this list in reviewed changes; no repository formatting gate.
+# Correctness checks (Pyflakes + syntax errors) cover the whole package, the
+# bundled Anti skill, CI helpers and tests. No repository formatting gate.
 [tool.ruff]
 target-version = "py310"
 include = [
-  "codex_antigravity_auth/account_state.py",
-  "codex_antigravity_auth/secure_store.py",
-  "codex_antigravity_auth/storage.py",
-  "codex_antigravity_auth/response_protocol.py",
-  "codex_antigravity_auth/schema.py",
-  "scripts/*.py",
-  "tests/test_quality_gates.py",
+  "codex_antigravity_auth/**/*.py",
+  "scripts/**/*.py",
+  "tests/**/*.py",
+  "test_support/**/*.py",
+  "conftest.py",
 ]
 
 [tool.ruff.lint]
 select = ["F", "E9"]
+
+[tool.ruff.lint.per-file-ignores]
+# cli.py is the compatibility facade: split cli_* modules and tests reach
+# helpers through `_cli.<name>`, and command handlers are bound lazily into
+# module globals at the end of the file. Its imports are deliberate re-exports
+# and its handler names are resolved at runtime.
+"codex_antigravity_auth/cli.py" = ["F401", "F821"]
+# pytest fixtures imported from sibling test modules are requested by name.
+"tests/test_account_binding_helper.py" = ["F811"]
+"tests/test_provider_clients.py" = ["F811"]

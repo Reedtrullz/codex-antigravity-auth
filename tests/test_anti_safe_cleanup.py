@@ -50,7 +50,7 @@ def clean(cleanup, root, **kw):
 @pytest.mark.parametrize("old", [False, True])
 def test_running_stale_and_unknown_records_are_preserved(sandbox, state, old):
     _, cleanup, root = sandbox
-    path = record(root, status=state, old=old)
+    record(root, status=state, old=old)
     artifact = root / "fixture"
     artifact.mkdir()
     (artifact / "result.json").write_text("synthetic result")

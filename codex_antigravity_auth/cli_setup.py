@@ -6,14 +6,12 @@ from .console import console_print as print
 import argparse
 import getpass
 import json
-import os
 import shlex
 import sys
 import time
 import urllib.error
 import urllib.request
 import webbrowser
-from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
 from . import cli as _cli

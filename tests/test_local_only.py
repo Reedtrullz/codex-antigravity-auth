@@ -4,7 +4,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 from urllib.parse import urlsplit
 
 import pytest
