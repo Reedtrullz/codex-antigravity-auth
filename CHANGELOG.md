@@ -8,9 +8,19 @@ maintainer steps.
 
 ### Changed
 
-- Runtime dependency floors were raised to `cryptography>=50.0.2` and
-  `fastapi>=0.142.2` (#173, #175). Environments pinned below these floors must
-  upgrade.
+- Runtime dependency floors are `cryptography>=50.0.2` (#173), `fastapi>=0.133.0`
+  and a new direct `starlette>=1.3.1` (#196). FastAPI was lowered from the
+  accidental 0.142.2 floor (#175), and Starlette 1.3.1 keeps its Host-header and
+  path-poisoning fixes. Environments pinned below these floors must upgrade.
+- Dependabot no longer edits the declared floors in
+  `requirements/minimum-runtime.txt`, and `pydantic`/`pydantic-core` updates
+  arrive together (#196).
+- The Cloud Code Assist host is one shared endpoint for generation, onboarding,
+  project discovery and `doctor`, which previously probed a different host
+  (#199).
+- Stale root review snapshots moved to `docs/history/2026-10-04/`, local
+  absolute paths were removed from the docs, and the qualification fixture
+  manifest stores paths relative to a portable evidence root (#200).
 - Anti defaults to Gemini 3.8 Flash instead of Claude 4.6 ahead of the
   2026-11-02 end of third-party model access on non-paid plans (#185, #187).
 - Claude requests without an explicit output cap now send one above the
@@ -18,6 +28,9 @@ maintainer steps.
 
 ### Added
 
+- `ANTIGRAVITY_ENDPOINT` and `ANTIGRAVITY_IDE_VERSION` environment overrides
+  for the Cloud Code Assist host and the advertised IDE version; invalid values
+  fail closed (#199).
 - Gemini 4 Argon and Claude Sonnet/Opus 5.5 catalog entries; their backend wire
   IDs are unverified and access is plan-gated (#183).
 - Explicit model discovery with expiring readiness observations, and generation
@@ -55,6 +68,13 @@ maintainer steps.
   replacement (#113, #128).
 - macOS service install waits for launchd activation and keeps failure
   evidence (#188).
+- OAuth token-endpoint and project-discovery errors are redacted, and the
+  login callback port no longer allows address reuse on Windows (#202).
+- Ruff's Pyflakes gate covers the whole tree; this fixed two `server.py`
+  callbacks that referenced a deleted exception variable, shadowed duplicate
+  tests and unused code (#201).
+- The downstream backpressure test arms its stream cap at handoff, removing a
+  macOS timing flake (#198).
 - CI gates on focused lint, dependency compatibility and an advisory policy;
   test state is isolated and installed artifacts are verified (#100, #130).
 
