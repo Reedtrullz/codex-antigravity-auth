@@ -227,10 +227,10 @@ def _extract_project_id(data: dict | None) -> str | None:
 
 def load_code_assist(access_token: str) -> str | None:
     """Call loadCodeAssist to discover the CCA project for an account."""
-    from .constants import CODE_ASSIST_DISCOVERY_ENDPOINT
+    from .constants import antigravity_endpoint
     from .google_transport import ide_user_agent
     req = urllib.request.Request(
-        f"{CODE_ASSIST_DISCOVERY_ENDPOINT}/v1internal:loadCodeAssist",
+        f"{antigravity_endpoint()}/v1internal:loadCodeAssist",
         data=json.dumps({"metadata": {"ideType": "ANTIGRAVITY"}}).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {access_token}",

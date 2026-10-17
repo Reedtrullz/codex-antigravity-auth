@@ -3,7 +3,6 @@ import json
 import sys
 import stat
 import ipaddress
-import tempfile
 from pathlib import Path
 from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory, protect_descriptor, verify_regular_descriptor
 from .namespaces import gateway_home, gateway_file
@@ -30,10 +29,6 @@ ANTIGRAVITY_ENDPOINT = DEFAULT_ANTIGRAVITY_ENDPOINT
 # production host; new code should use antigravity_endpoint().
 ANTIGRAVITY_ENDPOINT_PROD = ANTIGRAVITY_ENDPOINT
 ANTIGRAVITY_ENDPOINT_ENV = "ANTIGRAVITY_ENDPOINT"
-# Project discovery (loadCodeAssist) has used the production host since it was
-# introduced and live-verified in 521337b. It is kept separate on purpose and
-# is not affected by ANTIGRAVITY_ENDPOINT.
-CODE_ASSIST_DISCOVERY_ENDPOINT = "https://cloudcode-pa.googleapis.com"
 ANTIGRAVITY_ACCOUNTS_FILE = "~/.codex/antigravity-accounts.json"
 CREDENTIALS_FILE = "~/.codex/antigravity-credentials.json"
 GATEWAY_TOKEN_MIN_LENGTH = 32

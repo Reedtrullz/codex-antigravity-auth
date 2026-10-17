@@ -54,10 +54,13 @@ def test_endpoint_override_reaches_transport_and_route_identity(monkeypatch, val
 ])
 def test_invalid_endpoint_override_fails_closed(monkeypatch, value):
     monkeypatch.setenv("ANTIGRAVITY_ENDPOINT", value)
+    monkeypatch.setattr(oauth, "open_http_request", lambda *args, **kwargs: pytest.fail("Invalid endpoint reached dispatch"))
     with pytest.raises(ValueError):
         constants.antigravity_endpoint()
     with pytest.raises(ValueError):
         GoogleTransport(timeout=1)
+    with pytest.raises(ValueError):
+        oauth.load_code_assist("token")
 
 
 def test_ide_version_default_and_override(monkeypatch):
@@ -116,8 +119,10 @@ def test_onboarding_uses_endpoint_and_ide_version_overrides(monkeypatch):
     assert seen[0].get_header("User-agent").startswith("antigravity/ide/3.0.1 (")
 
 
-def test_project_discovery_host_is_explicit_and_not_overridden(monkeypatch):
-    monkeypatch.setenv("ANTIGRAVITY_ENDPOINT", "https://override.example.test")
+@pytest.mark.parametrize("endpoint", [DEFAULT, "https://override.example.test/"])
+def test_project_discovery_uses_shared_endpoint(monkeypatch, endpoint):
+    if endpoint != DEFAULT:
+        monkeypatch.setenv("ANTIGRAVITY_ENDPOINT", endpoint)
     seen = []
 
     def fake_open(request, timeout):
@@ -126,4 +131,5 @@ def test_project_discovery_host_is_explicit_and_not_overridden(monkeypatch):
 
     monkeypatch.setattr(oauth, "open_http_request", fake_open)
     assert oauth.load_code_assist("token") == "proj-2"
-    assert seen[0].full_url == constants.CODE_ASSIST_DISCOVERY_ENDPOINT + "/v1internal:loadCodeAssist"
+    assert len(seen) == 1
+    assert seen[0].full_url == endpoint.rstrip("/") + "/v1internal:loadCodeAssist"
