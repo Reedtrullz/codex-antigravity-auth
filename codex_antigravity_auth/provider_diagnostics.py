@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import urlsplit
 
 MAX_DIAGNOSTIC_MESSAGE_CHARS = 300
 

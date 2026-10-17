@@ -25,10 +25,14 @@ use synthetic credentials and temporary storage. Do not point tests at a live
 account store, provider or gateway.
 
 The focused static gate runs `python -m ruff check .` with `F` (Pyflakes) and
-`E9` rules on the ownership paths listed in `pyproject.toml`. It checks undefined
-names, unused imports/variables and invalid syntax without formatting the
-repository. Expand its ownership list deliberately as files become maintained;
-it is not a claim of full-source lint or type coverage. See the
+`E9` rules on the package (including the bundled Anti skill), `scripts/`,
+`tests/`, `test_support/` and `conftest.py`, as listed in `pyproject.toml`. It
+checks undefined names, unused imports/variables, shadowed definitions and
+invalid syntax without formatting the repository. Per-file ignores are limited
+to the `cli.py` compatibility facade (re-exports and lazily bound handlers) and
+two test modules that import pytest fixtures by name; mark any other deliberate
+re-export with an explained `# noqa: F401`. It is not a claim of style or type
+coverage. See the
 [official Ruff configuration reference](https://docs.astral.sh/ruff/configuration/).
 
 The audit runs [pip-audit](https://github.com/pypa/pip-audit) against all pinned

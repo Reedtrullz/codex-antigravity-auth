@@ -1,11 +1,9 @@
-from .console import console_print as print
+from .console import console_print as print  # noqa: F401 - terminal-safe print for any future output
 import logging
 import os
 import re
 import math
 from pathlib import Path
-from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory
-
 from .namespaces import gateway_file
 from .skills.anti.scripts.anti_lib.file_protection import ensure_private_directory
 from typing import Any

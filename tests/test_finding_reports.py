@@ -4,7 +4,6 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import jsonschema
 import pytest

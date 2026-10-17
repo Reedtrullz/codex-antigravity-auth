@@ -12,7 +12,7 @@ from .namespaces import gateway_home
 from typing import Any, Iterable
 
 from .constants import get_codex_home
-from .redaction import redact_secret_text, redact_secrets
+from .redaction import redact_secrets
 from .secure_store import file_lock
 
 _DEFAULT_GET_CODEX_HOME = get_codex_home

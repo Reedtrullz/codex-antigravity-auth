@@ -15,7 +15,6 @@ from codex_antigravity_auth.byok import (
     normalize_byok_model_id,
     provider_capabilities,
     provider_auth_mode,
-    provider_oauth_unsupported_message,
     provider_api_key_env_names,
     provider_allows_keyless_local_use,
     resolve_api_key,

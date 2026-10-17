@@ -7,7 +7,7 @@ from tests.conftest import byte_chunks
 import json
 import httpx
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -194,7 +194,6 @@ class TestUnifiedResponsesRouting(unittest.TestCase):
     def test_openai_success_does_not_touch_google_accounts(self):
         import os
         from codex_antigravity_auth import server
-        from codex_antigravity_auth.unified import OpenAIAuth
 
         fake_payload = {
             "id": "resp_123",
@@ -362,7 +361,6 @@ class TestUnifiedResponsesRouting(unittest.TestCase):
                 ):
                     with patch("codex_antigravity_auth.server.GoogleTransport") as mock_transport_cls:
                         instance = mock_transport_cls.return_value
-                        import asyncio
 
                         async def fake_post(req, lease):
                             return httpx.Response(200, json={"response": {
@@ -387,7 +385,6 @@ class TestUnifiedCodexConfig(unittest.TestCase):
     def test_classic_config_uses_antigravity_provider(self):
         from codex_antigravity_auth.cli import (
             DEFAULT_CODEX_PROVIDER_ID,
-            merge_codex_config,
             render_codex_config_snippet,
         )
 

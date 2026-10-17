@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from tests.test_wav_audio import fixture, bridge, endpoint, response, upstream, server
+from tests.test_wav_audio import fixture, bridge, endpoint, response, upstream, server  # noqa: F401 - pytest fixtures requested by name
 from tests.test_gemini_music_review import arguments, result
 from tests.test_wav_audio import listen_argv
 

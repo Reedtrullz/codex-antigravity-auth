@@ -1,20 +1,18 @@
 """Synthetic finalized-call contracts; no functions are executed by these tests."""
-import asyncio
 from copy import deepcopy
 from decimal import Decimal
 import json
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from codex_antigravity_auth import server
-from codex_antigravity_auth.google_transport import GoogleTransport, GoogleResponseAccumulator, GoogleStreamEventAdapter
+from codex_antigravity_auth.google_transport import GoogleTransport, GoogleResponseAccumulator
 from codex_antigravity_auth.openai_transport import OpenAICompatibleTransport, NativeResponsesStreamAdapter, ChatResponseAccumulator
 from codex_antigravity_auth.response_protocol import TerminalKind
 from codex_antigravity_auth.tool_calls import FunctionCallValidator, ToolCallError, native_response
-from codex_antigravity_auth.transform import transform_chat_response, transform_request, clean_function_call_args
+from codex_antigravity_auth.transform import clean_function_call_args
 from codex_antigravity_auth.unified import OpenAIAuth
 from fake_upstream import upstream, frames, split_bytes
 

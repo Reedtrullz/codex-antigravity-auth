@@ -5,9 +5,7 @@ age-ineligible terminal state, pool exhaustion, URL redaction, and panel
 fail-closed. Uses temporary stores only; never real credentials.
 """
 import json
-from unittest.mock import patch
 
-import pytest
 
 from codex_antigravity_auth.provider_diagnostics import (
     parse_provider_error,
