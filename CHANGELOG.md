@@ -1,6 +1,64 @@
 # Changelog
 
-## v2.4.3 - Music Evidence Candidate (not published)
+## v2.4.3 - Gateway Hardening & Music Evidence (unreleased)
+
+Release candidate: `pyproject.toml` already declares 2.4.3. The release date is
+set when the `v2.4.3` tag is pushed; tagging and PyPI publication are separate
+maintainer steps.
+
+### Changed
+
+- Runtime dependency floors were raised to `cryptography>=50.0.2` and
+  `fastapi>=0.142.2` (#173, #175). Environments pinned below these floors must
+  upgrade.
+- Anti defaults to Gemini 3.8 Flash instead of Claude 4.6 ahead of the
+  2026-11-02 end of third-party model access on non-paid plans (#185, #187).
+- Claude requests without an explicit output cap now send one above the
+  thinking budget (#186).
+
+### Added
+
+- Gemini 4 Argon and Claude Sonnet/Opus 5.5 catalog entries; their backend wire
+  IDs are unverified and access is plan-gated (#183).
+- Explicit model discovery with expiring readiness observations, and generation
+  readiness that requires completed assistant output (#103, #148).
+- Setup plans, non-secret profiles and drift-checked local restoration (#137);
+  service configuration drift detection (#143); versioned operational JSON and
+  bounded local support bundles (#139).
+- Encryption-key identity binding with backup-first recovery (#134).
+- Anti: image attachments, bounded PCM WAV listening, local HTML run reports,
+  offline review-quality replay, chunk-review resume, run-time/attempt and
+  currency budgets, local-only workflows, repository data policies and
+  context estimates (#151, #152, #154-#160, #136).
+
+### Hardened
+
+- Gateway request deadlines, payload/resource limits, generation admission and
+  provider HTTP connection reuse across every route (#140-#142).
+- Incremental SSE decoding, single-commit native stream outcomes, preserved
+  refusals/partial outcomes, Google output parts and validated function calls
+  (#118-#120, #138, #145, #149).
+- Request-shape validation and translated schema-loss reporting before
+  dispatch; lossy attachments and unsupported BYOK transports are rejected
+  (#101, #104, #144).
+- Endpoint policy that blocks credential-bearing redirects, explicit proxy and
+  remote-authentication boundaries (#121, #122).
+- OAuth: read-only diagnostics, denial/headless/stalled-callback handling,
+  refresh failures separated from credential rejection, refresh outside
+  selection locks (#105, #110, #111, #129).
+- Storage: private file protection with validated lock descriptors, protected
+  unsupported account-state versions, separate client/gateway namespaces
+  (#106, #131, #133).
+- Shared bounded credential redaction, terminal-control escaping, bounded and
+  sanitized process logs, serialized request-log rotation (#109, #116, #117, #135).
+- Semantic, transactional Codex TOML edits and staged/rolled-back skill
+  replacement (#113, #128).
+- macOS service install waits for launchd activation and keeps failure
+  evidence (#188).
+- CI gates on focused lint, dependency compatibility and an advisory policy;
+  test state is isolated and installed artifacts are verified (#100, #130).
+
+### Music evidence and provider diagnostics
 
 - Exclude volatile in-flight lease fields from the account-binding inventory
   hash so concurrent calls no longer invalidate a binding mid-run.
