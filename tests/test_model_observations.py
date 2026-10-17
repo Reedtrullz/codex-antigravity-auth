@@ -5,7 +5,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import sys
 import threading
-import time
 from unittest.mock import Mock
 
 import pytest
@@ -255,14 +254,20 @@ def test_catalog_diagnostics_show_omitted_configurations_without_hiding_local_mo
 
 @pytest.mark.parametrize('failure', ['timeout','error'])
 def test_catalog_timeout_and_error_are_visible(monkeypatch, failure):
+    # Block until released rather than sleeping, so a stalled runner cannot
+    # let the catalog finish before the 5ms timeout is observed.
+    unblock = threading.Event()
     def failed(created, **kwargs):
         if failure == 'error': raise RuntimeError('fixture-private-error')
-        time.sleep(.1)
+        unblock.wait(10)
         return []
     monkeypatch.setattr(server,'provider_model_catalog',failed)
     if failure == 'timeout':
         monkeypatch.setattr(server,'MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS',.005)
-    result = TestClient(server.app).get('/v1/models').json()
+    try:
+        result = TestClient(server.app).get('/v1/models').json()
+    finally:
+        unblock.set()
     assert result['provider_catalog_diagnostics']['status'] == failure
     assert result['data'] and 'fixture-private-error' not in json.dumps(result)
 
@@ -487,7 +492,7 @@ def test_refresh_waits_until_the_reviewed_import_transaction_finishes(monkeypatc
         def under_lock(data):
             worker = threading.Thread(target=refresh, daemon=True)
             workers.append(worker); worker.start()
-            assert started.wait(1)
+            assert started.wait(10)
             assert not finished.wait(.03)
             return mutate(data)
         return before_update(path,default,under_lock,**kwargs)

@@ -176,7 +176,7 @@ class TestAccounts(unittest.TestCase):
 
         def blocked_refresh(_token):
             started.set()
-            self.assertTrue(release.wait(1))
+            self.assertTrue(release.wait(10))
             return {"access_token": "fresh", "expires_in": 3600}
 
         mock_refresh.side_effect = blocked_refresh
@@ -184,18 +184,19 @@ class TestAccounts(unittest.TestCase):
         worker = threading.Thread(target=manager.refresh_expiring_accounts, daemon=True)
         worker.start()
         try:
-            self.assertTrue(started.wait(1))
+            self.assertTrue(started.wait(10))
 
             started_at = time.monotonic()
             selected = manager.select_active_account("gemini-3.8-flash")
             elapsed = time.monotonic() - started_at
 
             self.assertEqual(selected["email"], "secondary@gmail.com")
-            self.assertLess(elapsed, 0.5)
+            # The refresh stays blocked for up to 10s; selection must not wait.
+            self.assertLess(elapsed, 5)
             self.assertNotIn("primary@gmail.com", data["accountState"]["cooldowns"])
         finally:
             release.set()
-            worker.join(timeout=1)
+            worker.join(timeout=10)
             self.assertFalse(worker.is_alive())
 
     @patch("codex_antigravity_auth.accounts.update_accounts")
@@ -219,7 +220,7 @@ class TestAccounts(unittest.TestCase):
 
         def blocked_refresh(_token):
             started.set()
-            self.assertTrue(release.wait(1))
+            self.assertTrue(release.wait(10))
             return {"access_token": "fresh", "expires_in": 3600}
 
         mock_refresh.side_effect = blocked_refresh
@@ -227,16 +228,16 @@ class TestAccounts(unittest.TestCase):
         worker = threading.Thread(target=manager.refresh_expiring_accounts, daemon=True)
         worker.start()
         try:
-            self.assertTrue(started.wait(1))
+            self.assertTrue(started.wait(10))
 
             started_at = time.monotonic()
             with self.assertRaises(AccountRefreshInProgress):
                 manager.select_active_account("gemini-3.8-flash")
-            self.assertLess(time.monotonic() - started_at, 0.5)
+            self.assertLess(time.monotonic() - started_at, 5)
             self.assertNotIn("primary@gmail.com", data["accountState"]["cooldowns"])
         finally:
             release.set()
-            worker.join(timeout=1)
+            worker.join(timeout=10)
             self.assertFalse(worker.is_alive())
 
         self.assertEqual(data["accounts"][0]["accessToken"], "fresh")

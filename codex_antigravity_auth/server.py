@@ -190,6 +190,9 @@ GOOGLE_REQUEST_TIMEOUT_MAX_SECONDS = 600.0
 STREAM_IDLE_TIMEOUT_SECONDS = 60.0
 STREAM_TOTAL_TIMEOUT_SECONDS = 1800.0
 CLIENT_DISCONNECT_POLL_SECONDS = 0.1
+# Best-effort bound for the abort/limit diagnostic written while a request is
+# torn down; a stalled writer must not hold the request open. Tests override it.
+ABORT_DIAGNOSTIC_SECONDS = 0.05
 TEST_CLIENT_HOSTS = {"testserver", "testclient"}
 PROXY_INDICATOR_HEADERS = frozenset({
     "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "x-real-ip",
@@ -1460,7 +1463,7 @@ class OwnedStreamingResponse(StreamingResponse):
             finally:
                 self.budget.run_finalizers()
             if (disconnected or expired) and not self.budget.terminal_observed and not self.budget.abort_reported and self.budget.abort:
-                await shielded_cleanup(lambda: self.budget.abort(expired), timeout=0.05)
+                await shielded_cleanup(lambda: self.budget.abort(expired), timeout=ABORT_DIAGNOSTIC_SECONDS)
         if self.background is not None:
             await self.background()
 
@@ -1533,7 +1536,7 @@ async def create_response(request: Request):
     except ResourceLimitError as exc:
         report = getattr(budget, "report_limit", None)
         if report is not None:
-            await shielded_cleanup(lambda exc=exc: report(exc), timeout=0.05)
+            await shielded_cleanup(lambda exc=exc: report(exc), timeout=ABORT_DIAGNOSTIC_SECONDS)
         raise _resource_limit_http_exception(exc) from exc
     except (RequestDeadlineExceeded, ClientDisconnect, asyncio.CancelledError) as exc:
         if not isinstance(exc, RequestDeadlineExceeded) and not budget.terminal_observed:
@@ -1541,7 +1544,7 @@ async def create_response(request: Request):
         if budget.abort is not None and not budget.abort_reported:
             # Diagnostics are best effort; essential resource cleanup is owned
             # separately, so a stalled writer cannot retain a lease or client.
-            await shielded_cleanup(lambda exc=exc: budget.abort(isinstance(exc, RequestDeadlineExceeded)), timeout=0.05)
+            await shielded_cleanup(lambda exc=exc: budget.abort(isinstance(exc, RequestDeadlineExceeded)), timeout=ABORT_DIAGNOSTIC_SECONDS)
         if isinstance(exc, RequestDeadlineExceeded):
             raise HTTPException(status_code=504, detail="Gateway request deadline exceeded") from exc
         raise

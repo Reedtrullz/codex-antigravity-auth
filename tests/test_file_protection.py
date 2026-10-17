@@ -40,7 +40,8 @@ def test_unsafe_lock_targets_are_not_chmodded_or_written(tmp_path, kind):
     with pytest.raises((ValueError, OSError)):
         with secure_store.file_lock(target):
             pytest.fail("unsafe lock was accepted")
-    assert time.monotonic() - started < 1
+    # Rejected without blocking (e.g. on a FIFO open); generous for loaded runners.
+    assert time.monotonic() - started < 5
     assert referent.read_bytes() == b"synthetic original" and referent.stat().st_mode == before
 
 

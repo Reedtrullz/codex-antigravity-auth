@@ -144,17 +144,17 @@ def test_concurrent_background_refreshes_do_not_multiply_one_failure(monkeypatch
     def fail(*args, **kwargs):
         calls.append(1)
         entered.set()
-        assert release.wait(2)
+        assert release.wait(20)
         return (400, {"error": "invalid_grant"}) if credential_failure else (503, {})
 
     monkeypatch.setattr(oauth, "post_form", fail)
     managers = [accounts.AccountManager(), accounts.AccountManager()]
     with ThreadPoolExecutor(max_workers=2) as workers:
         first = workers.submit(managers[0].refresh_expiring_accounts)
-        assert entered.wait(1)
+        assert entered.wait(10)
         second = workers.submit(managers[1].refresh_expiring_accounts)
         release.set()
-        results = [first.result(timeout=3), second.result(timeout=3)]
+        results = [first.result(timeout=10), second.result(timeout=10)]
     assert len(calls) == 1
     assert sum(result["failed"] for result in results) == 1
     state = storage.load_accounts_read_only()["accountState"]

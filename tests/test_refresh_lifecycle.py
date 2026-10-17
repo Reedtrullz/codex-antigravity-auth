@@ -48,7 +48,7 @@ def test_delayed_foreground_allows_healthy_selection_and_removal(pool, monkeypat
 
     def refresh(_token):
         entered.set()
-        assert release.wait(3)
+        assert release.wait(20)
         return {"access_token": "fixture-new", "expires_in": 3600}
 
     monkeypatch.setattr(accounts, "refresh_access_token", refresh)
@@ -56,14 +56,14 @@ def test_delayed_foreground_allows_healthy_selection_and_removal(pool, monkeypat
     with ThreadPoolExecutor(3) as executor:
         pending = executor.submit(select, "gemini-3.8-flash")
         try:
-            assert entered.wait(2)
-            healthy = executor.submit(select, "gemini-3.8-flash").result(timeout=1)
+            assert entered.wait(10)
+            healthy = executor.submit(select, "gemini-3.8-flash").result(timeout=10)
             assert healthy["email"] == "second@example.invalid"
-            executor.submit(update, lambda state: state["accounts"].pop(0)).result(timeout=1)
+            executor.submit(update, lambda state: state["accounts"].pop(0)).result(timeout=10)
             assert manager.in_flight_count("first@example.invalid") == 0
         finally:
             release.set()
-        assert pending.result(timeout=2)["email"] == "second@example.invalid"
+        assert pending.result(timeout=10)["email"] == "second@example.invalid"
     assert [a["email"] for a in data["accounts"]] == ["second@example.invalid"]
     assert data["accountState"]["cooldowns"] == {}
 
@@ -78,12 +78,12 @@ def test_only_expiring_account_reports_refresh_in_progress(pool):
     def background_refresh_owner():
         with lock:
             entered.set()
-            assert release.wait(2)
+            assert release.wait(20)
 
     owner = threading.Thread(target=background_refresh_owner)
     owner.start()
     try:
-        assert entered.wait(1)
+        assert entered.wait(10)
         manager = accounts.AccountManager()
         with pytest.raises(accounts.AccountRefreshInProgress):
             manager.acquire_account("gemini-3.8-flash")
@@ -91,7 +91,7 @@ def test_only_expiring_account_reports_refresh_in_progress(pool):
         assert data["accountState"]["cooldowns"] == {}
     finally:
         release.set()
-        owner.join(timeout=2)
+        owner.join(timeout=10)
     assert not owner.is_alive()
 
 
@@ -105,7 +105,7 @@ def test_refresh_single_flight_across_managers_and_foreground_background(pool, m
     def refresh(token):
         calls.append(token)
         entered.set()
-        assert release.wait(3)
+        assert release.wait(20)
         return {"access_token": "fixture-new", "expires_in": 3600}
 
     monkeypatch.setattr(accounts, "refresh_access_token", refresh)
@@ -114,14 +114,14 @@ def test_refresh_single_flight_across_managers_and_foreground_background(pool, m
     with ThreadPoolExecutor(2) as executor:
         pending = executor.submit(first)
         try:
-            assert entered.wait(2)
+            assert entered.wait(10)
             assert managers[1].refresh_expiring_accounts()["refreshed"] == 0
             assert managers[1].select_active_account("gemini-3.8-flash")["email"] == "second@example.invalid"
             assert len(calls) == 1
             assert data["accountState"]["cooldowns"] == {}
         finally:
             release.set()
-        pending.result(timeout=2)
+        pending.result(timeout=10)
     assert data["accounts"][0]["accessToken"] == "fixture-new"
     assert managers[1].refresh_expiring_accounts()["refreshed"] == 0
     assert len(calls) == 1
@@ -195,21 +195,22 @@ def test_real_encrypted_store_removal_finishes_during_refresh(monkeypatch):
 
     def refresh(_token):
         entered.set()
-        assert release.wait(3)
+        assert release.wait(20)
         return {"access_token": "fixture-new", "expires_in": 3600}
 
     monkeypatch.setattr(accounts, "refresh_access_token", refresh)
+    # Hang guards only: encrypted-store writes took over 1s on Windows CI.
     with ThreadPoolExecutor(2) as executor:
         pending = executor.submit(manager.acquire_account, "gemini-3.8-flash")
         try:
-            assert entered.wait(2)
+            assert entered.wait(10)
             def remove(data):
                 data["accounts"] = []
                 return True
-            executor.submit(storage.update_accounts, remove).result(timeout=1)
+            executor.submit(storage.update_accounts, remove).result(timeout=10)
         finally:
             release.set()
-        assert pending.result(timeout=2) is None
+        assert pending.result(timeout=10) is None
     assert storage.load_accounts()["accounts"] == []
     assert manager.in_flight_count("removed@example.invalid") == 0
 
@@ -253,7 +254,7 @@ def test_shutdown_drains_worker_and_disallows_new_work(monkeypatch, cancel_shutd
     def refresh(_window, *, stop_event):
         calls.append(stop_event)
         entered.set()
-        assert release.wait(3)
+        assert release.wait(20)
         assert stop_event.is_set()
 
     monkeypatch.setattr(server.account_manager, "refresh_expiring_accounts", refresh)
@@ -302,20 +303,20 @@ def test_discovery_does_not_hold_selection_or_store_locks(pool, monkeypatch):
 
     def discover(_token):
         entered.set()
-        assert release.wait(3)
+        assert release.wait(20)
         return "fixture-discovered"
 
     monkeypatch.setattr("codex_antigravity_auth.oauth.discover_project_id", discover)
     with ThreadPoolExecutor(3) as executor:
         pending = executor.submit(manager.acquire_account, "gemini-3.8-flash")
         try:
-            assert entered.wait(2)
-            chosen = executor.submit(manager.select_active_account, "gemini-3.8-flash").result(timeout=1)
+            assert entered.wait(10)
+            chosen = executor.submit(manager.select_active_account, "gemini-3.8-flash").result(timeout=10)
             assert chosen["email"] == "second@example.invalid"
-            executor.submit(update, lambda state: state["accounts"][0].update(projectId="fixture-newer-project")).result(timeout=1)
+            executor.submit(update, lambda state: state["accounts"][0].update(projectId="fixture-newer-project")).result(timeout=10)
         finally:
             release.set()
-        pending.result(timeout=2)
+        pending.result(timeout=10)
     assert data["accounts"][0]["projectId"] == "fixture-newer-project"
 
 

@@ -224,12 +224,14 @@ def test_partial_connected_request_cannot_outlive_callback_deadline(drip):
                         client.sendall(b"x")
                     except OSError:
                         break
-            assert finished.wait(1), "accepted partial request bypassed the deadline"
+            # The client keeps the partial request open, so a bypassed deadline
+            # never finishes; the wait is only generous for loaded runners.
+            assert finished.wait(10), "accepted partial request bypassed the deadline"
             assert server.auth_code is server.auth_error is None
     finally:
         try:
             server.server_close()
-            worker.join(timeout=2)
+            worker.join(timeout=10)
             assert not worker.is_alive()
         finally:
             remove_listener(endpoint)

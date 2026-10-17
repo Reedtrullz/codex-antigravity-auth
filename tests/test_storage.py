@@ -46,7 +46,7 @@ class TestStorage(unittest.TestCase):
             def hold_first() -> None:
                 with file_lock(first_path):
                     first_entered.set()
-                    release_first.wait(2)
+                    release_first.wait(20)
 
             def enter_second() -> None:
                 with file_lock(second_path):
@@ -55,14 +55,14 @@ class TestStorage(unittest.TestCase):
             first = threading.Thread(target=hold_first)
             second = threading.Thread(target=enter_second)
             first.start()
-            self.assertTrue(first_entered.wait(1))
+            self.assertTrue(first_entered.wait(10))
             second.start()
             try:
-                self.assertTrue(second_entered.wait(1))
+                self.assertTrue(second_entered.wait(10))
             finally:
                 release_first.set()
-                first.join(2)
-                second.join(2)
+                first.join(10)
+                second.join(10)
 
     def test_key_initialization_lock_failure_does_not_trigger_fallback_key_creation(self):
         from codex_antigravity_auth import storage

@@ -2,6 +2,7 @@
 import asyncio
 from copy import deepcopy
 import json
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -14,6 +15,19 @@ from starlette.requests import ClientDisconnect
 
 from codex_antigravity_auth import request_budget as budgets, server
 from codex_antigravity_auth.account_binding import GATEWAY_INSTANCE
+from deadline_injection import HANG_GUARD_SECONDS, DiagnosticWriteDeadline, budget_deadline_on_entry
+
+# Timing policy: a short deadline under test is armed when the fixture reaches
+# the phase under test (see test_support/deadline_injection.py), never at
+# request start, and fixtures whose subject is not the deadline get a generous
+# GENEROUS_TIMEOUT. Wall-clock bounds only separate "bounded" from "waited for
+# the blocked operation" and keep a wide margin; hang guards use
+# HANG_GUARD_SECONDS. Scheduler stalls on loaded runners must not change which
+# phase a test exercises.
+GENEROUS_TIMEOUT = 5
+# Blocked fixtures hold out at least this long, so a wall-clock bound below it
+# still proves the request did not wait for them.
+BLOCK_SECONDS = 10
 
 ROUTES = ["google", "byok", "openai", "openai_oauth"]
 NATIVE = {"id": "resp_fixture", "status": "completed", "output": [{"type": "message", "role": "assistant", "id": "msg_fixture",
@@ -37,8 +51,14 @@ def setup_route(monkeypatch):
         monkeypatch.setattr(server, "GOOGLE_BACKEND_TIMEOUT_SECONDS", timeout)
         monkeypatch.setattr(server, "STREAM_IDLE_TIMEOUT_SECONDS", timeout)
         monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 1.0)
-        monkeypatch.setattr(budgets, "DRAIN_SECONDS", 0.015)
-        monkeypatch.setattr(budgets, "CLEANUP_SECONDS", 0.08)
+        # Cleanup, drain and abort-diagnostic bounds only cut off stalled
+        # fixtures. With the production-like 15-80ms values, a scheduler stall
+        # could cut off a fast terminal write or close and the test then saw
+        # zero or two terminal rows. Tests whose subject is a stalled close or
+        # drain set a short bound themselves.
+        monkeypatch.setattr(budgets, "DRAIN_SECONDS", HANG_GUARD_SECONDS)
+        monkeypatch.setattr(budgets, "CLEANUP_SECONDS", HANG_GUARD_SECONDS)
+        monkeypatch.setattr(server, "ABORT_DIAGNOSTIC_SECONDS", HANG_GUARD_SECONDS)
         monkeypatch.setattr(budgets, "DISCONNECT_POLL_SECONDS", 0.005)
         monkeypatch.setattr(server, "is_unified_mode_enabled", lambda: True)
         monkeypatch.setattr(server, "classify_route", lambda *a, **kw: "openai" if route.startswith("openai") else route)
@@ -70,25 +90,25 @@ def success_response(route):
 
 
 def deadline_on_phase_entry(monkeypatch, timeout=0.08):
-    armed = asyncio.Event()
-    async def timer(delay):
-        await armed.wait()
-        await asyncio.sleep(min(delay, timeout))
-    phase_asyncio = SimpleNamespace(**vars(asyncio))
-    phase_asyncio.sleep = timer
-    monkeypatch.setattr(budgets, "asyncio", phase_asyncio)
-    def arm():
-        budget = budgets.CURRENT_BUDGET.get()
-        assert budget is not None
-        budget.deadline = time.monotonic() + timeout
-        armed.set()
-    return arm
+    return budget_deadline_on_entry(monkeypatch, timeout)
+
+
+async def eventually(predicate, timeout=HANG_GUARD_SECONDS):
+    """Poll a late-cleanup observation without a tight wall-clock window."""
+    stop = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < stop:
+        await asyncio.sleep(0.005)
+    return predicate()
+
+
+# Hang guard for the nonstream fixture; its self-test below shortens it.
+PROVIDER_ENTRY_TIMEOUT = HANG_GUARD_SECONDS
 
 
 @pytest.mark.parametrize("route", ROUTES)
 @pytest.mark.parametrize("reason", ["deadline", "disconnect"])
 def test_nonstream_http_body_is_bounded_and_client_and_lease_close_once(monkeypatch, setup_route, route, reason):
-    state = setup_route(route, timeout=5)
+    state = setup_route(route, timeout=GENEROUS_TIMEOUT)
     clients = []
     async def scenario():
         entered = asyncio.Event()
@@ -108,7 +128,7 @@ def test_nonstream_http_body_is_bounded_and_client_and_lease_close_once(monkeypa
         task = asyncio.create_task(server.create_response(request))
         entry = asyncio.create_task(entered.wait())
         try:
-            await asyncio.wait({entry, task}, timeout=0.8, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait({entry, task}, timeout=PROVIDER_ENTRY_TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
             if not entered.is_set():
                 if task.done():
                     await task
@@ -116,7 +136,7 @@ def test_nonstream_http_body_is_bounded_and_client_and_lease_close_once(monkeypa
                 raise TimeoutError("timed out waiting for provider entry")
             if reason == "disconnect": request.disconnected = True
             with pytest.raises(HTTPException if reason == "deadline" else ClientDisconnect) as caught:
-                await asyncio.wait_for(task, 0.8)
+                await asyncio.wait_for(task, HANG_GUARD_SECONDS)
             if reason == "deadline": assert caught.value.status_code == 504
         finally:
             entry.cancel()
@@ -146,8 +166,10 @@ def test_nonstream_deadline_scenario_cannot_hang_before_provider_entry(monkeypat
             cleaned.append(True)
     def bounded_run(coro):
         async def bounded():
-            return await asyncio.wait_for(coro, 1.5)
+            return await asyncio.wait_for(coro, HANG_GUARD_SECONDS)
         return original_run(bounded())
+    # This tests the fixture's own provider-entry guard, so keep it short here.
+    monkeypatch.setattr(sys.modules[__name__], "PROVIDER_ENTRY_TIMEOUT", 0.3)
     monkeypatch.setattr(server, "create_response", before_provider)
     monkeypatch.setattr(asyncio, "run", bounded_run)
     if outcome == "deadline":
@@ -178,23 +200,31 @@ def test_phase_fault_survives_preparation_longer_than_fault_budget(monkeypatch, 
 @pytest.mark.parametrize("route,preparation", [("openai", "resolve_openai_auth"), ("byok", "all_provider_configs"),
                                                ("google", "response_model_id"), ("openai_oauth", "resolve_openai_auth")])
 def test_slow_sync_preparation_returns_without_late_provider_dispatch(monkeypatch, setup_route, route, preparation):
-    state = setup_route(route)
-    entered, unblock = threading.Event(), threading.Event()
+    state = setup_route(route, timeout=GENEROUS_TIMEOUT)
+    entered, unblock = [], threading.Event()
     original = getattr(server, preparation)
-    def slow(*args, **kwargs):
-        entered.set(); unblock.wait(1)
-        return original(*args, **kwargs)
-    monkeypatch.setattr(server, preparation, slow)
     clients = []
     monkeypatch.setattr(server.httpx, "AsyncClient", lambda **kw: clients.append(1))
-    started = time.monotonic()
-    try:
+    async def scenario():
+        arm_deadline = deadline_on_phase_entry(monkeypatch)
+        def slow(*args, **kwargs):
+            if not entered:
+                entered.append(time.monotonic())
+                arm_deadline()  # Expire while this synchronous step is blocked.
+            unblock.wait(BLOCK_SECONDS)
+            return original(*args, **kwargs)
+        monkeypatch.setattr(server, preparation, slow)
         with pytest.raises(HTTPException) as caught:
-            asyncio.run(server.create_response(Request(route)))
-        assert caught.value.status_code == 504 and time.monotonic() - started < 0.8
+            await server.create_response(Request(route))
+        assert caught.value.status_code == 504
+        # Returned while the preparation step was still blocked.
+        assert entered and not unblock.is_set()
+        assert time.monotonic() - entered[0] < BLOCK_SECONDS / 2
+    try:
+        asyncio.run(scenario())
     finally:
         unblock.set()
-    assert entered.is_set() and not clients
+    assert not clients
     assert not state.acquire.called
 
 
@@ -211,48 +241,57 @@ def test_slow_request_json_is_bounded_before_preparation(monkeypatch, setup_rout
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_blocked_diagnostic_write_does_not_hold_request_open(monkeypatch, setup_route, route):
-    state = setup_route(route)
-    unblock, entered = threading.Event(), threading.Event()
+    state = setup_route(route, timeout=GENEROUS_TIMEOUT)
+    write_deadline = DiagnosticWriteDeadline().install(monkeypatch)
+    unblock, entered = threading.Event(), []
     class Client:
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
-        async def post(self, *args, **kw): return success_response(route)
+        async def post(self, *args, **kw):
+            write_deadline.arm()  # The next log write is the one that stalls.
+            return success_response(route)
     monkeypatch.setattr(server.httpx, "AsyncClient", lambda **kw: Client())
-    def slow(row): entered.set(); unblock.wait(1)
+    def slow(row):
+        if not write_deadline.armed.is_set():
+            return  # Rows before provider dispatch are not the stall under test.
+        if not entered: entered.append(time.monotonic())
+        unblock.wait(BLOCK_SECONDS)
     monkeypatch.setattr(server, "write_request_record", slow)
-    started = time.monotonic()
     try:
         with pytest.raises(HTTPException) as caught:
             asyncio.run(server.create_response(Request(route)))
         assert caught.value.status_code == 504
-        assert time.monotonic() - started < 2.5
+        # Bounded by the armed deadline, not the blocked writer or the 2s
+        # diagnostic ceiling.
+        assert entered and not unblock.is_set()
+        assert time.monotonic() - entered[0] < 1.9
     finally: unblock.set()
-    assert entered.is_set()
     assert state.release.await_count == (1 if route == "google" else 0)
 
 
 def test_late_account_acquisition_is_released_without_dispatch(monkeypatch, setup_route):
-    state = setup_route("google")
+    state = setup_route("google", timeout=GENEROUS_TIMEOUT)
     async def scenario():
         finish = asyncio.Event()
+        arm_deadline = deadline_on_phase_entry(monkeypatch)
         async def acquire(*args):
+            arm_deadline()  # Expire while acquisition is in flight.
             await finish.wait()
             return {"email": "late@example.invalid", "accessToken": "synthetic-only"}
         monkeypatch.setattr(server, "acquire_active_account_for_request", acquire)
         with pytest.raises(HTTPException) as caught:
             await server.create_response(Request("google"))
         assert caught.value.status_code == 504
+        assert not state.release.await_count
         finish.set()
-        for _ in range(20):
-            if state.release.await_count: break
-            await asyncio.sleep(0.005)
+        await eventually(lambda: state.release.await_count)
         state.release.assert_awaited_once_with("late@example.invalid")
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("reason", ["deadline", "disconnect"])
 def test_late_bound_account_acquisition_is_released_without_dispatch(monkeypatch, setup_route, reason):
-    state = setup_route("google", timeout=5)
+    state = setup_route("google", timeout=GENEROUS_TIMEOUT)
     monkeypatch.setattr(
         server,
         "classify_route",
@@ -281,11 +320,11 @@ def test_late_bound_account_acquisition_is_released_without_dispatch(monkeypatch
         })
         task = asyncio.create_task(server.create_response(request))
         try:
-            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.wait_for(started.wait(), HANG_GUARD_SECONDS)
             if reason == "disconnect":
                 request.disconnected = True
             with pytest.raises(HTTPException if reason == "deadline" else ClientDisconnect) as caught:
-                await asyncio.wait_for(task, 2)
+                await asyncio.wait_for(task, HANG_GUARD_SECONDS)
             if reason == "deadline":
                 assert isinstance(caught.value, HTTPException)
                 assert caught.value.status_code == 504
@@ -293,17 +332,14 @@ def test_late_bound_account_acquisition_is_released_without_dispatch(monkeypatch
             finish.set()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        for _ in range(40):
-            if state.release.await_count:
-                break
-            await asyncio.sleep(0.005)
+        await eventually(lambda: state.release.await_count)
         state.release.assert_awaited_once_with("late-bound@example.invalid")
 
     asyncio.run(scenario())
 
 
 def test_refresh_in_progress_is_retryable_and_logged_without_a_lease(monkeypatch, setup_route):
-    state = setup_route("google")
+    state = setup_route("google", timeout=GENEROUS_TIMEOUT)
 
     async def acquire(*_args):
         raise server.AccountRefreshInProgress()
@@ -333,7 +369,7 @@ def test_refresh_in_progress_is_retryable_and_logged_without_a_lease(monkeypatch
 def test_sync_decode_and_translation_failures_keep_outer_deadline_or_disconnect(
     monkeypatch, setup_route, seam, route, failure_type, reason,
 ):
-    state = setup_route(route, timeout=5)
+    state = setup_route(route, timeout=GENEROUS_TIMEOUT)
     response = success_response(route)
     clients = []
 
@@ -404,12 +440,17 @@ def test_injected_decoder_failure_survives_slow_preparation(monkeypatch, setup_r
 def test_stream_event_idle_and_total_policies_fail_once_without_replay(monkeypatch, phase):
     monkeypatch.setattr(budgets, "DRAIN_SECONDS", 0.01)
     async def scenario():
-        budget = budgets.RequestBudget(Request("openai"), timeout=1, release_account=AsyncMock())
-        budget.stream_idle = 0.03 if phase == "idle" else 0.2
-        budget.deadline = time.monotonic() + (0.5 if phase == "idle" else 0.04)
+        budget = budgets.RequestBudget(Request("openai"), timeout=GENEROUS_TIMEOUT, release_account=AsyncMock())
+        budget.stream_idle = GENEROUS_TIMEOUT
         closed = []
         async def source():
             try:
+                # Arm the policy under test once the stream is producing, so a
+                # slow first step cannot expire it before any output exists.
+                if phase == "idle":
+                    budget.stream_idle = 0.03
+                else:
+                    budget.deadline = time.monotonic() + 0.04
                 yield 'data: {"type":"response.output_text.delta","delta":"fixture"}\n\n'
                 if phase == "idle": await asyncio.Future()
                 else:
@@ -429,9 +470,10 @@ def test_stream_event_idle_and_total_policies_fail_once_without_replay(monkeypat
 def test_observed_terminal_is_not_replaced_when_only_trailing_diagnostics_stall(monkeypatch):
     monkeypatch.setattr(budgets, "DRAIN_SECONDS", 0.01)
     async def scenario():
-        budget = budgets.RequestBudget(Request("openai"), timeout=1, release_account=AsyncMock())
-        budget.stream_idle = 0.02
+        budget = budgets.RequestBudget(Request("openai"), timeout=GENEROUS_TIMEOUT, release_account=AsyncMock())
+        budget.stream_idle = GENEROUS_TIMEOUT
         async def source():
+            budget.stream_idle = 0.02  # Only the trailing silence is short.
             yield "data: " + json.dumps({"type": "response.completed", "response": NATIVE}) + "\n\n"
             await asyncio.Future()
         chunks = [chunk async for chunk in budgets.stream_with_budget(source(), budget)]
@@ -441,7 +483,7 @@ def test_observed_terminal_is_not_replaced_when_only_trailing_diagnostics_stall(
     asyncio.run(scenario())
 
 
-def stream_clients(monkeypatch, route, *, repeated=False, slow_connect=False, on_first_read=None):
+def stream_clients(monkeypatch, route, *, repeated=False, slow_connect=False, on_first_read=None, on_connect=None):
     clients, contexts = [], []
     class Response:
         status_code = 200
@@ -465,6 +507,7 @@ def stream_clients(monkeypatch, route, *, repeated=False, slow_connect=False, on
     class Context:
         def __init__(self): self.closed = 0; contexts.append(self)
         async def __aenter__(self):
+            if on_connect is not None: on_connect()
             if slow_connect: await asyncio.Future()
             return Response()
         async def __aexit__(self, *args): self.closed += 1
@@ -482,11 +525,14 @@ def stream_clients(monkeypatch, route, *, repeated=False, slow_connect=False, on
 @pytest.mark.parametrize("policy", ["idle", "total"])
 @pytest.mark.parametrize("preparation_delay", [0, 0.15])
 def test_route_stream_timeouts_preserve_partial_output_and_close_owned_resources(monkeypatch, setup_route, route, policy, preparation_delay):
-    state = setup_route(route, timeout=5)
-    monkeypatch.setattr(server, "STREAM_IDLE_TIMEOUT_SECONDS", 0.04 if policy == "idle" else 0.3)
+    state = setup_route(route, timeout=GENEROUS_TIMEOUT)
     # This fixture tests an established stream. Preparation expiry has separate
-    # tests; arm its short fault-injection clock only after the fake first read.
-    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 5)
+    # tests, and the Google stream dispatches upstream inside its first body
+    # read, so both policies start generous and the short one is armed only at
+    # the fake first upstream read. Before, the 40ms idle cap also covered
+    # Google's dispatch and could expire before any client existed.
+    monkeypatch.setattr(server, "STREAM_IDLE_TIMEOUT_SECONDS", GENEROUS_TIMEOUT)
+    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", GENEROUS_TIMEOUT)
     factory = server._new_request_budget
     active = {}
     def capture_budget(request):
@@ -495,7 +541,12 @@ def test_route_stream_timeouts_preserve_partial_output_and_close_owned_resources
         return budget
     monkeypatch.setattr(server, '_new_request_budget', capture_budget)
     def arm_stream_deadline():
-        active['budget'].deadline = time.monotonic() + (1 if policy == 'idle' else 0.1)
+        # Idle: a short silence cap well inside the total. Total: a short
+        # total cap well inside the idle cap, while chunks keep flowing.
+        if policy == 'idle':
+            active['budget'].stream_idle = 0.04
+        else:
+            active['budget'].deadline = time.monotonic() + 0.1
     clients, contexts = stream_clients(monkeypatch, route, repeated=policy == "total", on_first_read=arm_stream_deadline)
     async def scenario():
         request = Request(route, stream=True)
@@ -523,7 +574,7 @@ def test_route_stream_timeouts_preserve_partial_output_and_close_owned_resources
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_disconnect_before_stream_iteration_releases_preacquired_resources(monkeypatch, setup_route, route):
-    state = setup_route(route, timeout=0.2)
+    state = setup_route(route, timeout=GENEROUS_TIMEOUT)
     clients, contexts = stream_clients(monkeypatch, route)
     async def scenario():
         response = await server.create_response(Request(route, stream=True))
@@ -539,10 +590,15 @@ def test_disconnect_before_stream_iteration_releases_preacquired_resources(monke
 
 @pytest.mark.parametrize("route", ["openai", "openai_oauth"])
 def test_native_stream_connect_deadline_closes_client_before_response_exists(monkeypatch, setup_route, route):
-    setup_route(route)
-    clients, contexts = stream_clients(monkeypatch, route, slow_connect=True)
-    with pytest.raises(HTTPException) as caught:
-        asyncio.run(server.create_response(Request(route, stream=True)))
+    setup_route(route, timeout=GENEROUS_TIMEOUT)
+    async def scenario():
+        arm_deadline = deadline_on_phase_entry(monkeypatch)
+        # Expire while the connect is in flight, not before it started.
+        clients, contexts = stream_clients(monkeypatch, route, slow_connect=True, on_connect=arm_deadline)
+        with pytest.raises(HTTPException) as caught:
+            await server.create_response(Request(route, stream=True))
+        return caught, clients, contexts
+    caught, clients, contexts = asyncio.run(scenario())
     assert caught.value.status_code == 504
     assert len(clients) == 1 and clients[0].closed == 1
     assert contexts[0].closed == 0  # Context entry never produced an owned response.
@@ -570,8 +626,9 @@ def test_slow_close_is_bounded_and_other_owned_resources_are_attempted(monkeypat
             await asyncio.Future()
         async def other(): calls.append("other")
         started = time.monotonic()
-        await budgets.shielded_cleanup(blocked, other)
-        assert time.monotonic() - started < 0.3
+        await asyncio.wait_for(budgets.shielded_cleanup(blocked, other), HANG_GUARD_SECONDS)
+        # The blocked close never finishes, so any return proves the bound.
+        assert time.monotonic() - started < BLOCK_SECONDS / 2
         assert sorted(calls) == ["blocked", "other"]
     asyncio.run(scenario())
 
@@ -596,14 +653,17 @@ def test_timeout_failure_uses_observed_native_response_id_without_created(monkey
     asyncio.run(scenario())
 
 
+STREAM_TOTAL_GENEROUS = 5.0
+
+
 @pytest.mark.parametrize("route", ROUTES)
 def test_downstream_backpressure_is_bounded_and_releases_ownership(monkeypatch, setup_route, route):
     # Preparation gets generous budgets so a slow runner cannot expire the
     # request before the stream is handed off. Previously the 60ms total-stream
     # cap also covered preparation and flaked on macOS CI with a 504 from
     # create_response. The short cap under test is armed at stream handoff.
-    state = setup_route(route, timeout=5)
-    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 5.0)
+    state = setup_route(route, timeout=GENEROUS_TIMEOUT)
+    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", STREAM_TOTAL_GENEROUS)
     new_budget = server._new_request_budget
     def short_stream_budget(request):
         budget = new_budget(request)
@@ -623,8 +683,9 @@ def test_downstream_backpressure_is_bounded_and_releases_ownership(monkeypatch, 
         async def send(message):
             if message["type"] == "http.response.body": await asyncio.Future()
         started = time.monotonic()
-        await asyncio.wait_for(response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send), 0.8)
-        assert time.monotonic() - started < 0.8
+        await asyncio.wait_for(response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send), HANG_GUARD_SECONDS)
+        # Ended by the 60ms handoff cap, well before the 5s stream total.
+        assert time.monotonic() - started < STREAM_TOTAL_GENEROUS - 1
     asyncio.run(scenario())
     assert all(client.closed == 1 for client in clients)
     assert all(context.closed == 1 for context in contexts)
@@ -635,7 +696,7 @@ def test_downstream_backpressure_is_bounded_and_releases_ownership(monkeypatch, 
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_deadline_metadata_is_stripped_from_every_provider_payload(monkeypatch, setup_route, route):
-    setup_route(route, timeout=0.2)
+    setup_route(route, timeout=GENEROUS_TIMEOUT)
     payloads = []
     class Client:
         async def __aenter__(self): return self
@@ -655,28 +716,39 @@ def test_deadline_metadata_is_stripped_from_every_provider_payload(monkeypatch, 
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_late_log_write_cannot_restore_success_after_deadline(monkeypatch, setup_route, route):
-    state = setup_route(route)
+    # The deadline must expire while the provider's success row is being
+    # written. An 80ms budget from request start could instead expire during
+    # preparation on a loaded runner (no provider call, no lease), so the
+    # short timeout is armed at provider dispatch and bounds the stalled write.
+    state = setup_route(route, timeout=GENEROUS_TIMEOUT)
+    write_deadline = DiagnosticWriteDeadline().install(monkeypatch)
     unblock = threading.Event()
-    rows = []
+    rows, stalled = [], []
     class Client:
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
-        async def post(self, *args, **kw): return success_response(route)
+        async def post(self, *args, **kw):
+            write_deadline.arm()
+            return success_response(route)
     monkeypatch.setattr(server.httpx, "AsyncClient", lambda **kw: Client())
     def blocked_writer(row):
-        unblock.wait(1)
+        if write_deadline.armed.is_set():
+            stalled.append(row["status"])
+            unblock.wait(BLOCK_SECONDS)
         rows.append(deepcopy(row))
     monkeypatch.setattr(server, "write_request_record", blocked_writer)
     async def scenario():
         with pytest.raises(HTTPException) as caught:
             await server.create_response(Request(route))
         assert caught.value.status_code == 504
+        # The stalled write was the provider's success row.
+        assert stalled and stalled[0] == "success"
         unblock.set()
-        for _ in range(100):
-            if any(row.get("terminal_reason") == "request_deadline_exceeded" for row in rows):
-                await asyncio.sleep(0.02)
-                break
-            await asyncio.sleep(0.005)
+        def settled():
+            return (any(row["status"] == "success" for row in rows)
+                    and rows[-1]["terminal_reason"] == "request_deadline_exceeded")
+        await eventually(settled)
+        await asyncio.sleep(0.02)
     try: asyncio.run(scenario())
     finally: unblock.set()
     assert rows[-1]["status"] == "failed" and rows[-1]["terminal_reason"] == "request_deadline_exceeded"
@@ -685,7 +757,7 @@ def test_late_log_write_cannot_restore_success_after_deadline(monkeypatch, setup
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_disconnect_after_partial_stream_closes_resources_and_logs_once(monkeypatch, setup_route, route):
-    state = setup_route(route, timeout=0.2)
+    state = setup_route(route, timeout=GENEROUS_TIMEOUT)
     clients, contexts = stream_clients(monkeypatch, route)
     async def scenario():
         response = await server.create_response(Request(route, stream=True))
@@ -696,7 +768,7 @@ def test_disconnect_after_partial_stream_closes_resources_and_logs_once(monkeypa
         async def send(message):
             if message["type"] == "http.response.body" and message.get("body"):
                 visible.set()
-        await asyncio.wait_for(response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send), 0.8)
+        await asyncio.wait_for(response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send), HANG_GUARD_SECONDS)
     asyncio.run(scenario())
     assert all(client.closed == 1 for client in clients)
     assert all(context.closed == 1 for context in contexts)
@@ -707,10 +779,16 @@ def test_disconnect_after_partial_stream_closes_resources_and_logs_once(monkeypa
 
 @pytest.mark.parametrize("route", ["openai", "openai_oauth"])
 def test_native_open_stream_is_closed_if_start_diagnostic_expires(monkeypatch, setup_route, route):
-    setup_route(route)
-    clients, contexts = stream_clients(monkeypatch, route)
+    setup_route(route, timeout=GENEROUS_TIMEOUT)
+    # Arm once the native stream is open, so the stalled write is its
+    # stream_started row rather than an earlier phase.
+    write_deadline = DiagnosticWriteDeadline().install(monkeypatch)
+    clients, contexts = stream_clients(monkeypatch, route, on_connect=write_deadline.arm)
     unblock = threading.Event()
-    monkeypatch.setattr(server, "write_request_record", lambda row: unblock.wait(1))
+    def blocked_writer(row):
+        if write_deadline.armed.is_set():
+            unblock.wait(BLOCK_SECONDS)
+    monkeypatch.setattr(server, "write_request_record", blocked_writer)
     try:
         with pytest.raises(HTTPException) as caught:
             asyncio.run(server.create_response(Request(route, stream=True)))
@@ -721,20 +799,27 @@ def test_native_open_stream_is_closed_if_start_diagnostic_expires(monkeypatch, s
 
 
 def test_preparation_failure_after_account_acquisition_releases_lease(monkeypatch, setup_route):
-    state = setup_route("google")
+    state = setup_route("google", timeout=GENEROUS_TIMEOUT)
     unblock = threading.Event()
-    monkeypatch.setattr(server, "get_platform", lambda: (unblock.wait(1), "fixture")[1])
-    try:
+    async def scenario():
+        arm_deadline = deadline_on_phase_entry(monkeypatch)
+        def platform():
+            arm_deadline()  # Runs in a worker after the lease is acquired.
+            unblock.wait(BLOCK_SECONDS)
+            return "fixture"
+        monkeypatch.setattr(server, "get_platform", platform)
         with pytest.raises(HTTPException) as caught:
-            asyncio.run(server.create_response(Request("google")))
+            await server.create_response(Request("google"))
         assert caught.value.status_code == 504
+    try:
+        asyncio.run(scenario())
     finally: unblock.set()
     assert state.acquire.await_count == state.release.await_count == 1
 
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_already_disconnected_request_never_acquires_or_resolves_auth(monkeypatch, setup_route, route):
-    state = setup_route(route, timeout=5)
+    state = setup_route(route, timeout=GENEROUS_TIMEOUT)
     auth = []
     monkeypatch.setattr(server, "resolve_openai_auth", lambda: auth.append(True))
     request = Request(route); request.disconnected = True
@@ -754,12 +839,17 @@ def test_already_disconnected_request_survives_slow_body_read(monkeypatch, setup
 
 
 def test_late_native_connect_result_is_closed_without_being_transferred(monkeypatch, setup_route):
-    setup_route("openai")
+    setup_route("openai", timeout=GENEROUS_TIMEOUT)
+    # The connect ignores the first cancellation, so the drain wait always
+    # times out; keep it short. The fixture is still blocked when it expires.
+    monkeypatch.setattr(budgets, "DRAIN_SECONDS", 0.015)
     closed = []
     async def scenario():
         finish = asyncio.Event()
+        arm_deadline = deadline_on_phase_entry(monkeypatch)
         class Context:
             async def __aenter__(self):
+                arm_deadline()  # Expire while the connect is in flight.
                 try: await finish.wait()
                 except asyncio.CancelledError: await finish.wait()
                 return SimpleNamespace(status_code=200)
@@ -772,9 +862,7 @@ def test_late_native_connect_result_is_closed_without_being_transferred(monkeypa
             await server.create_response(Request("openai", stream=True))
         assert caught.value.status_code == 504 and closed == ["client"]
         finish.set()
-        for _ in range(50):
-            if len(closed) == 2: break
-            await asyncio.sleep(0.005)
+        await eventually(lambda: len(closed) == 2)
         assert closed == ["client", "response"]
     asyncio.run(scenario())
 
@@ -782,11 +870,14 @@ def test_late_native_connect_result_is_closed_without_being_transferred(monkeypa
 @pytest.mark.parametrize("route,preparation", [("openai", "resolve_openai_auth"), ("openai_oauth", "resolve_openai_auth"),
                                                ("byok", "all_provider_configs"), ("google", "native_model_capabilities")])
 def test_public_stream_total_expires_during_preparation_before_http_200(monkeypatch, setup_route, route, preparation):
+    # The 1s stream total from metadata is the subject, armed from request
+    # start as in production. The 3s request timeout and the 10s blocked step
+    # bound what a broken stream-total cap would take instead.
     state = setup_route(route, timeout=3)
     unblock = threading.Event()
     original = getattr(server, preparation)
     def slow(*args, **kwargs):
-        unblock.wait(2)
+        unblock.wait(BLOCK_SECONDS)
         return original(*args, **kwargs)
     monkeypatch.setattr(server, preparation, slow)
     clients, contexts = stream_clients(monkeypatch, route)
@@ -798,7 +889,8 @@ def test_public_stream_total_expires_during_preparation_before_http_200(monkeypa
         with pytest.raises(HTTPException) as caught:
             asyncio.run(server.create_response(request))
         assert caught.value.status_code == 504
-        assert time.monotonic() - started < 1.8
+        # Below the 3s request timeout: the 1s stream total ended preparation.
+        assert time.monotonic() - started < 2.9
     finally:
         unblock.set()
     assert not clients and not contexts and not state.acquire.called
@@ -808,8 +900,8 @@ def test_public_stream_total_expires_during_preparation_before_http_200(monkeypa
 def test_total_expiry_after_preparation_handoff_sends_504_without_sse_headers(monkeypatch, setup_route, route):
     # Expiry is injected after preparation; scheduler load must not move this
     # fixture into the separately tested preparation-expiry phase.
-    state = setup_route(route, timeout=3)
-    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 3)
+    state = setup_route(route, timeout=GENEROUS_TIMEOUT)
+    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", GENEROUS_TIMEOUT)
     clients, contexts = stream_clients(monkeypatch, route)
     async def scenario():
         response = await server.create_response(Request(route, stream=True))
@@ -829,36 +921,53 @@ def test_total_expiry_after_preparation_handoff_sends_504_without_sse_headers(mo
 
 @pytest.mark.parametrize("route", ["google", "openai", "openai_oauth"])
 def test_short_total_during_owned_preparation_releases_resources(monkeypatch, setup_route, route):
+    # A short stream total expires while preparation owns resources: Google's
+    # lease (blocked platform lookup) or a native stream that is already open
+    # (blocked stream_started write). The 40ms cap is armed on entry to that
+    # owned phase; armed from request start it could expire before anything
+    # was owned, and the old 0.25s wall-clock bound flaked on loaded runners.
     google = route == "google"
-    state = setup_route(route, timeout=5 if google else 0.3)
-    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", 5 if google else 0.04)
-    clients, contexts = stream_clients(monkeypatch, route)
+    state = setup_route(route, timeout=GENEROUS_TIMEOUT)
+    monkeypatch.setattr(server, "STREAM_TOTAL_TIMEOUT_SECONDS", GENEROUS_TIMEOUT)
     unblock = threading.Event()
     entered = []
     async def scenario():
+        arm_deadline = deadline_on_phase_entry(monkeypatch, timeout=0.04)
         if google:
-            arm_deadline = deadline_on_phase_entry(monkeypatch, timeout=0.04)
-            loop = asyncio.get_running_loop()
+            clients, contexts = stream_clients(monkeypatch, route)
             def platform():
                 entered.append(time.monotonic())
                 # This preparation step runs in a worker after lease acquisition.
-                loop.call_soon_threadsafe(arm_deadline)
-                unblock.wait(1)
+                arm_deadline()
+                unblock.wait(BLOCK_SECONDS)
                 return "fixture"
             monkeypatch.setattr(server, "get_platform", platform)
         else:
-            monkeypatch.setattr(server, "write_request_record", lambda row: unblock.wait(1))
-        started = time.monotonic()
+            write_deadline = DiagnosticWriteDeadline(timeout=0.04).install(monkeypatch)
+            def opened():
+                entered.append(time.monotonic())
+                arm_deadline(); write_deadline.arm()
+            clients, contexts = stream_clients(monkeypatch, route, on_connect=opened)
+            def blocked_writer(row):
+                if write_deadline.armed.is_set():
+                    unblock.wait(BLOCK_SECONDS)
+            monkeypatch.setattr(server, "write_request_record", blocked_writer)
         try:
             with pytest.raises(HTTPException) as caught:
-                await asyncio.wait_for(server.create_response(Request(route, stream=True)), 2)
+                await asyncio.wait_for(server.create_response(Request(route, stream=True)), HANG_GUARD_SECONDS)
+            assert len(entered) == 1
             if google:
-                assert len(entered) == state.acquire.await_count == 1
+                assert state.acquire.await_count == 1
+            else:
+                assert len(clients) == len(contexts) == 1
             assert caught.value.status_code == 504
-            assert time.monotonic() - (entered[0] if google else started) < 0.25
+            # Returned while the owned step was still blocked.
+            assert not unblock.is_set()
+            assert time.monotonic() - entered[0] < BLOCK_SECONDS / 2
         finally:
             unblock.set()
-    asyncio.run(scenario())
+        return clients, contexts
+    clients, contexts = asyncio.run(scenario())
     assert all(client.closed == 1 for client in clients)
     assert all(context.closed == 1 for context in contexts)
     assert state.release.await_count == (1 if route == "google" else 0)
@@ -882,7 +991,9 @@ def test_stream_handoff_never_extends_an_expired_preparation_budget():
 
 
 def test_stream_total_override_does_not_limit_nonstream_preparation(monkeypatch, setup_route):
-    setup_route("openai", timeout=3)
+    # 1.05s of preparation outlives the 1s stream total but must stay well
+    # inside the request timeout, even on a loaded runner.
+    setup_route("openai", timeout=10)
     original = server.resolve_openai_auth
     monkeypatch.setattr(server, "resolve_openai_auth", lambda: (time.sleep(1.05), original())[1])
     class Client:
@@ -891,14 +1002,14 @@ def test_stream_total_override_does_not_limit_nonstream_preparation(monkeypatch,
         async def post(self, *args, **kw): return success_response("openai")
     monkeypatch.setattr(server.httpx, "AsyncClient", lambda **kw: Client())
     request = Request("openai")
-    request.payload["metadata"] = {"antigravity_request_timeout_seconds": 3,
+    request.payload["metadata"] = {"antigravity_request_timeout_seconds": 10,
                                    "antigravity_stream_total_timeout_seconds": 1}
     result = asyncio.run(server.create_response(request))
     assert result["status"] == "completed"
 
 
 def test_expiry_between_header_check_and_dispatch_cannot_use_failure_grace(monkeypatch, setup_route):
-    setup_route("openai", timeout=0.3)
+    setup_route("openai", timeout=GENEROUS_TIMEOUT)
     clients, contexts = stream_clients(monkeypatch, "openai")
     async def scenario():
         response = await server.create_response(Request("openai", stream=True))

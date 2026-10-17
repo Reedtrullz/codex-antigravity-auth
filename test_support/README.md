@@ -31,3 +31,15 @@ focused boundaries; real HTTP replays must not replace the HTTP client with mock
 There is no automatic live-test profile. A live run requires separate explicit
 user authorization and a separate process/environment; never disable this guard
 to make ordinary tests pass. CI and installed-artifact tests remain offline.
+
+Deadline tests must not depend on scheduler timing. `deadline_injection` keeps
+the real request budget generous until the fixture reaches the phase under
+test, then shortens the real budget timers (`budget_deadline_on_entry`) or the
+request-log write timeout (`DiagnosticWriteDeadline`). Production deadline code
+still decides the outcome. Wall-clock assertions only separate "bounded" from
+"waited for a blocked fixture" and need a wide margin below that fixture's block.
+Cleanup, drain and abort-diagnostic bounds (`request_budget.CLEANUP_SECONDS`,
+`DRAIN_SECONDS`, `server.ABORT_DIAGNOSTIC_SECONDS`) are generous in fixtures
+whose writers and closes are fast; only tests whose subject is a stalled close
+or drain shorten them. A blocked fixture waits on an event that the test
+releases, never on a fixed sleep the timer under test has to beat.
