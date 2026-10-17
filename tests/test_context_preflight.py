@@ -340,13 +340,19 @@ def test_changed_provider_endpoint_invalidates_verified_binding(gateway):
 
 
 def test_preflight_slow_configuration_read_obeys_owned_deadline(gateway,monkeypatch):
-    import time
+    import threading
     monkeypatch.setattr(server, 'GOOGLE_BACKEND_TIMEOUT_SECONDS', 0.03)
+    # Block until released rather than sleeping 0.15s, so a stalled runner
+    # cannot let the read finish before the 30ms deadline is observed.
+    unblock = threading.Event()
     def slow():
-        time.sleep(0.15)
+        unblock.wait(10)
         return {}
     monkeypatch.setattr(server, 'all_provider_configs_read_only', slow)
-    response = TestClient(server.app).post('/v1/context/preflight', json={'input':'fixture'})
+    try:
+        response = TestClient(server.app).post('/v1/context/preflight', json={'input':'fixture'})
+    finally:
+        unblock.set()
     assert response.status_code == 504
     assert server.ADMISSION.total == 0
 

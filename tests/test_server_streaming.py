@@ -9,7 +9,9 @@ import unittest
 import httpx
 from fastapi import HTTPException
 from unittest.mock import AsyncMock, patch, MagicMock
+import pytest
 from codex_antigravity_auth import server as server_module
+from deadline_injection import HANG_GUARD_SECONDS, DiagnosticWriteDeadline, budget_deadline_on_entry
 from codex_antigravity_auth.server import (
     app,
     create_response,
@@ -26,6 +28,14 @@ def operation_client(factory):
     # provider-client suite exercises real lifespan pools and response leases.
     return patch('codex_antigravity_auth.server.provider_client',
                  side_effect=lambda _lane, **kwargs: factory(**kwargs))
+
+
+async def eventually(predicate, timeout=HANG_GUARD_SECONDS):
+    """Poll a late-cleanup observation without a tight wall-clock window."""
+    stop = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < stop:
+        await asyncio.sleep(0.005)
+    return predicate()
 
 
 class TestServerStreaming(unittest.TestCase):
@@ -834,6 +844,7 @@ class TestServerStreaming(unittest.TestCase):
             async def post(self, request, lease):
                 nonlocal post_count
                 post_count += 1
+                arm_deadline[0]()  # The short total covers the trickle only.
                 backend_started.set()
                 try:
                     await asyncio.Future()
@@ -847,15 +858,18 @@ class TestServerStreaming(unittest.TestCase):
         async def noop(*args, **kwargs):
             pass
 
+        arm_deadline = []
         async def scenario():
-            with self.assertRaises(HTTPException) as caught:
-                await create_response(request)
+            with pytest.MonkeyPatch.context() as monkeypatch:
+                arm_deadline.append(budget_deadline_on_entry(monkeypatch, timeout=0.5))
+                with self.assertRaises(HTTPException) as caught:
+                    await create_response(request)
             return caught.exception
 
         release_mock = AsyncMock()
         record_mock = AsyncMock()
         with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
-             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.5), \
+             patch.object(server_module, "google_request_timeout_from_metadata", return_value=5), \
              patch.object(server_module, "acquire_active_account_for_request", get_account), \
              patch.object(server_module, "release_account_for_request", release_mock), \
              patch.object(server_module, "record_attempt_outcome", record_mock), \
@@ -1026,19 +1040,27 @@ class TestServerStreaming(unittest.TestCase):
             async def post(self, request, lease):
                 nonlocal post_count
                 post_count += 1
+                # Arm the short remaining budget once the first attempt is
+                # dispatched; the rotated acquisition must inherit it.
+                arm_deadline[0]()
                 raise httpx.ConnectError("fixture connection failure")
 
         async def release(email):
             released.append(email)
 
+        arm_deadline = []
         async def scenario():
-            with self.assertRaises(HTTPException) as caught:
-                await create_response(request)
-            await asyncio.sleep(1.1)
+            with pytest.MonkeyPatch.context() as monkeypatch:
+                arm_deadline.append(budget_deadline_on_entry(monkeypatch, timeout=0.3))
+                with self.assertRaises(HTTPException) as caught:
+                    await create_response(request)
+                # The late second account (1s acquisition) is released afterwards.
+                self.assertEqual(released, ["first-deadline@example.invalid"])
+                await eventually(lambda: len(released) == 2)
             return caught.exception
 
         with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
-             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.5), \
+             patch.object(server_module, "google_request_timeout_from_metadata", return_value=5), \
              patch.object(server_module, "acquire_active_account_for_request", get_account), \
              patch.object(server_module, "release_account_for_request", release), \
              patch.object(server_module, "record_attempt_outcome", AsyncMock()), \
@@ -1102,7 +1124,8 @@ class TestServerStreaming(unittest.TestCase):
         async def scenario():
             with self.assertRaises(ClientDisconnect):
                 await create_response(request)
-            await asyncio.sleep(0.15)
+            await eventually(lambda: released)
+            await asyncio.sleep(0.02)  # A late post would have to start now.
 
         with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
              patch.object(server_module, "acquire_active_account_for_request", get_account), \
@@ -1143,21 +1166,28 @@ class TestServerStreaming(unittest.TestCase):
                 pass
 
             async def post(self, request, lease):
+                arm_deadline[0]()  # Expire with the provider call in flight.
                 await asyncio.Future()
 
         async def get_account(*args, **kwargs):
             return account
 
         release_mock = AsyncMock()
+        arm_deadline = []
+
+        async def scenario():
+            with pytest.MonkeyPatch.context() as monkeypatch:
+                arm_deadline.append(budget_deadline_on_entry(monkeypatch))
+                await create_response(request)
 
         with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
-             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.5), \
+             patch.object(server_module, "google_request_timeout_from_metadata", return_value=5), \
              patch.object(server_module, "acquire_active_account_for_request", get_account), \
              patch.object(server_module, "release_account_for_request", release_mock), \
              patch.object(server_module, "write_request_record", side_effect=RuntimeError("audit failed")), \
              patch.object(server_module, "GoogleTransport", FakeTransport):
             with self.assertRaises(HTTPException) as caught:
-                asyncio.run(create_response(request))
+                asyncio.run(scenario())
 
         self.assertEqual(caught.exception.status_code, 504)
         release_mock.assert_awaited_once_with("diagnostic-failure@example.invalid")
@@ -1195,20 +1225,29 @@ class TestServerStreaming(unittest.TestCase):
                 pass
 
             async def post(self, request, lease):
+                # The success row written next is the stalled write; a 100ms
+                # budget from request start could instead expire before the
+                # lease existed on a loaded runner.
+                write_deadline.arm()
                 return httpx.Response(200, json={"response": {"candidates": []}})
 
         async def get_account(*args, **kwargs):
             return account
 
+        write_deadline = DiagnosticWriteDeadline(timeout=0.1)
+
         def blocked_log(record):
+            if not write_deadline.armed.is_set():
+                return
             log_started.set()
-            unblock_log.wait(5)
+            unblock_log.wait(10)
 
         release_mock = AsyncMock()
         started = time.monotonic()
         try:
-            with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
-                 patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.1), \
+            with write_deadline.patch(), \
+                 patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
+                 patch.object(server_module, "google_request_timeout_from_metadata", return_value=5), \
                  patch.object(server_module, "acquire_active_account_for_request", get_account), \
                  patch.object(server_module, "release_account_for_request", release_mock), \
                  patch.object(server_module, "record_attempt_outcome", AsyncMock()), \
@@ -1221,7 +1260,7 @@ class TestServerStreaming(unittest.TestCase):
         elapsed = time.monotonic() - started
 
         self.assertEqual(caught.exception.status_code, 504)
-        self.assertLess(elapsed, 3.0)
+        self.assertLess(elapsed, 5.0)  # Did not wait for the 10s blocked write.
         self.assertTrue(log_started.is_set())
         release_mock.assert_awaited_once_with("diagnostic-hang@example.invalid")
 
@@ -1266,6 +1305,8 @@ class TestServerStreaming(unittest.TestCase):
             async def post(self, request, lease):
                 nonlocal post_count
                 post_count += 1
+                post_started.append(time.monotonic())
+                arm_deadline[0]()
                 try:
                     await asyncio.Future()
                 except asyncio.CancelledError:
@@ -1276,11 +1317,15 @@ class TestServerStreaming(unittest.TestCase):
         async def get_account(*args, **kwargs):
             return account
 
+        post_started, arm_deadline = [], []
+
         async def scenario():
-            started = time.monotonic()
-            with self.assertRaises(HTTPException) as caught:
-                await create_response(request)
-            elapsed = time.monotonic() - started
+            with pytest.MonkeyPatch.context() as monkeypatch:
+                # 0.5s budget armed at dispatch, not at request start.
+                arm_deadline.append(budget_deadline_on_entry(monkeypatch, timeout=0.5))
+                with self.assertRaises(HTTPException) as caught:
+                    await create_response(request)
+                elapsed = time.monotonic() - post_started[0]
             backend_release.set()
             await asyncio.sleep(0.05)
             polls_after_response = disconnect_poll_count
@@ -1289,7 +1334,7 @@ class TestServerStreaming(unittest.TestCase):
 
         release_mock = AsyncMock()
         with patch.object(server_module, "schedule_refresh_accounts_ahead", return_value=False), \
-             patch.object(server_module, "google_request_timeout_from_metadata", return_value=0.5), \
+             patch.object(server_module, "google_request_timeout_from_metadata", return_value=5), \
              patch.object(server_module, "acquire_active_account_for_request", get_account), \
              patch.object(server_module, "release_account_for_request", release_mock), \
              patch.object(server_module, "write_request_record", lambda record: None), \
@@ -1297,7 +1342,11 @@ class TestServerStreaming(unittest.TestCase):
             exception, elapsed, polls_after_response, polls_later = asyncio.run(scenario())
 
         self.assertEqual(exception.status_code, 504)
-        self.assertLess(elapsed, 1.1)
+        # The backend ignores cancellation until backend_release, which is set
+        # only after create_response returns, so returning at all proves the
+        # request did not wait for it. The bound (0.5s budget + drain) stays
+        # well below the 5s request timeout with room for a loaded runner.
+        self.assertLess(elapsed, 3.0)
         self.assertEqual(polls_after_response, polls_later)
         self.assertEqual(post_count, 1)
         self.assertTrue(backend_done.is_set())
@@ -1594,8 +1643,9 @@ class TestServerStreaming(unittest.TestCase):
                 )
 
     def test_models_endpoint_returns_native_catalog_when_provider_catalog_blocks(self):
+        unblock = threading.Event()
         def slow_provider_configs():
-            time.sleep(0.2)
+            unblock.wait(10)
             return {
                 "openrouter": {
                     "id": "openrouter",
@@ -1607,20 +1657,25 @@ class TestServerStreaming(unittest.TestCase):
             }
 
         started = time.monotonic()
-        with patch("codex_antigravity_auth.server.MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS", 0.01):
-            with patch(
-                "codex_antigravity_auth.server.all_provider_configs_read_only",
-                side_effect=slow_provider_configs,
-            ):
-                response = TestClient(app).get("/v1/models")
-        elapsed = time.monotonic() - started
+        try:
+            with patch("codex_antigravity_auth.server.MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS", 0.01):
+                with patch(
+                    "codex_antigravity_auth.server.all_provider_configs_read_only",
+                    side_effect=slow_provider_configs,
+                ):
+                    response = TestClient(app).get("/v1/models")
+            elapsed = time.monotonic() - started
+            # Answered while the provider catalog was still blocked.
+            self.assertFalse(unblock.is_set())
+        finally:
+            unblock.set()
 
         self.assertEqual(response.status_code, 200)
         ids = [model["id"] for model in response.json()["data"]]
         self.assertIn("claude-sonnet-4-6", ids)
         self.assertIn("claude-opus-4-6-thinking", ids)
         self.assertNotIn("openrouter:openrouter/auto", ids)
-        self.assertLess(elapsed, 1.0)
+        self.assertLess(elapsed, 5.0)
 
     def test_google_streaming_invalid_json_chunk_fails_instead_of_completing(self):
         fake_account = {"email": "test@gmail.com", "accessToken": "dummy_access"}

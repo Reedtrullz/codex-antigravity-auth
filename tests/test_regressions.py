@@ -1,6 +1,7 @@
 from tests.conftest import byte_chunks
 import json
 import asyncio
+import threading
 import time
 import unittest
 import warnings
@@ -119,13 +120,20 @@ class TestRegressionFixes(unittest.TestCase):
         self.assertEqual(response.json()["package_version"], "unknown")
 
     def test_health_endpoint_fails_soft_when_provider_catalog_blocks(self):
+        # Block until released instead of sleeping 0.2s, so a stalled runner
+        # cannot let the catalog finish before the 10ms timeout is observed.
+        unblock = threading.Event()
+
         def slow_provider_configs():
-            time.sleep(0.2)
+            unblock.wait(10)
             return {}
 
-        with patch("codex_antigravity_auth.server.MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS", 0.01):
-            with patch("codex_antigravity_auth.server.all_provider_configs_read_only", side_effect=slow_provider_configs):
-                response = TestClient(app).get("/health")
+        try:
+            with patch("codex_antigravity_auth.server.MODEL_CATALOG_PROVIDER_TIMEOUT_SECONDS", 0.01):
+                with patch("codex_antigravity_auth.server.all_provider_configs_read_only", side_effect=slow_provider_configs):
+                    response = TestClient(app).get("/health")
+        finally:
+            unblock.set()
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
