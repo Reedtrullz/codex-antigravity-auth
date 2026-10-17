@@ -843,8 +843,10 @@ def run_doctor(
         try:
             import urllib.request
             import urllib.error
-            # cloudcode-pa.googleapis.com returns 404 on HEAD; POST to keepalive-health endpoint
-            req = urllib.request.Request("https://cloudcode-pa.googleapis.com/v1internal:generateContent", method="POST",
+            from .constants import antigravity_endpoint
+            # Probe the same host the gateway generates against. The backend
+            # returns 404 on HEAD, so POST an unauthenticated empty request.
+            req = urllib.request.Request(f"{antigravity_endpoint()}/v1internal:generateContent", method="POST",
                                          data=json.dumps({"model": resolve_backend_model(DEFAULT_GEMINI_MODEL_ID), "request": {"contents": []}}).encode("utf-8"),
                                          headers={"Content-Type": "application/json"})
             try:

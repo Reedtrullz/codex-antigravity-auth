@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import json
 import math
+import os
+import re
 import time
 from typing import Any, AsyncIterator
 import uuid
@@ -17,7 +19,7 @@ from .request_budget import call_sync, owned_context
 from .resource_limits import ResourceLimitError, json_loads_limited, limited_post, response_json
 from .sse import SSELineError, SSELimitError, iter_sse_data
 
-from .constants import ANTIGRAVITY_ENDPOINT_PROD, get_platform
+from .constants import ANTIGRAVITY_ENDPOINT_PROD, antigravity_endpoint, get_platform  # noqa: F401 - compatibility re-export
 from .response_protocol import (
     AttemptOutcome,
     ProviderResult,
@@ -37,8 +39,24 @@ from .transform import (
     transform_gemini_candidate,
     transform_request,
 )
+# Default Antigravity IDE version presented to the backend. Override with
+# ANTIGRAVITY_IDE_VERSION when the backend starts requiring a newer client.
 ANTIGRAVITY_IDE_VERSION = "2.5.5"
+ANTIGRAVITY_IDE_VERSION_ENV = "ANTIGRAVITY_IDE_VERSION"
+_IDE_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}$")
 _IDE_USER_AGENT_CACHE: str | None = None
+_IDE_USER_AGENT_CACHE_VERSION: str | None = None
+
+
+def antigravity_ide_version() -> str:
+    """Return the IDE version, honouring ANTIGRAVITY_IDE_VERSION (dotted numbers)."""
+    raw = os.environ.get(ANTIGRAVITY_IDE_VERSION_ENV)
+    if raw is None or not raw.strip():
+        return ANTIGRAVITY_IDE_VERSION
+    value = raw.strip()
+    if not _IDE_VERSION_RE.fullmatch(value):
+        raise ValueError(f"{ANTIGRAVITY_IDE_VERSION_ENV} must be a dotted numeric version such as 2.5.5")
+    return value
 
 
 def ide_user_agent() -> str:
@@ -48,8 +66,9 @@ def ide_user_agent() -> str:
     identity.  Sending a non-IDE UA (e.g. Electron/Chrome) causes 403
     VALIDATION_REQUIRED errors.
     """
-    global _IDE_USER_AGENT_CACHE
-    if _IDE_USER_AGENT_CACHE is not None:
+    global _IDE_USER_AGENT_CACHE, _IDE_USER_AGENT_CACHE_VERSION
+    version = antigravity_ide_version()
+    if _IDE_USER_AGENT_CACHE is not None and _IDE_USER_AGENT_CACHE_VERSION == version:
         return _IDE_USER_AGENT_CACHE
     import platform as _platform
     os_type = _platform.system().lower()  # darwin, linux, windows
@@ -61,10 +80,11 @@ def ide_user_agent() -> str:
     else:
         arch = machine
     ua = (
-        f"antigravity/ide/{ANTIGRAVITY_IDE_VERSION} "
+        f"antigravity/ide/{version} "
         f"(os_type={os_type}; arch={arch}; aidev_client; auth_method=oauth)"
     )
     _IDE_USER_AGENT_CACHE = ua
+    _IDE_USER_AGENT_CACHE_VERSION = version
     return ua
 
 
@@ -446,11 +466,13 @@ class GoogleTransport:
         *,
         timeout: float,
         platform_name: str | None = None,
-        endpoint: str = ANTIGRAVITY_ENDPOINT_PROD,
+        endpoint: str | None = None,
         client_factory: Any = httpx.AsyncClient,
     ) -> None:
         self.timeout = timeout
         self.platform_name = platform_name or get_platform()
+        if endpoint is None:
+            endpoint = antigravity_endpoint()
         self.endpoint = validate_endpoint_url(endpoint, label="Google endpoint").rstrip("/")
         self.client_factory = client_factory
 

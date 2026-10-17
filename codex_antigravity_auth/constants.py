@@ -21,10 +21,36 @@ SCOPES = [
     "https://www.googleapis.com/auth/experimentsandconfigs",
 ]
 
-ANTIGRAVITY_ENDPOINT_PROD = "https://daily-cloudcode-pa.googleapis.com"
+# Cloud Code Assist host for generation and onboarding. The "daily" host is
+# deliberate: the production host triggered VALIDATION_REQUIRED for this client
+# identity (see commit 521337b). Override with ANTIGRAVITY_ENDPOINT.
+DEFAULT_ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com"
+ANTIGRAVITY_ENDPOINT = DEFAULT_ANTIGRAVITY_ENDPOINT
+# Backward-compatible alias. Despite its name it never pointed at the
+# production host; new code should use antigravity_endpoint().
+ANTIGRAVITY_ENDPOINT_PROD = ANTIGRAVITY_ENDPOINT
+ANTIGRAVITY_ENDPOINT_ENV = "ANTIGRAVITY_ENDPOINT"
+# Project discovery (loadCodeAssist) has used the production host since it was
+# introduced and live-verified in 521337b. It is kept separate on purpose and
+# is not affected by ANTIGRAVITY_ENDPOINT.
+CODE_ASSIST_DISCOVERY_ENDPOINT = "https://cloudcode-pa.googleapis.com"
 ANTIGRAVITY_ACCOUNTS_FILE = "~/.codex/antigravity-accounts.json"
 CREDENTIALS_FILE = "~/.codex/antigravity-credentials.json"
 GATEWAY_TOKEN_MIN_LENGTH = 32
+
+
+def antigravity_endpoint() -> str:
+    """Return the Cloud Code Assist base URL, honouring ANTIGRAVITY_ENDPOINT.
+
+    The override must be an absolute https URL (http only for loopback hosts)
+    without credentials, query or fragment; an invalid value raises ValueError
+    instead of silently falling back, because OAuth bearer tokens are sent to it.
+    """
+    raw = os.environ.get(ANTIGRAVITY_ENDPOINT_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_ANTIGRAVITY_ENDPOINT
+    from .skills.anti.scripts.anti_lib.endpoint_policy import validate_endpoint_url
+    return validate_endpoint_url(raw.strip(), label=ANTIGRAVITY_ENDPOINT_ENV).rstrip("/")
 
 
 def get_platform() -> str:
