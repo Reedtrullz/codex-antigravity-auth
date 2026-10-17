@@ -1,2 +1,5 @@
 # Historical snapshots are hashed as exact bytes; avoid platform EOL rewriting.
 docs/history/** -text
+# The qualification manifest and its pin are hashed as exact bytes too.
+docs/qualification/fixture-manifest.json -text
+docs/qualification/fixture-manifest.json.sha256 -text

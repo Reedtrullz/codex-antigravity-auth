@@ -154,9 +154,10 @@ def main():
     }
     payload = json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(payload)
+    # Write bytes so the pinned digest matches on every platform (no CRLF translation).
+    args.out.write_bytes(payload.encode())
     digest = hashlib.sha256(payload.encode()).hexdigest()
-    args.out.with_suffix(args.out.suffix + ".sha256").write_text(digest + "  " + args.out.name + "\n")
+    args.out.with_suffix(args.out.suffix + ".sha256").write_bytes((digest + "  " + args.out.name + "\n").encode())
     counts = Counter(f["clipClass"] for f in fixtures)
     print(json.dumps({"manifest": str(args.out), "sha256": digest, "fixtures": dict(counts), "exclusions": len(exclusions)}, sort_keys=True))
     return 0
