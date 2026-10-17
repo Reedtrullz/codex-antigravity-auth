@@ -2,7 +2,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import json
-from pathlib import Path
 import threading
 
 import pytest

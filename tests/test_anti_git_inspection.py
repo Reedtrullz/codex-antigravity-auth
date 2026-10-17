@@ -47,7 +47,7 @@ def test_inspection_never_invokes_configured_converter_or_external_diff(repo, sc
         git("commit", "-qm", "change")
     # Positive control: this configured converter really executes without our guard.
     args = ["--cached"] if scope == "staged" else ["HEAD~1..HEAD"] if scope == "diff" else ["HEAD"]
-    converted = git("diff", *args, "--no-ext-diff", "--", "sample.txt")
+    git("diff", *args, "--no-ext-diff", "--", "sample.txt")
     assert (root / "converter-ran").exists()
     (root / "converter-ran").unlink()
     monkeypatch.chdir(root)

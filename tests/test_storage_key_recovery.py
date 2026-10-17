@@ -2,7 +2,6 @@
 import base64
 import json
 import os
-from pathlib import Path
 from unittest.mock import Mock
 
 from cryptography.fernet import Fernet

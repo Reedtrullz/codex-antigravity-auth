@@ -1,6 +1,5 @@
 """Synthetic callback/flow fixtures; no real OAuth/browser/provider access."""
 
-import json
 import sys
 import threading
 import time
@@ -262,3 +261,44 @@ def test_callback_drip_reads_check_absolute_deadline_without_timer(monkeypatch):
         handler.handle()
     assert len(reads) == 3
     assert connection.settimeout.call_args.args[0] <= 0.15
+
+
+def test_callback_server_never_shares_its_port_on_windows():
+    assert cli.callback_allows_address_reuse("nt") is False
+    assert cli.callback_allows_address_reuse("posix") is True
+    assert cli.OAuthServer.allow_reuse_address is cli.callback_allows_address_reuse()
+
+
+def test_project_discovery_failure_is_redacted_before_printing(flow, monkeypatch, capsys):
+    server, _, exchange, _ = flow
+    def receive():
+        server.auth_code = "synthetic-code"
+        server.auth_state = oauth.encode_state({"id": "synthetic-state"})
+    monkeypatch.setattr(server, "handle_request", receive)
+    exchange.side_effect = None
+    exchange.return_value = {"access_token": "synthetic-access", "refresh_token": "synthetic-refresh"}
+    secret = "ya29.synthetic-discovery-token"
+    monkeypatch.setattr(oauth, "discover_project_id", MagicMock(side_effect=RuntimeError(f"failed Bearer {secret}")))
+    monkeypatch.setattr(cli, "open_http_request", MagicMock(side_effect=RuntimeError("synthetic userinfo stop")))
+    with pytest.raises(SystemExit):
+        cli.run_local_oauth_flow(no_browser=True)
+    output = capsys.readouterr().out
+    assert "Project discovery failed" in output
+    assert secret not in output
+
+
+def test_invalid_json_token_response_is_redacted(monkeypatch):
+    secret = "ya29.synthetic-invalid-json-token"
+    class Response:
+        status = 502
+        def read(self):
+            return f"<html>upstream echoed access_token={secret}</html>".encode()
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+    monkeypatch.setattr(oauth, "open_http_request", lambda *args, **kwargs: Response())
+    status, payload = oauth.post_form("https://oauth2.googleapis.com/token", {"grant_type": "synthetic"})
+    assert status == 502
+    assert payload["error"] == "invalid_json"
+    assert secret not in payload["error_description"]

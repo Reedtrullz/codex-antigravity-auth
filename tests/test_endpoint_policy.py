@@ -18,8 +18,6 @@ from unittest.mock import MagicMock
 
 import pytest
 import httpx
-from fake_upstream import allow_listener, remove_listener
-from standalone import without_installed_packages
 from _test_isolation import expected_denial
 
 from codex_antigravity_auth import byok, cli, oauth, server, unified

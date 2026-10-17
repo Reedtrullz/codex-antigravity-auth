@@ -1,5 +1,4 @@
 import unittest
-import json
 from codex_antigravity_auth.transform import transform_request
 from tests.conftest import _legacy_transform_response as transform_response
 

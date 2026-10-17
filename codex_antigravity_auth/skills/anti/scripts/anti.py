@@ -46,11 +46,11 @@ from anti_lib import checkpoints as chunk_checkpoints
 from anti_lib import media as image_attachments
 from anti_lib import wav_audio, music_evidence
 from anti_lib.artifacts import (
-    ArtifactError, RECORD_SCHEMA_VERSION, SAVED_RESULT_SCHEMA_VERSION, LANE_SCHEMA_VERSION,
-    file_reference, read_record, validate_record, coverage_has_loss,
+    ArtifactError, read_record,
+    validate_record,  # noqa: F401 - loaded-module surface used by tests
 )
 from anti_lib.chunking import chunk_manifest
-from anti_lib.cleanup import RUN_ID_RE, assert_not_deleted, clean_runs
+from anti_lib.cleanup import RUN_ID_RE, clean_runs
 from anti_lib.context import ordered_prompt
 from anti_lib.errors import AntiError
 from anti_lib import run_records, context as scope_context
@@ -67,9 +67,9 @@ from anti_lib import diff_snapshot
 from anti_lib.data_policy import DataPolicy, PolicyError
 from anti_lib.ledger import execution_entry, prompts_as_text
 from anti_lib.endpoint_policy import open_http_request, validate_endpoint_url
-from anti_lib.redaction import REDACTION_MARKER, redact_sensitive_text, sanitize_json
-from anti_lib.persistence import PersistenceError, atomic_write_json, file_lock, fsync_directory
-from anti_lib.retention import lifecycle_metadata, summary_projection, summary_retention, summary_structure
+from anti_lib.redaction import redact_sensitive_text, sanitize_json
+from anti_lib.persistence import PersistenceError, atomic_write_json, file_lock
+from anti_lib.retention import lifecycle_metadata  # noqa: F401 - loaded-module surface used by tests
 from anti_lib.runner import presentable_result
 from anti_lib.verifier import verify_findings
 from anti_lib.reflections import (
@@ -2599,7 +2599,7 @@ def file_is_tracked(root: Path, rel_path: str) -> bool:
             stderr=subprocess.PIPE,
         )
     except subprocess.TimeoutExpired:
-        raise AntiError(f"git ls-files timed out after 60s")
+        raise AntiError("git ls-files timed out after 60s")
     if proc.returncode not in (0, 1):
         raise AntiError(proc.stderr.strip() or "git ls-files failed")
     return proc.returncode == 0
@@ -7077,7 +7077,6 @@ def command_panel(args: argparse.Namespace) -> int:
         return result
 
     judge_cap = args.judge_output_tokens
-    judge_estimate = estimate_call_cost(judge_model, len(synthesis_prompt), judge_cap)
     judge_text, judge_model_used, judge_generation = run_judge(synthesis_prompt, judge_cap)
     judge_attempts: list[dict[str, Any]] = [
         dict(judge_generation, attempt=1)
@@ -7475,7 +7474,6 @@ def command_consult(args: argparse.Namespace) -> int:
         prompt += '\n\nRequested output schema: ' + schema_text
         if args.max_prompt_chars and len(prompt) > args.max_prompt_chars:
             raise AntiError('prompt plus --response-schema exceeds --max-prompt-chars')
-    estimated_cost = estimate_call_cost(model, len(prompt), args.max_output_tokens)
     if policy_preflight(args, prompt, [(model, "primary")]):
         return 0
     if args.dry_run:
@@ -7502,7 +7500,7 @@ def command_consult(args: argparse.Namespace) -> int:
             max_output_tokens=args.max_output_tokens,
             purpose=mode,
         )
-    except AntiError as exc:
+    except AntiError:
         raise
     attempts_metadata: list[dict[str, Any]] = [generation_metadata]
     usage = generation_metadata.get("usage")
@@ -9068,11 +9066,11 @@ def command_runs(args: argparse.Namespace) -> int:
         if summary.get("date_range"):
             print(f"- Date range: {summary['date_range'][0]} to {summary['date_range'][1]}")
         if summary.get("top_recurring"):
-            print(f"- Most recurring findings:")
+            print("- Most recurring findings:")
             for fp, count in summary["top_recurring"]:
                 print(f"  - {fp[:16]}... ({count} times)")
         if summary.get("most_reviewed_files"):
-            print(f"- Most reviewed files:")
+            print("- Most reviewed files:")
             for fname, count in summary["most_reviewed_files"][:5]:
                 print(f"  - {fname} ({count} findings)")
         if summary.get("severity_distribution"):

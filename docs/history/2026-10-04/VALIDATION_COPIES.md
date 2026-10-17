@@ -29,6 +29,6 @@ The bundled `codex_antigravity_auth/skills/anti/scripts/anti_lib/wav_audio.py` i
 
 ## Navigation and unresolved scope
 
-See the [authored demo](../anti-keyspilli-music-demo-20261003/CURRENT_STATE.md) and [Player study](../anti-keyspilli-player-study-20261003/CURRENT_STATE.md). Their source pins and negative controls matter more than a repeated package version. See [visible root review](CURRENT_STATE.md) for that older checkout's actual behavior.
+See the authored demo (`anti-keyspilli-music-demo-20261003/CURRENT_STATE.md`) and Player study (`anti-keyspilli-player-study-20261003/CURRENT_STATE.md`) in the local Projectos workspace; they are outside this repository. Their source pins and negative controls matter more than a repeated package version. See [visible root review](CURRENT_STATE.md) for that older checkout's actual behavior.
 
 This was a source/delta review, not an exhaustive review of every duplicate copy, every test or each historical log. Installed runtime, provider catalogs, OAuth state, active account quotas and external worktree source were not verified. Do not use these copies to infer what is deployed, merged or safe to clean up.

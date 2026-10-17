@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-import json
 import math
 import time
 from typing import Any, AsyncIterator
@@ -27,7 +26,7 @@ from .resource_limits import ResourceLimitError, json_loads_limited, read_respon
 from .redaction import redact_secret_text
 from .native_output import (
     MAX_ITEMS, NativeOutputError, check_json, reconcile_output,
-    validate_event, validate_output, validate_response,
+    validate_event, validate_output,
 )
 
 from .response_protocol import (

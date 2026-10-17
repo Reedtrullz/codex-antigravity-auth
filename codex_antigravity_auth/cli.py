@@ -74,7 +74,6 @@ from .oauth import (
     token_expires_in_seconds,
 )
 from .service import install_service, service_status, uninstall_service, repair_service, restart_service
-from .secure_store import file_lock
 from .service_manager import observed_service_result
 from .storage import (
     account_store_diagnostics,
@@ -210,8 +209,19 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         self.server.auth_state = state
         self._page(200, "Authorization received", "Return to the terminal. Sign-in completes after token exchange and account setup.")
 
+def callback_allows_address_reuse(os_name=None):
+    """Whether the fixed OAuth callback port may set SO_REUSEADDR.
+
+    On Windows SO_REUSEADDR lets another local process bind the same port and
+    race us for the authorization-code redirect, so it stays off there. On POSIX
+    it only permits rebinding over TIME_WAIT connections from a previous login,
+    which never shares an actively listening port.
+    """
+    return (os.name if os_name is None else os_name) != "nt"
+
+
 class OAuthServer(socketserver.TCPServer):
-    allow_reuse_address = True
+    allow_reuse_address = callback_allows_address_reuse()
     auth_code = None
     auth_state = None
     auth_error = None
@@ -373,7 +383,7 @@ def install_codex_skill(
                     if _path_tree_manifest(destination) != bundled_manifest:
                         raise RuntimeError("Published Anti skill failed manifest validation")
                     published_and_validated = True
-                except BaseException as exc:
+                except BaseException:
                     try:
                         if published:
                             destination.rename(staging_root / "failed-install")
@@ -1611,7 +1621,7 @@ def _main():
     discover.add_argument("--network", action="store_true", help="Fetch a bounded catalog; never probe generation or save declarations")
     discover.add_argument("--timeout", type=float, default=10)
     discover.add_argument("--json", action="store_true")
-    discovered_import = provider_sub.add_parser("import-discovery", help="Preview selected discovered IDs before explicitly saving declarations")
+    provider_sub.add_parser("import-discovery", help="Preview selected discovered IDs before explicitly saving declarations")
     provider_set = provider_sub.add_parser("set", help="Configure a BYOK provider")
     provider_set.add_argument("provider", help="Provider id, e.g. openrouter, deepseek, xai, kimi, ollama, opencode, custom")
     provider_set.add_argument("--api-key", help="API key to store encrypted")

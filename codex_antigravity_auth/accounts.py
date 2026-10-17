@@ -1,4 +1,4 @@
-from .console import console_print as print
+from .console import console_print as print  # noqa: F401 - terminal-safe print for any future output
 import logging
 import copy
 import math

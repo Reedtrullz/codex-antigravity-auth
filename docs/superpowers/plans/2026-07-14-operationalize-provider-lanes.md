@@ -21,7 +21,7 @@
 - Branch provider list: no configured DeepSeek or BluesMinds provider.
 - Live proof: DeepSeek V4 Flash passed JSON, SSE, automatic tool calling, and tool-output continuation; DeepSeek V4 Pro and xAI OAuth generation are not yet proven.
 - BluesMinds: Grok 4.5 returned a billing error; GLM-5.2 returned an upstream `429`.
-- `/Users/reidar/Projectos/.env` is a mode-600 FIFO, not a regular dotenv file.
+- `~/Projectos/.env` is a mode-600 FIFO, not a regular dotenv file.
 - Installed 1Password CLI is `2.34.1`; it supports `op run --env-file` but not `op run --environment`.
 - `~/.codex/config.toml` SHA-256 before execution: `57bf0d7e4d8cc08c847bcf097ea6d99cd9abd882298ff62cccef6024f060f560`.
 
@@ -41,7 +41,7 @@ The current implementation may be called complete for this follow-up only at **S
 - Never edit `~/.codex/config.toml`; hash it before and after every runtime phase.
 - Never print, persist, or place provider values in argv, shell history, logs, prompts, tests, Git, Obsidian, or the LaunchAgent plist.
 - The only durable dotenv permitted by this plan contains `op://` references and has mode `0600`.
-- Do not pass `/Users/reidar/Projectos/.env` to `--op-env-file`; it is a FIFO and the service validator correctly rejects it.
+- Do not pass `~/Projectos/.env` to `--op-env-file`; it is a FIFO and the service validator correctly rejects it.
 - Do not configure `BLUESMINDS_API_KEY` in the durable service during this plan.
 - Do not add automatic cross-provider fallback.
 - Native Codex remains the acting agent; Opus remains the default judge.

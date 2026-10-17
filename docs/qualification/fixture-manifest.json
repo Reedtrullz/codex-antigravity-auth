@@ -1,4 +1,5 @@
 {
+  "evidenceRoot": "~/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh",
   "exclusions": [
     {
       "clipId": "foreign-solo-2",
@@ -42,10 +43,10 @@
       "attackTimesSeconds": [
         0.296
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-0.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-quiet-0.json",
       "clipClass": "core",
       "clipId": "foreign-quiet-0",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-0.wav",
+      "clipPath": "capture-retry/media/foreign-quiet-0.wav",
       "clipSha256": "cf7bea5f8e454f93356daec3f4fc79011753c8013989cadf2ad4b6be28db4f56",
       "events": [
         {
@@ -74,10 +75,10 @@
       "attackTimesSeconds": [
         0.293
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-1.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-quiet-1.json",
       "clipClass": "core",
       "clipId": "foreign-quiet-1",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-1.wav",
+      "clipPath": "capture-retry/media/foreign-quiet-1.wav",
       "clipSha256": "40ae087010799ce9f88bc8e0173121bb710608a63dfe2e47b529cdb25dcf7e1e",
       "events": [
         {
@@ -106,10 +107,10 @@
       "attackTimesSeconds": [
         0.297
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-2.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-quiet-2.json",
       "clipClass": "core",
       "clipId": "foreign-quiet-2",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-2.wav",
+      "clipPath": "capture-retry/media/foreign-quiet-2.wav",
       "clipSha256": "2b5a564381fd0fcb92bb87273926b45973ff743ff691c8acf8c72f6abaed3b2c",
       "events": [
         {
@@ -138,10 +139,10 @@
       "attackTimesSeconds": [
         0.296
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-3.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-quiet-3.json",
       "clipClass": "core",
       "clipId": "foreign-quiet-3",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-3.wav",
+      "clipPath": "capture-retry/media/foreign-quiet-3.wav",
       "clipSha256": "1fbeb8f0f04119632c6739b19bdbb59b605df1a3b6331427b0c4db4cd632076a",
       "events": [
         {
@@ -174,10 +175,10 @@
         0.339,
         0.378
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-solo-0.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-solo-0.json",
       "clipClass": "core",
       "clipId": "foreign-solo-0",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-solo-0.wav",
+      "clipPath": "capture-retry/media/foreign-solo-0.wav",
       "clipSha256": "3c520fe59724727c5ee26310ebfd0bef3c149b582a3922169ddb5bb1deeda5dc",
       "events": [
         {
@@ -234,10 +235,10 @@
         0.438,
         0.456
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-solo-1.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-solo-1.json",
       "clipClass": "core",
       "clipId": "foreign-solo-1",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-solo-1.wav",
+      "clipPath": "capture-retry/media/foreign-solo-1.wav",
       "clipSha256": "b90d759731105a067557ece046aed16ce481e5b47d3521411d8d779e20993d9d",
       "events": [
         {
@@ -305,10 +306,10 @@
       "attackTimesSeconds": [
         0.387
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-07.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-07.json",
       "clipClass": "core",
       "clipId": "fresh-07",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-07.wav",
+      "clipPath": "capture-retry/media/fresh-07.wav",
       "clipSha256": "34e62ca52b2be8d75b181a8e9ccfc5ed6f9b2c3e7b74e170e8ee7bd70b127070",
       "events": [
         {
@@ -343,10 +344,10 @@
       "attackTimesSeconds": [
         0.307
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-08.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-08.json",
       "clipClass": "core",
       "clipId": "fresh-08",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-08.wav",
+      "clipPath": "capture-retry/media/fresh-08.wav",
       "clipSha256": "e4ef1d4e76d7db508c27b49615aa3a647dca8ba7a60c8ed307e678b6a2a8f6e6",
       "events": [
         {
@@ -375,10 +376,10 @@
       "attackTimesSeconds": [
         0.342
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-09.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-09.json",
       "clipClass": "core",
       "clipId": "fresh-09",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-09.wav",
+      "clipPath": "capture-retry/media/fresh-09.wav",
       "clipSha256": "9d842387f66db94b7987b88c39bf2480f70c356baa1e104799a4340d63313576",
       "events": [
         {
@@ -414,10 +415,10 @@
         0.291,
         0.725
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-10.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-10.json",
       "clipClass": "core",
       "clipId": "fresh-10",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-10.wav",
+      "clipPath": "capture-retry/media/fresh-10.wav",
       "clipSha256": "7ab8259642bb6f35a6a119c1f01f858d2a13fb94a459f6e449ab350b8f64b194",
       "events": [
         {
@@ -459,10 +460,10 @@
         0.303,
         0.664
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-11.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-11.json",
       "clipClass": "core",
       "clipId": "fresh-11",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-11.wav",
+      "clipPath": "capture-retry/media/fresh-11.wav",
       "clipSha256": "46c8c750ab955216f645cc777ba8cba288cc383b8c68496ebdc3e0b3d9b0ce37",
       "events": [
         {
@@ -504,10 +505,10 @@
         0.269,
         0.619
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-12.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-12.json",
       "clipClass": "core",
       "clipId": "fresh-12",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-12.wav",
+      "clipPath": "capture-retry/media/fresh-12.wav",
       "clipSha256": "7f1e19fecbadca5b21ab81d5f043784e6a73f0b72905b5151567ec26d6e12be9",
       "events": [
         {
@@ -549,10 +550,10 @@
         0.358,
         0.619
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-13.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-13.json",
       "clipClass": "core",
       "clipId": "fresh-13",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-13.wav",
+      "clipPath": "capture-retry/media/fresh-13.wav",
       "clipSha256": "9095421715aa7055ddac0c85380c20c5d6b902cc145a84114a468f61d891ed0e",
       "events": [
         {
@@ -594,10 +595,10 @@
         0.254,
         0.689
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-14.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-14.json",
       "clipClass": "core",
       "clipId": "fresh-14",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-14.wav",
+      "clipPath": "capture-retry/media/fresh-14.wav",
       "clipSha256": "8b5adceb2a792426150b44537f4dee7c9483750216fa75c8413bb9f8d4d1b597",
       "events": [
         {
@@ -633,10 +634,10 @@
         0.361,
         0.751
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-15.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-15.json",
       "clipClass": "core",
       "clipId": "fresh-15",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-15.wav",
+      "clipPath": "capture-retry/media/fresh-15.wav",
       "clipSha256": "4f9f7aada323b86c58898c95b435c6c5cb48d8dedeb15a7dda9e6a0dcac32c7c",
       "events": [
         {
@@ -672,10 +673,10 @@
         0.228,
         0.709
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-16.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-16.json",
       "clipClass": "core",
       "clipId": "fresh-16",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-16.wav",
+      "clipPath": "capture-retry/media/fresh-16.wav",
       "clipSha256": "3035be1b4b28baddb62241e06696513df2e0bdd41a7099ec1190e5e71f67819f",
       "events": [
         {
@@ -711,10 +712,10 @@
         0.311,
         0.716
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-17.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-17.json",
       "clipClass": "core",
       "clipId": "fresh-17",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-17.wav",
+      "clipPath": "capture-retry/media/fresh-17.wav",
       "clipSha256": "cbf210a7847be177533c90fc9edb8eb2f8e97e11b08acbd20342de8861c7aba9",
       "events": [
         {
@@ -747,10 +748,10 @@
         0.248,
         0.807
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-18.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-18.json",
       "clipClass": "core",
       "clipId": "fresh-18",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-18.wav",
+      "clipPath": "capture-retry/media/fresh-18.wav",
       "clipSha256": "b1a5bf08b5d9e15ce7caf16625988cf87eff19fad17462ad3446b9a6196e4285",
       "events": [
         {
@@ -783,10 +784,10 @@
         0.305,
         0.802
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-19.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-19.json",
       "clipClass": "core",
       "clipId": "fresh-19",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-19.wav",
+      "clipPath": "capture-retry/media/fresh-19.wav",
       "clipSha256": "b5684c4b0a5b7f7d1aaa3dbd1302da488156911ca8b5b9b57bb71065635f50d9",
       "events": [
         {
@@ -818,10 +819,10 @@
       "attackTimesSeconds": [
         0.296
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-0.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-quiet-0.json",
       "clipClass": "quiet",
       "clipId": "foreign-quiet-0",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-0.wav",
+      "clipPath": "capture-retry/media/foreign-quiet-0.wav",
       "clipSha256": "cf7bea5f8e454f93356daec3f4fc79011753c8013989cadf2ad4b6be28db4f56",
       "events": [
         {
@@ -851,10 +852,10 @@
       "attackTimesSeconds": [
         0.293
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-1.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-quiet-1.json",
       "clipClass": "quiet",
       "clipId": "foreign-quiet-1",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-1.wav",
+      "clipPath": "capture-retry/media/foreign-quiet-1.wav",
       "clipSha256": "40ae087010799ce9f88bc8e0173121bb710608a63dfe2e47b529cdb25dcf7e1e",
       "events": [
         {
@@ -884,10 +885,10 @@
       "attackTimesSeconds": [
         0.297
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-2.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-quiet-2.json",
       "clipClass": "quiet",
       "clipId": "foreign-quiet-2",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-2.wav",
+      "clipPath": "capture-retry/media/foreign-quiet-2.wav",
       "clipSha256": "2b5a564381fd0fcb92bb87273926b45973ff743ff691c8acf8c72f6abaed3b2c",
       "events": [
         {
@@ -917,10 +918,10 @@
       "attackTimesSeconds": [
         0.296
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-quiet-3.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-quiet-3.json",
       "clipClass": "quiet",
       "clipId": "foreign-quiet-3",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-quiet-3.wav",
+      "clipPath": "capture-retry/media/foreign-quiet-3.wav",
       "clipSha256": "1fbeb8f0f04119632c6739b19bdbb59b605df1a3b6331427b0c4db4cd632076a",
       "events": [
         {
@@ -954,10 +955,10 @@
         0.339,
         0.378
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-solo-0.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-solo-0.json",
       "clipClass": "quiet",
       "clipId": "foreign-solo-0",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-solo-0.wav",
+      "clipPath": "capture-retry/media/foreign-solo-0.wav",
       "clipSha256": "3c520fe59724727c5ee26310ebfd0bef3c149b582a3922169ddb5bb1deeda5dc",
       "events": [
         {
@@ -1015,10 +1016,10 @@
         0.438,
         0.456
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-solo-1.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-solo-1.json",
       "clipClass": "quiet",
       "clipId": "foreign-solo-1",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-solo-1.wav",
+      "clipPath": "capture-retry/media/foreign-solo-1.wav",
       "clipSha256": "b90d759731105a067557ece046aed16ce481e5b47d3521411d8d779e20993d9d",
       "events": [
         {
@@ -1087,10 +1088,10 @@
       "attackTimesSeconds": [
         0.387
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-07.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-07.json",
       "clipClass": "quiet",
       "clipId": "fresh-07",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-07.wav",
+      "clipPath": "capture-retry/media/fresh-07.wav",
       "clipSha256": "34e62ca52b2be8d75b181a8e9ccfc5ed6f9b2c3e7b74e170e8ee7bd70b127070",
       "events": [
         {
@@ -1126,10 +1127,10 @@
       "attackTimesSeconds": [
         0.307
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-08.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-08.json",
       "clipClass": "quiet",
       "clipId": "fresh-08",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-08.wav",
+      "clipPath": "capture-retry/media/fresh-08.wav",
       "clipSha256": "e4ef1d4e76d7db508c27b49615aa3a647dca8ba7a60c8ed307e678b6a2a8f6e6",
       "events": [
         {
@@ -1159,10 +1160,10 @@
       "attackTimesSeconds": [
         0.342
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-09.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-09.json",
       "clipClass": "quiet",
       "clipId": "fresh-09",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-09.wav",
+      "clipPath": "capture-retry/media/fresh-09.wav",
       "clipSha256": "9d842387f66db94b7987b88c39bf2480f70c356baa1e104799a4340d63313576",
       "events": [
         {
@@ -1199,10 +1200,10 @@
         0.291,
         0.725
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-10.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-10.json",
       "clipClass": "quiet",
       "clipId": "fresh-10",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-10.wav",
+      "clipPath": "capture-retry/media/fresh-10.wav",
       "clipSha256": "7ab8259642bb6f35a6a119c1f01f858d2a13fb94a459f6e449ab350b8f64b194",
       "events": [
         {
@@ -1245,10 +1246,10 @@
         0.303,
         0.664
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-11.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-11.json",
       "clipClass": "quiet",
       "clipId": "fresh-11",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-11.wav",
+      "clipPath": "capture-retry/media/fresh-11.wav",
       "clipSha256": "46c8c750ab955216f645cc777ba8cba288cc383b8c68496ebdc3e0b3d9b0ce37",
       "events": [
         {
@@ -1291,10 +1292,10 @@
         0.269,
         0.619
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-12.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-12.json",
       "clipClass": "quiet",
       "clipId": "fresh-12",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-12.wav",
+      "clipPath": "capture-retry/media/fresh-12.wav",
       "clipSha256": "7f1e19fecbadca5b21ab81d5f043784e6a73f0b72905b5151567ec26d6e12be9",
       "events": [
         {
@@ -1337,10 +1338,10 @@
         0.358,
         0.619
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-13.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-13.json",
       "clipClass": "quiet",
       "clipId": "fresh-13",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-13.wav",
+      "clipPath": "capture-retry/media/fresh-13.wav",
       "clipSha256": "9095421715aa7055ddac0c85380c20c5d6b902cc145a84114a468f61d891ed0e",
       "events": [
         {
@@ -1383,10 +1384,10 @@
         0.254,
         0.689
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-14.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-14.json",
       "clipClass": "quiet",
       "clipId": "fresh-14",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-14.wav",
+      "clipPath": "capture-retry/media/fresh-14.wav",
       "clipSha256": "8b5adceb2a792426150b44537f4dee7c9483750216fa75c8413bb9f8d4d1b597",
       "events": [
         {
@@ -1423,10 +1424,10 @@
         0.361,
         0.751
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-15.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-15.json",
       "clipClass": "quiet",
       "clipId": "fresh-15",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-15.wav",
+      "clipPath": "capture-retry/media/fresh-15.wav",
       "clipSha256": "4f9f7aada323b86c58898c95b435c6c5cb48d8dedeb15a7dda9e6a0dcac32c7c",
       "events": [
         {
@@ -1463,10 +1464,10 @@
         0.228,
         0.709
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-16.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-16.json",
       "clipClass": "quiet",
       "clipId": "fresh-16",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-16.wav",
+      "clipPath": "capture-retry/media/fresh-16.wav",
       "clipSha256": "3035be1b4b28baddb62241e06696513df2e0bdd41a7099ec1190e5e71f67819f",
       "events": [
         {
@@ -1503,10 +1504,10 @@
         0.311,
         0.716
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-17.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-17.json",
       "clipClass": "quiet",
       "clipId": "fresh-17",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-17.wav",
+      "clipPath": "capture-retry/media/fresh-17.wav",
       "clipSha256": "cbf210a7847be177533c90fc9edb8eb2f8e97e11b08acbd20342de8861c7aba9",
       "events": [
         {
@@ -1540,10 +1541,10 @@
         0.248,
         0.807
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-18.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-18.json",
       "clipClass": "quiet",
       "clipId": "fresh-18",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-18.wav",
+      "clipPath": "capture-retry/media/fresh-18.wav",
       "clipSha256": "b1a5bf08b5d9e15ce7caf16625988cf87eff19fad17462ad3446b9a6196e4285",
       "events": [
         {
@@ -1577,10 +1578,10 @@
         0.305,
         0.802
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-19.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-19.json",
       "clipClass": "quiet",
       "clipId": "fresh-19",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-19.wav",
+      "clipPath": "capture-retry/media/fresh-19.wav",
       "clipSha256": "b5684c4b0a5b7f7d1aaa3dbd1302da488156911ca8b5b9b57bb71065635f50d9",
       "events": [
         {
@@ -1617,10 +1618,10 @@
         0.339,
         0.378
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-solo-0.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-solo-0.json",
       "clipClass": "repeat",
       "clipId": "foreign-solo-0",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-solo-0.wav",
+      "clipPath": "capture-retry/media/foreign-solo-0.wav",
       "clipSha256": "3c520fe59724727c5ee26310ebfd0bef3c149b582a3922169ddb5bb1deeda5dc",
       "events": [
         {
@@ -1677,10 +1678,10 @@
         0.438,
         0.456
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/foreign-solo-1.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/foreign-solo-1.json",
       "clipClass": "repeat",
       "clipId": "foreign-solo-1",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/foreign-solo-1.wav",
+      "clipPath": "capture-retry/media/foreign-solo-1.wav",
       "clipSha256": "b90d759731105a067557ece046aed16ce481e5b47d3521411d8d779e20993d9d",
       "events": [
         {
@@ -1749,10 +1750,10 @@
         0.311,
         0.716
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-17.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-17.json",
       "clipClass": "repeat",
       "clipId": "fresh-17",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-17.wav",
+      "clipPath": "capture-retry/media/fresh-17.wav",
       "clipSha256": "cbf210a7847be177533c90fc9edb8eb2f8e97e11b08acbd20342de8861c7aba9",
       "events": [
         {
@@ -1785,10 +1786,10 @@
         0.248,
         0.807
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-18.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-18.json",
       "clipClass": "repeat",
       "clipId": "fresh-18",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-18.wav",
+      "clipPath": "capture-retry/media/fresh-18.wav",
       "clipSha256": "b1a5bf08b5d9e15ce7caf16625988cf87eff19fad17462ad3446b9a6196e4285",
       "events": [
         {
@@ -1821,10 +1822,10 @@
         0.305,
         0.802
       ],
-      "captureReceiptPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/capture-receipts/fresh-19.json",
+      "captureReceiptPath": "capture-retry/capture-receipts/fresh-19.json",
       "clipClass": "repeat",
       "clipId": "fresh-19",
-      "clipPath": "/Users/reidar/.codex/worktrees/keyspilli-music-review-afk/Keyspilli/output/music-review/20261005-afk/player-search-solution/20261006-014631/fresh/capture-retry/media/fresh-19.wav",
+      "clipPath": "capture-retry/media/fresh-19.wav",
       "clipSha256": "b5684c4b0a5b7f7d1aaa3dbd1302da488156911ca8b5b9b57bb71065635f50d9",
       "events": [
         {
@@ -1908,5 +1909,5 @@
       "expected": "refused"
     }
   ],
-  "schemaVersion": 1
+  "schemaVersion": 2
 }

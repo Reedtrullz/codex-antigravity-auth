@@ -9,7 +9,7 @@ import sys
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 
-from codex_antigravity_auth import cli, cli_json, observability, support_bundle
+from codex_antigravity_auth import cli, observability, support_bundle
 
 EMAIL = "private-fixture@example.invalid"
 SECRET = "sk-fixture-secret-12345678901234567890"

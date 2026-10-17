@@ -3577,11 +3577,11 @@ class ConsultFileContextTests(unittest.TestCase):
 
     def test_extract_file_paths_from_prompt_absolute_paths(self) -> None:
         anti = load_anti()
-        prompt = 'Review /Users/reidar/Documents/RSHelper/src/rshelper/ (api.py, models.py)'
+        prompt = 'Review /Users/example/Documents/RSHelper/src/rshelper/ (api.py, models.py)'
         paths = anti.extract_file_paths_from_prompt(prompt)
         self.assertEqual(paths, [
-            '/Users/reidar/Documents/RSHelper/src/rshelper/api.py',
-            '/Users/reidar/Documents/RSHelper/src/rshelper/models.py',
+            '/Users/example/Documents/RSHelper/src/rshelper/api.py',
+            '/Users/example/Documents/RSHelper/src/rshelper/models.py',
         ])
 
     def test_extract_file_paths_from_prompt_no_paths(self) -> None:
@@ -3813,7 +3813,7 @@ class ConsultFileContextWorkspaceTests(unittest.TestCase):
         test_file = Path.cwd() / "_anti_workspace_test.py"
         try:
             test_file.write_text("print('ok')", encoding="utf-8")
-            prompt = f'Review ./_anti_workspace_test.py'
+            prompt = 'Review ./_anti_workspace_test.py'
             enhanced, caveats, read_files = anti.build_consult_file_context(prompt, 120_000)
             self.assertEqual(read_files, ["./_anti_workspace_test.py"])
             self.assertIn("print('ok')", enhanced)
@@ -5013,7 +5013,7 @@ class ScopeIntegrityContractTests(unittest.TestCase):
                         self.assertEqual(rc, 1)
                         self.assertEqual(len(calls), 2)
                         record = json.loads((anti.RUNS_DIR / f"{run_id}.json").read_text(encoding="utf-8"))
-                        generation = record["metadata"]["chunk_generation"]
+                        self.assertIn("chunk_generation", record["metadata"])
                         self.assertEqual(record["metadata"]["failed_chunk"], record["metadata"]["chunk_prompts"][1]["label"])
                         self.assertEqual(artifact["coverage"]["chunksExpected"], planned)
                         self.assertEqual(artifact["coverage"]["chunksCompleted"], 1)
@@ -5899,7 +5899,6 @@ class AntiHardeningTests(unittest.TestCase):
             sys.path.insert(0, anti_lib_dir)
         import anti_lib.reflections as reflections_module
 
-        original_record_review = reflections_module.record_review
         original_reflections_dir = reflections_module.REFLECTIONS_DIR
 
         def fake_post_response(**kwargs):

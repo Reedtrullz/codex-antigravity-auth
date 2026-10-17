@@ -1,5 +1,4 @@
 """Immutable patch coordinates from synthetic local Git repositories only."""
-from copy import deepcopy
 import hashlib
 import importlib.util
 import json
