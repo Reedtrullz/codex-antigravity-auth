@@ -1,10 +1,6 @@
 # Changelog
 
-## v2.4.3 - Gateway Hardening & Music Evidence (unreleased)
-
-Release candidate: `pyproject.toml` already declares 2.4.3. The release date is
-set when the `v2.4.3` tag is pushed; tagging and PyPI publication are separate
-maintainer steps.
+## v2.4.3 - Gateway Hardening & Music Evidence (Oct 18, 2026)
 
 ### Changed
 
