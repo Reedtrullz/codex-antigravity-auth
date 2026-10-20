@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
@@ -13,6 +14,34 @@ from codex_antigravity_auth import cli, observability, support_bundle
 
 EMAIL = "private-fixture@example.invalid"
 SECRET = "sk-fixture-secret-12345678901234567890"
+
+
+@pytest.mark.parametrize("argv,code", [
+    (["--help"], 0),
+    (["not-a-command"], 2),
+    (["not-a-command", "--json"], 2),
+])
+def test_argument_exits_when_command_implementations_unavailable(argv, code):
+    script = """
+import importlib.abc
+import sys
+class UnavailableCommands(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {"codex_antigravity_auth.cli_doctor", "codex_antigravity_auth.cli_service", "codex_antigravity_auth.cli_setup"}:
+            raise ImportError("command implementation unavailable")
+sys.meta_path.insert(0, UnavailableCommands())
+from codex_antigravity_auth.cli import main
+sys.argv[0] = "codex-antigravity"
+main()
+"""
+    result = subprocess.run([sys.executable, "-c", script, *argv], capture_output=True, text=True, timeout=20)
+    assert result.returncode == code, result.stderr
+    if "--json" in argv:
+        assert json.loads(result.stdout)["errors"] == ["invalid_arguments"]
+    elif code == 0:
+        assert "usage:" in result.stdout
+    else:
+        assert "invalid choice" in result.stderr
 
 
 @pytest.fixture

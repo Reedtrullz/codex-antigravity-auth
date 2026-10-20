@@ -1331,7 +1331,6 @@ def configure_local_gateway_environment(args):
         os.environ['CODEX_ANTIGRAVITY_NO_UPDATE_CHECK'] = '1'
 
 def _main():
-    _ensure_split_modules()
     from .cli_json import JSONArgumentParser
     parser = JSONArgumentParser(description="Codex Antigravity Auth CLI Utility")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1696,6 +1695,7 @@ def _main():
     from .setup_profiles import add_parsers
     add_parsers(subparsers)
     args = parser.parse_args()
+    _ensure_split_modules()
     # Observation commands own their evidence/proposal JSON; the operational
     # envelope covers model listing without replacing those command payloads.
     command_json = (
