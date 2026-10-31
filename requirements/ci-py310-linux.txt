@@ -160,7 +160,7 @@ tomli==2.5.0
     #   pytest
 tomli-w==1.2.0
     # via pip-audit
-tomlkit==0.15.1
+tomlkit==0.15.2
     # via codex-antigravity-auth (pyproject.toml)
 typing-extensions==4.16.0
     # via
